@@ -4,9 +4,20 @@
 
 Eventually. For now its going to be a rust server that starts and starts to provide functions and nice programmable SDK into it via TS library most likely.
 
-## Generated below
+Mostly writing this tool in background as I want it to automate my entire workflow. I [stream dev of it](https://youtube.com/@nikivdev/streams) too.
+
+## Current state
 
 An Axum powered daemon + CLI sandbox for building the foundations of an always-on personal operating system. The daemon exposes HTTP endpoints that can be called from any tool, while the CLI offers fast local utilities that share the same internals.
+
+### What it does today
+
+- **Axum daemon** – `f daemon` boots the HTTP server with `/health`, `/screen/latest`, and `/screen/stream` endpoints (mocked frames for now).
+- **Screen preview CLI** – `f screen --frames 15 --fps 4` reuses the frame generator outside of HTTP for quick tuning.
+- **Project task runner** – define tasks in `flow.toml`, list them with `f tasks`, run via `f run <task>`/`f <task>`, and capture descriptions for discoverability.
+- **Dependency checks** – optional `[dependencies]` entries ensure required binaries (e.g., `fast`) exist on `PATH` before a task executes.
+- **Shell aliases** – declare `[[alias]]` tables and load them into your shell with `eval "$(f setup)"` so commands like `fr` or `fc` are always available.
+- **Deploy helper** – `f run deploy` (or `./scripts/deploy.sh`) builds the debug binary and keeps `~/bin/f` symlinked to the latest build for fast iteration.
 
 ## Requirements
 
@@ -36,6 +47,28 @@ cargo run -- screen --frames 15 --fps 4
 
 This prints the frames along with timestamps, which is a lightweight way to validate performance and tune buffer sizes without wiring up HTTP.
 
+## Project automation
+
+`flow.toml` doubles as a lightweight task runner. Example:
+
+```toml
+[[tasks]]
+name = "dev"
+command = "bun dev"
+description = "Start the web server"
+
+[[tasks]]
+name = "commit"
+dependencies = ["github.com/1focus-ai/fast"]
+command = "fast commitPush"
+description = "Commit with AI"
+
+[dependencies]
+"github.com/1focus-ai/fast" = "fast"
+```
+
+Run `f tasks` to list everything, `f run dev` (or simply `f dev`) to execute a task, and `f run deploy` to build + refresh the local `f` binary via `scripts/deploy.sh`. Optional `[dependencies]` entries make sure the referenced commands exist on `PATH` before the task’s shell is launched, so failures surface early.
+
 ## Next steps
 
 - Replace the mock screen generator with a real capture backend and push binary payloads (e.g. raw RGBA or compressed video chunks).
@@ -57,8 +90,6 @@ Apply them in a shell session via `eval "$(f setup)"`, or add the same expressio
 ## Contributing
 
 Any PR to improve is welcome. [codex](https://github.com/openai/codex) & [cursor](https://cursor.com) are nice for dev. Great **working** & **useful** patches are most appreciated (ideally). Issues with bugs or ideas are welcome too.
-
-There are [streams of development of this](https://www.youtube.com/@nikivdev/streams).
 
 ### 🖤
 
