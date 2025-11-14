@@ -18,10 +18,12 @@ An Axum powered daemon + CLI sandbox for building the foundations of an always-o
 - **Dependency checks** – optional `[dependencies]` entries ensure required binaries (e.g., `fast`) exist on `PATH` before a task executes.
 - **Shell aliases** – declare `[[alias]]` tables and load them into your shell with `eval "$(f setup)"` so commands like `fr` or `fc` are always available.
 - **Deploy helper** – `f run deploy` (or `./scripts/deploy.sh`) builds the debug binary and keeps `~/bin/f` symlinked to the latest build for fast iteration.
+- **Command palette** – running `f` with no arguments pipes built-ins + project tasks into `fzf`, so you can fuzzy select anything (fallback to a plain list if `fzf` isn’t installed).
 
 ## Requirements
 
 - Rust 1.79+ (matches stable rustup toolchain)
+- [`fzf`](https://github.com/junegunn/fzf) on your `PATH` (optional, used for the `f` command palette—falls back to a plain list when missing)
 
 ## Running the daemon
 

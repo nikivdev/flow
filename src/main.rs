@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod palette;
 mod screen;
 mod server;
 mod servers;
@@ -53,7 +54,7 @@ fn main() -> Result<()> {
             })?;
         }
         None => {
-            tasks::list(TasksOpts::default())?;
+            palette::run(TasksOpts::default())?;
         }
     }
 

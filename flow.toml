@@ -3,6 +3,12 @@ name = "setup"
 command = "cargo check"
 description = "Compile the workspace to make sure the toolchain works"
 
+# TODO: up
+[[tasks]]
+name = "dev"
+command = "cargo run -- daemon --host 0.0.0.0 --port 9050 --fps 10"
+description = "Dev env"
+
 [[tasks]]
 name = "deploy"
 command = "./scripts/deploy.sh"
@@ -10,18 +16,18 @@ description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
 
 [[tasks]]
 name = "commit"
+# command = "fast commitPush"
+# TODO: test with this first
 command = "fast commitPush"
 description = "Commit with AI"
-
-[[tasks]]
-name = "test"
-command = "fast --version"
-description = "testing"
 
 [dependencies]
 "github.com/1focus-ai/fast" = "fast"
 
+# f = fuzzy search through commands (builtin and project)
+# f <cmd> = does command
 [[alias]]
-fr = "f run"    # fuzzy search through tasks to run or do `fr <task>`
+fe = "f dev"    # dev
 fd = "f deploy" # deploy
+fa = "f ai"     # ai chat
 fc = "f commit" # commit
