@@ -1,0 +1,9 @@
+[[tasks]]
+name = "setup"
+command = "cargo check"
+description = "Compile the workspace to make sure the toolchain works"
+
+[[tasks]]
+name = "deploy"
+command = "./scripts/deploy.sh"
+desc = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
