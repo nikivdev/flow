@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod hub;
+mod indexer;
 mod palette;
 mod screen;
 mod server;
@@ -40,6 +41,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Run(opts)) => {
             tasks::run(opts)?;
+        }
+        Some(Commands::Index(opts)) => {
+            indexer::run(opts)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

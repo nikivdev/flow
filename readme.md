@@ -20,6 +20,7 @@ An Axum powered daemon + CLI sandbox for building the foundations of an always-o
 - **Hub launcher** – `f hub` checks whether the background daemon is listening on `localhost:6000` and spawns it (using `~/.config/flow/flow.toml`) if missing, giving you a one-command way to ensure services are hot.
 - **Deploy helper** – `f run deploy` (or `./scripts/deploy.sh`) builds the debug binary and keeps `~/bin/f` symlinked to the latest build for fast iteration.
 - **Command palette** – running `f` with no arguments pipes built-ins + project tasks into `fzf`, so you can fuzzy select anything (fallback to a plain list if `fzf` isn’t installed).
+- **Codanna indexing** – `f index` bootstraps `.codanna/` if needed, runs `codanna index .`, captures `codanna mcp get_index_info --json`, and stores the JSON payload under `~/.db/flow/flow.sqlite` for other automations to consume.
 
 > Tip: run `f <command> -h` (e.g. `f hub -h`, `f servers -h`) to see flags and detailed instructions for any subcommand.
 

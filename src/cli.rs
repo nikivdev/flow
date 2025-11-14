@@ -52,6 +52,11 @@ pub enum Commands {
         long_about = "Look up the named task from flow.toml (respecting declared dependencies) and run its shell command."
     )]
     Run(TaskRunOpts),
+    #[command(
+        about = "Index the current repository with Codanna and store the stats snapshot.",
+        long_about = "Runs 'codanna index' for the current project, then captures 'codanna mcp get_index_info --json' and persists the payload to ~/.db/flow/flow.sqlite so other tools can consume it."
+    )]
+    Index(IndexOpts),
     /// Invoke tasks directly via `f <task>` without typing `run`.
     #[command(external_subcommand)]
     TaskShortcut(Vec<String>),
@@ -151,4 +156,19 @@ pub struct SetupOpts {
     /// Path to the project flow config (flow.toml).
     #[arg(long, default_value = "flow.toml")]
     pub config: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct IndexOpts {
+    /// Codanna binary to execute (defaults to looking up 'codanna' in PATH).
+    #[arg(long, default_value = "codanna")]
+    pub binary: String,
+
+    /// Directory to index; defaults to the current working directory.
+    #[arg(long)]
+    pub project_root: Option<PathBuf>,
+
+    /// SQLite destination for snapshots (defaults to ~/.db/flow/flow.sqlite).
+    #[arg(long)]
+    pub database: Option<PathBuf>,
 }
