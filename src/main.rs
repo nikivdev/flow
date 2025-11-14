@@ -30,8 +30,8 @@ fn main() -> Result<()> {
         Some(Commands::Servers(opts)) => {
             servers_tui::run(opts)?;
         }
-        Some(Commands::Hub(opts)) => {
-            hub::run(opts)?;
+        Some(Commands::Hub(cmd)) => {
+            hub::run(cmd)?;
         }
         Some(Commands::Setup(opts)) => {
             setup::run(opts)?;

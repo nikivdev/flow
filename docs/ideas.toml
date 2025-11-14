@@ -1,0 +1,7 @@
+# f = fuzzy search through commands (builtin and project)
+# f <cmd> = does command
+[[alias]]
+fe = "f dev"    # dev
+fd = "f deploy" # deploy
+fa = "f ai"     # ai chat
+fc = "f commit" # commit

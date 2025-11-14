@@ -36,7 +36,7 @@ pub enum Commands {
         about = "Ensure the background hub daemon is running (spawns it if missing).",
         long_about = "Checks the /health endpoint on the configured host/port (defaults to 127.0.0.1:6000). If unreachable, a daemon is launched in the background using ~/.config/flow/config.toml and the command waits until it is healthy."
     )]
-    Hub(HubOpts),
+    Hub(HubCommand),
     #[command(
         about = "Emit shell helpers (aliases) defined in flow.toml.",
         long_about = "Print alias definitions derived from the current flow.toml so you can source them (e.g., eval \"$(f setup)\") inside your shell session."
@@ -137,6 +137,15 @@ pub struct TaskRunOpts {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct HubCommand {
+    #[command(flatten)]
+    pub opts: HubOpts,
+
+    #[command(subcommand)]
+    pub action: Option<HubAction>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct HubOpts {
     /// Hostname or IP address of the hub daemon.
     #[arg(long, default_value = "127.0.0.1")]
@@ -149,6 +158,14 @@ pub struct HubOpts {
     /// Optional path to the global flow config (defaults to ~/.config/flow/config.toml).
     #[arg(long)]
     pub config: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum HubAction {
+    #[command(about = "Start or ensure the hub daemon is running")]
+    Start,
+    #[command(about = "Stop the hub daemon if it was started by flow")]
+    Stop,
 }
 
 #[derive(Args, Debug, Clone)]
