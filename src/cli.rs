@@ -4,9 +4,9 @@ use std::{net::IpAddr, path::PathBuf};
 /// Command line interface for the flow daemon / CLI hybrid.
 #[derive(Parser, Debug)]
 #[command(
-    name = "flowd",
+    name = "flow",
     version,
-    about = "Flow daemon with Axum API and CLI utilities",
+    about = "Your second OS",
     subcommand_required = false,
     arg_required_else_help = false
 )]
@@ -25,6 +25,8 @@ pub enum Commands {
     Servers(ServersOpts),
     /// List project automation tasks defined in flow.toml (default command).
     Tasks(TasksOpts),
+    /// Execute a specific project task.
+    Run(TaskRunOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -89,4 +91,14 @@ impl Default for TasksOpts {
             config: PathBuf::from("flow.toml"),
         }
     }
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TaskRunOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+    /// Name of the task to execute.
+    #[arg(value_name = "TASK")]
+    pub name: String,
 }

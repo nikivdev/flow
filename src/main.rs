@@ -29,6 +29,9 @@ fn main() -> Result<()> {
         Some(Commands::Tasks(opts)) => {
             tasks::list(opts)?;
         }
+        Some(Commands::Run(opts)) => {
+            tasks::run(opts)?;
+        }
         None => {
             tasks::list(TasksOpts::default())?;
         }
