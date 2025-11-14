@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod hub;
 mod palette;
 mod screen;
 mod server;
@@ -27,6 +28,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Servers(opts)) => {
             servers_tui::run(opts)?;
+        }
+        Some(Commands::Hub(opts)) => {
+            hub::run(opts)?;
         }
         Some(Commands::Setup(opts)) => {
             setup::run(opts)?;

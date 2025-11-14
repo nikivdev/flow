@@ -101,7 +101,7 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
 async fn health() -> impl IntoResponse {
     Json(json!({
         "status": "ok",
-        "message": "flowd daemon ready"
+        "message": "flow daemon ready"
     }))
 }
 
