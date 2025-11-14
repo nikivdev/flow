@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{net::IpAddr, path::PathBuf};
 
 /// Command line interface for the flow daemon / CLI hybrid.
@@ -18,11 +18,13 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     #[command(
+        hide = true,
         about = "Run the Axum daemon so other processes can interact with it.",
         long_about = "Boot the Axum-based daemon that powers flow. This exposes /health, /screen/latest, and /screen/stream endpoints and hosts any managed servers/watchers defined in your config."
     )]
     Daemon(DaemonOpts),
     #[command(
+        hide = true,
         about = "Generate a short mock preview of frames as if they were captured off the screen.",
         long_about = "Preview mock screen frames directly in the terminal for quick FPS/buffer tuning without bringing up the daemon."
     )]
@@ -52,6 +54,11 @@ pub enum Commands {
         long_about = "Look up the named task from flow.toml (respecting declared dependencies) and run its shell command."
     )]
     Run(TaskRunOpts),
+    #[command(
+        about = "Manage remote environment secrets.",
+        long_about = "List configured secret environments and pull their values from a hosted or self-hosted Flow hub."
+    )]
+    Secrets(SecretsCommand),
     #[command(
         about = "Index the current repository with Codanna and store the stats snapshot.",
         long_about = "Runs 'codanna index' for the current project, then captures 'codanna mcp get_index_info --json' and persists the payload to ~/.db/flow/flow.sqlite so other tools can consume it."
@@ -166,6 +173,56 @@ pub enum HubAction {
     Start,
     #[command(about = "Stop the hub daemon if it was started by flow")]
     Stop,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SecretsCommand {
+    #[command(subcommand)]
+    pub action: SecretsAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SecretsAction {
+    #[command(about = "List configured secret environments")]
+    List(SecretsListOpts),
+    #[command(about = "Fetch secrets for a specific environment")]
+    Pull(SecretsPullOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SecretsListOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SecretsPullOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+
+    /// Environment name defined in the storage config.
+    #[arg(value_name = "ENV")]
+    pub env: String,
+
+    /// Optional override for the storage hub URL (default flow.1focus.ai).
+    #[arg(long)]
+    pub hub: Option<String>,
+
+    /// Optional file to write secrets to (defaults to stdout).
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Output format for rendered secrets.
+    #[arg(long, default_value_t = SecretsFormat::Shell, value_enum)]
+    pub format: SecretsFormat,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SecretsFormat {
+    Shell,
+    Dotenv,
 }
 
 #[derive(Args, Debug, Clone)]

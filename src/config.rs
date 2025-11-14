@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer};
 /// Top-level configuration for flowd, currently focused on managed servers.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    #[serde(default)]
+    #[serde(default, alias = "server")]
     pub servers: Vec<ServerConfig>,
     #[serde(default)]
     pub tasks: Vec<TaskConfig>,
@@ -18,6 +18,12 @@ pub struct Config {
     pub dependencies: HashMap<String, DependencySpec>,
     #[serde(default, alias = "alias", deserialize_with = "deserialize_aliases")]
     pub aliases: HashMap<String, String>,
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
+    #[serde(default, alias = "watcher")]
+    pub watchers: Vec<WatcherConfig>,
+    #[serde(default)]
+    pub stream: Option<StreamConfig>,
 }
 
 impl Default for Config {
@@ -27,6 +33,9 @@ impl Default for Config {
             tasks: Vec::new(),
             dependencies: HashMap::new(),
             aliases: HashMap::new(),
+            storage: None,
+            watchers: Vec::new(),
+            stream: None,
         }
     }
 }
@@ -79,6 +88,75 @@ pub enum DependencySpec {
     Single(String),
     /// Multiple commands that should be checked together.
     Multiple(Vec<String>),
+}
+
+/// Storage configuration describing remote environments providers.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StorageConfig {
+    /// Provider identifier understood by the hosted hub.
+    pub provider: String,
+    /// Environment variable that stores the API key/token.
+    #[serde(default = "default_storage_env_var")]
+    pub env_var: String,
+    /// Base URL for the storage hub (defaults to hosted flow hub).
+    #[serde(default = "default_hub_url")]
+    pub hub_url: String,
+    /// Environments that can be synced locally.
+    #[serde(default)]
+    pub envs: Vec<StorageEnvConfig>,
+}
+
+fn default_hub_url() -> String {
+    "https://flow.1focus.ai".to_string()
+}
+
+fn default_storage_env_var() -> String {
+    "FLOW_SECRETS_TOKEN".to_string()
+}
+
+/// Definition of an environment with named variables.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StorageEnvConfig {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub variables: Vec<StorageVariable>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StorageVariable {
+    pub key: String,
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+/// File watcher configuration for local automation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatcherConfig {
+    pub name: String,
+    pub path: String,
+    #[serde(default, rename = "match")]
+    pub filter: Option<String>,
+    pub command: String,
+    #[serde(default = "default_debounce_ms")]
+    pub debounce_ms: u64,
+    #[serde(default)]
+    pub run_on_start: bool,
+}
+
+fn default_debounce_ms() -> u64 {
+    200
+}
+
+/// Streaming configuration handled by the hub (stub for future OBS integration).
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamConfig {
+    pub provider: String,
+    #[serde(default)]
+    pub hotkey: Option<String>,
+    #[serde(default)]
+    pub toggle_url: Option<String>,
 }
 
 impl DependencySpec {

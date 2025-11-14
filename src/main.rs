@@ -4,11 +4,13 @@ mod hub;
 mod indexer;
 mod palette;
 mod screen;
+mod secrets;
 mod server;
 mod servers;
 mod servers_tui;
 mod setup;
 mod tasks;
+mod watchers;
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -41,6 +43,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Run(opts)) => {
             tasks::run(opts)?;
+        }
+        Some(Commands::Secrets(cmd)) => {
+            secrets::run(cmd)?;
         }
         Some(Commands::Index(opts)) => {
             indexer::run(opts)?;
