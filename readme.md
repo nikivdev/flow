@@ -42,6 +42,18 @@ This prints the frames along with timestamps, which is a lightweight way to vali
 - Add WebSocket and RPC endpoints for sending commands into the daemon.
 - Add persistence + state management (sled/sqlite/postgres) to model “second OS” workflows over time.
 
+## Shell helpers
+
+Define aliases in `flow.toml` to speed up commands and load them with `f setup`:
+
+```toml
+[[alias]]
+fr = "f run"    # fuzzy search through tasks
+fc = "f commit" # run the "commit" task via the shorthand `f commit`
+```
+
+Apply them in a shell session via `eval "$(f setup)"`, or add the same expression to your shell rc file. After `f setup`, you can run tasks directly with `f <task>` (e.g. `f commit`) or via custom shell aliases such as `fr`/`fc`.
+
 ## Contributing
 
 Any PR to improve is welcome. [codex](https://github.com/openai/codex) & [cursor](https://cursor.com) are nice for dev. Great **working** & **useful** patches are most appreciated (ideally). Issues with bugs or ideas are welcome too.

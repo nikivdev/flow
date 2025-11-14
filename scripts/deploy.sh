@@ -12,11 +12,12 @@ cargo build
 INSTALL_DIR="${FLOW_INSTALL_DIR:-$HOME/bin}"
 mkdir -p "${INSTALL_DIR}"
 
-SOURCE_BIN="${ROOT_DIR}/target/debug/flowd"
-TARGET_BIN="${INSTALL_DIR}/flow"
+SOURCE_BIN="${ROOT_DIR}/target/debug/f"
+TARGET_BIN="${INSTALL_DIR}/f"
 
-cp "${SOURCE_BIN}" "${TARGET_BIN}"
-chmod +x "${TARGET_BIN}"
+echo "Linking ${TARGET_BIN} -> ${SOURCE_BIN}"
+rm -f "${TARGET_BIN}"
+ln -s "${SOURCE_BIN}" "${TARGET_BIN}"
 
-echo "Installed flow to ${TARGET_BIN}"
-echo "Ensure ${INSTALL_DIR} is on your PATH to run 'flow' from anywhere."
+echo "Symlinked f to ${TARGET_BIN}"
+echo "Ensure ${INSTALL_DIR} is on your PATH to run 'f' from anywhere."

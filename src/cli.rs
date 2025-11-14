@@ -23,10 +23,15 @@ pub enum Commands {
     Screen(ScreenOpts),
     /// Inspect managed HTTP servers and view their logs in a TUI.
     Servers(ServersOpts),
+    /// Emit shell helpers (aliases) defined in flow.toml so they can be eval'ed in the current shell.
+    Setup(SetupOpts),
     /// List project automation tasks defined in flow.toml (default command).
     Tasks(TasksOpts),
     /// Execute a specific project task.
     Run(TaskRunOpts),
+    /// Invoke tasks directly via `f <task>` without typing `run`.
+    #[command(external_subcommand)]
+    TaskShortcut(Vec<String>),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -101,4 +106,11 @@ pub struct TaskRunOpts {
     /// Name of the task to execute.
     #[arg(value_name = "TASK")]
     pub name: String,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SetupOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
 }
