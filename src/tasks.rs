@@ -138,15 +138,31 @@ fn ensure_dependencies_available(commands: &[String]) -> Result<()> {
         commands.join(", ")
     );
     for command in commands {
-        which::which(command).with_context(|| {
-            format!(
-                "dependency '{}' not found in PATH. Install it or adjust the [dependencies] config.",
-                command
-            )
-        })?;
+        which::which(command).with_context(|| dependency_error(command))?;
     }
 
     Ok(())
+}
+
+fn dependency_error(command: &str) -> String {
+    let mut msg = format!(
+        "dependency '{}' not found in PATH. Install it or adjust the [dependencies] config.",
+        command
+    );
+    if let Some(extra) = dependency_help(command) {
+        msg.push('\n');
+        msg.push_str(extra);
+    }
+    msg
+}
+
+fn dependency_help(command: &str) -> Option<&'static str> {
+    match command {
+        "fast" => Some(
+            "Get the fast CLI from https://github.com/1focus-ai/fast and ensure it is on PATH.",
+        ),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

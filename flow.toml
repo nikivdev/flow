@@ -16,8 +16,6 @@ description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
 
 [[tasks]]
 name = "commit"
-# command = "fast commitPush"
-# TODO: test with this first
 command = "fast commitPush"
 description = "Commit with AI"
 
