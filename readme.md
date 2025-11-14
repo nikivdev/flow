@@ -17,7 +17,7 @@ An Axum powered daemon + CLI sandbox for building the foundations of an always-o
 - **Project task runner** – define tasks in `flow.toml`, list them with `f tasks`, run via `f run <task>`/`f <task>`, and capture descriptions for discoverability.
 - **Dependency checks** – optional `[dependencies]` entries ensure required binaries (e.g., `fast`) exist on `PATH` before a task executes.
 - **Shell aliases** – declare `[[alias]]` tables and load them into your shell with `eval "$(f setup)"` so commands like `fr` or `fc` are always available.
-- **Hub launcher** – `f hub` checks whether the background daemon is listening on `localhost:6000` and spawns it (using `~/.config/flow/flow.toml`) if missing, giving you a one-command way to ensure services are hot.
+- **Hub launcher** – `f hub` checks whether the background daemon is listening on `localhost:6000` and spawns it (using `~/.config/flow/flow.toml`) if missing; `f hub stop` terminates the managed daemon when you’re done.
 - **Deploy helper** – `f run deploy` (or `./scripts/deploy.sh`) builds the debug binary and keeps `~/bin/f` symlinked to the latest build for fast iteration.
 - **Command palette** – running `f` with no arguments pipes built-ins + project tasks into `fzf`, so you can fuzzy select anything (fallback to a plain list if `fzf` isn’t installed).
 - **Codanna indexing** – `f index` bootstraps `.codanna/` if needed, runs `codanna index .`, captures `codanna mcp get_index_info --json`, and stores the JSON payload under `~/.db/flow/flow.sqlite` for other automations to consume.
