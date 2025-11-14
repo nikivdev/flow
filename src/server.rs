@@ -23,6 +23,7 @@ use crate::{
     config::{self, Config},
     screen::ScreenBroadcaster,
     servers::{LogLine, ManagedServer, ServerSnapshot},
+    watchers::WatchManager,
 };
 
 #[derive(Clone)]
@@ -41,7 +42,7 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
         .config
         .clone()
         .unwrap_or_else(config::default_config_path);
-    let cfg: Config = config::load_or_default(&config_path);
+    let mut cfg: Config = config::load_or_default(&config_path);
     tracing::info!(
         path = %config_path.display(),
         server_count = cfg.servers.len(),
@@ -51,7 +52,8 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
     // Prepare managed servers
     const LOG_BUFFER_CAPACITY: usize = 2048;
     let mut servers_map: HashMap<String, Arc<ManagedServer>> = HashMap::new();
-    for server_cfg in cfg.servers.into_iter() {
+    let servers = std::mem::take(&mut cfg.servers);
+    for server_cfg in servers.into_iter() {
         let name = server_cfg.name.clone();
         let autostart = server_cfg.autostart;
         let managed = ManagedServer::new(server_cfg, LOG_BUFFER_CAPACITY);
@@ -66,6 +68,16 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
         }
 
         servers_map.insert(name, managed);
+    }
+
+    let watcher_guard = WatchManager::start(&cfg.watchers)?;
+    if let Some(stream) = cfg.stream.as_ref() {
+        tracing::info!(
+            provider = %stream.provider,
+            hotkey = %stream.hotkey.as_deref().unwrap_or(""),
+            toggle_url = %stream.toggle_url.as_deref().unwrap_or(""),
+            "stream config detected"
+        );
     }
 
     let state = AppState {
@@ -94,6 +106,8 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    drop(watcher_guard);
 
     Ok(())
 }

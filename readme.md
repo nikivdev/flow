@@ -18,6 +18,8 @@ An Axum powered daemon + CLI sandbox for building the foundations of an always-o
 - **Dependency checks** – optional `[dependencies]` entries ensure required binaries (e.g., `fast`) exist on `PATH` before a task executes.
 - **Shell aliases** – declare `[[alias]]` tables and load them into your shell with `eval "$(f setup)"` so commands like `fr` or `fc` are always available.
 - **Hub launcher** – `f hub` checks whether the background daemon is listening on `localhost:6000` and spawns it (using `~/.config/flow/flow.toml`) if missing; `f hub stop` terminates the managed daemon when you’re done.
+- **Watchers** – `[[watchers]]` entries automatically run commands (e.g., `~/bin/goku`) whenever their files change.
+- **Secrets sync** – declare `[storage]` environments in `flow.toml`, list them with `f secrets list`, and fetch remote `.env` payloads from the hosted hub (`flow.1focus.ai` by default) via `f secrets pull <env>`.
 - **Deploy helper** – `f run deploy` (or `./scripts/deploy.sh`) builds the debug binary and keeps `~/bin/f` symlinked to the latest build for fast iteration.
 - **Command palette** – running `f` with no arguments pipes built-ins + project tasks into `fzf`, so you can fuzzy select anything (fallback to a plain list if `fzf` isn’t installed).
 - **Codanna indexing** – `f index` bootstraps `.codanna/` if needed, runs `codanna index .`, captures `codanna mcp get_index_info --json`, and stores the JSON payload under `~/.db/flow/flow.sqlite` for other automations to consume.
@@ -72,6 +74,80 @@ description = "Commit with AI"
 [dependencies]
 "github.com/1focus-ai/fast" = "fast"
 ```
+
+### Watchers
+
+Keep background automations in sync with your dotfiles or code whenever files change:
+
+```toml
+[[watchers]]
+name = "karabiner"
+path = "~/config/i/karabiner"
+match = "karabiner.edn"
+command = "~/bin/goku"
+debounce_ms = 150
+run_on_start = true
+
+[[watchers]]
+name = "design-system"
+path = "~/src/org/1f/1f"
+command = "blade --port 4000"
+```
+
+Every watcher observes its `path` (recursively) and executes the command via `/bin/sh -c`. Use `match` to filter on file names, `debounce_ms` to control how quickly successive changes trigger, and `run_on_start` when you want the command to fire as soon as the hub daemon boots.
+
+## Secrets sync
+
+Flow can keep API keys and service credentials in a hosted (or self-hosted) hub and hydrate them locally on demand. Define environments in `flow.toml`:
+
+```toml
+[storage]
+provider = "1focus"
+env_var = "1F_KEY"           # API token pulled from your shell env
+
+[[storage.envs]]
+name = "local"
+description = "Local development defaults"
+variables = ["DATABASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+
+[[storage.envs]]
+name = "dev"
+description = "Shared development cluster"
+variables = [
+  "DATABASE_URL",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "S3_ACCESS_KEY",
+  "S3_SECRET_KEY",
+]
+
+[[storage.envs]]
+name = "prod"
+description = "Production runtime"
+variables = [
+  "DATABASE_URL",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "S3_ACCESS_KEY",
+  "S3_SECRET_KEY",
+  "SLACK_WEBHOOK_URL",
+]
+```
+
+Usage:
+
+```bash
+# Show configured environments
+f secrets list
+
+# Pull the "dev" env from the hosted hub (flow.1focus.ai) and write .env.dev
+f secrets pull dev --output .env.dev --format dotenv
+
+# Point at a self-hosted hub
+f secrets pull prod --hub https://hub.mycompany.dev
+```
+
+Set the API token via the configured `env_var` (e.g., `export 1F_KEY=...`). The hub URL defaults to `https://flow.1focus.ai`, but you can self-host by overriding `storage.hub_url` or passing `--hub` at runtime.
 
 Run `f tasks` to list everything, `f run dev` (or simply `f dev`) to execute a task, and `f run deploy` to build + refresh the local `f` binary via `scripts/deploy.sh`. Optional `[dependencies]` entries make sure the referenced commands exist on `PATH` before the task’s shell is launched, so failures surface early.
 

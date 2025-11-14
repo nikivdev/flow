@@ -1,3 +1,6 @@
+[storage]
+provider = "1focus.ai"
+
 [[tasks]]
 name = "setup"
 command = "cargo check"
@@ -21,3 +24,33 @@ description = "Commit with AI"
 
 [dependencies]
 "github.com/1focus-ai/fast" = "fast"
+
+[[storage.envs]]
+name = "local"
+variables = [
+  { key = "DATABASE_URL", default = "" },
+  { key = "OPENAI_API_KEY", default = "" },
+]
+
+[[storage.envs]]
+name = "dev"
+description = "Shared development cluster"
+variables = [
+  "DATABASE_URL",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "S3_ACCESS_KEY",
+  "S3_SECRET_KEY",
+]
+
+[[storage.envs]]
+name = "prod"
+description = "Production runtime"
+variables = [
+  "DATABASE_URL",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "S3_ACCESS_KEY",
+  "S3_SECRET_KEY",
+  "SLACK_WEBHOOK_URL",
+]
