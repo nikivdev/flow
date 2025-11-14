@@ -6,4 +6,22 @@ description = "Compile the workspace to make sure the toolchain works"
 [[tasks]]
 name = "deploy"
 command = "./scripts/deploy.sh"
-desc = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
+description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
+
+[[tasks]]
+name = "commit"
+command = "fast commitPush"
+description = "Commit with AI"
+
+[[tasks]]
+name = "test"
+command = "fast --version"
+description = "testing"
+
+[dependencies]
+"github.com/1focus-ai/fast" = "fast"
+
+[[alias]]
+fr = "f run"    # fuzzy search through tasks to run or do `fr <task>`
+fd = "f deploy" # deploy
+fc = "f commit" # commit

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     cli::{TaskRunOpts, TasksOpts},
-    config::{self, Config, TaskConfig},
+    config::{self, Config, DependencySpec, TaskConfig},
 };
 
 pub fn list(opts: TasksOpts) -> Result<()> {
@@ -35,11 +35,12 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
             config_path.display()
         );
     };
-
+    let dependency_commands = resolve_task_dependencies(task, &cfg)?;
+    ensure_dependencies_available(&dependency_commands)?;
     execute_task(task, config_path.parent().unwrap_or(Path::new(".")))
 }
 
-fn load_project_config(path: PathBuf) -> Result<(PathBuf, Config)> {
+pub(crate) fn load_project_config(path: PathBuf) -> Result<(PathBuf, Config)> {
     let config_path = resolve_path(path)?;
     let cfg = config::load(&config_path).with_context(|| {
         format!(
@@ -94,6 +95,60 @@ fn format_task_lines(tasks: &[TaskConfig]) -> Vec<String> {
     lines
 }
 
+fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<Vec<String>> {
+    if task.dependencies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if cfg.dependencies.is_empty() {
+        bail!(
+            "task '{}' declares dependencies but no [dependencies] table is defined",
+            task.name
+        );
+    }
+
+    let mut missing = Vec::new();
+    let mut commands = Vec::new();
+    for dep_name in &task.dependencies {
+        if let Some(spec) = cfg.dependencies.get(dep_name) {
+            spec.extend_commands(&mut commands);
+        } else {
+            missing.push(dep_name.as_str());
+        }
+    }
+
+    if !missing.is_empty() {
+        bail!(
+            "task '{}' references unknown dependencies: {}",
+            task.name,
+            missing.join(", ")
+        );
+    }
+
+    Ok(commands)
+}
+
+fn ensure_dependencies_available(commands: &[String]) -> Result<()> {
+    if commands.is_empty() {
+        return Ok(());
+    }
+
+    println!(
+        "Ensuring dependencies are available on PATH: {}",
+        commands.join(", ")
+    );
+    for command in commands {
+        which::which(command).with_context(|| {
+            format!(
+                "dependency '{}' not found in PATH. Install it or adjust the [dependencies] config.",
+                command
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,11 +160,13 @@ mod tests {
             TaskConfig {
                 name: "lint".to_string(),
                 command: "golangci-lint run".to_string(),
+                dependencies: Vec::new(),
                 description: Some("Run lint checks".to_string()),
             },
             TaskConfig {
                 name: "test".to_string(),
                 command: "gotestsum ./...".to_string(),
+                dependencies: Vec::new(),
                 description: None,
             },
         ];
@@ -130,11 +187,73 @@ mod tests {
         let task = TaskConfig {
             name: "empty".into(),
             command: "".into(),
+            dependencies: Vec::new(),
             description: None,
         };
         let err = execute_task(&task, Path::new(".")).unwrap_err();
         assert!(
             err.to_string().contains("empty command"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn collects_dependency_commands() {
+        let mut cfg = Config::default();
+        cfg.dependencies
+            .insert("fast".into(), DependencySpec::Single("fast".into()));
+        cfg.dependencies.insert(
+            "toolkit".into(),
+            DependencySpec::Multiple(vec!["rg".into(), "fd".into()]),
+        );
+
+        let task = TaskConfig {
+            name: "ci".into(),
+            command: "ci".into(),
+            dependencies: vec!["fast".into(), "toolkit".into()],
+            description: None,
+        };
+
+        let commands = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
+        assert_eq!(
+            commands,
+            vec!["fast".to_string(), "rg".to_string(), "fd".to_string()]
+        );
+    }
+
+    #[test]
+    fn errors_on_missing_dependencies() {
+        let cfg = Config::default();
+        let task = TaskConfig {
+            name: "ci".into(),
+            command: "ci".into(),
+            dependencies: vec!["unknown".into()],
+            description: None,
+        };
+
+        let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("declares dependencies but no [dependencies] table"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn errors_when_dependency_not_declared_in_table() {
+        let mut cfg = Config::default();
+        cfg.dependencies
+            .insert("fast".into(), DependencySpec::Single("fast".into()));
+        let task = TaskConfig {
+            name: "ci".into(),
+            command: "ci".into(),
+            dependencies: vec!["unknown".into()],
+            description: None,
+        };
+
+        let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("references unknown dependencies"),
             "unexpected error: {err:?}"
         );
     }

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// Top-level configuration for flowd, currently focused on managed servers.
 #[derive(Debug, Clone, Deserialize)]
@@ -14,6 +14,10 @@ pub struct Config {
     pub servers: Vec<ServerConfig>,
     #[serde(default)]
     pub tasks: Vec<TaskConfig>,
+    #[serde(default)]
+    pub dependencies: HashMap<String, DependencySpec>,
+    #[serde(default, alias = "alias", deserialize_with = "deserialize_aliases")]
+    pub aliases: HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -21,6 +25,8 @@ impl Default for Config {
         Self {
             servers: Vec::new(),
             tasks: Vec::new(),
+            dependencies: HashMap::new(),
+            aliases: HashMap::new(),
         }
     }
 }
@@ -57,9 +63,61 @@ pub struct TaskConfig {
     pub name: String,
     /// Shell command that should be executed for this task.
     pub command: String,
+    /// Optional task-specific dependencies that must be made available before the command runs.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     /// Optional human-friendly description.
     #[serde(default, alias = "desc")]
     pub description: Option<String>,
+}
+
+/// Definition of a dependency that can be referenced by automation tasks.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum DependencySpec {
+    /// Single command/binary that should be available on PATH.
+    Single(String),
+    /// Multiple commands that should be checked together.
+    Multiple(Vec<String>),
+}
+
+impl DependencySpec {
+    /// Add one or more command names to the provided buffer.
+    pub fn extend_commands(&self, buffer: &mut Vec<String>) {
+        match self {
+            DependencySpec::Single(cmd) => buffer.push(cmd.clone()),
+            DependencySpec::Multiple(cmds) => buffer.extend(cmds.iter().cloned()),
+        }
+    }
+}
+
+fn deserialize_aliases<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum AliasInput {
+        Map(HashMap<String, String>),
+        List(Vec<HashMap<String, String>>),
+    }
+
+    let maybe = Option::<AliasInput>::deserialize(deserializer)?;
+    let mut aliases = HashMap::new();
+    if let Some(input) = maybe {
+        match input {
+            AliasInput::Map(map) => aliases = map,
+            AliasInput::List(list) => {
+                for table in list {
+                    for (name, command) in table {
+                        aliases.insert(name, command);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(aliases)
 }
 
 /// Default config path: ~/.config/flow/config.toml
@@ -178,6 +236,82 @@ mod tests {
             test_task.description.as_deref(),
             Some("Execute the Go test suite with gotestsum output"),
             "desc alias should populate description"
+        );
+    }
+
+    #[test]
+    fn load_parses_dependency_table() {
+        let contents = r#"
+[dependencies]
+fast = "fast"
+toolkit = ["rg", "fd"]
+
+[[tasks]]
+name = "ci"
+command = "ci"
+dependencies = ["fast", "toolkit"]
+"#;
+        let cfg: Config =
+            toml::from_str(contents).expect("inline config with dependencies should parse");
+
+        let task = cfg.tasks.first().expect("task should parse");
+        assert_eq!(
+            task.dependencies,
+            ["fast", "toolkit"],
+            "task dependency references should parse"
+        );
+
+        let fast = cfg
+            .dependencies
+            .get("fast")
+            .expect("fast dependency should be present");
+        match fast {
+            DependencySpec::Single(expr) => {
+                assert_eq!(expr, "fast");
+            }
+            other => panic!("fast dependency variant mismatch: {other:?}"),
+        }
+
+        let toolkit = cfg
+            .dependencies
+            .get("toolkit")
+            .expect("toolkit dependency should be present");
+        match toolkit {
+            DependencySpec::Multiple(exprs) => {
+                assert_eq!(exprs, &["rg", "fd"]);
+            }
+            other => panic!("toolkit dependency variant mismatch: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_parses_aliases() {
+        let contents = r#"
+[aliases]
+fr = "f run"
+ls = "f tasks"
+"#;
+        let cfg: Config = toml::from_str(contents).expect("inline alias config should parse");
+        assert_eq!(cfg.aliases.get("fr").map(String::as_str), Some("f run"));
+        assert_eq!(cfg.aliases.get("ls").map(String::as_str), Some("f tasks"));
+    }
+
+    #[test]
+    fn load_parses_alias_array_table() {
+        let contents = r#"
+[[alias]]
+fr = "f run"
+fc = "f commit"
+
+[[alias]]
+dev = "f run dev"
+"#;
+        let cfg: Config = toml::from_str(contents).expect("alias array config should parse");
+        assert_eq!(cfg.aliases.get("fr").map(String::as_str), Some("f run"));
+        assert_eq!(cfg.aliases.get("fc").map(String::as_str), Some("f commit"));
+        assert_eq!(
+            cfg.aliases.get("dev").map(String::as_str),
+            Some("f run dev")
         );
     }
 }

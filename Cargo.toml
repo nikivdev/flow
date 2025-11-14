@@ -3,6 +3,10 @@ name = "flowd"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "f"
+path = "src/main.rs"
+
 [dependencies]
 axum = "0.7"
 anyhow = "1.0"
@@ -18,3 +22,4 @@ toml = "0.8"
 ratatui = { version = "0.27", default-features = false, features = ["crossterm"] }
 crossterm = "0.27"
 reqwest = { version = "0.11", features = ["json", "blocking"] }
+which = "6"
