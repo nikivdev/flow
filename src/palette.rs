@@ -119,6 +119,7 @@ impl PaletteEntry {
 
 fn builtin_entries(config_arg: &str) -> Vec<PaletteEntry> {
     vec![
+        PaletteEntry::new("[cmd] hub – ensure daemon is running", vec!["hub".into()]),
         PaletteEntry::new("[cmd] daemon – start HTTP daemon", vec!["daemon".into()]),
         PaletteEntry::new("[cmd] screen – preview frames", vec!["screen".into()]),
         PaletteEntry::new(

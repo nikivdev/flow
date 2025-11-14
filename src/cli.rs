@@ -17,17 +17,40 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Run the HTTP daemon so other processes can interact with it.
+    #[command(
+        about = "Run the Axum daemon so other processes can interact with it.",
+        long_about = "Boot the Axum-based daemon that powers flow. This exposes /health, /screen/latest, and /screen/stream endpoints and hosts any managed servers/watchers defined in your config."
+    )]
     Daemon(DaemonOpts),
-    /// Generate a short mock preview of frames as if they were captured off the screen.
+    #[command(
+        about = "Generate a short mock preview of frames as if they were captured off the screen.",
+        long_about = "Preview mock screen frames directly in the terminal for quick FPS/buffer tuning without bringing up the daemon."
+    )]
     Screen(ScreenOpts),
-    /// Inspect managed HTTP servers and view their logs in a TUI.
+    #[command(
+        about = "Inspect managed HTTP servers and view their logs in a TUI.",
+        long_about = "Connect to the running daemon (default 127.0.0.1:9050) and display managed servers in a terminal UI. Use arrow keys or j/k to navigate, Enter to toggle logs, and q to exit."
+    )]
     Servers(ServersOpts),
-    /// Emit shell helpers (aliases) defined in flow.toml so they can be eval'ed in the current shell.
+    #[command(
+        about = "Ensure the background hub daemon is running (spawns it if missing).",
+        long_about = "Checks the /health endpoint on the configured host/port (defaults to 127.0.0.1:6000). If unreachable, a daemon is launched in the background using ~/.config/flow/config.toml and the command waits until it is healthy."
+    )]
+    Hub(HubOpts),
+    #[command(
+        about = "Emit shell helpers (aliases) defined in flow.toml.",
+        long_about = "Print alias definitions derived from the current flow.toml so you can source them (e.g., eval \"$(f setup)\") inside your shell session."
+    )]
     Setup(SetupOpts),
-    /// List project automation tasks defined in flow.toml (default command).
+    #[command(
+        about = "List project automation tasks defined in flow.toml.",
+        long_about = "Read the project flow.toml, render a numbered list of tasks plus their descriptions, and exit."
+    )]
     Tasks(TasksOpts),
-    /// Execute a specific project task.
+    #[command(
+        about = "Execute a specific project task.",
+        long_about = "Look up the named task from flow.toml (respecting declared dependencies) and run its shell command."
+    )]
     Run(TaskRunOpts),
     /// Invoke tasks directly via `f <task>` without typing `run`.
     #[command(external_subcommand)]
@@ -106,6 +129,21 @@ pub struct TaskRunOpts {
     /// Name of the task to execute.
     #[arg(value_name = "TASK")]
     pub name: String,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HubOpts {
+    /// Hostname or IP address of the hub daemon.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: IpAddr,
+
+    /// TCP port for the daemon's HTTP interface.
+    #[arg(long, default_value_t = 6000)]
+    pub port: u16,
+
+    /// Optional path to the global flow config (defaults to ~/.config/flow/config.toml).
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]
