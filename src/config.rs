@@ -10,6 +10,8 @@ use serde::{Deserialize, Deserializer};
 /// Top-level configuration for flowd, currently focused on managed servers.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub version: Option<u32>,
     #[serde(default, alias = "server")]
     pub servers: Vec<ServerConfig>,
     #[serde(default)]
@@ -20,7 +22,7 @@ pub struct Config {
     pub aliases: HashMap<String, String>,
     #[serde(default)]
     pub storage: Option<StorageConfig>,
-    #[serde(default, alias = "watcher")]
+    #[serde(default, alias = "watcher", alias = "always-run")]
     pub watchers: Vec<WatcherConfig>,
     #[serde(default)]
     pub stream: Option<StreamConfig>,
@@ -29,6 +31,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            version: None,
             servers: Vec::new(),
             tasks: Vec::new(),
             dependencies: HashMap::new(),
@@ -41,24 +44,81 @@ impl Default for Config {
 }
 
 /// Configuration for a single managed HTTP server process.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// Human-friendly name used in the TUI and HTTP API.
     pub name: String,
     /// Program to execute, e.g. "node", "cargo".
     pub command: String,
     /// Arguments passed to the command.
-    #[serde(default)]
     pub args: Vec<String>,
     /// Optional working directory for the process.
-    #[serde(default)]
     pub working_dir: Option<PathBuf>,
     /// Additional environment variables.
-    #[serde(default)]
     pub env: HashMap<String, String>,
     /// Whether this server should be started automatically with the daemon.
-    #[serde(default = "default_autostart")]
     pub autostart: bool,
+}
+
+impl<'de> Deserialize<'de> for ServerConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawServerConfig {
+            #[serde(default)]
+            name: Option<String>,
+            command: String,
+            #[serde(default)]
+            args: Vec<String>,
+            #[serde(default, alias = "path")]
+            working_dir: Option<PathBuf>,
+            #[serde(default)]
+            env: HashMap<String, String>,
+            #[serde(default = "default_autostart")]
+            autostart: bool,
+        }
+
+        let raw = RawServerConfig::deserialize(deserializer)?;
+        let mut command = raw.command;
+        let mut args = raw.args;
+
+        if args.is_empty() {
+            if let Ok(parts) = shell_words::split(&command) {
+                if let Some((head, tail)) = parts.split_first() {
+                    command = head.clone();
+                    args = tail.to_vec();
+                }
+            }
+        }
+
+        let name = raw
+            .name
+            .or_else(|| {
+                raw.working_dir.as_ref().and_then(|dir| {
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+            })
+            .unwrap_or_else(|| {
+                if command.is_empty() {
+                    "server".to_string()
+                } else {
+                    command.clone()
+                }
+            });
+
+        Ok(ServerConfig {
+            name,
+            command,
+            args,
+            working_dir: raw.working_dir,
+            env: raw.env,
+            autostart: raw.autostart,
+        })
+    }
 }
 
 fn default_autostart() -> bool {
@@ -248,35 +308,33 @@ mod tests {
         let cfg = load(fixture_path("test-data/global-config/flow.toml"))
             .expect("global config fixture should parse");
 
-        assert_eq!(cfg.servers.len(), 2);
+        assert_eq!(cfg.version, Some(1));
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.watchers.len(), 1);
         assert!(
             cfg.tasks.is_empty(),
             "global config should not define tasks"
         );
 
-        let frontend = &cfg.servers[0];
-        assert_eq!(frontend.name, "frontend");
-        assert_eq!(frontend.command, "npm");
-        assert_eq!(frontend.args, ["run", "dev"]);
-        assert_eq!(
-            frontend.working_dir.as_deref(),
-            Some(Path::new("apps/frontend"))
-        );
-        assert!(!frontend.autostart);
-        assert_eq!(
-            frontend.env.get("NODE_ENV").map(String::as_str),
-            Some("development")
-        );
-        assert_eq!(frontend.env.get("PORT").map(String::as_str), Some("4100"));
+        let watcher = &cfg.watchers[0];
+        assert_eq!(watcher.name, "karabiner");
+        assert_eq!(watcher.path, "~/config/i/karabiner");
+        assert_eq!(watcher.filter.as_deref(), Some("karabiner.edn"));
+        assert_eq!(watcher.command, "~/bin/goku");
+        assert_eq!(watcher.debounce_ms, 150);
+        assert!(watcher.run_on_start);
 
-        let api = &cfg.servers[1];
-        assert_eq!(api.name, "api");
-        assert_eq!(api.command, "cargo");
-        assert!(api.args.is_empty());
-        assert!(api.working_dir.is_none());
-        assert!(api.env.is_empty());
+        let server = &cfg.servers[0];
+        assert_eq!(server.name, "1f");
+        assert_eq!(server.command, "blade");
+        assert_eq!(server.args, ["--port", "4000"]);
+        assert_eq!(
+            server.working_dir.as_deref(),
+            Some(Path::new("~/src/org/1f/1f"))
+        );
+        assert!(server.env.is_empty());
         assert!(
-            api.autostart,
+            server.autostart,
             "autostart should default to true when omitted"
         );
     }

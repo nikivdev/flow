@@ -1,3 +1,5 @@
+version = 1
+
 [storage]
 provider = "1focus.ai"
 
