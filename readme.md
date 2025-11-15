@@ -4,8 +4,6 @@
 
 Eventually. For now its going to be a rust server that starts and starts to provide functions and nice programmable SDK into it via TS library most likely.
 
-Mostly writing this tool in background as I want it to automate my entire workflow. I [stream dev of it](https://youtube.com/@nikivdev/streams) too.
-
 ## Current state
 
 An Axum powered daemon + CLI sandbox for building the foundations of an always-on personal operating system. The daemon exposes HTTP endpoints that can be called from any tool, while the CLI offers fast local utilities that share the same internals.
