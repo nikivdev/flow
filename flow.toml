@@ -18,6 +18,11 @@ command = "./scripts/deploy.sh"
 description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
 
 [[tasks]]
+name = "deploy-release"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh"
+description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
+
+[[tasks]]
 name = "commit"
 command = "fast commitPush"
 description = "Commit with AI"
@@ -36,21 +41,21 @@ variables = [
 name = "dev"
 description = "Shared development cluster"
 variables = [
-  "DATABASE_URL",
-  "OPENAI_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "S3_ACCESS_KEY",
-  "S3_SECRET_KEY",
+  { key = "DATABASE_URL" },
+  { key = "OPENAI_API_KEY" },
+  { key = "ANTHROPIC_API_KEY" },
+  { key = "S3_ACCESS_KEY" },
+  { key = "S3_SECRET_KEY" },
 ]
 
 [[storage.envs]]
 name = "prod"
 description = "Production runtime"
 variables = [
-  "DATABASE_URL",
-  "OPENAI_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "S3_ACCESS_KEY",
-  "S3_SECRET_KEY",
-  "SLACK_WEBHOOK_URL",
+  { key = "DATABASE_URL" },
+  { key = "OPENAI_API_KEY" },
+  { key = "ANTHROPIC_API_KEY" },
+  { key = "S3_ACCESS_KEY" },
+  { key = "S3_SECRET_KEY" },
+  { key = "SLACK_WEBHOOK_URL" },
 ]

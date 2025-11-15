@@ -108,29 +108,33 @@ env_var = "1F_KEY"           # API token pulled from your shell env
 [[storage.envs]]
 name = "local"
 description = "Local development defaults"
-variables = ["DATABASE_URL", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+variables = [
+  { key = "DATABASE_URL", default = "" },
+  { key = "OPENAI_API_KEY", default = "" },
+  { key = "ANTHROPIC_API_KEY", default = "" },
+]
 
 [[storage.envs]]
 name = "dev"
 description = "Shared development cluster"
 variables = [
-  "DATABASE_URL",
-  "OPENAI_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "S3_ACCESS_KEY",
-  "S3_SECRET_KEY",
+  { key = "DATABASE_URL" },
+  { key = "OPENAI_API_KEY" },
+  { key = "ANTHROPIC_API_KEY" },
+  { key = "S3_ACCESS_KEY" },
+  { key = "S3_SECRET_KEY" },
 ]
 
 [[storage.envs]]
 name = "prod"
 description = "Production runtime"
 variables = [
-  "DATABASE_URL",
-  "OPENAI_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "S3_ACCESS_KEY",
-  "S3_SECRET_KEY",
-  "SLACK_WEBHOOK_URL",
+  { key = "DATABASE_URL" },
+  { key = "OPENAI_API_KEY" },
+  { key = "ANTHROPIC_API_KEY" },
+  { key = "S3_ACCESS_KEY" },
+  { key = "S3_SECRET_KEY" },
+  { key = "SLACK_WEBHOOK_URL" },
 ]
 ```
 

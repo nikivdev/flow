@@ -130,15 +130,21 @@ fn fetch_remote_secrets(
         .error_for_status()
         .with_context(|| "storage hub returned an error response")?;
 
-    let body: HashMap<String, String> = response
+    let mut body: HashMap<String, String> = response
         .json()
         .with_context(|| "failed to parse storage hub response")?;
 
     for var in &env_cfg.variables {
-        if !body.contains_key(var) {
+        if body.contains_key(&var.key) {
+            continue;
+        }
+
+        if let Some(default) = &var.default {
+            body.insert(var.key.clone(), default.clone());
+        } else {
             bail!(
                 "storage hub response missing required variable '{}' for environment '{}'",
-                var,
+                var.key,
                 env_cfg.name
             );
         }
@@ -152,13 +158,13 @@ fn order_variables(
     values: &HashMap<String, String>,
 ) -> Vec<(String, String)> {
     let mut ordered = Vec::new();
-    for key in &env_cfg.variables {
-        if let Some(value) = values.get(key) {
-            ordered.push((key.clone(), value.clone()));
+    for var in &env_cfg.variables {
+        if let Some(value) = values.get(&var.key) {
+            ordered.push((var.key.clone(), value.clone()));
         }
     }
     for (key, value) in values {
-        if env_cfg.variables.iter().any(|v| v == key) {
+        if env_cfg.variables.iter().any(|v| v.key == *key) {
             continue;
         }
         ordered.push((key.clone(), value.clone()));
@@ -234,5 +240,103 @@ fn resolve_path(path: PathBuf) -> Result<PathBuf> {
         Ok(path)
     } else {
         Ok(env::current_dir()?.join(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::Server;
+    use std::path::PathBuf;
+
+    fn fixture_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                unsafe {
+                    env::set_var(&self.key, value);
+                }
+            } else {
+                unsafe {
+                    env::remove_var(&self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn project_config_fixture_is_loadable_and_fetches_mocked_secrets() {
+        let cfg = config::load(fixture_path("test-data/project-config/flow.toml"))
+            .expect("project config fixture should parse");
+
+        assert_eq!(cfg.tasks.len(), 3, "fixture defines three tasks");
+        let commit = cfg
+            .tasks
+            .iter()
+            .find(|task| task.name == "commit")
+            .expect("commit task should exist");
+        assert_eq!(
+            commit.dependencies,
+            ["github.com/1focus-ai/fast"],
+            "commit task should depend on fast"
+        );
+
+        let storage = cfg
+            .storage
+            .clone()
+            .expect("fixture should define a storage provider");
+        assert_eq!(storage.provider, "1focus.ai");
+        let env_cfg = storage
+            .envs
+            .iter()
+            .find(|env| env.name == "local")
+            .expect("local storage env should exist");
+
+        let _guard = EnvVarGuard::set(&storage.env_var, "test-token");
+
+        let mut server = Server::new();
+        let endpoint = format!("/api/secrets/{}/{}", storage.provider, env_cfg.name);
+        let mock = server
+            .mock("GET", endpoint.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "DATABASE_URL": "postgres://localhost/flow"
+            }"#,
+            )
+            .create();
+
+        let values =
+            fetch_remote_secrets(&storage, env_cfg, Some(server.url())).expect("mock fetch works");
+        mock.assert();
+
+        assert_eq!(
+            values.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://localhost/flow")
+        );
+        assert_eq!(values.get("OPENAI_API_KEY").map(String::as_str), Some(""));
     }
 }
