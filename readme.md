@@ -153,6 +153,16 @@ Set the API token via the configured `env_var` (e.g., `export 1F_KEY=...`). The 
 
 Run `f tasks` to list everything, `f run dev` (or simply `f dev`) to execute a task, and `f run deploy` to build + refresh the local `f` binary via `scripts/deploy.sh`. Optional `[dependencies]` entries make sure the referenced commands exist on `PATH` before the task’s shell is launched, so failures surface early.
 
+## Remote hubs
+
+Use `scripts/remote-hub-setup.sh <ssh-host> [config-path]` to stand up a second hub on a vanilla Linux box (great for a homelab or cloud VM reachable via Tailscale). The helper will:
+
+- Build a release `f` binary locally and copy it plus your config to the remote host over SSH.
+- Optionally sync extra folders by setting `REMOTE_SYNC_PATHS=dir1:dir2` (handy for pushing dotfiles, agent state, etc.).
+- Install and start a `systemd` unit so the daemon survives reboots (`sudo systemctl status flowd` on the remote to inspect logs).
+
+Pairing two hubs over Tailscale now takes a single command, and once both daemons are online you can push files or configs by re-running the script or using the same `REMOTE_SYNC_PATHS` env for incremental rsyncs.
+
 ## Next steps
 
 - Replace the mock screen generator with a real capture backend and push binary payloads (e.g. raw RGBA or compressed video chunks).
@@ -170,6 +180,11 @@ fc = "f commit" # run the "commit" task via the shorthand `f commit`
 ```
 
 Apply them in a shell session via `eval "$(f setup)"`, or add the same expression to your shell rc file. After `f setup`, you can run tasks directly with `f <task>` (e.g. `f commit`) or via custom shell aliases such as `fr`/`fc`.
+
+## Examples in the wild
+
+- [Global config: nikiv](https://github.com/nikivdev/config/tree/main/flow)
+- [Project config: linsa](https://github.com/linsa-io/linsa)
 
 ## Contributing
 

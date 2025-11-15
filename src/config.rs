@@ -12,8 +12,10 @@ use serde::{Deserialize, Deserializer};
 pub struct Config {
     #[serde(default)]
     pub version: Option<u32>,
-    #[serde(default, alias = "server")]
+    #[serde(default, alias = "server", alias = "server-local")]
     pub servers: Vec<ServerConfig>,
+    #[serde(default, rename = "server-remote")]
+    pub remote_servers: Vec<RemoteServerConfig>,
     #[serde(default)]
     pub tasks: Vec<TaskConfig>,
     #[serde(default)]
@@ -26,6 +28,8 @@ pub struct Config {
     pub watchers: Vec<WatcherConfig>,
     #[serde(default)]
     pub stream: Option<StreamConfig>,
+    #[serde(default, rename = "server-hub")]
+    pub server_hub: Option<ServerHubConfig>,
 }
 
 impl Default for Config {
@@ -33,12 +37,14 @@ impl Default for Config {
         Self {
             version: None,
             servers: Vec::new(),
+            remote_servers: Vec::new(),
             tasks: Vec::new(),
             dependencies: HashMap::new(),
             aliases: HashMap::new(),
             storage: None,
             watchers: Vec::new(),
             stream: None,
+            server_hub: None,
         }
     }
 }
@@ -191,6 +197,34 @@ pub struct StorageVariable {
     pub default: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteServerConfig {
+    #[serde(flatten)]
+    pub server: ServerConfig,
+    /// Optional hub name that coordinates this remote process.
+    #[serde(default)]
+    pub hub: Option<String>,
+    /// Paths to sync to the remote hub before launching.
+    #[serde(default)]
+    pub sync_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerHubConfig {
+    pub name: String,
+    pub host: String,
+    #[serde(default = "default_server_hub_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub tailscale: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+fn default_server_hub_port() -> u16 {
+    9050
+}
+
 /// File watcher configuration for local automation.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WatcherConfig {
@@ -310,6 +344,7 @@ mod tests {
 
         assert_eq!(cfg.version, Some(1));
         assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.remote_servers.len(), 1);
         assert_eq!(cfg.watchers.len(), 1);
         assert!(
             cfg.tasks.is_empty(),
@@ -337,6 +372,17 @@ mod tests {
             server.autostart,
             "autostart should default to true when omitted"
         );
+
+        let remote = &cfg.remote_servers[0];
+        assert_eq!(remote.server.name, "homelab-blade");
+        assert_eq!(remote.hub.as_deref(), Some("homelab"));
+        assert_eq!(remote.sync_paths, [PathBuf::from("~/config/i/karabiner")]);
+
+        let hub = cfg.server_hub.as_ref().expect("server hub config");
+        assert_eq!(hub.name, "homelab");
+        assert_eq!(hub.host, "tailscale");
+        assert_eq!(hub.port, 9050);
+        assert_eq!(hub.tailscale.as_deref(), Some("linux-hub"));
     }
 
     #[test]
