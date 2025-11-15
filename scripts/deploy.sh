@@ -6,13 +6,25 @@ ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${ROOT_DIR}"
 
-echo "Building flow CLI and daemon (debug profile)..."
-cargo build
+PROFILE="${FLOW_PROFILE:-debug}"
+TARGET_DIR="debug"
+BUILD_ARGS=()
+if [ "${PROFILE}" = "release" ]; then
+    TARGET_DIR="release"
+    BUILD_ARGS+=("--release")
+fi
+
+echo "Building flow CLI and daemon (${PROFILE} profile)..."
+if [ "${#BUILD_ARGS[@]}" -gt 0 ]; then
+    cargo build "${BUILD_ARGS[@]}"
+else
+    cargo build
+fi
 
 INSTALL_DIR="${FLOW_INSTALL_DIR:-$HOME/bin}"
 mkdir -p "${INSTALL_DIR}"
 
-SOURCE_BIN="${ROOT_DIR}/target/debug/f"
+SOURCE_BIN="${ROOT_DIR}/target/${TARGET_DIR}/f"
 TARGET_BIN="${INSTALL_DIR}/f"
 
 echo "Linking ${TARGET_BIN} -> ${SOURCE_BIN}"
