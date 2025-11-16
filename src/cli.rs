@@ -64,6 +64,11 @@ pub enum Commands {
         long_about = "Runs 'codanna index' for the current project, then captures 'codanna mcp get_index_info --json' and persists the payload to ~/.db/flow/flow.sqlite so other tools can consume it."
     )]
     Index(IndexOpts),
+    #[command(
+        about = "View logs emitted by managed servers",
+        long_about = "Fetch buffered logs (or stream live logs) from managed servers via the HTTP API."
+    )]
+    Logs(LogsOpts),
     /// Invoke tasks directly via `f <task>` without typing `run`.
     #[command(external_subcommand)]
     TaskShortcut(Vec<String>),
@@ -105,6 +110,29 @@ pub struct ScreenOpts {
     /// How many frames we keep buffered locally while previewing.
     #[arg(long, default_value_t = 64)]
     pub frame_buffer: usize,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct LogsOpts {
+    /// Hostname or IP address of the running flowd daemon.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: IpAddr,
+
+    /// TCP port of the daemon's HTTP interface.
+    #[arg(long, default_value_t = 9050)]
+    pub port: u16,
+
+    /// Specific server to fetch logs for (omit to dump all servers).
+    #[arg(long)]
+    pub server: Option<String>,
+
+    /// Number of log lines to fetch per server when not streaming.
+    #[arg(long, default_value_t = 200)]
+    pub limit: usize,
+
+    /// Stream logs in real-time (requires --server).
+    #[arg(long)]
+    pub follow: bool,
 }
 
 #[derive(Args, Debug, Clone)]

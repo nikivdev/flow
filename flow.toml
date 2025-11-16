@@ -8,19 +8,18 @@ name = "setup"
 command = "cargo check"
 description = "Compile the workspace to make sure the toolchain works"
 
-# TODO: up
 [[tasks]]
-name = "dev"
-command = "cargo run -- daemon --host 0.0.0.0 --port 9050 --fps 10"
-description = "Dev env"
+name = "dev-hub"
+command = "cargo run -- daemon --host 127.0.0.1 --port 9050"
+description = "Runs the hub daemon (local version)"
 
 [[tasks]]
-name = "deploy"
+name = "deploy-cli-local"
 command = "./scripts/deploy.sh"
 description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
 
 [[tasks]]
-name = "deploy-release"
+name = "deploy-cli-release"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh"
 description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
 
@@ -31,33 +30,3 @@ description = "Commit with AI"
 
 [dependencies]
 "github.com/1focus-ai/fast" = "fast"
-
-[[storage.envs]]
-name = "local"
-variables = [
-  { key = "DATABASE_URL", default = "" },
-  { key = "OPENAI_API_KEY", default = "" },
-]
-
-[[storage.envs]]
-name = "dev"
-description = "Shared development cluster"
-variables = [
-  { key = "DATABASE_URL" },
-  { key = "OPENAI_API_KEY" },
-  { key = "ANTHROPIC_API_KEY" },
-  { key = "S3_ACCESS_KEY" },
-  { key = "S3_SECRET_KEY" },
-]
-
-[[storage.envs]]
-name = "prod"
-description = "Production runtime"
-variables = [
-  { key = "DATABASE_URL" },
-  { key = "OPENAI_API_KEY" },
-  { key = "ANTHROPIC_API_KEY" },
-  { key = "S3_ACCESS_KEY" },
-  { key = "S3_SECRET_KEY" },
-  { key = "SLACK_WEBHOOK_URL" },
-]
