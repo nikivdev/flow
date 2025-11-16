@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer};
+use shellexpand::tilde;
 
 /// Top-level configuration for flowd, currently focused on managed servers.
 #[derive(Debug, Clone, Deserialize)]
@@ -53,7 +54,7 @@ impl Default for Config {
 }
 
 /// Configuration for a single managed HTTP server process.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     /// Human-friendly name used in the TUI and HTTP API.
     pub name: String,
@@ -82,7 +83,7 @@ impl<'de> Deserialize<'de> for ServerConfig {
             #[serde(default)]
             args: Vec<String>,
             #[serde(default, alias = "path")]
-            working_dir: Option<PathBuf>,
+            working_dir: Option<String>,
             #[serde(default)]
             env: HashMap<String, String>,
             #[serde(default = "default_autostart")]
@@ -106,7 +107,8 @@ impl<'de> Deserialize<'de> for ServerConfig {
             .name
             .or_else(|| {
                 raw.working_dir.as_ref().and_then(|dir| {
-                    dir.file_name()
+                    Path::new(dir)
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .filter(|s| !s.is_empty())
                 })
@@ -119,11 +121,13 @@ impl<'de> Deserialize<'de> for ServerConfig {
                 }
             });
 
+        let command = expand_path(&command).to_string_lossy().into_owned();
+
         Ok(ServerConfig {
             name,
             command,
             args,
-            working_dir: raw.working_dir,
+            working_dir: raw.working_dir.map(|dir| expand_path(&dir)),
             env: raw.env,
             autostart: raw.autostart,
         })
@@ -207,6 +211,7 @@ pub struct CommandFileConfig {
     pub description: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct RemoteServerConfig {
     #[serde(flatten)]
@@ -219,6 +224,7 @@ pub struct RemoteServerConfig {
     pub sync_paths: Vec<PathBuf>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerHubConfig {
     pub name: String,
@@ -238,19 +244,87 @@ fn default_server_hub_port() -> u16 {
 /// File watcher configuration for local automation.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WatcherConfig {
+    #[serde(default)]
+    pub driver: WatcherDriver,
     pub name: String,
     pub path: String,
     #[serde(default, rename = "match")]
     pub filter: Option<String>,
-    pub command: String,
+    #[serde(default)]
+    pub command: Option<String>,
     #[serde(default = "default_debounce_ms")]
     pub debounce_ms: u64,
     #[serde(default)]
     pub run_on_start: bool,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub poltergeist: Option<PoltergeistConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WatcherDriver {
+    Shell,
+    Poltergeist,
+}
+
+impl Default for WatcherDriver {
+    fn default() -> Self {
+        WatcherDriver::Shell
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PoltergeistConfig {
+    #[serde(default = "default_poltergeist_binary")]
+    pub binary: String,
+    #[serde(default)]
+    pub mode: PoltergeistMode,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl Default for PoltergeistConfig {
+    fn default() -> Self {
+        Self {
+            binary: default_poltergeist_binary(),
+            mode: PoltergeistMode::Haunt,
+            args: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PoltergeistMode {
+    Haunt,
+    Panel,
+    Status,
+}
+
+impl Default for PoltergeistMode {
+    fn default() -> Self {
+        PoltergeistMode::Haunt
+    }
 }
 
 fn default_debounce_ms() -> u64 {
     200
+}
+
+fn default_poltergeist_binary() -> String {
+    "poltergeist".to_string()
+}
+
+impl PoltergeistMode {
+    pub fn as_subcommand(&self) -> &'static str {
+        match self {
+            PoltergeistMode::Haunt => "haunt",
+            PoltergeistMode::Panel => "panel",
+            PoltergeistMode::Status => "status",
+        }
+    }
 }
 
 /// Streaming configuration handled by the hub (stub for future OBS integration).
@@ -302,15 +376,34 @@ where
     Ok(aliases)
 }
 
-/// Default config path: ~/.config/flow/config.toml
+/// Default config path: ~/.config/flow/flow.toml (falls back to legacy config.toml)
 pub fn default_config_path() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        let mut path = PathBuf::from(home);
-        path.push(".config/flow/config.toml");
-        path
-    } else {
-        PathBuf::from(".config/flow/config.toml")
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/flow");
+
+    let primary = base.join("flow.toml");
+    if primary.exists() {
+        return primary;
     }
+
+    let legacy = base.join("config.toml");
+    if legacy.exists() {
+        tracing::warn!("using legacy config path ~/.config/flow/config.toml; rename to flow.toml");
+        return legacy;
+    }
+
+    primary
+}
+
+pub fn expand_path(raw: &str) -> PathBuf {
+    let tilde_expanded = tilde(raw).into_owned();
+    let env_expanded = match shellexpand::env(&tilde_expanded) {
+        Ok(val) => val.into_owned(),
+        Err(_) => tilde_expanded,
+    };
+    PathBuf::from(env_expanded)
 }
 
 pub fn load<P: AsRef<Path>>(path: P) -> Result<Config> {
@@ -338,6 +431,13 @@ fn load_with_includes(path: &Path, visited: &mut Vec<PathBuf>) -> Result<Config>
 
     for include in cfg.command_files.clone() {
         let include_path = resolve_include_path(&canonical, &include.path);
+        if let Some(description) = include.description.as_deref() {
+            tracing::debug!(
+                path = %include_path.display(),
+                description,
+                "loading additional command file"
+            );
+        }
         let included = load_with_includes(&include_path, visited)
             .with_context(|| format!("failed to load commands file {}", include_path.display()))?;
         merge_config(&mut cfg, included);
@@ -393,7 +493,7 @@ pub fn load_or_default<P: AsRef<Path>>(path: P) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     fn fixture_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -415,20 +515,27 @@ mod tests {
         );
 
         let watcher = &cfg.watchers[0];
+        assert_eq!(watcher.driver, WatcherDriver::Shell);
         assert_eq!(watcher.name, "karabiner");
         assert_eq!(watcher.path, "~/config/i/karabiner");
         assert_eq!(watcher.filter.as_deref(), Some("karabiner.edn"));
-        assert_eq!(watcher.command, "~/bin/goku");
+        assert_eq!(watcher.command.as_deref(), Some("~/bin/goku"));
         assert_eq!(watcher.debounce_ms, 150);
         assert!(watcher.run_on_start);
+        assert!(watcher.poltergeist.is_none());
 
         let server = &cfg.servers[0];
         assert_eq!(server.name, "1f");
         assert_eq!(server.command, "blade");
         assert_eq!(server.args, ["--port", "4000"]);
-        assert_eq!(
-            server.working_dir.as_deref(),
-            Some(Path::new("~/src/org/1f/1f"))
+        let working_dir = server
+            .working_dir
+            .as_ref()
+            .expect("server working dir should parse");
+        assert!(
+            working_dir.ends_with("src/org/1f/1f"),
+            "unexpected working dir: {}",
+            working_dir.display()
         );
         assert!(server.env.is_empty());
         assert!(
@@ -457,6 +564,45 @@ mod tests {
         assert_eq!(hub.host, "tailscale");
         assert_eq!(hub.port, 9050);
         assert_eq!(hub.tailscale.as_deref(), Some("linux-hub"));
+    }
+
+    #[test]
+    fn expand_path_supports_tilde_and_env() {
+        let home = std::env::var("HOME").expect("HOME must be set for tests");
+        let expected = PathBuf::from(&home).join("projects/demo");
+
+        assert_eq!(expand_path("~/projects/demo"), expected);
+        assert_eq!(expand_path("$HOME/projects/demo"), expected);
+    }
+
+    #[test]
+    fn parses_poltergeist_watcher() {
+        let toml = r#"
+            [[watchers]]
+            driver = "poltergeist"
+            name = "peekaboo"
+            path = "~/src/org/1f/peekaboo"
+
+            [watchers.poltergeist]
+            binary = "/opt/bin/poltergeist"
+            mode = "panel"
+            args = ["status", "--verbose"]
+        "#;
+
+        let cfg: Config = toml::from_str(toml).expect("poltergeist watcher should parse");
+        assert_eq!(cfg.watchers.len(), 1);
+        let watcher = &cfg.watchers[0];
+        assert_eq!(watcher.driver, WatcherDriver::Poltergeist);
+        assert_eq!(watcher.command, None);
+        assert_eq!(watcher.path, "~/src/org/1f/peekaboo");
+
+        let poltergeist = watcher
+            .poltergeist
+            .as_ref()
+            .expect("poltergeist config should exist");
+        assert_eq!(poltergeist.binary, "/opt/bin/poltergeist");
+        assert_eq!(poltergeist.mode, PoltergeistMode::Panel);
+        assert_eq!(poltergeist.args, vec!["status", "--verbose"]);
     }
 
     #[test]

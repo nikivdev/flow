@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    sync::{RwLock, broadcast},
+    sync::{Mutex, RwLock, broadcast, mpsc},
 };
 
 use crate::config::ServerConfig;
@@ -44,6 +44,11 @@ enum ProcessState {
     Failed { error: String },
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ServerControl {
+    Terminate,
+}
+
 /// Snapshot of the current state of a managed server, suitable for JSON APIs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerSnapshot {
@@ -65,6 +70,7 @@ pub struct ManagedServer {
     log_tx: broadcast::Sender<LogLine>,
     log_buffer: RwLock<VecDeque<LogLine>>,
     log_buffer_capacity: usize,
+    control: Mutex<Option<mpsc::Sender<ServerControl>>>,
 }
 
 impl ManagedServer {
@@ -76,11 +82,12 @@ impl ManagedServer {
             log_tx,
             log_buffer: RwLock::new(VecDeque::with_capacity(log_buffer_capacity)),
             log_buffer_capacity,
+            control: Mutex::new(None),
         })
     }
 
-    pub fn name(&self) -> &str {
-        &self.cfg.name
+    pub fn config(&self) -> &ServerConfig {
+        &self.cfg
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<LogLine> {
@@ -122,6 +129,16 @@ impl ManagedServer {
     /// background task monitors for process exit.
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         {
+            let state = self.state.read().await;
+            if matches!(
+                *state,
+                ProcessState::Starting | ProcessState::Running { .. }
+            ) {
+                return Ok(());
+            }
+        }
+
+        {
             let mut state = self.state.write().await;
             *state = ProcessState::Starting;
         }
@@ -150,6 +167,12 @@ impl ManagedServer {
             *state = ProcessState::Running { pid };
         }
 
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        {
+            let mut guard = self.control.lock().await;
+            *guard = Some(control_tx);
+        }
+
         let server = Arc::clone(self);
 
         // stdout task
@@ -164,7 +187,23 @@ impl ManagedServer {
 
         // wait for exit
         tokio::spawn(async move {
-            let status = child.wait().await;
+            let status = tokio::select! {
+                status = child.wait() => status,
+                ctrl = control_rx.recv() => {
+                    if matches!(ctrl, Some(ServerControl::Terminate)) {
+                        if let Err(err) = child.kill().await {
+                            tracing::warn!(?err, server = server.cfg.name, "failed to terminate server child");
+                        }
+                    }
+                    child.wait().await
+                }
+            };
+
+            {
+                let mut guard = server.control.lock().await;
+                *guard = None;
+            }
+
             let mut state = server.state.write().await;
             match status {
                 Ok(status) => {
@@ -180,6 +219,14 @@ impl ManagedServer {
             }
         });
 
+        Ok(())
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        let tx = { self.control.lock().await.clone() };
+        if let Some(tx) = tx {
+            let _ = tx.send(ServerControl::Terminate).await;
+        }
         Ok(())
     }
 

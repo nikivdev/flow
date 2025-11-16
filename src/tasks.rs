@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     cli::{TaskRunOpts, TasksOpts},
-    config::{self, Config, DependencySpec, TaskConfig},
+    config::{self, Config, TaskConfig},
 };
 
 pub fn list(opts: TasksOpts) -> Result<()> {
@@ -168,6 +168,7 @@ fn dependency_help(command: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DependencySpec;
     use std::path::Path;
 
     #[test]

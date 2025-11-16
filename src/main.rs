@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod hub;
 mod indexer;
+mod logs;
 mod palette;
 mod screen;
 mod secrets;
@@ -49,6 +50,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Index(opts)) => {
             indexer::run(opts)?;
+        }
+        Some(Commands::Logs(opts)) => {
+            logs::run(opts)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

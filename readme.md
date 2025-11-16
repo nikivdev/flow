@@ -82,7 +82,9 @@ The optional `[[commands]]` tables let you split `flow.toml` into multiple files
 
 ### Watchers
 
-Keep background automations in sync with your dotfiles or code whenever files change:
+Keep background automations in sync with your dotfiles or code whenever files change. Flow now treats watchers as a first-class primitive with two drivers:
+
+#### Shell driver (default)
 
 ```toml
 [[watchers]]
@@ -93,13 +95,53 @@ command = "~/bin/goku"
 debounce_ms = 150
 run_on_start = true
 
-[[watchers]]
-name = "design-system"
-path = "~/src/org/1f/1f"
-command = "blade --port 4000"
+[watchers.env]
+PATH = "/opt/homebrew/bin:${PATH}"
 ```
 
-Every watcher observes its `path` (recursively) and executes the command via `/bin/sh -c`. Use `match` to filter on file names, `debounce_ms` to control how quickly successive changes trigger, and `run_on_start` when you want the command to fire as soon as the hub daemon boots.
+Shell watchers observe `path` recursively and execute the configured command via `/bin/sh -c`. Use `match` to filter filenames, `debounce_ms` to control how quickly successive changes retrigger, `run_on_start` when the command should fire as soon as the daemon boots, and the optional `[watchers.env]` table for per-watcher environment overrides.
+
+#### Poltergeist driver
+
+For native build loops and hot reload flows, Flow can now manage [Poltergeist](https://github.com/steipete/poltergeist)—the "ghost" that keeps your builds fresh. Flow spawns `poltergeist haunt` (or any other Poltergeist subcommand you choose) for each configured watcher so your projects instantly gain its universal file-watching, Watchman-powered queueing, and panel UI.
+
+```toml
+[[watchers]]
+driver = "poltergeist"
+name = "peekaboo"
+path = "~/src/org/1f/peekaboo"
+
+[watchers.poltergeist]
+# Default is "haunt"; switch to "panel" to keep the Ink dashboard open.
+mode = "haunt"
+args = ["--git-mode", "ai"]
+
+[watchers.env]
+POLTERGEIST_GIT_MODE = "ai"
+```
+
+When the hub starts, Flow expands `path`, launches the configured Poltergeist binary (`poltergeist` by default), and keeps the process alive until shutdown. Set `mode = "haunt"` for the background daemon, `mode = "panel"` for the Ink status dashboard, or `mode = "status"` if you want a long-running `poltergeist status --watch` loop. Additional `args` are appended to the command so you can enable features like Claude-powered git summaries (`--git-mode ai`) or pass a custom config file. Standard Poltergeist installations from Homebrew (`brew install poltergeist`) or npm (`npm install -g @steipete/poltergeist`) work out of the box—just remember to install Watchman as required by Poltergeist—and Flow inherits all of its debounced rebuilds, priority queues, and native notifications.
+
+### Config hot reload
+
+The daemon now watches `~/.config/flow/flow.toml` (falling back to `config.toml`) and automatically reapplies the configuration whenever the file changes. Save the file, and Flow restarts managed servers whose definitions changed, tears down ones you removed, and reloads every watcher so long-running tasks always match what’s declared on disk—no manual restarts required.
+
+### Log streaming
+
+Need to inspect build output or see why a server failed? Use `f logs`:
+
+```bash
+# Dump the last 200 lines for every managed server
+f logs
+
+# Focus on a single server
+f logs --server la --limit 100
+
+# Follow live output via SSE (requires --server)
+f logs --server la --follow
+```
+
+`f logs` talks to the daemon over HTTP, so it works against both local development daemons (`--host 127.0.0.1 --port 9050`) and the background hub (`--host 127.0.0.1 --port 6000`).
 
 ## Secrets sync
 

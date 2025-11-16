@@ -1,11 +1,17 @@
 use std::{
-    collections::HashMap, convert::Infallible, net::SocketAddr, pin::Pin, sync::Arc, time::Duration,
+    collections::HashMap,
+    convert::Infallible,
+    net::SocketAddr,
+    path::Path,
+    pin::Pin,
+    sync::{Arc, mpsc as std_mpsc},
+    time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::{
         IntoResponse, Json,
@@ -14,22 +20,30 @@ use axum::{
     routing::get,
 };
 use futures::{Stream, StreamExt};
+use notify::RecursiveMode;
+use notify_debouncer_mini::new_debouncer;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::{
     cli::DaemonOpts,
-    config::{self, Config},
+    config::{self, Config, ServerConfig, WatcherConfig},
     screen::ScreenBroadcaster,
     servers::{LogLine, ManagedServer, ServerSnapshot},
     watchers::WatchManager,
 };
 
+const LOG_BUFFER_CAPACITY: usize = 2048;
+
+type ServerStore = Arc<RwLock<HashMap<String, Arc<ManagedServer>>>>;
+type WatcherState = Arc<Mutex<Option<WatchManager>>>;
+
 #[derive(Clone)]
 struct AppState {
     screen: ScreenBroadcaster,
-    servers: Arc<HashMap<String, Arc<ManagedServer>>>,
+    servers: ServerStore,
 }
 
 type DynSseStream = dyn Stream<Item = std::result::Result<Event, Infallible>> + Send;
@@ -48,29 +62,14 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
         server_count = cfg.servers.len(),
         "loaded flow config"
     );
-
-    // Prepare managed servers
-    const LOG_BUFFER_CAPACITY: usize = 2048;
-    let mut servers_map: HashMap<String, Arc<ManagedServer>> = HashMap::new();
-    let servers = std::mem::take(&mut cfg.servers);
-    for server_cfg in servers.into_iter() {
-        let name = server_cfg.name.clone();
-        let autostart = server_cfg.autostart;
-        let managed = ManagedServer::new(server_cfg, LOG_BUFFER_CAPACITY);
-
-        if autostart {
-            let m = managed.clone();
-            tokio::spawn(async move {
-                if let Err(err) = m.start().await {
-                    tracing::error!(?err, "failed to start managed server");
-                }
-            });
-        }
-
-        servers_map.insert(name, managed);
+    if let Some(version) = cfg.version {
+        tracing::debug!(version, "config version detected");
     }
 
-    let watcher_guard = WatchManager::start(&cfg.watchers)?;
+    let servers_store: ServerStore = Arc::new(RwLock::new(HashMap::new()));
+    sync_servers(&servers_store, std::mem::take(&mut cfg.servers)).await;
+
+    let watcher_state: WatcherState = Arc::new(Mutex::new(WatchManager::start(&cfg.watchers)?));
     if let Some(stream) = cfg.stream.as_ref() {
         tracing::info!(
             provider = %stream.provider,
@@ -82,8 +81,30 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
 
     let state = AppState {
         screen,
-        servers: Arc::new(servers_map),
+        servers: Arc::clone(&servers_store),
     };
+
+    let (reload_tx, mut reload_rx) = mpsc::channel(4);
+    if let Err(err) = spawn_config_watcher(&config_path, reload_tx.clone()) {
+        tracing::warn!(?err, "failed to watch config for changes");
+    }
+
+    let servers_for_reload = Arc::clone(&servers_store);
+    let watchers_for_reload = Arc::clone(&watcher_state);
+    let config_path_for_reload = config_path.clone();
+    tokio::spawn(async move {
+        while reload_rx.recv().await.is_some() {
+            if let Err(err) = reload_config(
+                &config_path_for_reload,
+                &servers_for_reload,
+                &watchers_for_reload,
+            )
+            .await
+            {
+                tracing::warn!(?err, "config reload failed");
+            }
+        }
+    });
 
     let router = Router::new()
         .route("/health", get(health))
@@ -106,8 +127,6 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
-
-    drop(watcher_guard);
 
     Ok(())
 }
@@ -153,8 +172,8 @@ async fn screen_stream(
 }
 
 async fn servers_list(State(state): State<AppState>) -> impl IntoResponse {
-    let futures_iter = state
-        .servers
+    let servers = state.servers.read().await;
+    let futures_iter = servers
         .values()
         .cloned()
         .map(|server| async move { server.snapshot().await });
@@ -176,10 +195,15 @@ fn default_logs_limit() -> usize {
 
 async fn server_logs(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AxumPath(name): AxumPath<String>,
     Query(query): Query<LogsQuery>,
 ) -> impl IntoResponse {
-    match state.servers.get(&name).cloned() {
+    let server = {
+        let guard = state.servers.read().await;
+        guard.get(&name).cloned()
+    };
+
+    match server {
         Some(server) => {
             let lines: Vec<LogLine> = server.recent_logs(query.limit).await;
             (StatusCode::OK, Json(lines)).into_response()
@@ -194,9 +218,14 @@ async fn server_logs(
 
 async fn server_logs_stream(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    AxumPath(name): AxumPath<String>,
 ) -> Sse<Pin<Box<DynSseStream>>> {
-    let (stream, enable_keep_alive) = match state.servers.get(&name).cloned() {
+    let server = {
+        let guard = state.servers.read().await;
+        guard.get(&name).cloned()
+    };
+
+    let (stream, enable_keep_alive) = match server {
         Some(server) => {
             let receiver = server.subscribe();
             let stream = BroadcastStream::new(receiver).filter_map(|result| async move {
@@ -241,6 +270,149 @@ async fn server_logs_stream(
     } else {
         sse
     }
+}
+
+async fn reload_config(path: &Path, servers: &ServerStore, watchers: &WatcherState) -> Result<()> {
+    let mut cfg = config::load(path)
+        .with_context(|| format!("failed to reload config at {}", path.display()))?;
+    tracing::info!(path = %path.display(), "config changed; reloading");
+
+    reload_watchers(watchers, &cfg.watchers).await?;
+    sync_servers(servers, std::mem::take(&mut cfg.servers)).await;
+
+    if let Some(stream) = cfg.stream {
+        tracing::info!(
+            provider = %stream.provider,
+            hotkey = %stream.hotkey.as_deref().unwrap_or(""),
+            toggle_url = %stream.toggle_url.as_deref().unwrap_or(""),
+            "stream config updated"
+        );
+    }
+
+    Ok(())
+}
+
+async fn reload_watchers(state: &WatcherState, configs: &[WatcherConfig]) -> Result<()> {
+    let mut guard = state.lock().await;
+    *guard = WatchManager::start(configs)?;
+    Ok(())
+}
+
+async fn sync_servers(store: &ServerStore, configs: Vec<ServerConfig>) {
+    let mut desired: HashMap<String, ServerConfig> = HashMap::new();
+    for cfg in configs.into_iter() {
+        desired.insert(cfg.name.clone(), cfg);
+    }
+
+    let mut to_stop: Vec<Arc<ManagedServer>> = Vec::new();
+    let mut to_start: Vec<Arc<ManagedServer>> = Vec::new();
+
+    {
+        let mut guard = store.write().await;
+
+        guard.retain(|name, server| {
+            if !desired.contains_key(name) {
+                to_stop.push(server.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        for (name, cfg) in desired.into_iter() {
+            if let Some(existing) = guard.get(&name) {
+                if existing.config() == &cfg {
+                    continue;
+                }
+                to_stop.push(existing.clone());
+                guard.remove(&name);
+            }
+
+            let managed = ManagedServer::new(cfg.clone(), LOG_BUFFER_CAPACITY);
+            if cfg.autostart {
+                to_start.push(managed.clone());
+            }
+            guard.insert(name, managed);
+        }
+    }
+
+    for server in to_stop {
+        if let Err(err) = server.stop().await {
+            tracing::warn!(
+                ?err,
+                name = server.config().name,
+                "failed to stop managed server during reload"
+            );
+        }
+    }
+
+    for server in to_start {
+        tokio::spawn(async move {
+            if let Err(err) = server.start().await {
+                tracing::error!(
+                    ?err,
+                    server = server.config().name,
+                    "failed to start managed server"
+                );
+            }
+        });
+    }
+}
+
+fn spawn_config_watcher(path: &Path, tx: mpsc::Sender<()>) -> notify::Result<()> {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let watch_root = target
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| target.clone());
+
+    std::thread::spawn(move || {
+        let (event_tx, event_rx) = std_mpsc::channel();
+        let mut debouncer = match new_debouncer(Duration::from_millis(250), event_tx) {
+            Ok(debouncer) => debouncer,
+            Err(err) => {
+                tracing::error!(?err, "failed to initialize config watcher");
+                return;
+            }
+        };
+
+        if let Err(err) = debouncer
+            .watcher()
+            .watch(&watch_root, RecursiveMode::NonRecursive)
+        {
+            tracing::error!(?err, path = %watch_root.display(), "failed to watch config directory");
+            return;
+        }
+
+        while let Ok(result) = event_rx.recv() {
+            match result {
+                Ok(events) => {
+                    let should_reload = events.iter().any(|event| same_file(&target, &event.path));
+                    if should_reload && tx.blocking_send(()).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => tracing::warn!(?err, "config watcher error"),
+            }
+        }
+    });
+
+    Ok(())
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+
+    if let Ok(canon) = b.canonicalize() {
+        if canon == a {
+            return true;
+        }
+    }
+
+    a.file_name()
+        .is_some_and(|name| Some(name) == b.file_name())
 }
 
 async fn shutdown_signal() {

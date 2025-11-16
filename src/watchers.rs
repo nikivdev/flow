@@ -9,9 +9,8 @@ use std::{
 use anyhow::{Context, Result};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{DebouncedEvent, new_debouncer};
-use shellexpand::tilde;
 
-use crate::config::WatcherConfig;
+use crate::config::{WatcherConfig, WatcherDriver, expand_path};
 
 pub struct WatchManager {
     handles: Vec<WatcherHandle>,
@@ -54,10 +53,31 @@ pub struct WatcherHandle {
 
 impl WatcherHandle {
     fn spawn(cfg: WatcherConfig) -> Result<Self> {
+        match cfg.driver {
+            WatcherDriver::Shell => Self::spawn_shell(cfg),
+            WatcherDriver::Poltergeist => Self::spawn_poltergeist(cfg),
+        }
+    }
+
+    fn spawn_shell(cfg: WatcherConfig) -> Result<Self> {
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
-            if let Err(err) = run_watcher(cfg, shutdown_rx) {
+            if let Err(err) = run_shell_watcher(cfg, shutdown_rx) {
                 tracing::error!(?err, "watcher exited with error");
+            }
+        });
+
+        Ok(Self {
+            shutdown: Some(shutdown_tx),
+            join: Some(handle),
+        })
+    }
+
+    fn spawn_poltergeist(cfg: WatcherConfig) -> Result<Self> {
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            if let Err(err) = run_poltergeist_watcher(cfg, shutdown_rx) {
+                tracing::error!(?err, "poltergeist watcher exited with error");
             }
         });
 
@@ -79,7 +99,7 @@ impl Drop for WatcherHandle {
     }
 }
 
-fn run_watcher(cfg: WatcherConfig, shutdown: Receiver<()>) -> Result<()> {
+fn run_shell_watcher(cfg: WatcherConfig, shutdown: Receiver<()>) -> Result<()> {
     let watch_path = expand_path(&cfg.path);
     if !watch_path.exists() {
         anyhow::bail!(
@@ -155,21 +175,116 @@ fn matches_filter(events: &[DebouncedEvent], filter: Option<&str>) -> bool {
     }
 }
 
-fn run_command(cfg: &WatcherConfig, workdir: &Path) {
+fn run_poltergeist_watcher(cfg: WatcherConfig, shutdown: Receiver<()>) -> Result<()> {
+    let watch_path = expand_path(&cfg.path);
+    if !watch_path.exists() {
+        anyhow::bail!(
+            "watch path {} does not exist (watcher {})",
+            watch_path.display(),
+            cfg.name
+        );
+    }
+
+    let workdir = if watch_path.is_dir() {
+        watch_path.clone()
+    } else {
+        watch_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+
+    let poltergeist = cfg.poltergeist.clone().unwrap_or_default();
     tracing::info!(
         name = cfg.name,
-        command = cfg.command,
+        path = %workdir.display(),
+        mode = %poltergeist.mode.as_subcommand(),
+        binary = %poltergeist.binary,
+        "starting poltergeist watcher"
+    );
+
+    let mut command = Command::new(&poltergeist.binary);
+    command.arg(poltergeist.mode.as_subcommand());
+    if !poltergeist.args.is_empty() {
+        command.args(&poltergeist.args);
+    }
+    command.current_dir(&workdir);
+    command.envs(cfg.env.iter().map(|(k, v)| (k, v)));
+    command.stdout(std::process::Stdio::inherit());
+    command.stderr(std::process::Stdio::inherit());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to launch poltergeist for {}", cfg.name))?;
+
+    loop {
+        if shutdown.try_recv().is_ok() {
+            tracing::info!(name = cfg.name, "stopping poltergeist watcher");
+            if let Err(err) = child.kill() {
+                tracing::warn!(
+                    ?err,
+                    watcher = cfg.name,
+                    "failed to kill poltergeist process"
+                );
+            }
+            let _ = child.wait();
+            break;
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    tracing::info!(name = cfg.name, ?status, "poltergeist watcher exited");
+                } else {
+                    tracing::warn!(
+                        name = cfg.name,
+                        ?status,
+                        "poltergeist watcher exited with error"
+                    );
+                }
+                break;
+            }
+            Ok(None) => {
+                thread::sleep(Duration::from_millis(500));
+            }
+            Err(err) => {
+                tracing::error!(
+                    ?err,
+                    name = cfg.name,
+                    "failed to query poltergeist watcher status"
+                );
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_command(cfg: &WatcherConfig, workdir: &Path) {
+    let Some(command) = cfg
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|cmd| !cmd.is_empty())
+    else {
+        tracing::warn!(name = cfg.name, "watcher missing command; skipping");
+        return;
+    };
+
+    tracing::info!(
+        name = cfg.name,
+        command = command,
         "running watcher command"
     );
     let start = Instant::now();
-    match Command::new("/bin/sh")
-        .arg("-c")
-        .arg(cfg.command.trim())
-        .current_dir(workdir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c").arg(command).current_dir(workdir);
+    cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped());
+
+    match cmd.spawn() {
         Ok(mut child) => {
             let _ = child.wait();
             tracing::info!(name = cfg.name, ?workdir, elapsed = ?start.elapsed(), "watcher command finished");
@@ -178,13 +293,4 @@ fn run_command(cfg: &WatcherConfig, workdir: &Path) {
             tracing::error!(?err, name = cfg.name, "failed to execute watcher command");
         }
     }
-}
-
-fn expand_path(raw: &str) -> PathBuf {
-    let tilde_expanded = tilde(raw).into_owned();
-    let env_expanded = match shellexpand::env(&tilde_expanded) {
-        Ok(val) => val.into_owned(),
-        Err(_) => tilde_expanded,
-    };
-    PathBuf::from(env_expanded)
 }

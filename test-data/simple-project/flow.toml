@@ -1,0 +1,9 @@
+[[tasks]]
+name = "lint"
+command = "golangci-lint run"
+description = "Run static analysis for Go sources"
+
+[[tasks]]
+name = "test"
+command = "gotestsum -f pkgname ./..."
+desc = "Execute the Go test suite with gotestsum output"
