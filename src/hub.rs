@@ -11,15 +11,26 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cli::{HubAction, HubCommand, HubOpts},
-    config,
+    cli::{HubAction, HubCommand, HubOpts, ServersOpts},
+    config, servers_tui,
 };
 
 pub fn run(cmd: HubCommand) -> Result<()> {
     let action = cmd.action.unwrap_or(HubAction::Start);
+    let opts = cmd.opts;
     match action {
-        HubAction::Start => ensure_daemon(cmd.opts),
-        HubAction::Stop => stop_daemon(cmd.opts),
+        HubAction::Start => {
+            ensure_daemon(opts.clone())?;
+            if opts.no_ui {
+                return Ok(());
+            }
+            let tui_opts = ServersOpts {
+                host: opts.host,
+                port: opts.port,
+            };
+            servers_tui::run(tui_opts)
+        }
+        HubAction::Stop => stop_daemon(opts),
     }
 }
 

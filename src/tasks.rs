@@ -28,7 +28,7 @@ pub fn list(opts: TasksOpts) -> Result<()> {
 
 pub fn run(opts: TaskRunOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(opts.config)?;
-    let Some(task) = cfg.tasks.iter().find(|task| task.name == opts.name) else {
+    let Some(task) = find_task(&cfg, &opts.name) else {
         bail!(
             "task '{}' not found in {}",
             opts.name,
@@ -87,12 +87,85 @@ fn execute_task(task: &TaskConfig, workdir: &Path) -> Result<()> {
 fn format_task_lines(tasks: &[TaskConfig]) -> Vec<String> {
     let mut lines = Vec::new();
     for (idx, task) in tasks.iter().enumerate() {
-        lines.push(format!("{:>2}. {} – {}", idx + 1, task.name, task.command));
+        let shortcut_display = if task.shortcuts.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", task.shortcuts.join(", "))
+        };
+        lines.push(format!(
+            "{:>2}. {}{} – {}",
+            idx + 1,
+            task.name,
+            shortcut_display,
+            task.command
+        ));
         if let Some(desc) = &task.description {
             lines.push(format!("    {desc}"));
         }
     }
     lines
+}
+
+pub(crate) fn find_task<'a>(cfg: &'a Config, needle: &str) -> Option<&'a TaskConfig> {
+    let normalized = needle.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if let Some(task) = cfg
+        .tasks
+        .iter()
+        .find(|task| task.name.eq_ignore_ascii_case(normalized))
+    {
+        return Some(task);
+    }
+
+    if let Some(task) = cfg.tasks.iter().find(|task| {
+        task.shortcuts
+            .iter()
+            .any(|alias| alias.eq_ignore_ascii_case(normalized))
+    }) {
+        return Some(task);
+    }
+
+    resolve_by_abbreviation(&cfg.tasks, normalized)
+}
+
+fn resolve_by_abbreviation<'a>(tasks: &'a [TaskConfig], alias: &str) -> Option<&'a TaskConfig> {
+    let alias = alias.trim().to_ascii_lowercase();
+    if alias.len() < 2 {
+        return None;
+    }
+
+    let mut matches = tasks.iter().filter(|task| {
+        generate_abbreviation(&task.name)
+            .map(|abbr| abbr == alias)
+            .unwrap_or(false)
+    });
+
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        None
+    } else {
+        Some(first)
+    }
+}
+
+fn generate_abbreviation(name: &str) -> Option<String> {
+    let mut abbr = String::new();
+    let mut new_segment = true;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if new_segment {
+                abbr.push(ch.to_ascii_lowercase());
+                new_segment = false;
+            }
+        } else {
+            new_segment = true;
+        }
+    }
+
+    if abbr.len() >= 2 { Some(abbr) } else { None }
 }
 
 fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<Vec<String>> {
@@ -179,12 +252,14 @@ mod tests {
                 command: "golangci-lint run".to_string(),
                 dependencies: Vec::new(),
                 description: Some("Run lint checks".to_string()),
+                shortcuts: Vec::new(),
             },
             TaskConfig {
                 name: "test".to_string(),
                 command: "gotestsum ./...".to_string(),
                 dependencies: Vec::new(),
                 description: None,
+                shortcuts: Vec::new(),
             },
         ];
 
@@ -206,6 +281,7 @@ mod tests {
             command: "".into(),
             dependencies: Vec::new(),
             description: None,
+            shortcuts: Vec::new(),
         };
         let err = execute_task(&task, Path::new(".")).unwrap_err();
         assert!(
@@ -229,6 +305,7 @@ mod tests {
             command: "ci".into(),
             dependencies: vec!["fast".into(), "toolkit".into()],
             description: None,
+            shortcuts: Vec::new(),
         };
 
         let commands = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -246,6 +323,7 @@ mod tests {
             command: "ci".into(),
             dependencies: vec!["unknown".into()],
             description: None,
+            shortcuts: Vec::new(),
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
@@ -266,12 +344,72 @@ mod tests {
             command: "ci".into(),
             dependencies: vec!["unknown".into()],
             description: None,
+            shortcuts: Vec::new(),
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
         assert!(
             err.to_string().contains("references unknown dependencies"),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn find_task_matches_shortcuts_and_abbreviations() {
+        let mut cfg = Config::default();
+        cfg.tasks = vec![
+            TaskConfig {
+                name: "deploy-cli-release".into(),
+                command: "echo deploy".into(),
+                dependencies: Vec::new(),
+                description: None,
+                shortcuts: vec!["dcr-alias".into()],
+            },
+            TaskConfig {
+                name: "dev-hub".into(),
+                command: "echo dev".into(),
+                dependencies: Vec::new(),
+                description: None,
+                shortcuts: Vec::new(),
+            },
+        ];
+
+        let task = find_task(&cfg, "dcr-alias").expect("shortcut should resolve");
+        assert_eq!(task.name, "deploy-cli-release");
+
+        let task = find_task(&cfg, "dcr").expect("abbreviation should resolve");
+        assert_eq!(task.name, "deploy-cli-release");
+
+        let task = find_task(&cfg, "dev-hub").expect("exact match should resolve");
+        assert_eq!(task.name, "dev-hub");
+
+        let task = find_task(&cfg, "DH").expect("case-insensitive match should resolve");
+        assert_eq!(task.name, "dev-hub");
+    }
+
+    #[test]
+    fn ambiguous_abbreviations_do_not_match() {
+        let mut cfg = Config::default();
+        cfg.tasks = vec![
+            TaskConfig {
+                name: "deploy-cli-release".into(),
+                command: "echo deploy".into(),
+                dependencies: Vec::new(),
+                description: None,
+                shortcuts: Vec::new(),
+            },
+            TaskConfig {
+                name: "deploy-core-runner".into(),
+                command: "echo runner".into(),
+                dependencies: Vec::new(),
+                description: None,
+                shortcuts: Vec::new(),
+            },
+        ];
+
+        assert!(
+            find_task(&cfg, "dcr").is_none(),
+            "abbreviation should be ambiguous"
         );
     }
 }

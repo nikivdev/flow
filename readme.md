@@ -15,7 +15,7 @@ An Axum powered daemon + CLI sandbox for building the foundations of an always-o
 - **Project task runner** – define tasks in `flow.toml`, list them with `f tasks`, run via `f run <task>`/`f <task>`, and capture descriptions for discoverability.
 - **Dependency checks** – optional `[dependencies]` entries ensure required binaries (e.g., `fast`) exist on `PATH` before a task executes.
 - **Shell aliases** – declare `[[alias]]` tables and load them into your shell with `eval "$(f setup)"` so commands like `fr` or `fc` are always available.
-- **Hub launcher** – `f hub` checks whether the background daemon is listening on `localhost:6000` and spawns it (using `~/.config/flow/flow.toml`) if missing; `f hub stop` terminates the managed daemon when you’re done.
+- **Hub launcher** – `f hub` checks whether the background daemon is listening on `localhost:6000`, spawns it (using `~/.config/flow/flow.toml`) if missing, and then opens an aggregated Ratatui dashboard so you can follow logs across every managed server. `f hub --no-ui` skips the TUI, and `f hub stop` terminates the managed daemon when you’re done.
 - **Watchers** – `[[watchers]]` entries automatically run commands (e.g., `~/bin/goku`) whenever their files change.
 - **Secrets sync** – declare `[storage]` environments in `flow.toml`, list them with `f secrets list`, and fetch remote `.env` payloads from the hosted hub (`flow.1focus.ai` by default) via `f secrets pull <env>`.
 - **Deploy helper** – `f run deploy` (or `./scripts/deploy.sh`) builds the debug binary and keeps `~/bin/f` symlinked to the latest build for fast iteration.
@@ -53,6 +53,12 @@ cargo run -- screen --frames 15 --fps 4
 
 This prints the frames along with timestamps, which is a lightweight way to validate performance and tune buffer sizes without wiring up HTTP.
 
+## Monitoring the hub
+
+1. Build the production binary with `f deploy-cli-release` (this keeps `~/bin/f` symlinked to `target/release/f`).
+2. Run `f hub`. Flow will ensure the daemon is online at `127.0.0.1:6000` (or your overridden host/port) and then open a Ratatui dashboard that lists every managed server plus a live, aggregated log stream. Use `j`/`k` (or arrow keys) to change selection, `f` to focus logs on the highlighted server, `a` to go back to the all-server view, `PgUp`/`PgDn` to scroll, `r` to force-refresh, and `q` to exit. The daemon keeps running in the background after you quit the UI.
+3. If you just want to ensure the daemon is up without opening the UI—e.g., from a script—pass `f hub --no-ui`. You can always fall back to `f logs` or `curl http://127.0.0.1:6000/logs` to verify output in that mode.
+
 ## Project automation
 
 `flow.toml` doubles as a lightweight task runner. Example:
@@ -78,7 +84,22 @@ description = "Extra task/alias bundle"
 ```
 
 The optional `[[commands]]` tables let you split `flow.toml` into multiple files (great for sharing aliases or task packs). Each entry points at another TOML file using a path relative to the parent config (or an absolute path). Those included files can declare their own `[[tasks]]`, `[[alias]]`, dependencies, watchers, etc., and everything is merged at load time.
+
+### Task shortcuts
+
+You can run any task via `f run <name>` or just `f <name>` (so `f commit` works once you’re inside a project). For long names, Flow now auto-generates an abbreviation from the initials of kebab/underscore separated words—`deploy-cli-release` becomes `dcr`—as long as the shortcut is unique. You can also pin explicit shortcuts:
+
+```toml
+[[tasks]]
+name = "deploy-cli-release"
+shortcuts = ["dcr", "deploy-release"]
+command = "FLOW_PROFILE=release ./scripts/deploy.sh"
+description = "Release build + symlink"
 ```
+
+After that, `f run dcr`, `f dcr`, or even `f run deploy-release` all resolve to the same task. Shortcuts are case-insensitive and don’t require you to edit `[alias]` tables.
+
+````
 
 ### Watchers
 
@@ -97,7 +118,7 @@ run_on_start = true
 
 [watchers.env]
 PATH = "/opt/homebrew/bin:${PATH}"
-```
+````
 
 Shell watchers observe `path` recursively and execute the configured command via `/bin/sh -c`. Use `match` to filter filenames, `debounce_ms` to control how quickly successive changes retrigger, `run_on_start` when the command should fire as soon as the daemon boots, and the optional `[watchers.env]` table for per-watcher environment overrides.
 
@@ -141,7 +162,7 @@ f logs --server la --limit 100
 f logs --server la --follow
 ```
 
-`f logs` talks to the daemon over HTTP, so it works against both local development daemons (`--host 127.0.0.1 --port 9050`) and the background hub (`--host 127.0.0.1 --port 6000`).
+`f logs` talks to the daemon over HTTP, so it works against both local development daemons (`--host 127.0.0.1 --port 9050`) and the background hub (`--host 127.0.0.1 --port 6000`). When `--follow` is set, the CLI keeps the SSE connection alive, automatically reconnects when the daemon restarts, and colorizes stderr/stdout prefixes (pass `--no-color` if you need plain text).
 
 ## Secrets sync
 

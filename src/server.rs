@@ -111,6 +111,7 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
         .route("/screen/latest", get(screen_latest))
         .route("/screen/stream", get(screen_stream))
         .route("/servers", get(servers_list))
+        .route("/logs", get(all_logs))
         .route("/servers/:name/logs", get(server_logs))
         .route("/servers/:name/logs/stream", get(server_logs_stream))
         .with_state(state);
@@ -214,6 +215,29 @@ async fn server_logs(
         )
             .into_response(),
     }
+}
+
+async fn all_logs(
+    State(state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+) -> impl IntoResponse {
+    let servers: Vec<_> = {
+        let guard = state.servers.read().await;
+        guard.values().cloned().collect()
+    };
+
+    let mut entries: Vec<LogLine> = Vec::new();
+    for server in servers {
+        let mut lines = server.recent_logs(query.limit).await;
+        entries.append(&mut lines);
+    }
+
+    entries.sort_by_key(|line| line.timestamp_ms);
+    if entries.len() > query.limit {
+        entries = entries.split_off(entries.len() - query.limit);
+    }
+
+    (StatusCode::OK, Json(entries)).into_response()
 }
 
 async fn server_logs_stream(
