@@ -71,6 +71,13 @@ description = "Commit with AI"
 
 [dependencies]
 "github.com/1focus-ai/fast" = "fast"
+
+[[commands]]
+path = "commands-more.toml"
+description = "Extra task/alias bundle"
+```
+
+The optional `[[commands]]` tables let you split `flow.toml` into multiple files (great for sharing aliases or task packs). Each entry points at another TOML file using a path relative to the parent config (or an absolute path). Those included files can declare their own `[[tasks]]`, `[[alias]]`, dependencies, watchers, etc., and everything is merged at load time.
 ```
 
 ### Watchers
