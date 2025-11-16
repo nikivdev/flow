@@ -151,6 +151,14 @@ pub struct TaskConfig {
     /// Optional human-friendly description.
     #[serde(default, alias = "desc")]
     pub description: Option<String>,
+    /// Optional short aliases that `f run` should recognize (e.g. "dcr" for "deploy-cli-release").
+    #[serde(
+        default,
+        alias = "shortcut",
+        alias = "short",
+        deserialize_with = "deserialize_shortcuts"
+    )]
+    pub shortcuts: Vec<String>,
 }
 
 /// Definition of a dependency that can be referenced by automation tasks.
@@ -161,6 +169,26 @@ pub enum DependencySpec {
     Single(String),
     /// Multiple commands that should be checked together.
     Multiple(Vec<String>),
+}
+
+fn deserialize_shortcuts<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ShortcutField {
+        Single(String),
+        Multiple(Vec<String>),
+    }
+
+    let value = Option::<ShortcutField>::deserialize(deserializer)?;
+    let shortcuts = match value {
+        Some(ShortcutField::Single(alias)) => vec![alias],
+        Some(ShortcutField::Multiple(aliases)) => aliases,
+        None => Vec::new(),
+    };
+    Ok(shortcuts)
 }
 
 /// Storage configuration describing remote environments providers.

@@ -36,7 +36,7 @@ pub enum Commands {
     Servers(ServersOpts),
     #[command(
         about = "Ensure the background hub daemon is running (spawns it if missing).",
-        long_about = "Checks the /health endpoint on the configured host/port (defaults to 127.0.0.1:6000). If unreachable, a daemon is launched in the background using ~/.config/flow/config.toml and the command waits until it is healthy."
+        long_about = "Checks the /health endpoint on the configured host/port (defaults to 127.0.0.1:6000). If unreachable, a daemon is launched in the background using ~/.config/flow/config.toml, then a TUI opens so you can inspect managed servers and aggregated logs."
     )]
     Hub(HubCommand),
     #[command(
@@ -133,6 +133,10 @@ pub struct LogsOpts {
     /// Stream logs in real-time (requires --server).
     #[arg(long)]
     pub follow: bool,
+
+    /// Disable ANSI color output in log prefixes.
+    #[arg(long)]
+    pub no_color: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -193,6 +197,10 @@ pub struct HubOpts {
     /// Optional path to the global flow config (defaults to ~/.config/flow/config.toml).
     #[arg(long)]
     pub config: Option<PathBuf>,
+
+    /// Skip launching the hub TUI after ensuring the daemon is running.
+    #[arg(long)]
+    pub no_ui: bool,
 }
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]

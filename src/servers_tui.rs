@@ -13,9 +13,9 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::{
@@ -55,6 +55,7 @@ struct App {
     selected: usize,
     logs: Vec<LogLine>,
     log_scroll: u16,
+    focus_server: bool,
     last_servers_refresh: Instant,
     last_logs_refresh: Instant,
 }
@@ -68,6 +69,7 @@ impl App {
             selected: 0,
             logs: Vec::new(),
             log_scroll: 0,
+            focus_server: false,
             last_servers_refresh: Instant::now(),
             last_logs_refresh: Instant::now(),
         };
@@ -108,21 +110,27 @@ impl App {
     }
 
     fn refresh_logs(&mut self) -> Result<()> {
-        let name = match self.selected_server_name() {
-            Some(name) => name,
-            None => {
-                self.logs.clear();
-                return Ok(());
-            }
+        let request = if self.focus_server {
+            let name = match self.selected_server_name() {
+                Some(name) => name,
+                None => {
+                    self.logs.clear();
+                    self.focus_server = false;
+                    self.last_logs_refresh = Instant::now();
+                    return Ok(());
+                }
+            };
+            format!("{}/servers/{}/logs", self.base_url, name)
+        } else {
+            format!("{}/logs", self.base_url)
         };
 
-        let url = format!("{}/servers/{}/logs", self.base_url, name);
         let resp = self
             .client
-            .get(&url)
+            .get(&request)
             .query(&[("limit", LOG_LIMIT)])
             .send()
-            .with_context(|| format!("failed to GET {url}"))?;
+            .with_context(|| format!("failed to GET {request}"))?;
 
         if resp.status().is_success() {
             let logs = resp
@@ -173,6 +181,36 @@ impl App {
     fn scroll_up(&mut self) {
         self.log_scroll = self.log_scroll.saturating_sub(1);
     }
+
+    fn toggle_focus(&mut self) -> Result<()> {
+        if self.servers.is_empty() {
+            return Ok(());
+        }
+        self.focus_server = !self.focus_server;
+        self.log_scroll = 0;
+        self.refresh_logs()
+    }
+
+    fn show_all_logs(&mut self) -> Result<()> {
+        if self.focus_server {
+            self.focus_server = false;
+            self.log_scroll = 0;
+            self.refresh_logs()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn log_scope_label(&self) -> String {
+        if self.focus_server {
+            match self.selected_server_name() {
+                Some(name) => format!("Focused: {}", name),
+                None => "Focused: (none)".to_string(),
+            }
+        } else {
+            "All servers".to_string()
+        }
+    }
 }
 
 fn run_app<B: ratatui::backend::Backend>(
@@ -222,6 +260,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             app.refresh_servers()?;
             app.refresh_logs()?;
         }
+        KeyCode::Char('f') => {
+            app.toggle_focus()?;
+        }
+        KeyCode::Char('a') => {
+            app.show_all_logs()?;
+        }
         _ => {}
     }
 
@@ -231,10 +275,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
 fn draw_ui(f: &mut ratatui::Frame<'_>, app: &App) {
     let size = f.size();
 
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(size);
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(size);
+        .split(layout[0]);
 
     // Servers list
     let servers_items: Vec<ListItem> = if app.servers.is_empty() {
@@ -274,33 +323,49 @@ fn draw_ui(f: &mut ratatui::Frame<'_>, app: &App) {
             .map(|line| {
                 let ts = format_ts(line.timestamp_ms);
                 let stream = match line.stream {
-                    LogStream::Stdout => "OUT",
-                    LogStream::Stderr => "ERR",
+                    LogStream::Stdout => ("OUT", Style::default().fg(Color::Green)),
+                    LogStream::Stderr => ("ERR", Style::default().fg(Color::Red)),
                 };
+                let server_label = Span::styled(
+                    format!("{:<12}", line.server),
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                );
                 Line::from(vec![
                     Span::styled(
                         format!("[{ts}]"),
                         Style::default().add_modifier(Modifier::DIM),
                     ),
                     Span::raw(" "),
-                    Span::styled(stream, Style::default().add_modifier(Modifier::BOLD)),
+                    server_label,
                     Span::raw(" "),
-                    Span::raw(&line.line),
+                    Span::styled(stream.0, stream.1.add_modifier(Modifier::BOLD)),
+                    Span::raw(" "),
+                    Span::raw(line.line.trim_end()),
                 ])
             })
             .collect()
     };
 
-    let title = match app.selected_server_name() {
-        Some(name) => format!("Logs – {}", name),
-        None => "Logs".to_string(),
-    };
+    let scope = app.log_scope_label();
+    let title = format!("Logs ({scope}) – PgUp/PgDn scroll • f focus toggle • a all logs");
 
     let logs_widget = Paragraph::new(log_lines)
         .block(Block::default().borders(Borders::ALL).title(title))
         .scroll((app.log_scroll, 0));
 
     f.render_widget(logs_widget, chunks[1]);
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("Hub: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(&app.base_url),
+        Span::raw("  |  q quit • r refresh • j/k select • f focus • a all logs"),
+    ]))
+    .block(Block::default().borders(Borders::ALL).title("Help"))
+    .wrap(Wrap { trim: true });
+
+    f.render_widget(help, layout[1]);
 }
 
 fn format_ts(ms: u128) -> String {

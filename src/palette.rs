@@ -11,7 +11,7 @@ pub fn run(opts: TasksOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(opts.config)?;
     let config_arg = config_path.display().to_string();
 
-    let mut entries = builtin_entries(&config_arg);
+    let mut entries = builtin_entries(&config_arg, !cfg.aliases.is_empty());
     for task in &cfg.tasks {
         entries.push(PaletteEntry::from_task(task, &config_arg));
     }
@@ -117,8 +117,8 @@ impl PaletteEntry {
     }
 }
 
-fn builtin_entries(config_arg: &str) -> Vec<PaletteEntry> {
-    vec![
+fn builtin_entries(config_arg: &str, has_aliases: bool) -> Vec<PaletteEntry> {
+    let mut entries = vec![
         PaletteEntry::new("[cmd] hub – ensure daemon is running", vec!["hub".into()]),
         PaletteEntry::new("[cmd] daemon – start HTTP daemon", vec!["daemon".into()]),
         PaletteEntry::new("[cmd] screen – preview frames", vec!["screen".into()]),
@@ -130,9 +130,14 @@ fn builtin_entries(config_arg: &str) -> Vec<PaletteEntry> {
             "[cmd] tasks – list project tasks",
             vec!["tasks".into(), "--config".into(), config_arg.to_string()],
         ),
-        PaletteEntry::new(
+    ];
+
+    if has_aliases {
+        entries.push(PaletteEntry::new(
             "[cmd] setup – emit shell aliases",
             vec!["setup".into(), "--config".into(), config_arg.to_string()],
-        ),
-    ]
+        ));
+    }
+
+    entries
 }

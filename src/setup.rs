@@ -2,12 +2,22 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 
-use crate::{cli::SetupOpts, tasks::load_project_config};
+use crate::{
+    cli::{SetupOpts, TaskRunOpts},
+    tasks::{self, load_project_config},
+};
 
 pub fn run(opts: SetupOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(opts.config)?;
 
     if cfg.aliases.is_empty() {
+        if tasks::find_task(&cfg, "setup").is_some() {
+            return tasks::run(TaskRunOpts {
+                config: config_path,
+                name: "setup".to_string(),
+            });
+        }
+
         println!(
             "# No aliases defined in {}. Add an alias table like:",
             config_path.display()
