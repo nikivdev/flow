@@ -22,6 +22,8 @@ pub struct Config {
     pub dependencies: HashMap<String, DependencySpec>,
     #[serde(default, alias = "alias", deserialize_with = "deserialize_aliases")]
     pub aliases: HashMap<String, String>,
+    #[serde(default, rename = "commands")]
+    pub command_files: Vec<CommandFileConfig>,
     #[serde(default)]
     pub storage: Option<StorageConfig>,
     #[serde(default, alias = "watcher", alias = "always-run")]
@@ -41,6 +43,7 @@ impl Default for Config {
             tasks: Vec::new(),
             dependencies: HashMap::new(),
             aliases: HashMap::new(),
+            command_files: Vec::new(),
             storage: None,
             watchers: Vec::new(),
             stream: None,
@@ -198,6 +201,13 @@ pub struct StorageVariable {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct CommandFileConfig {
+    pub path: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RemoteServerConfig {
     #[serde(flatten)]
     pub server: ServerConfig,
@@ -305,11 +315,63 @@ pub fn default_config_path() -> PathBuf {
 
 pub fn load<P: AsRef<Path>>(path: P) -> Result<Config> {
     let path = path.as_ref();
-    let contents = fs::read_to_string(path)
+    let mut visited = Vec::new();
+    load_with_includes(path, &mut visited)
+}
+
+fn load_with_includes(path: &Path, visited: &mut Vec<PathBuf>) -> Result<Config> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve path {}", path.display()))?;
+    if visited.contains(&canonical) {
+        anyhow::bail!(
+            "cycle detected while loading config includes: {}",
+            path.display()
+        );
+    }
+    visited.push(canonical.clone());
+
+    let contents = fs::read_to_string(&canonical)
         .with_context(|| format!("failed to read flow config at {}", path.display()))?;
-    let cfg: Config = toml::from_str(&contents)
+    let mut cfg: Config = toml::from_str(&contents)
         .with_context(|| format!("failed to parse flow config at {}", path.display()))?;
+
+    for include in cfg.command_files.clone() {
+        let include_path = resolve_include_path(&canonical, &include.path);
+        let included = load_with_includes(&include_path, visited)
+            .with_context(|| format!("failed to load commands file {}", include_path.display()))?;
+        merge_config(&mut cfg, included);
+    }
+
+    visited.pop();
     Ok(cfg)
+}
+
+fn resolve_include_path(base: &Path, include: &str) -> PathBuf {
+    let include_path = PathBuf::from(include);
+    if include_path.is_absolute() {
+        include_path
+    } else if let Some(parent) = base.parent() {
+        parent.join(include_path)
+    } else {
+        include_path
+    }
+}
+
+fn merge_config(base: &mut Config, other: Config) {
+    base.servers.extend(other.servers);
+    base.remote_servers.extend(other.remote_servers);
+    base.tasks.extend(other.tasks);
+    base.watchers.extend(other.watchers);
+    base.stream = base.stream.take().or(other.stream);
+    base.storage = base.storage.take().or(other.storage);
+    base.server_hub = base.server_hub.take().or(other.server_hub);
+    for (key, value) in other.aliases {
+        base.aliases.entry(key).or_insert(value);
+    }
+    for (key, value) in other.dependencies {
+        base.dependencies.entry(key).or_insert(value);
+    }
 }
 
 /// Load config from the given path, logging a warning and returning an empty
@@ -346,9 +408,10 @@ mod tests {
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.remote_servers.len(), 1);
         assert_eq!(cfg.watchers.len(), 1);
-        assert!(
-            cfg.tasks.is_empty(),
-            "global config should not define tasks"
+        assert_eq!(
+            cfg.tasks.len(),
+            1,
+            "global config should inherit tasks from included command files"
         );
 
         let watcher = &cfg.watchers[0];
@@ -371,6 +434,17 @@ mod tests {
         assert!(
             server.autostart,
             "autostart should default to true when omitted"
+        );
+
+        let sync_task = &cfg.tasks[0];
+        assert_eq!(sync_task.name, "sync-config");
+        assert_eq!(
+            sync_task.command,
+            "rsync -av ~/.config/flow remote:~/flow-config"
+        );
+        assert!(
+            cfg.aliases.contains_key("fsh"),
+            "included aliases should merge into base config"
         );
 
         let remote = &cfg.remote_servers[0];
