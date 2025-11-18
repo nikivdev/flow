@@ -62,6 +62,8 @@ pub struct ServerConfig {
     pub command: String,
     /// Arguments passed to the command.
     pub args: Vec<String>,
+    /// Optional port the server listens on (for display only).
+    pub port: Option<u16>,
     /// Optional working directory for the process.
     pub working_dir: Option<PathBuf>,
     /// Additional environment variables.
@@ -82,6 +84,8 @@ impl<'de> Deserialize<'de> for ServerConfig {
             command: String,
             #[serde(default)]
             args: Vec<String>,
+            #[serde(default)]
+            port: Option<u16>,
             #[serde(default, alias = "path")]
             working_dir: Option<String>,
             #[serde(default)]
@@ -127,6 +131,7 @@ impl<'de> Deserialize<'de> for ServerConfig {
             name,
             command,
             args,
+            port: raw.port,
             working_dir: raw.working_dir.map(|dir| expand_path(&dir)),
             env: raw.env,
             autostart: raw.autostart,
@@ -592,6 +597,30 @@ mod tests {
         assert_eq!(hub.host, "tailscale");
         assert_eq!(hub.port, 9050);
         assert_eq!(hub.tailscale.as_deref(), Some("linux-hub"));
+    }
+
+    #[test]
+    fn server_port_is_preserved_when_present() {
+        let toml = r#"
+            [[server]]
+            name = "api"
+            command = "npm start"
+            port = 8080
+        "#;
+
+        let cfg: Config = toml::from_str(toml).expect("server config should parse");
+        let server = cfg.servers.first().expect("server should parse");
+        assert_eq!(server.port, Some(8080));
+
+        // Missing port should deserialize as None for backward compatibility.
+        let no_port_toml = r#"
+            [[server]]
+            name = "web"
+            command = "npm run dev"
+        "#;
+        let cfg: Config =
+            toml::from_str(no_port_toml).expect("server config without port should parse");
+        assert_eq!(cfg.servers[0].port, None);
     }
 
     #[test]
