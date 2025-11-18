@@ -69,7 +69,7 @@ impl App {
             selected: 0,
             logs: Vec::new(),
             log_scroll: 0,
-            focus_server: false,
+            focus_server: true,
             last_servers_refresh: Instant::now(),
             last_logs_refresh: Instant::now(),
         };
@@ -292,7 +292,10 @@ fn draw_ui(f: &mut ratatui::Frame<'_>, app: &App) {
         app.servers
             .iter()
             .map(|s| {
-                let label = format!("{} [{}]", s.name, s.status);
+                let label = match s.port {
+                    Some(port) => format!("{}:{} [{}]", s.name, port, s.status),
+                    None => format!("{} [{}]", s.name, s.status),
+                };
                 ListItem::new(label)
             })
             .collect()
