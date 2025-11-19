@@ -32,6 +32,7 @@ use crate::{
     config::{self, Config, ServerConfig, WatcherConfig},
     screen::ScreenBroadcaster,
     servers::{LogLine, ManagedServer, ServerSnapshot},
+    terminal,
     watchers::WatchManager,
 };
 
@@ -65,6 +66,8 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
     if let Some(version) = cfg.version {
         tracing::debug!(version, "config version detected");
     }
+
+    terminal::maybe_enable_terminal_tracing(&cfg.options);
 
     let servers_store: ServerStore = Arc::new(RwLock::new(HashMap::new()));
     sync_servers(&servers_store, std::mem::take(&mut cfg.servers)).await;

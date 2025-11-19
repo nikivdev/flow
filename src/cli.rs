@@ -69,6 +69,11 @@ pub enum Commands {
         long_about = "Fetch buffered logs (or stream live logs) from managed servers via the HTTP API."
     )]
     Logs(LogsOpts),
+    #[command(
+        about = "Inspect terminal tracing stream",
+        long_about = "Stream traced shell commands (start/end) or show the last command input/output when tracing is enabled."
+    )]
+    Trace(TraceOpts),
     /// Invoke tasks directly via `f <task>` without typing `run`.
     #[command(external_subcommand)]
     TaskShortcut(Vec<String>),
@@ -137,6 +142,13 @@ pub struct LogsOpts {
     /// Disable ANSI color output in log prefixes.
     #[arg(long)]
     pub no_color: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TraceOpts {
+    /// Show the last command's input/output instead of streaming events.
+    #[arg(long)]
+    pub last_command: bool,
 }
 
 #[derive(Args, Debug, Clone)]

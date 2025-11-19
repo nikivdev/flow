@@ -11,6 +11,8 @@ mod servers;
 mod servers_tui;
 mod setup;
 mod tasks;
+mod terminal;
+mod trace;
 mod watchers;
 
 use anyhow::{Result, bail};
@@ -53,6 +55,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Logs(opts)) => {
             logs::run(opts)?;
+        }
+        Some(Commands::Trace(opts)) => {
+            trace::run(opts)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
