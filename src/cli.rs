@@ -60,6 +60,16 @@ pub enum Commands {
     )]
     Secrets(SecretsCommand),
     #[command(
+        about = "Verify required dependencies and shell integrations.",
+        long_about = "Checks for tools like direnv and ensures your active shell sources the recommended hook so Flow tasks can auto-run when you cd into a repo."
+    )]
+    Doctor(DoctorOpts),
+    #[command(
+        about = "Run tasks flagged to auto-activate when entering the repo root.",
+        long_about = "Load flow.toml, find tasks with activate_on_cd_to_root = true, and run them sequentially (respecting dependency checks). Perfect for direnv or shell hooks that fire on cd."
+    )]
+    Activate(TaskActivateOpts),
+    #[command(
         about = "Index the current repository with Codanna and store the stats snapshot.",
         long_about = "Runs 'codanna index' for the current project, then captures 'codanna mcp get_index_info --json' and persists the payload to ~/.db/flow/flow.sqlite so other tools can consume it."
     )]
@@ -186,6 +196,16 @@ pub struct TaskRunOpts {
     #[arg(value_name = "TASK")]
     pub name: String,
 }
+
+#[derive(Args, Debug, Clone)]
+pub struct TaskActivateOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct DoctorOpts {}
 
 #[derive(Args, Debug, Clone)]
 pub struct HubCommand {

@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod doctor;
 mod hub;
 mod indexer;
 mod logs;
@@ -41,8 +42,14 @@ fn main() -> Result<()> {
         Some(Commands::Setup(opts)) => {
             setup::run(opts)?;
         }
+        Some(Commands::Doctor(opts)) => {
+            doctor::run(opts)?;
+        }
         Some(Commands::Tasks(opts)) => {
             tasks::list(opts)?;
+        }
+        Some(Commands::Activate(opts)) => {
+            tasks::activate(opts)?;
         }
         Some(Commands::Run(opts)) => {
             tasks::run(opts)?;

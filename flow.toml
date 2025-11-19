@@ -7,6 +7,8 @@ provider = "1focus.ai"
 name = "setup"
 command = "cargo check"
 description = "Compile the workspace to make sure the toolchain works"
+rerun_on = ["package.json", "*.ts"]
+activate_on_cd_to_root = true
 
 [[tasks]]
 name = "dev-hub"
