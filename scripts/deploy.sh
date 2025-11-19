@@ -25,11 +25,14 @@ INSTALL_DIR="${FLOW_INSTALL_DIR:-$HOME/bin}"
 mkdir -p "${INSTALL_DIR}"
 
 SOURCE_BIN="${ROOT_DIR}/target/${TARGET_DIR}/f"
-TARGET_BIN="${INSTALL_DIR}/f"
+TARGET_BIN_F="${INSTALL_DIR}/f"
+TARGET_BIN_FLOW="${INSTALL_DIR}/flow"
 
-echo "Linking ${TARGET_BIN} -> ${SOURCE_BIN}"
-rm -f "${TARGET_BIN}"
-ln -s "${SOURCE_BIN}" "${TARGET_BIN}"
+for target in "${TARGET_BIN_F}" "${TARGET_BIN_FLOW}"; do
+    echo "Linking ${target} -> ${SOURCE_BIN}"
+    rm -f "${target}"
+    ln -s "${SOURCE_BIN}" "${target}"
+done
 
-echo "Symlinked f to ${TARGET_BIN}"
-echo "Ensure ${INSTALL_DIR} is on your PATH to run 'f' from anywhere."
+echo "Symlinked CLI to ${TARGET_BIN_F} and ${TARGET_BIN_FLOW}"
+echo "Ensure ${INSTALL_DIR} is on your PATH to run 'f' or 'flow' from anywhere."

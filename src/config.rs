@@ -13,6 +13,8 @@ use shellexpand::tilde;
 pub struct Config {
     #[serde(default)]
     pub version: Option<u32>,
+    #[serde(default)]
+    pub options: OptionsConfig,
     #[serde(default, alias = "server", alias = "server-local")]
     pub servers: Vec<ServerConfig>,
     #[serde(default, rename = "server-remote")]
@@ -39,6 +41,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: None,
+            options: OptionsConfig::default(),
             servers: Vec::new(),
             remote_servers: Vec::new(),
             tasks: Vec::new(),
@@ -49,6 +52,21 @@ impl Default for Config {
             watchers: Vec::new(),
             stream: None,
             server_hub: None,
+        }
+    }
+}
+
+/// Global feature toggles.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OptionsConfig {
+    #[serde(default, rename = "trace_terminal_io")]
+    pub trace_terminal_io: bool,
+}
+
+impl OptionsConfig {
+    fn merge(&mut self, other: OptionsConfig) {
+        if other.trace_terminal_io {
+            self.trace_terminal_io = true;
         }
     }
 }
@@ -492,6 +510,7 @@ fn resolve_include_path(base: &Path, include: &str) -> PathBuf {
 }
 
 fn merge_config(base: &mut Config, other: Config) {
+    base.options.merge(other.options);
     base.servers.extend(other.servers);
     base.remote_servers.extend(other.remote_servers);
     base.tasks.extend(other.tasks);
@@ -538,6 +557,7 @@ mod tests {
             .expect("global config fixture should parse");
 
         assert_eq!(cfg.version, Some(1));
+        assert!(cfg.options.trace_terminal_io, "options table should parse");
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.remote_servers.len(), 1);
         assert_eq!(cfg.watchers.len(), 1);
@@ -772,5 +792,22 @@ dev = "f run dev"
             cfg.aliases.get("dev").map(String::as_str),
             Some("f run dev")
         );
+    }
+
+    #[test]
+    fn options_defaults_are_false() {
+        let cfg: Config =
+            toml::from_str("").expect("empty config should parse with default options");
+        assert!(!cfg.options.trace_terminal_io);
+    }
+
+    #[test]
+    fn options_trace_flag_parses() {
+        let toml = r#"
+[options]
+trace_terminal_io = true
+"#;
+        let cfg: Config = toml::from_str(toml).expect("options table should parse");
+        assert!(cfg.options.trace_terminal_io);
     }
 }

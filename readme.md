@@ -18,7 +18,7 @@ An Axum powered daemon + CLI sandbox for building the foundations of an always-o
 - **Hub launcher** – `f hub` checks whether the background daemon is listening on `localhost:6000`, spawns it (using `~/.config/flow/flow.toml`) if missing, and then opens an aggregated Ratatui dashboard so you can follow logs across every managed server. `f hub --no-ui` skips the TUI, and `f hub stop` terminates the managed daemon when you’re done.
 - **Watchers** – `[[watchers]]` entries automatically run commands (e.g., `~/bin/goku`) whenever their files change.
 - **Secrets sync** – declare `[storage]` environments in `flow.toml`, list them with `f secrets list`, and fetch remote `.env` payloads from the hosted hub (`flow.1focus.ai` by default) via `f secrets pull <env>`.
-- **Deploy helper** – `f run deploy` (or `./scripts/deploy.sh`) builds the debug binary and keeps `~/bin/f` symlinked to the latest build for fast iteration.
+- **Deploy helper** – `f run deploy` (or `./scripts/deploy.sh`) builds the debug binary and keeps both `~/bin/f` and `~/bin/flow` symlinked to the latest build for fast iteration.
 - **Command palette** – running `f` with no arguments pipes built-ins + project tasks into `fzf`, so you can fuzzy select anything (fallback to a plain list if `fzf` isn’t installed).
 - **Codanna indexing** – `f index` bootstraps `.codanna/` if needed, runs `codanna index .`, captures `codanna mcp get_index_info --json`, and stores the JSON payload under `~/.db/flow/flow.sqlite` for other automations to consume.
 
@@ -55,7 +55,7 @@ This prints the frames along with timestamps, which is a lightweight way to vali
 
 ## Monitoring the hub
 
-1. Build the production binary with `f deploy-cli-release` (this keeps `~/bin/f` symlinked to `target/release/f`).
+1. Build the production binary with `f deploy-cli-release` (this keeps `~/bin/f` and `~/bin/flow` symlinked to `target/release/f`).
 2. Run `f hub`. Flow will ensure the daemon is online at `127.0.0.1:6000` (or your overridden host/port) and then open a Ratatui dashboard that lists every managed server plus a live, aggregated log stream. Use `j`/`k` (or arrow keys) to change selection, `f` to focus logs on the highlighted server, `a` to go back to the all-server view, `PgUp`/`PgDn` to scroll, `r` to force-refresh, and `q` to exit. The daemon keeps running in the background after you quit the UI.
 3. If you just want to ensure the daemon is up without opening the UI—e.g., from a script—pass `f hub --no-ui`. You can always fall back to `f logs` or `curl http://127.0.0.1:6000/logs` to verify output in that mode.
 
@@ -163,6 +163,24 @@ f logs --server la --follow
 ```
 
 `f logs` talks to the daemon over HTTP, so it works against both local development daemons (`--host 127.0.0.1 --port 9050`) and the background hub (`--host 127.0.0.1 --port 6000`). When `--follow` is set, the CLI keeps the SSE connection alive, automatically reconnects when the daemon restarts, and colorizes stderr/stdout prefixes (pass `--no-color` if you need plain text).
+
+## Terminal tracing
+
+Let the daemon capture every command you run plus its output so agents can replay context. Flip the feature on in your global config (`~/.config/flow/config.toml` by default):
+
+```toml
+[options]
+trace_terminal_io = true
+```
+
+With tracing enabled, flow will:
+
+- create `~/.flow/tmux-logs` plus a helper script under `~/.config/flow/tmux-enable-tracing.sh`.
+- install tmux hooks (`pane-add`, `client-session-changed`, `session-created`) so each pane runs `tmux pipe-pane -o` and appends raw TTY data into per-pane logs.
+- drop Fish hooks into `~/.config/fish/conf.d/flow-trace.fish` that log command metadata (timestamp, cwd, exit status) to `~/.flow/tty-meta/`.
+- expose the data via `f trace` (live stream) or `f trace --last-command` (dump the most recent command + captured stdout/stderr).
+
+Because tmux is the transport for terminal I/O, Flow now auto-attaches interactive Fish shells to tmux whenever tracing is on: opening a new terminal jumps into the `flow` session (created on demand). Override the session name by exporting `FLOW_AUTO_TMUX_SESSION`, or skip the auto-attach logic entirely with `FLOW_SKIP_AUTO_TMUX=1`.
 
 ## Secrets sync
 
