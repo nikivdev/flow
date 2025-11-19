@@ -168,6 +168,9 @@ pub struct TaskConfig {
     pub name: String,
     /// Shell command that should be executed for this task.
     pub command: String,
+    /// Whether this task should run automatically when entering the project root.
+    #[serde(default)]
+    pub activate_on_cd_to_root: bool,
     /// Optional task-specific dependencies that must be made available before the command runs.
     #[serde(default)]
     pub dependencies: Vec<String>,
@@ -761,6 +764,25 @@ dependencies = ["fast", "toolkit"]
             }
             other => panic!("toolkit dependency variant mismatch: {other:?}"),
         }
+    }
+
+    #[test]
+    fn task_activation_flag_defaults_and_parses() {
+        let toml = r#"
+[[tasks]]
+name = "lint"
+command = "golangci-lint run"
+
+[[tasks]]
+name = "setup"
+command = "cargo check"
+activate_on_cd_to_root = true
+"#;
+
+        let cfg: Config = toml::from_str(toml).expect("activation config should parse");
+        assert_eq!(cfg.tasks.len(), 2);
+        assert!(!cfg.tasks[0].activate_on_cd_to_root);
+        assert!(cfg.tasks[1].activate_on_cd_to_root);
     }
 
     #[test]

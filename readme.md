@@ -28,6 +28,7 @@ An Axum powered daemon + CLI sandbox for building the foundations of an always-o
 
 - Rust 1.79+ (matches stable rustup toolchain)
 - [`fzf`](https://github.com/junegunn/fzf) on your `PATH` (optional, used for the `f` command palette—falls back to a plain list when missing)
+- Run `f doctor` after installing to verify `direnv` is available and that your shell sources the recommended hook so Flow tasks auto-activate when you `cd` into a repo.
 
 ## Running the daemon
 
@@ -84,6 +85,27 @@ description = "Extra task/alias bundle"
 ```
 
 The optional `[[commands]]` tables let you split `flow.toml` into multiple files (great for sharing aliases or task packs). Each entry points at another TOML file using a path relative to the parent config (or an absolute path). Those included files can declare their own `[[tasks]]`, `[[alias]]`, dependencies, watchers, etc., and everything is merged at load time.
+
+### Auto activation when entering the repo
+
+Need certain tasks to fire automatically whenever you `cd` into the project root? Mark them with `activate_on_cd_to_root = true` and wire `f activate` into a shell hook (Direnv, zsh `chpwd`, etc.). Flow will load `flow.toml`, ensure dependencies exist, and run each flagged task exactly like `f run` would.
+
+```toml
+[[tasks]]
+name = "setup"
+command = "cargo check"
+activate_on_cd_to_root = true
+```
+
+Then add something like this to `.envrc` so Direnv fires `flow activate` every time you enter the repo, but lets your shell return immediately while the setup task runs in the background:
+
+```sh
+if command -v flow >/dev/null 2>&1; then
+    (flow activate >/dev/null 2>&1 &)
+fi
+```
+
+`f activate --config other.toml` also works for nested repos or monorepos with dedicated configs. Because the command inherits stdout/stderr, you still see logs from tasks like `cargo check` even though they were spawned asynchronously.
 
 ### Task shortcuts
 

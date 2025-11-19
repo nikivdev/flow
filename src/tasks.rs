@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    cli::{TaskRunOpts, TasksOpts},
+    cli::{TaskActivateOpts, TaskRunOpts, TasksOpts},
     config::{self, Config, TaskConfig},
 };
 
@@ -38,6 +38,29 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     let dependency_commands = resolve_task_dependencies(task, &cfg)?;
     ensure_dependencies_available(&dependency_commands)?;
     execute_task(task, config_path.parent().unwrap_or(Path::new(".")))
+}
+
+pub fn activate(opts: TaskActivateOpts) -> Result<()> {
+    let (config_path, cfg) = load_project_config(opts.config)?;
+    let workdir = config_path.parent().unwrap_or(Path::new("."));
+
+    let tasks: Vec<&TaskConfig> = cfg
+        .tasks
+        .iter()
+        .filter(|task| task.activate_on_cd_to_root)
+        .collect();
+
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    for task in tasks {
+        let dependency_commands = resolve_task_dependencies(task, &cfg)?;
+        ensure_dependencies_available(&dependency_commands)?;
+        execute_task(task, workdir)?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn load_project_config(path: PathBuf) -> Result<(PathBuf, Config)> {
@@ -250,6 +273,7 @@ mod tests {
             TaskConfig {
                 name: "lint".to_string(),
                 command: "golangci-lint run".to_string(),
+                activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: Some("Run lint checks".to_string()),
                 shortcuts: Vec::new(),
@@ -257,6 +281,7 @@ mod tests {
             TaskConfig {
                 name: "test".to_string(),
                 command: "gotestsum ./...".to_string(),
+                activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: Vec::new(),
@@ -279,6 +304,7 @@ mod tests {
         let task = TaskConfig {
             name: "empty".into(),
             command: "".into(),
+            activate_on_cd_to_root: false,
             dependencies: Vec::new(),
             description: None,
             shortcuts: Vec::new(),
@@ -303,6 +329,7 @@ mod tests {
         let task = TaskConfig {
             name: "ci".into(),
             command: "ci".into(),
+            activate_on_cd_to_root: false,
             dependencies: vec!["fast".into(), "toolkit".into()],
             description: None,
             shortcuts: Vec::new(),
@@ -321,6 +348,7 @@ mod tests {
         let task = TaskConfig {
             name: "ci".into(),
             command: "ci".into(),
+            activate_on_cd_to_root: false,
             dependencies: vec!["unknown".into()],
             description: None,
             shortcuts: Vec::new(),
@@ -342,6 +370,7 @@ mod tests {
         let task = TaskConfig {
             name: "ci".into(),
             command: "ci".into(),
+            activate_on_cd_to_root: false,
             dependencies: vec!["unknown".into()],
             description: None,
             shortcuts: Vec::new(),
@@ -361,6 +390,7 @@ mod tests {
             TaskConfig {
                 name: "deploy-cli-release".into(),
                 command: "echo deploy".into(),
+                activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: vec!["dcr-alias".into()],
@@ -368,6 +398,7 @@ mod tests {
             TaskConfig {
                 name: "dev-hub".into(),
                 command: "echo dev".into(),
+                activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: Vec::new(),
@@ -394,6 +425,7 @@ mod tests {
             TaskConfig {
                 name: "deploy-cli-release".into(),
                 command: "echo deploy".into(),
+                activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: Vec::new(),
@@ -401,6 +433,7 @@ mod tests {
             TaskConfig {
                 name: "deploy-core-runner".into(),
                 command: "echo runner".into(),
+                activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: Vec::new(),
