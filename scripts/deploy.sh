@@ -27,6 +27,8 @@ mkdir -p "${INSTALL_DIR}"
 SOURCE_BIN="${ROOT_DIR}/target/${TARGET_DIR}/f"
 TARGET_BIN_F="${INSTALL_DIR}/f"
 TARGET_BIN_FLOW="${INSTALL_DIR}/flow"
+SOURCE_IRIS="${ROOT_DIR}/target/${TARGET_DIR}/iris"
+TARGET_BIN_IRIS="${INSTALL_DIR}/iris"
 
 for target in "${TARGET_BIN_F}" "${TARGET_BIN_FLOW}"; do
     echo "Linking ${target} -> ${SOURCE_BIN}"
@@ -34,5 +36,10 @@ for target in "${TARGET_BIN_F}" "${TARGET_BIN_FLOW}"; do
     ln -s "${SOURCE_BIN}" "${target}"
 done
 
+echo "Linking ${TARGET_BIN_IRIS} -> ${SOURCE_IRIS}"
+rm -f "${TARGET_BIN_IRIS}"
+ln -s "${SOURCE_IRIS}" "${TARGET_BIN_IRIS}"
+
 echo "Symlinked CLI to ${TARGET_BIN_F} and ${TARGET_BIN_FLOW}"
-echo "Ensure ${INSTALL_DIR} is on your PATH to run 'f' or 'flow' from anywhere."
+echo "Symlinked watcher daemon to ${TARGET_BIN_IRIS}"
+echo "Ensure ${INSTALL_DIR} is on your PATH to run 'f', 'flow', or 'iris' from anywhere."
