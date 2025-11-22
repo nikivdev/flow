@@ -7,6 +7,10 @@ edition = "2024"
 name = "f"
 path = "src/main.rs"
 
+[[bin]]
+name = "iris"
+path = "src/bin/iris.rs"
+
 [dependencies]
 axum = "0.7"
 anyhow = "1.0"

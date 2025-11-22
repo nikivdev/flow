@@ -9,9 +9,31 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::DoctorOpts;
 
+/// Ensure the iris watcher daemon is available, prompting to install a bundled
+/// copy if it is missing from PATH. Returns the resolved binary path.
+pub fn ensure_iris_available_interactive() -> Result<PathBuf> {
+    if let Ok(path) = which::which("iris") {
+        println!("✅ iris watcher daemon found at {}", path.display());
+        return Ok(path);
+    }
+
+    if let Some(bundled) = find_bundled_iris() {
+        if prompt_install_iris(&bundled)? {
+            let installed = install_iris(&bundled)?;
+            println!("✅ Installed iris to {}", installed.display());
+            return Ok(installed);
+        }
+    }
+
+    bail!(
+        "iris is not on PATH. Build/install from this repo (scripts/deploy.sh) so flow can delegate watchers to it."
+    );
+}
+
 pub fn run(_opts: DoctorOpts) -> Result<()> {
     println!("Running flow doctor checks...\n");
 
+    let _ = ensure_iris_available_interactive();
     ensure_direnv_on_path()?;
 
     match detect_shell()? {
@@ -35,6 +57,72 @@ fn ensure_direnv_on_path() -> Result<()> {
             "direnv is not on PATH. Install it from https://direnv.net/#installation and rerun `flow doctor`."
         ),
     }
+}
+
+fn find_bundled_iris() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from))?;
+    let candidate = exe_dir.join("iris");
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn prompt_install_iris(bundled: &Path) -> Result<bool> {
+    println!(
+        "iris was not found on PATH. A bundled copy was found at {}.",
+        bundled.display()
+    );
+    print!(
+        "Install iris to {}? [Y/n]: ",
+        default_install_dir().display()
+    );
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).ok();
+    let normalized = input.trim().to_ascii_lowercase();
+    Ok(normalized.is_empty() || normalized == "y" || normalized == "yes")
+}
+
+fn install_iris(bundled: &Path) -> Result<PathBuf> {
+    let dest_dir = default_install_dir();
+    std::fs::create_dir_all(&dest_dir).with_context(|| {
+        format!(
+            "failed to create iris install directory {}",
+            dest_dir.display()
+        )
+    })?;
+
+    let dest = dest_dir.join("iris");
+    std::fs::copy(bundled, &dest).with_context(|| {
+        format!(
+            "failed to copy bundled iris from {} to {}",
+            bundled.display(),
+            dest.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dest)
+            .context("failed to stat installed iris")?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dest, perms).context("failed to mark iris executable")?;
+    }
+
+    Ok(dest)
+}
+
+fn default_install_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("bin"))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn detect_shell() -> Result<Option<ShellKind>> {

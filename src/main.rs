@@ -1,24 +1,10 @@
-mod cli;
-mod config;
-mod doctor;
-mod hub;
-mod indexer;
-mod logs;
-mod palette;
-mod screen;
-mod secrets;
-mod server;
-mod servers;
-mod servers_tui;
-mod setup;
-mod tasks;
-mod terminal;
-mod trace;
-mod watchers;
-
 use anyhow::{Result, bail};
 use clap::Parser;
-use cli::{Cli, Commands, TaskRunOpts, TasksOpts};
+use flowd::{
+    cli::{Cli, Commands, TaskRunOpts, TasksOpts},
+    doctor, hub, indexer, init_tracing, logs, palette, screen, secrets, server, servers_tui, setup,
+    tasks, trace,
+};
 
 fn main() -> Result<()> {
     init_tracing();
@@ -88,15 +74,4 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn init_tracing() {
-    let default_filter = "flowd=info,axum=warn,tower=warn";
-    let filter_layer = std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_string());
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter_layer)
-        .with_target(false)
-        .compact()
-        .init();
 }

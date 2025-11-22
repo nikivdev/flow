@@ -123,9 +123,9 @@ After that, `f run dcr`, `f dcr`, or even `f run deploy-release` all resolve to 
 
 ````
 
-### Watchers
+### Watchers (via iris)
 
-Keep background automations in sync with your dotfiles or code whenever files change. Flow now treats watchers as a first-class primitive with two drivers:
+Keep background automations in sync with your dotfiles or code whenever files change. Flow now ships the lean `iris` watcher daemon and delegates all watch execution to it—flow stays the coordinator and simply ensures `iris` is installed alongside `f` (see `scripts/deploy.sh`). Start it with `iris --config ~/.config/flow/flow.toml` to honor the same watcher definitions Flow used to run. Two drivers are available:
 
 #### Shell driver (default)
 

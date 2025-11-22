@@ -1,7 +1,8 @@
 use std::{
     fs,
+    io::{self, Write},
     net::IpAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::Duration,
@@ -12,15 +13,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cli::{HubAction, HubCommand, HubOpts, ServersOpts},
-    config, servers_tui,
+    config, doctor, servers_tui,
 };
 
 pub fn run(cmd: HubCommand) -> Result<()> {
     let action = cmd.action.unwrap_or(HubAction::Start);
     let opts = cmd.opts;
+    let runtime = ensure_hub_runtime()?; // prompt if missing
     match action {
         HubAction::Start => {
-            ensure_daemon(opts.clone())?;
+            ensure_daemon(opts.clone(), &runtime)?;
             if opts.no_ui {
                 return Ok(());
             }
@@ -30,14 +32,19 @@ pub fn run(cmd: HubCommand) -> Result<()> {
             };
             servers_tui::run(tui_opts)
         }
-        HubAction::Stop => stop_daemon(opts),
+        HubAction::Stop => stop_daemon(opts, &runtime),
     }
 }
 
-fn ensure_daemon(opts: HubOpts) -> Result<()> {
+fn ensure_daemon(opts: HubOpts, runtime: &HubRuntime) -> Result<()> {
     let host = opts.host;
     let port = opts.port;
     let config_path = opts.config.unwrap_or_else(config::default_config_path);
+    let cfg = config::load_or_default(&config_path);
+
+    if runtime.provider == HubProvider::Iris && !cfg.watchers.is_empty() {
+        ensure_iris_running(runtime, &config_path, cfg.watchers.len())?;
+    }
 
     if is_daemon_alive(host, port)? {
         println!("hub already running at http://{host}:{port}");
@@ -55,7 +62,7 @@ fn ensure_daemon(opts: HubOpts) -> Result<()> {
     Ok(())
 }
 
-fn stop_daemon(opts: HubOpts) -> Result<()> {
+fn stop_daemon(opts: HubOpts, runtime: &HubRuntime) -> Result<()> {
     let host = opts.host;
     let port = opts.port;
 
@@ -67,6 +74,9 @@ fn stop_daemon(opts: HubOpts) -> Result<()> {
         terminate_process(record.pid)?;
         wait_for_shutdown(record.host, record.port)?;
         remove_pid_file()?;
+        if runtime.provider == HubProvider::Iris {
+            stop_iris_process().ok();
+        }
         println!("hub stopped");
         return Ok(());
     }
@@ -78,6 +88,9 @@ fn stop_daemon(opts: HubOpts) -> Result<()> {
         );
         terminate_process(pid)?;
         wait_for_shutdown(host, port)?;
+        if runtime.provider == HubProvider::Iris {
+            stop_iris_process().ok();
+        }
         println!("hub stopped");
         return Ok(());
     }
@@ -89,12 +102,19 @@ fn stop_daemon(opts: HubOpts) -> Result<()> {
         );
         terminate_process(pid)?;
         wait_for_shutdown(host, port)?;
+        if runtime.provider == HubProvider::Iris {
+            stop_iris_process().ok();
+        }
         println!("hub stopped");
         return Ok(());
     }
 
     if is_daemon_alive(host, port)? {
         bail!("hub daemon is running but unable to determine pid; stop it manually");
+    }
+
+    if runtime.provider == HubProvider::Iris {
+        stop_iris_process().ok();
     }
 
     println!("hub daemon is not running");
@@ -248,6 +268,230 @@ fn terminate_process(pid: u32) -> Result<()> {
             "taskkill exited with status {}",
             status.code().unwrap_or(-1)
         );
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HubRuntime {
+    provider: HubProvider,
+    binary: PathBuf,
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum HubProvider {
+    Iris,
+    Flow,
+}
+
+fn ensure_hub_runtime() -> Result<HubRuntime> {
+    if let Some(existing) = load_hub_runtime()? {
+        return Ok(existing);
+    }
+
+    let runtime = prompt_hub_runtime()?;
+    persist_hub_runtime(&runtime)?;
+    Ok(runtime)
+}
+
+fn prompt_hub_runtime() -> Result<HubRuntime> {
+    println!(
+        "Select hub runtime (stored under {}):",
+        hub_runtime_path().display()
+    );
+    println!("1) iris (recommended) – dedicated watcher daemon");
+    println!("2) flow (built-in daemon)");
+    print!("Choice [1]: ");
+    let _ = io::stdout().flush();
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).ok();
+    let choice = input.trim();
+
+    match choice {
+        "" | "1" => {
+            let binary = doctor::ensure_iris_available_interactive()?;
+            Ok(HubRuntime {
+                provider: HubProvider::Iris,
+                version: detect_binary_version(&binary),
+                binary,
+            })
+        }
+        "2" => {
+            let exe = std::env::current_exe().context("failed to resolve current executable")?;
+            Ok(HubRuntime {
+                provider: HubProvider::Flow,
+                version: detect_binary_version(&exe),
+                binary: exe,
+            })
+        }
+        _other => {
+            println!("Enter path to hub binary (e.g., iris):");
+            let mut path_input = String::new();
+            io::stdin().read_line(&mut path_input).ok();
+            let path = PathBuf::from(path_input.trim());
+            if path.as_os_str().is_empty() {
+                bail!("no hub binary specified");
+            }
+            Ok(HubRuntime {
+                provider: HubProvider::Iris,
+                version: detect_binary_version(&path),
+                binary: path,
+            })
+        }
+    }
+}
+
+fn detect_binary_version(path: &Path) -> Option<String> {
+    Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+}
+
+fn hub_runtime_path() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".config/flow/hub-runtime.json")
+    } else {
+        PathBuf::from(".config/flow/hub-runtime.json")
+    }
+}
+
+fn load_hub_runtime() -> Result<Option<HubRuntime>> {
+    let path = hub_runtime_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let runtime: HubRuntime = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse hub runtime at {}", path.display()))?;
+    Ok(Some(runtime))
+}
+
+fn persist_hub_runtime(runtime: &HubRuntime) -> Result<()> {
+    let path = hub_runtime_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(runtime)
+        .context("failed to serialize hub runtime selection")?;
+    fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn ensure_iris_running(
+    runtime: &HubRuntime,
+    config_path: &Path,
+    watcher_count: usize,
+) -> Result<()> {
+    if runtime.provider != HubProvider::Iris {
+        return Ok(());
+    }
+
+    if watcher_count == 0 {
+        tracing::info!("no watchers defined; skipping iris launch");
+        return Ok(());
+    }
+
+    if let Some(pid) = load_iris_pid()? {
+        if process_alive(pid)? {
+            return Ok(());
+        } else {
+            remove_iris_pid().ok();
+        }
+    }
+
+    println!(
+        "Starting iris watcher daemon ({} watchers) using {}",
+        watcher_count,
+        config_path.display()
+    );
+    start_iris_process(&runtime.binary, config_path)
+}
+
+fn start_iris_process(binary: &Path, config_path: &Path) -> Result<()> {
+    let mut cmd = Command::new(binary);
+    cmd.arg("--config").arg(config_path);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("failed to start iris from {}", binary.display()))?;
+    persist_iris_pid(child.id())?;
+    Ok(())
+}
+
+fn stop_iris_process() -> Result<()> {
+    if let Some(pid) = load_iris_pid()? {
+        terminate_process(pid).ok();
+        remove_iris_pid().ok();
+    }
+    Ok(())
+}
+
+fn iris_pid_path() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".config/flow/iris.pid")
+    } else {
+        PathBuf::from(".config/flow/iris.pid")
+    }
+}
+
+fn load_iris_pid() -> Result<Option<u32>> {
+    let path = iris_pid_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let pid: u32 = contents.trim().parse().ok().unwrap_or(0);
+    if pid == 0 { Ok(None) } else { Ok(Some(pid)) }
+}
+
+fn persist_iris_pid(pid: u32) -> Result<()> {
+    let path = iris_pid_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create pid dir {}", parent.display()))?;
+    }
+    fs::write(&path, pid.to_string())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn remove_iris_pid() -> Result<()> {
+    let path = iris_pid_path();
+    if path.exists() {
+        fs::remove_file(path).ok();
+    }
+    Ok(())
+}
+
+fn process_alive(pid: u32) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill").arg("-0").arg(pid.to_string()).status();
+        return Ok(status.map(|s| s.success()).unwrap_or(false));
+    }
+
+    #[cfg(windows)]
+    {
+        let output = Command::new("tasklist")
+            .output()
+            .context("failed to invoke tasklist")?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        let needle = pid.to_string();
+        let body = String::from_utf8_lossy(&output.stdout);
+        Ok(body.lines().any(|line| line.contains(&needle)))
     }
 }
 

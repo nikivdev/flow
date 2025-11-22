@@ -24,22 +24,20 @@ use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::{
     cli::DaemonOpts,
-    config::{self, Config, ServerConfig, WatcherConfig},
+    config::{self, Config, ServerConfig},
     screen::ScreenBroadcaster,
     servers::{LogLine, ManagedServer, ServerSnapshot},
     terminal,
-    watchers::WatchManager,
 };
 
 const LOG_BUFFER_CAPACITY: usize = 2048;
 
 type ServerStore = Arc<RwLock<HashMap<String, Arc<ManagedServer>>>>;
-type WatcherState = Arc<Mutex<Option<WatchManager>>>;
 
 #[derive(Clone)]
 struct AppState {
@@ -72,7 +70,6 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
     let servers_store: ServerStore = Arc::new(RwLock::new(HashMap::new()));
     sync_servers(&servers_store, std::mem::take(&mut cfg.servers)).await;
 
-    let watcher_state: WatcherState = Arc::new(Mutex::new(WatchManager::start(&cfg.watchers)?));
     if let Some(stream) = cfg.stream.as_ref() {
         tracing::info!(
             provider = %stream.provider,
@@ -93,17 +90,10 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
     }
 
     let servers_for_reload = Arc::clone(&servers_store);
-    let watchers_for_reload = Arc::clone(&watcher_state);
     let config_path_for_reload = config_path.clone();
     tokio::spawn(async move {
         while reload_rx.recv().await.is_some() {
-            if let Err(err) = reload_config(
-                &config_path_for_reload,
-                &servers_for_reload,
-                &watchers_for_reload,
-            )
-            .await
-            {
+            if let Err(err) = reload_config(&config_path_for_reload, &servers_for_reload).await {
                 tracing::warn!(?err, "config reload failed");
             }
         }
@@ -299,12 +289,11 @@ async fn server_logs_stream(
     }
 }
 
-async fn reload_config(path: &Path, servers: &ServerStore, watchers: &WatcherState) -> Result<()> {
+async fn reload_config(path: &Path, servers: &ServerStore) -> Result<()> {
     let mut cfg = config::load(path)
         .with_context(|| format!("failed to reload config at {}", path.display()))?;
     tracing::info!(path = %path.display(), "config changed; reloading");
 
-    reload_watchers(watchers, &cfg.watchers).await?;
     sync_servers(servers, std::mem::take(&mut cfg.servers)).await;
 
     if let Some(stream) = cfg.stream {
@@ -316,12 +305,6 @@ async fn reload_config(path: &Path, servers: &ServerStore, watchers: &WatcherSta
         );
     }
 
-    Ok(())
-}
-
-async fn reload_watchers(state: &WatcherState, configs: &[WatcherConfig]) -> Result<()> {
-    let mut guard = state.lock().await;
-    *guard = WatchManager::start(configs)?;
     Ok(())
 }
 
