@@ -2,7 +2,30 @@
 
 > Your second OS. SDK that has it all. Streaming, OS control with agents. Sync.
 
-Eventually. For now its going to be a rust server that starts and starts to provide functions and nice programmable SDK into it via TS library most likely.
+The goal of this CLI is to first parse out `flow.toml` files like the one in [this repo](flow.toml).
+
+Install this CLI, for now have to manually compile this as we don't have setup release builds yet.
+
+But once you have `f` (also available as `flow`) CLI. Create `flow.toml` in some project with tasks like:
+
+```
+[[tasks]]
+name = "deploy-cli-local"
+command = "./scripts/deploy.sh"
+description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
+```
+
+And if you run `f` in the project it will fuzzy search through all tasks you can run. You can also run tasks with `f <task>`.
+
+## Hub
+
+There is component in flow that is a hub. It's a daemon that does things. Flow is not responsible for what the daemon does, all it does is it makes sure this daemon runs and in future perhaps auto heals or restarts as the idea is that the daemon should always be running.
+
+There is an implementation of such hub built in private called `lin`. Will be possible to use soon, for now it's being tested in private as there are bugs. The goal of lin is to declaratively specify servers to run and trace all terminal I/O. In future more.
+
+There are also plans for flow to handle communication between hubs. But flow will always try to abstract away the job of the actual hub to the hub itself as the hub can do many things. Right now it is assumed there is only 1 hub but in future there could be multiple hubs in theory.
+
+I like to think of flow as a program that is first top in class project manager with AI deeply embedded. But also as a small kubernetes like orchestrator of servers that run on the OS. Perhaps it will also handle the job of ingesting and streaming data from these hubs. i.e. in theory it can protect the user host from external potentially malicious hubs by making sure the hub has limited rights to do things.
 
 ## Current state
 
