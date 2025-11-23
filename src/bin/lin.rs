@@ -15,12 +15,12 @@ use flowd::{config, init_tracing, watchers::WatchManager};
 /// Standalone watcher daemon that mirrors the watch config from flow.
 #[derive(Parser, Debug)]
 #[command(
-    name = "iris",
+    name = "lin",
     version,
     about = "Lean watcher daemon that reloads on config changes",
     arg_required_else_help = false
 )]
-struct IrisCli {
+struct LinCli {
     /// Path to the flow config TOML (defaults to ~/.config/flow/flow.toml).
     #[arg(long)]
     config: Option<PathBuf>,
@@ -29,7 +29,7 @@ struct IrisCli {
 fn main() -> Result<()> {
     init_tracing();
 
-    let cli = IrisCli::parse();
+    let cli = LinCli::parse();
     let config_path = cli
         .config
         .map(|path| {
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
 }
 
 fn run(config_path: PathBuf) -> Result<()> {
-    tracing::info!(path = %config_path.display(), "starting iris watcher daemon");
+    tracing::info!(path = %config_path.display(), "starting lin watcher daemon");
     let (reload_tx, reload_rx) = mpsc::channel();
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
@@ -59,7 +59,7 @@ fn run(config_path: PathBuf) -> Result<()> {
 
     let mut manager = start_watchers(&config_path)?;
     println!(
-        "iris watcher daemon ready (config: {})",
+        "lin watcher daemon ready (config: {})",
         config_path.display()
     );
     println!("Press Ctrl+C to stop.");
@@ -80,7 +80,7 @@ fn run(config_path: PathBuf) -> Result<()> {
     }
 
     drop(manager);
-    tracing::info!("iris watcher daemon shutting down");
+    tracing::info!("lin watcher daemon shutting down");
     Ok(())
 }
 
