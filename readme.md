@@ -15,6 +15,27 @@ cargo build --bin lin
 Once you have `f` (also available as `flow`) CLI, create `flow.toml` in some project with tasks like:
 
 ```
+version = 1
+
+[deps]
+fast = "fast"  # single-command dependency; use ["cmd1", "cmd2"] for multiples
+
+# Optional: Flox install set to keep tools reproducible (parsed for future integration)
+[flox]
+[flox.install]
+eza.pkg-path = "eza"
+bat.pkg-path = "bat"
+edgedb.pkg-path = "edgedb"
+coreutils.pkg-path = "coreutils"
+parallel.pkg-path = "parallel"
+nil.pkg-path = "nil"
+nixfmt.pkg-path = "nixfmt"
+nixd.pkg-path = "nixd"
+deploy-rs.pkg-path = "deploy-rs"
+nixos-rebuild.pkg-path = "nixos-rebuild"
+nix-index.pkg-path = "nix-index"
+xcpretty.pkg-path = "xcpretty"
+
 [[tasks]]
 name = "deploy-cli-local"
 command = "./scripts/deploy.sh"

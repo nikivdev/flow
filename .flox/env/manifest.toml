@@ -1,0 +1,7 @@
+version = 1
+
+[install.cargo]
+pkg-path = "cargo"
+
+[install.eza]
+pkg-path = "eza"

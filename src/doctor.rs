@@ -33,6 +33,7 @@ pub fn ensure_lin_available_interactive() -> Result<PathBuf> {
 pub fn run(_opts: DoctorOpts) -> Result<()> {
     println!("Running flow doctor checks...\n");
 
+    ensure_flox_available()?;
     let _ = ensure_lin_available_interactive();
     ensure_direnv_on_path()?;
 
@@ -45,6 +46,24 @@ pub fn run(_opts: DoctorOpts) -> Result<()> {
 
     println!("\n✅ flow doctor is done. Re-run it any time after changing shells or machines.");
     Ok(())
+}
+
+fn ensure_flox_available() -> Result<()> {
+    if which::which("flox").is_ok() {
+        println!("✅ flox found on PATH");
+        return Ok(());
+    }
+
+    // Heuristic: flox-managed env leaves a .flox directory or ~/.flox directory.
+    let home = home_dir();
+    if home.join(".flox").exists() {
+        println!("✅ flox environment directory detected at {}", home.join(".flox").display());
+        return Ok(());
+    }
+
+    bail!(
+        "flox is not installed. Install it from https://flox.dev/docs/install-flox/install/ and re-run `f doctor`."
+    );
 }
 
 fn ensure_direnv_on_path() -> Result<()> {

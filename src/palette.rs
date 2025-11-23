@@ -112,7 +112,7 @@ impl PaletteEntry {
             .description
             .as_deref()
             .unwrap_or_else(|| task.command.as_str());
-        let display = format!("[task] {} – {}", task.name, summary);
+        let display = format!("[task] {} – {}", task.name, truncate(summary, 96));
         let exec = vec![
             "run".into(),
             "--config".into(),
@@ -189,4 +189,18 @@ fn resolve_path(path: PathBuf) -> Result<PathBuf> {
     } else {
         Ok(std::env::current_dir()?.join(path))
     }
+}
+
+fn truncate(input: &str, max: usize) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        if out.chars().count() + 1 >= max {
+            break;
+        }
+        out.push(ch);
+    }
+    if out.len() < input.len() {
+        out.push('…');
+    }
+    out
 }

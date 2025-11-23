@@ -1,19 +1,39 @@
 version = 1
 
-[storage]
-provider = "1focus.ai"
+[dependencies]
+fast = "github.com/1focus-ai/fast"
+
+[flox]
+[flox.install]
+cargo.pkg-path = "cargo"
+eza.pkg-path = "eza"
 
 [[tasks]]
 name = "setup"
 command = "cargo check"
 description = "Compile the workspace to make sure the toolchain works"
-rerun_on = ["package.json", "*.ts"]
 activate_on_cd_to_root = true
 
 [[tasks]]
+name = "test"
+command = "cargo test"
+description = "Run the full test suite for a basic sanity check"
+
+[[tasks]]
+name = "which-cargo"
+command = "which cargo && cargo --version"
+description = "Confirm cargo is coming from the managed toolchain"
+dependencies = ["cargo"]
+
+[[tasks]]
+name = "test-deps"
+command = "tsx tests/deps.ts"
+description = "Run the e2e managed-deps test script"
+
+[[tasks]]
 name = "dev-hub"
-command = "cargo run -- daemon --host 127.0.0.1 --port 9050"
-description = "Runs the hub daemon (local version)"
+command = "cargo run -- hub start"
+description = "Ensure the hub daemon is running locally"
 
 [[tasks]]
 name = "deploy-cli-local"
@@ -29,6 +49,17 @@ description = "Build the CLI/daemon with --release and copy the binary to ~/.loc
 name = "commit"
 command = "fast commitPush"
 description = "Commit with AI"
+dependencies = ["fast"]        # references [dependencies].fast above
 
-[dependencies]
-"github.com/1focus-ai/fast" = "fast"
+[storage]
+provider = "1focus.ai"
+env_var = "FLOW_SECRETS_TOKEN" # optional; defaults to this value
+
+[[storage.envs]]
+name = "local"
+description = "Local development defaults"
+variables = [
+  { key = "DATABASE_URL", default = "" },
+  { key = "OPENAI_API_KEY", default = "" },
+  { key = "ANTHROPIC_API_KEY", default = "" },
+]

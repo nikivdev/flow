@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use flowd::{
     cli::{Cli, Commands, TaskRunOpts, TasksOpts},
-    hub, init, init_tracing, palette, tasks,
+    doctor, hub, init, init_tracing, palette, tasks,
 };
 
 fn main() -> Result<()> {
@@ -15,6 +15,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Init(opts)) => {
             init::run(opts)?;
+        }
+        Some(Commands::Doctor(opts)) => {
+            doctor::run(opts)?;
         }
         Some(Commands::Run(opts)) => {
             tasks::run(opts)?;
