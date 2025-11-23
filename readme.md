@@ -4,7 +4,7 @@
 
 The goal of this CLI is to first parse out `flow.toml` files like the one in [this repo](flow.toml).
 
-Install this CLI, for now have to manually compile this as we don't have setup release builds yet.
+Install this CLI, for now have to manually compile this as we have not setup release builds yet.
 
 But once you have `f` (also available as `flow`) CLI. Create `flow.toml` in some project with tasks like:
 
