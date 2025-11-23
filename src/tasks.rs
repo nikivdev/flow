@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     cli::{TaskActivateOpts, TaskRunOpts, TasksOpts},
-    config::{self, Config, TaskConfig},
+    config::{self, Config, FloxInstallSpec, TaskConfig},
+    flox::{self, FloxEnv},
 };
 
 pub fn list(opts: TasksOpts) -> Result<()> {
@@ -35,9 +36,23 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
             config_path.display()
         );
     };
-    let dependency_commands = resolve_task_dependencies(task, &cfg)?;
-    ensure_dependencies_available(&dependency_commands)?;
-    execute_task(task, config_path.parent().unwrap_or(Path::new(".")))
+    let resolved = resolve_task_dependencies(task, &cfg)?;
+    let workdir = config_path.parent().unwrap_or(Path::new("."));
+    let flox_pkgs = collect_flox_packages(&cfg, &resolved.flox);
+    if flox_pkgs.is_empty() {
+        ensure_command_dependencies_available(&resolved.commands)?;
+    } else {
+        println!(
+            "Skipping host PATH checks; using managed deps [{}]",
+            flox_pkgs
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let flox_env = prepare_flox_env(workdir, &flox_pkgs)?;
+    execute_task(task, workdir, flox_env.as_ref())
 }
 
 pub fn activate(opts: TaskActivateOpts) -> Result<()> {
@@ -54,10 +69,30 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
         return Ok(());
     }
 
+    let mut combined = ResolvedDependencies::default();
+    for task in &tasks {
+        let resolved = resolve_task_dependencies(task, &cfg)?;
+        combined.commands.extend(resolved.commands);
+        combined.flox.extend(resolved.flox);
+    }
+
+    let flox_pkgs = collect_flox_packages(&cfg, &combined.flox);
+    if flox_pkgs.is_empty() {
+        ensure_command_dependencies_available(&combined.commands)?;
+    } else {
+        println!(
+            "Skipping host PATH checks; using managed deps [{}]",
+            flox_pkgs
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let flox_env = prepare_flox_env(workdir, &flox_pkgs)?;
+
     for task in tasks {
-        let dependency_commands = resolve_task_dependencies(task, &cfg)?;
-        ensure_dependencies_available(&dependency_commands)?;
-        execute_task(task, workdir)?;
+        execute_task(task, workdir, flox_env.as_ref())?;
     }
 
     Ok(())
@@ -82,28 +117,32 @@ fn resolve_path(path: PathBuf) -> Result<PathBuf> {
     }
 }
 
-fn execute_task(task: &TaskConfig, workdir: &Path) -> Result<()> {
+fn execute_task(task: &TaskConfig, workdir: &Path, flox_env: Option<&FloxEnv>) -> Result<()> {
     let command = task.command.trim();
     if command.is_empty() {
         bail!("task '{}' has an empty command", task.name);
     }
 
     println!("Running task '{}': {}", task.name, command);
-    let status = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(workdir)
-        .status()
-        .with_context(|| format!("failed to spawn command for task '{}'", task.name))?;
-
-    if status.success() {
-        Ok(())
+    if let Some(env) = flox_env {
+        flox::run_in_env(env, workdir, command)
     } else {
-        bail!(
-            "task '{}' exited with status {}",
-            task.name,
-            status.code().unwrap_or(-1)
-        );
+        let status = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(workdir)
+            .status()
+            .with_context(|| format!("failed to spawn command for task '{}'", task.name))?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            bail!(
+                "task '{}' exited with status {}",
+                task.name,
+                status.code().unwrap_or(-1)
+            );
+        }
     }
 }
 
@@ -191,40 +230,51 @@ fn generate_abbreviation(name: &str) -> Option<String> {
     if abbr.len() >= 2 { Some(abbr) } else { None }
 }
 
-fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<Vec<String>> {
-    if task.dependencies.is_empty() {
-        return Ok(Vec::new());
-    }
+#[derive(Debug, Default)]
+struct ResolvedDependencies {
+    commands: Vec<String>,
+    flox: Vec<(String, FloxInstallSpec)>,
+}
 
-    if cfg.dependencies.is_empty() {
-        bail!(
-            "task '{}' declares dependencies but no [dependencies] table is defined",
-            task.name
-        );
+fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<ResolvedDependencies> {
+    if task.dependencies.is_empty() {
+        return Ok(ResolvedDependencies::default());
     }
 
     let mut missing = Vec::new();
-    let mut commands = Vec::new();
+    let mut resolved = ResolvedDependencies::default();
     for dep_name in &task.dependencies {
         if let Some(spec) = cfg.dependencies.get(dep_name) {
-            spec.extend_commands(&mut commands);
-        } else {
-            missing.push(dep_name.as_str());
+            match spec {
+                config::DependencySpec::Single(cmd) => resolved.commands.push(cmd.clone()),
+                config::DependencySpec::Multiple(cmds) => resolved.commands.extend(cmds.clone()),
+                config::DependencySpec::Flox(pkg) => {
+                    resolved.flox.push((dep_name.clone(), pkg.clone()));
+                }
+            }
+            continue;
         }
+
+        if let Some(flox) = cfg.flox.as_ref().and_then(|f| f.install.get(dep_name)) {
+            resolved.flox.push((dep_name.clone(), flox.clone()));
+            continue;
+        }
+
+        missing.push(dep_name.as_str());
     }
 
     if !missing.is_empty() {
         bail!(
-            "task '{}' references unknown dependencies: {}",
+            "task '{}' references unknown dependencies: {} (define them under [dependencies] or [flox.install]/[flox.deps])",
             task.name,
             missing.join(", ")
         );
     }
 
-    Ok(commands)
+    Ok(resolved)
 }
 
-fn ensure_dependencies_available(commands: &[String]) -> Result<()> {
+fn ensure_command_dependencies_available(commands: &[String]) -> Result<()> {
     if commands.is_empty() {
         return Ok(());
     }
@@ -261,10 +311,46 @@ fn dependency_help(command: &str) -> Option<&'static str> {
     }
 }
 
+fn prepare_flox_env(
+    project_root: &Path,
+    deps: &[(String, FloxInstallSpec)],
+) -> Result<Option<FloxEnv>> {
+    if deps.is_empty() {
+        return Ok(None);
+    }
+
+    let env = flox::ensure_env(project_root, deps)?;
+    let names: Vec<_> = deps.iter().map(|(name, _)| name.as_str()).collect();
+    println!(
+        "Ensuring flox deps [{}] (manifest: {})",
+        names.join(", "),
+        env.manifest_path.display()
+    );
+    Ok(Some(env))
+}
+
+fn collect_flox_packages(
+    cfg: &Config,
+    deps: &[(String, FloxInstallSpec)],
+) -> Vec<(String, FloxInstallSpec)> {
+    let mut merged = std::collections::BTreeMap::new();
+    if let Some(flox) = &cfg.flox {
+        for (name, spec) in &flox.install {
+            merged.insert(name.clone(), spec.clone());
+        }
+    }
+
+    for (name, spec) in deps {
+        merged.insert(name.clone(), spec.clone());
+    }
+
+    merged.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DependencySpec;
+    use crate::config::{DependencySpec, FloxConfig};
     use std::path::Path;
 
     #[test]
@@ -309,7 +395,7 @@ mod tests {
             description: None,
             shortcuts: Vec::new(),
         };
-        let err = execute_task(&task, Path::new(".")).unwrap_err();
+        let err = execute_task(&task, Path::new("."), None).unwrap_err();
         assert!(
             err.to_string().contains("empty command"),
             "unexpected error: {err:?}"
@@ -335,11 +421,75 @@ mod tests {
             shortcuts: Vec::new(),
         };
 
-        let commands = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
+        let resolved =
+            resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
         assert_eq!(
-            commands,
+            resolved.commands,
             vec!["fast".to_string(), "rg".to_string(), "fd".to_string()]
         );
+        assert!(resolved.flox.is_empty());
+    }
+
+    #[test]
+    fn collects_flox_dependencies_from_dependency_table() {
+        let mut cfg = Config::default();
+        cfg.dependencies.insert(
+            "ripgrep".into(),
+            DependencySpec::Flox(FloxInstallSpec {
+                pkg_path: "ripgrep".into(),
+                pkg_group: None,
+                version: None,
+                systems: None,
+                priority: None,
+            }),
+        );
+
+        let task = TaskConfig {
+            name: "search".into(),
+            command: "rg TODO".into(),
+            activate_on_cd_to_root: false,
+            dependencies: vec!["ripgrep".into()],
+            description: None,
+            shortcuts: Vec::new(),
+        };
+
+        let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
+        assert!(resolved.commands.is_empty());
+        assert_eq!(resolved.flox.len(), 1);
+        assert_eq!(resolved.flox[0].0, "ripgrep");
+        assert_eq!(resolved.flox[0].1.pkg_path, "ripgrep");
+    }
+
+    #[test]
+    fn collects_flox_dependencies_from_flox_config() {
+        let mut cfg = Config::default();
+        let mut install = std::collections::HashMap::new();
+        install.insert(
+            "node".to_string(),
+            FloxInstallSpec {
+                pkg_path: "nodejs".into(),
+                pkg_group: None,
+                version: None,
+                systems: None,
+                priority: None,
+            },
+        );
+        cfg.flox = Some(FloxConfig { install });
+
+        let task = TaskConfig {
+            name: "dev".into(),
+            command: "npm start".into(),
+            activate_on_cd_to_root: false,
+            dependencies: vec!["node".into()],
+            description: None,
+            shortcuts: Vec::new(),
+        };
+
+        let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
+        assert!(resolved.commands.is_empty());
+        assert_eq!(resolved.flox.len(), 1);
+        assert_eq!(resolved.flox[0].0, "node");
+        assert_eq!(resolved.flox[0].1.pkg_path, "nodejs");
     }
 
     #[test]
@@ -356,8 +506,7 @@ mod tests {
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("declares dependencies but no [dependencies] table"),
+            err.to_string().contains("references unknown dependencies"),
             "unexpected error: {err:?}"
         );
     }

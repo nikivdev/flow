@@ -33,6 +33,11 @@ pub enum Commands {
         long_about = "Creates a starter flow.toml with stub tasks (setup, dev) so you can fill in commands later."
     )]
     Init(InitOpts),
+    #[command(
+        about = "Verify required tools and shell integrations.",
+        long_about = "Checks for flox (for managed deps), lin (hub helper), and direnv + shell hook presence."
+    )]
+    Doctor(DoctorOpts),
     /// Execute a specific project task (hidden; used by the palette and task shortcuts).
     #[command(hide = true)]
     Run(TaskRunOpts),

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use shellexpand::tilde;
 
 /// Top-level configuration for flowd, currently focused on managed servers.
@@ -21,7 +21,7 @@ pub struct Config {
     pub remote_servers: Vec<RemoteServerConfig>,
     #[serde(default)]
     pub tasks: Vec<TaskConfig>,
-    #[serde(default)]
+    #[serde(default, alias = "deps")]
     pub dependencies: HashMap<String, DependencySpec>,
     #[serde(default, alias = "alias", deserialize_with = "deserialize_aliases")]
     pub aliases: HashMap<String, String>,
@@ -29,6 +29,8 @@ pub struct Config {
     pub command_files: Vec<CommandFileConfig>,
     #[serde(default)]
     pub storage: Option<StorageConfig>,
+    #[serde(default)]
+    pub flox: Option<FloxConfig>,
     #[serde(default, alias = "watcher", alias = "always-run")]
     pub watchers: Vec<WatcherConfig>,
     #[serde(default)]
@@ -49,6 +51,7 @@ impl Default for Config {
             aliases: HashMap::new(),
             command_files: Vec::new(),
             storage: None,
+            flox: None,
             watchers: Vec::new(),
             stream: None,
             server_hub: None,
@@ -195,6 +198,8 @@ pub enum DependencySpec {
     Single(String),
     /// Multiple commands that should be checked together.
     Multiple(Vec<String>),
+    /// Flox package descriptor that should be added to the local env manifest.
+    Flox(FloxInstallSpec),
 }
 
 fn deserialize_shortcuts<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
@@ -256,6 +261,27 @@ pub struct StorageVariable {
     pub key: String,
     #[serde(default)]
     pub default: Option<String>,
+}
+
+/// Flox manifest-style configuration (install set, etc.).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct FloxConfig {
+    #[serde(default, rename = "install", alias = "deps")]
+    pub install: HashMap<String, FloxInstallSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FloxInstallSpec {
+    #[serde(rename = "pkg-path")]
+    pub pkg_path: String,
+    #[serde(default, rename = "pkg-group")]
+    pub pkg_group: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub systems: Option<Vec<String>>,
+    #[serde(default)]
+    pub priority: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -397,6 +423,7 @@ impl DependencySpec {
         match self {
             DependencySpec::Single(cmd) => buffer.push(cmd.clone()),
             DependencySpec::Multiple(cmds) => buffer.extend(cmds.iter().cloned()),
+            DependencySpec::Flox(_) => {}
         }
     }
 }
@@ -526,6 +553,15 @@ fn merge_config(base: &mut Config, other: Config) {
     }
     for (key, value) in other.dependencies {
         base.dependencies.entry(key).or_insert(value);
+    }
+    match (&mut base.flox, other.flox) {
+        (Some(base_flox), Some(other_flox)) => {
+            for (key, value) in other_flox.install {
+                base_flox.install.entry(key).or_insert(value);
+            }
+        }
+        (None, Some(other_flox)) => base.flox = Some(other_flox),
+        _ => {}
     }
 }
 
@@ -764,6 +800,33 @@ dependencies = ["fast", "toolkit"]
             }
             other => panic!("toolkit dependency variant mismatch: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_flox_dependencies_and_config() {
+        let contents = r#"
+[dependencies]
+rg.pkg-path = "ripgrep"
+
+[flox.deps]
+fd.pkg-path = "fd"
+"#;
+
+        let cfg: Config = toml::from_str(contents).expect("config with flox deps should parse");
+
+        match cfg.dependencies.get("rg") {
+            Some(DependencySpec::Flox(spec)) => {
+                assert_eq!(spec.pkg_path, "ripgrep");
+            }
+            other => panic!("unexpected dependency variant: {other:?}"),
+        }
+
+        let flox = cfg.flox.expect("flox config should exist");
+        let fd = flox
+            .install
+            .get("fd")
+            .expect("fd install should be present");
+        assert_eq!(fd.pkg_path, "fd");
     }
 
     #[test]

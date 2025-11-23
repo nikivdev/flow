@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config;
 pub mod doctor;
+pub mod flox;
 pub mod hub;
 pub mod init;
 pub mod palette;
