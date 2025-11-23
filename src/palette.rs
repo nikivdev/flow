@@ -1,40 +1,25 @@
 use std::{
     io::Write,
+    path::PathBuf,
     process::{Command, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
 
-use crate::{cli::TasksOpts, config::TaskConfig, tasks::load_project_config};
+use crate::{
+    cli::TasksOpts,
+    config::{self, TaskConfig},
+};
 
 pub fn run(opts: TasksOpts) -> Result<()> {
-    let (config_path, cfg) = load_project_config(opts.config)?;
-    let config_arg = config_path.display().to_string();
+    let entries = build_entries(Some(opts))?;
+    present(entries)
+}
 
-    let mut entries = builtin_entries(&config_arg, !cfg.aliases.is_empty());
-    for task in &cfg.tasks {
-        entries.push(PaletteEntry::from_task(task, &config_arg));
-    }
-
-    if entries.is_empty() {
-        println!("No commands or tasks available. Add entries to flow.toml.");
-        return Ok(());
-    }
-
-    if which::which("fzf").is_err() {
-        println!("fzf not found on PATH – install it to use fuzzy selection.");
-        println!("Available commands:");
-        for entry in &entries {
-            println!("  {}", entry.display);
-        }
-        return Ok(());
-    }
-
-    if let Some(selected) = run_fzf(&entries)? {
-        run_entry(selected)?;
-    }
-
-    Ok(())
+/// Show global commands/tasks only (no project flow.toml required).
+pub fn run_global() -> Result<()> {
+    let entries = build_entries(None)?;
+    present(entries)
 }
 
 fn run_fzf<'a>(entries: &'a [PaletteEntry]) -> Result<Option<&'a PaletteEntry>> {
@@ -87,6 +72,28 @@ fn run_entry(entry: &PaletteEntry) -> Result<()> {
     }
 }
 
+fn present(entries: Vec<PaletteEntry>) -> Result<()> {
+    if entries.is_empty() {
+        println!("No commands or tasks available. Add entries to flow.toml or global config.");
+        return Ok(());
+    }
+
+    if which::which("fzf").is_err() {
+        println!("fzf not found on PATH – install it to use fuzzy selection.");
+        println!("Available commands:");
+        for entry in &entries {
+            println!("  {}", entry.display);
+        }
+        return Ok(());
+    }
+
+    if let Some(selected) = run_fzf(&entries)? {
+        run_entry(selected)?;
+    }
+
+    Ok(())
+}
+
 struct PaletteEntry {
     display: String,
     exec: Vec<String>,
@@ -117,27 +124,69 @@ impl PaletteEntry {
     }
 }
 
-fn builtin_entries(config_arg: &str, has_aliases: bool) -> Vec<PaletteEntry> {
-    let mut entries = vec![
-        PaletteEntry::new("[cmd] hub – ensure daemon is running", vec!["hub".into()]),
-        PaletteEntry::new("[cmd] daemon – start HTTP daemon", vec!["daemon".into()]),
-        PaletteEntry::new("[cmd] screen – preview frames", vec!["screen".into()]),
-        PaletteEntry::new(
-            "[cmd] servers – inspect managed servers",
-            vec!["servers".into()],
-        ),
-        PaletteEntry::new(
-            "[cmd] tasks – list project tasks",
-            vec!["tasks".into(), "--config".into(), config_arg.to_string()],
-        ),
-    ];
+fn build_entries(project_opts: Option<TasksOpts>) -> Result<Vec<PaletteEntry>> {
+    let mut entries = Vec::new();
+    let global_cfg = load_if_exists(config::default_config_path())?;
+    let mut has_project = false;
 
-    if has_aliases {
-        entries.push(PaletteEntry::new(
-            "[cmd] setup – emit shell aliases",
-            vec!["setup".into(), "--config".into(), config_arg.to_string()],
-        ));
+    if let Some(opts) = project_opts {
+        if let Some((config_path, cfg)) = load_project_if_exists(opts)? {
+            has_project = true;
+            let config_arg = config_path.display().to_string();
+            for task in &cfg.tasks {
+                entries.push(PaletteEntry::from_task(task, &config_arg));
+            }
+        }
     }
 
+    if has_project {
+        return Ok(entries);
+    }
+
+    entries.extend(builtin_entries());
+
+    if let Some((global_path, cfg)) = global_cfg {
+        let arg = global_path.display().to_string();
+        for task in &cfg.tasks {
+            entries.push(PaletteEntry::from_task(task, &arg));
+        }
+    }
+
+    Ok(entries)
+}
+
+fn builtin_entries() -> Vec<PaletteEntry> {
+    let entries = vec![
+        PaletteEntry::new("[cmd] hub – ensure daemon is running", vec!["hub".into()]),
+        PaletteEntry::new("[cmd] search – global commands/tasks", vec!["search".into()]),
+        PaletteEntry::new("[cmd] init – scaffold flow.toml", vec!["init".into()]),
+    ];
+
     entries
+}
+
+fn load_if_exists(path: PathBuf) -> Result<Option<(PathBuf, config::Config)>> {
+    if path.exists() {
+        let cfg = config::load(&path)?;
+        Ok(Some((path, cfg)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn load_project_if_exists(opts: TasksOpts) -> Result<Option<(PathBuf, config::Config)>> {
+    let config_path = resolve_path(opts.config)?;
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    let cfg = config::load(&config_path)?;
+    Ok(Some((config_path, cfg)))
+}
+
+fn resolve_path(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
 }

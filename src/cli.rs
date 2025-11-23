@@ -18,72 +18,24 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     #[command(
-        hide = true,
-        about = "Run the Axum daemon so other processes can interact with it.",
-        long_about = "Boot the Axum-based daemon that powers flow. This exposes /health, /screen/latest, and /screen/stream endpoints and hosts any managed servers/watchers defined in your config."
+        about = "Fuzzy search global commands/tasks without a project flow.toml.",
+        long_about = "Browse global commands and tasks from your global flow config (e.g., ~/.config/flow/flow.toml). Useful when you are outside a project directory.",
+        alias = "s"
     )]
-    Daemon(DaemonOpts),
-    #[command(
-        hide = true,
-        about = "Generate a short mock preview of frames as if they were captured off the screen.",
-        long_about = "Preview mock screen frames directly in the terminal for quick FPS/buffer tuning without bringing up the daemon."
-    )]
-    Screen(ScreenOpts),
-    #[command(
-        about = "Inspect managed HTTP servers and view their logs in a TUI.",
-        long_about = "Connect to the running daemon (default 127.0.0.1:9050) and display managed servers in a terminal UI. Use arrow keys or j/k to navigate, Enter to toggle logs, and q to exit."
-    )]
-    Servers(ServersOpts),
+    Search,
     #[command(
         about = "Ensure the background hub daemon is running (spawns it if missing).",
         long_about = "Checks the /health endpoint on the configured host/port (defaults to 127.0.0.1:6000). If unreachable, a daemon is launched in the background using ~/.config/flow/config.toml, then a TUI opens so you can inspect managed servers and aggregated logs."
     )]
     Hub(HubCommand),
     #[command(
-        about = "Emit shell helpers (aliases) defined in flow.toml.",
-        long_about = "Print alias definitions derived from the current flow.toml so you can source them (e.g., eval \"$(f setup)\") inside your shell session."
+        about = "Scaffold a new flow.toml in the current directory.",
+        long_about = "Creates a starter flow.toml with stub tasks (setup, dev) so you can fill in commands later."
     )]
-    Setup(SetupOpts),
-    #[command(
-        about = "List project automation tasks defined in flow.toml.",
-        long_about = "Read the project flow.toml, render a numbered list of tasks plus their descriptions, and exit."
-    )]
-    Tasks(TasksOpts),
-    #[command(
-        about = "Execute a specific project task.",
-        long_about = "Look up the named task from flow.toml (respecting declared dependencies) and run its shell command."
-    )]
+    Init(InitOpts),
+    /// Execute a specific project task (hidden; used by the palette and task shortcuts).
+    #[command(hide = true)]
     Run(TaskRunOpts),
-    #[command(
-        about = "Manage remote environment secrets.",
-        long_about = "List configured secret environments and pull their values from a hosted or self-hosted Flow hub."
-    )]
-    Secrets(SecretsCommand),
-    #[command(
-        about = "Verify required dependencies and shell integrations.",
-        long_about = "Checks for tools like direnv and ensures your active shell sources the recommended hook so Flow tasks can auto-run when you cd into a repo."
-    )]
-    Doctor(DoctorOpts),
-    #[command(
-        about = "Run tasks flagged to auto-activate when entering the repo root.",
-        long_about = "Load flow.toml, find tasks with activate_on_cd_to_root = true, and run them sequentially (respecting dependency checks). Perfect for direnv or shell hooks that fire on cd."
-    )]
-    Activate(TaskActivateOpts),
-    #[command(
-        about = "Index the current repository with Codanna and store the stats snapshot.",
-        long_about = "Runs 'codanna index' for the current project, then captures 'codanna mcp get_index_info --json' and persists the payload to ~/.db/flow/flow.sqlite so other tools can consume it."
-    )]
-    Index(IndexOpts),
-    #[command(
-        about = "View logs emitted by managed servers",
-        long_about = "Fetch buffered logs (or stream live logs) from managed servers via the HTTP API."
-    )]
-    Logs(LogsOpts),
-    #[command(
-        about = "Inspect terminal tracing stream",
-        long_about = "Stream traced shell commands (start/end) or show the last command input/output when tracing is enabled."
-    )]
-    Trace(TraceOpts),
     /// Invoke tasks directly via `f <task>` without typing `run`.
     #[command(external_subcommand)]
     TaskShortcut(Vec<String>),
@@ -206,6 +158,13 @@ pub struct TaskActivateOpts {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorOpts {}
+
+#[derive(Args, Debug, Clone)]
+pub struct InitOpts {
+    /// Where to write the scaffolded flow.toml (defaults to ./flow.toml).
+    #[arg(long)]
+    pub path: Option<PathBuf>,
+}
 
 #[derive(Args, Debug, Clone)]
 pub struct HubCommand {
