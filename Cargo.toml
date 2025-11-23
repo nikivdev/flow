@@ -8,8 +8,8 @@ name = "f"
 path = "src/main.rs"
 
 [[bin]]
-name = "iris"
-path = "src/bin/iris.rs"
+name = "lin"
+path = "src/bin/lin.rs"
 
 [dependencies]
 axum = "0.7"
