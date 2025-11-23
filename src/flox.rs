@@ -100,27 +100,14 @@ pub fn run_in_env(env: &FloxEnv, workdir: &Path, command: &str) -> Result<()> {
         .with_context(|| "failed to spawn flox activate for task")?;
 
     if status.success() {
-        Ok(())
-    } else {
-        tracing::warn!(
-            status = ?status.code(),
-            "flox activate failed; falling back to host PATH"
-        );
-        let host_status = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(workdir)
-            .status()
-            .with_context(|| "failed to spawn command without flox")?;
-        if host_status.success() {
-            Ok(())
-        } else {
-            bail!(
-                "command exited with status {} after flox fallback",
-                host_status.code().unwrap_or(-1)
-            );
-        }
+        return Ok(());
     }
+
+    tracing::debug!(
+        status = ?status.code(),
+        "flox activate failed; running task with host PATH"
+    );
+    run_on_host(workdir, command)
 }
 
 fn write_env_json(project_root: &Path, manifest_path: &Path, lockfile_path: &Path) -> Result<()> {
@@ -156,6 +143,23 @@ fn write_env_json(project_root: &Path, manifest_path: &Path, lockfile_path: &Pat
     write_if_changed(&top_level, &top_level_contents)?;
     write_if_changed(&nested, &nested_contents)?;
     Ok(())
+}
+
+fn run_on_host(workdir: &Path, command: &str) -> Result<()> {
+    let host_status = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(workdir)
+        .status()
+        .with_context(|| "failed to spawn command without managed env")?;
+    if host_status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "command exited with status {}",
+            host_status.code().unwrap_or(-1)
+        );
+    }
 }
 
 fn render_manifest(packages: &[(String, FloxInstallSpec)]) -> Result<String> {
