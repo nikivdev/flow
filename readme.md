@@ -4,9 +4,15 @@
 
 The goal of this CLI is to first parse out `flow.toml` files like the one in [this repo](flow.toml).
 
-Install this CLI, for now have to manually compile this as we have not setup release builds yet.
+Install this CLI by building locally (no releases yet):
 
-But once you have `f` (also available as `flow`) CLI. Create `flow.toml` in some project with tasks like:
+```bash
+cargo build --bin f
+# Optional: build the bundled lin watcher/hub helper if you don't already have lin installed
+cargo build --bin lin
+```
+
+Once you have `f` (also available as `flow`) CLI, create `flow.toml` in some project with tasks like:
 
 ```
 [[tasks]]
@@ -16,6 +22,13 @@ description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
 ```
 
 And if you run `f` in the project it will fuzzy search through all tasks you can run. You can also run tasks with `f <task>`.
+
+## Commands
+
+- `f init` — scaffold a starter `flow.toml` in the current directory with stub `setup`/`dev` tasks.
+- `f` (or `f <task>`) — interactive picker / direct task execution when a local `flow.toml` exists.
+- `f search` / `f s` — fuzzy search global commands/tasks (falls back to `~/.config/flow/flow.toml` if present).
+- `f hub start|stop` — ensure the `lin` hub is running (or stop it). Use `f hub --help` for flags.
 
 ## Hub
 
@@ -42,26 +55,6 @@ Lightweight CLI that reads project-local `flow.toml` files, surfaces tasks, and 
 - `lin` is the hub implementation; it reads `~/.config/lin/config.ts` (or `config.toml`) and owns servers/watchers/tracing.
 - Flow does not read `~/.config/flow/flow.toml` anymore; point `lin` at its config and keep it running (e.g., `lin -- daemon` or `lin hub start` if you use the helper).
 - Future Flow features will talk to the hub over HTTP instead of reimplementing those capabilities.
-
-### Installing
-
-No released binaries yet. Build locally:
-
-```bash
-cargo build --bin f
-```
-
-## Shell helpers
-
-Define aliases in `flow.toml` to speed up commands and load them with `f setup`:
-
-```toml
-[[alias]]
-fr = "f run"    # fuzzy search through tasks
-fc = "f commit" # run the "commit" task via the shorthand `f commit`
-```
-
-Apply them in a shell session via `eval "$(f setup)"`, or add the same expression to your shell rc file. After `f setup`, you can run tasks directly with `f <task>` (e.g. `f commit`) or via custom shell aliases such as `fr`/`fc`.
 
 ## Contributing
 
