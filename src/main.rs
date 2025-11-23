@@ -2,8 +2,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use flowd::{
     cli::{Cli, Commands, TaskRunOpts, TasksOpts},
-    doctor, hub, indexer, init_tracing, logs, palette, screen, secrets, server, servers_tui, setup,
-    tasks, trace,
+    hub, init, init_tracing, palette, tasks,
 };
 
 fn main() -> Result<()> {
@@ -11,46 +10,17 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Some(Commands::Daemon(opts)) => {
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(server::run(opts))?;
-        }
-        Some(Commands::Screen(opts)) => {
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(screen::preview(opts))?;
-        }
-        Some(Commands::Servers(opts)) => {
-            servers_tui::run(opts)?;
-        }
         Some(Commands::Hub(cmd)) => {
             hub::run(cmd)?;
         }
-        Some(Commands::Setup(opts)) => {
-            setup::run(opts)?;
-        }
-        Some(Commands::Doctor(opts)) => {
-            doctor::run(opts)?;
-        }
-        Some(Commands::Tasks(opts)) => {
-            tasks::list(opts)?;
-        }
-        Some(Commands::Activate(opts)) => {
-            tasks::activate(opts)?;
+        Some(Commands::Init(opts)) => {
+            init::run(opts)?;
         }
         Some(Commands::Run(opts)) => {
             tasks::run(opts)?;
         }
-        Some(Commands::Secrets(cmd)) => {
-            secrets::run(cmd)?;
-        }
-        Some(Commands::Index(opts)) => {
-            indexer::run(opts)?;
-        }
-        Some(Commands::Logs(opts)) => {
-            logs::run(opts)?;
-        }
-        Some(Commands::Trace(opts)) => {
-            trace::run(opts)?;
+        Some(Commands::Search) => {
+            palette::run_global()?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

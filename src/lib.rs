@@ -2,18 +2,9 @@ pub mod cli;
 pub mod config;
 pub mod doctor;
 pub mod hub;
-pub mod indexer;
-pub mod logs;
+pub mod init;
 pub mod palette;
-pub mod screen;
-pub mod secrets;
-pub mod server;
-pub mod servers;
-pub mod servers_tui;
-pub mod setup;
 pub mod tasks;
-pub mod terminal;
-pub mod trace;
 pub mod watchers;
 
 /// Initialize tracing with a default filter if `RUST_LOG` is unset.
