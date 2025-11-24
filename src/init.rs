@@ -39,10 +39,11 @@ pub fn run(opts: InitOpts) -> Result<()> {
 fn resolve_path(path: Option<PathBuf>) -> PathBuf {
     match path {
         Some(p) if p.is_absolute() => p,
-        Some(p) => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(p),
+        Some(p) => std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p),
         None => std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("flow.toml"),
     }
 }
-

@@ -4,6 +4,7 @@ use flowd::{
     cli::{Cli, Commands, TaskRunOpts, TasksOpts},
     doctor, hub, init, init_tracing, palette, tasks,
 };
+use std::net::IpAddr;
 
 fn main() -> Result<()> {
     init_tracing();
@@ -38,6 +39,9 @@ fn main() -> Result<()> {
             }
             tasks::run(TaskRunOpts {
                 config: TasksOpts::default().config,
+                delegate_to_hub: false,
+                hub_host: IpAddr::from([127, 0, 0, 1]),
+                hub_port: 9050,
                 name: task_name.clone(),
             })?;
         }

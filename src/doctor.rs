@@ -72,7 +72,10 @@ fn ensure_flox_available() -> Result<()> {
     // Heuristic: flox-managed env leaves a .flox directory or ~/.flox directory.
     let home = home_dir();
     if home.join(".flox").exists() {
-        println!("✅ flox environment directory detected at {}", home.join(".flox").display());
+        println!(
+            "✅ flox environment directory detected at {}",
+            home.join(".flox").display()
+        );
         return Ok(());
     }
 

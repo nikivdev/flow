@@ -40,7 +40,8 @@ pub fn ensure_env(project_root: &Path, packages: &[(String, FloxInstallSpec)]) -
         bail!("flox environment requested without any packages");
     }
 
-    let flox_bin = which::which("flox").context("flox is required to use [deps]; install flox and ensure it is on PATH")?;
+    let flox_bin = which::which("flox")
+        .context("flox is required to use [deps]; install flox and ensure it is on PATH")?;
 
     let env_dir = project_root.join(".flox").join("env");
     let manifest_path = env_dir.join("manifest.toml");
@@ -60,7 +61,10 @@ pub fn ensure_env(project_root: &Path, packages: &[(String, FloxInstallSpec)]) -
             .with_context(|| "failed to run 'flox lock-manifest'")?;
 
         if output.status.success() {
-            write_if_changed(&lockfile_path, String::from_utf8_lossy(&output.stdout).as_ref())?;
+            write_if_changed(
+                &lockfile_path,
+                String::from_utf8_lossy(&output.stdout).as_ref(),
+            )?;
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!("flox lock-manifest failed: {}", stderr.trim());
@@ -78,11 +82,7 @@ pub fn ensure_env(project_root: &Path, packages: &[(String, FloxInstallSpec)]) -
 
 /// Run a shell command inside the prepared flox environment.
 pub fn run_in_env(env: &FloxEnv, workdir: &Path, command: &str) -> Result<()> {
-    write_env_json(
-        &env.project_root,
-        &env.manifest_path,
-        &env.lockfile_path,
-    )?;
+    write_env_json(&env.project_root, &env.manifest_path, &env.lockfile_path)?;
 
     let flox_bin = which::which("flox").context("flox is required to run tasks with flox deps")?;
     let status = Command::new(&flox_bin)
@@ -138,8 +138,8 @@ fn write_env_json(project_root: &Path, manifest_path: &Path, lockfile_path: &Pat
 
     let top_level_contents = serde_json::to_string_pretty(&top_level_json)
         .context("failed to render top-level env.json")?;
-    let nested_contents = serde_json::to_string_pretty(&nested_json)
-        .context("failed to render nested env.json")?;
+    let nested_contents =
+        serde_json::to_string_pretty(&nested_json).context("failed to render nested env.json")?;
 
     write_if_changed(&top_level, &top_level_contents)?;
     write_if_changed(&nested, &nested_contents)?;

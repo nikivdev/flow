@@ -158,7 +158,10 @@ fn build_entries(project_opts: Option<TasksOpts>) -> Result<Vec<PaletteEntry>> {
 fn builtin_entries() -> Vec<PaletteEntry> {
     let entries = vec![
         PaletteEntry::new("[cmd] hub – ensure daemon is running", vec!["hub".into()]),
-        PaletteEntry::new("[cmd] search – global commands/tasks", vec!["search".into()]),
+        PaletteEntry::new(
+            "[cmd] search – global commands/tasks",
+            vec!["search".into()],
+        ),
         PaletteEntry::new("[cmd] init – scaffold flow.toml", vec!["init".into()]),
     ];
 

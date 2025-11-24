@@ -1,14 +1,19 @@
 use std::{
+    net::IpAddr,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use reqwest::blocking::Client;
+use serde_json::json;
 
 use crate::{
-    cli::{TaskActivateOpts, TaskRunOpts, TasksOpts},
+    cli::{HubAction, HubCommand, HubOpts, TaskActivateOpts, TaskRunOpts, TasksOpts},
     config::{self, Config, FloxInstallSpec, TaskConfig},
     flox::{self, FloxEnv},
+    hub,
 };
 
 pub fn list(opts: TasksOpts) -> Result<()> {
@@ -38,6 +43,20 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     };
     let resolved = resolve_task_dependencies(task, &cfg)?;
     let workdir = config_path.parent().unwrap_or(Path::new("."));
+
+    let should_delegate = opts.delegate_to_hub || task.delegate_to_hub;
+    if should_delegate {
+        match delegate_task_to_hub(task, &resolved, workdir, opts.hub_host, opts.hub_port) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                println!(
+                    "⚠️  Failed to delegate task '{}' to hub ({}); falling back to local execution.",
+                    task.name, err
+                );
+            }
+        }
+    }
+
     let flox_pkgs = collect_flox_packages(&cfg, &resolved.flox);
     if flox_pkgs.is_empty() {
         ensure_command_dependencies_available(&resolved.commands)?;
@@ -347,6 +366,93 @@ fn collect_flox_packages(
     merged.into_iter().collect()
 }
 
+fn delegate_task_to_hub(
+    task: &TaskConfig,
+    deps: &ResolvedDependencies,
+    workdir: &Path,
+    host: IpAddr,
+    port: u16,
+) -> Result<()> {
+    ensure_hub_running(host, port)?;
+    let url = format_task_submit_url(host, port);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("failed to construct HTTP client for hub delegation")?;
+
+    let flox_specs: Vec<_> = deps
+        .flox
+        .iter()
+        .map(|(name, spec)| json!({ "name": name, "spec": spec }))
+        .collect();
+
+    let payload = json!({
+        "task": {
+            "name": task.name,
+            "command": task.command,
+            "dependencies": {
+                "commands": deps.commands,
+                "flox": flox_specs,
+            },
+        },
+        "cwd": workdir.to_string_lossy(),
+        "flow_version": env!("CARGO_PKG_VERSION"),
+    });
+
+    let resp = client.post(&url).json(&payload).send().with_context(|| {
+        format!(
+            "failed to submit task to hub at {}",
+            format_addr(host, port)
+        )
+    })?;
+
+    let status = resp.status();
+    if status.is_success() {
+        println!(
+            "Delegated task '{}' to hub at {}",
+            task.name,
+            format_addr(host, port)
+        );
+        Ok(())
+    } else {
+        let body = resp.text().unwrap_or_default();
+        bail!(
+            "hub returned {} while delegating task '{}': {}",
+            status,
+            task.name,
+            body
+        );
+    }
+}
+
+fn ensure_hub_running(host: IpAddr, port: u16) -> Result<()> {
+    let opts = HubOpts {
+        host,
+        port,
+        config: None,
+        no_ui: true,
+    };
+    let cmd = HubCommand {
+        opts,
+        action: Some(HubAction::Start),
+    };
+    hub::run(cmd)
+}
+
+fn format_addr(host: IpAddr, port: u16) -> String {
+    match host {
+        IpAddr::V4(_) => format!("http://{host}:{port}"),
+        IpAddr::V6(_) => format!("http://[{host}]:{port}"),
+    }
+}
+
+fn format_task_submit_url(host: IpAddr, port: u16) -> String {
+    match host {
+        IpAddr::V4(_) => format!("http://{host}:{port}/tasks/run"),
+        IpAddr::V6(_) => format!("http://[{host}]:{port}/tasks/run"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +465,7 @@ mod tests {
             TaskConfig {
                 name: "lint".to_string(),
                 command: "golangci-lint run".to_string(),
+                delegate_to_hub: false,
                 activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: Some("Run lint checks".to_string()),
@@ -367,6 +474,7 @@ mod tests {
             TaskConfig {
                 name: "test".to_string(),
                 command: "gotestsum ./...".to_string(),
+                delegate_to_hub: false,
                 activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,
@@ -390,6 +498,7 @@ mod tests {
         let task = TaskConfig {
             name: "empty".into(),
             command: "".into(),
+            delegate_to_hub: false,
             activate_on_cd_to_root: false,
             dependencies: Vec::new(),
             description: None,
@@ -415,14 +524,14 @@ mod tests {
         let task = TaskConfig {
             name: "ci".into(),
             command: "ci".into(),
+            delegate_to_hub: false,
             activate_on_cd_to_root: false,
             dependencies: vec!["fast".into(), "toolkit".into()],
             description: None,
             shortcuts: Vec::new(),
         };
 
-        let resolved =
-            resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
+        let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
         assert_eq!(
             resolved.commands,
             vec!["fast".to_string(), "rg".to_string(), "fd".to_string()]
@@ -447,6 +556,7 @@ mod tests {
         let task = TaskConfig {
             name: "search".into(),
             command: "rg TODO".into(),
+            delegate_to_hub: false,
             activate_on_cd_to_root: false,
             dependencies: vec!["ripgrep".into()],
             description: None,
@@ -479,6 +589,7 @@ mod tests {
         let task = TaskConfig {
             name: "dev".into(),
             command: "npm start".into(),
+            delegate_to_hub: false,
             activate_on_cd_to_root: false,
             dependencies: vec!["node".into()],
             description: None,
@@ -498,6 +609,7 @@ mod tests {
         let task = TaskConfig {
             name: "ci".into(),
             command: "ci".into(),
+            delegate_to_hub: false,
             activate_on_cd_to_root: false,
             dependencies: vec!["unknown".into()],
             description: None,
@@ -519,6 +631,7 @@ mod tests {
         let task = TaskConfig {
             name: "ci".into(),
             command: "ci".into(),
+            delegate_to_hub: false,
             activate_on_cd_to_root: false,
             dependencies: vec!["unknown".into()],
             description: None,
@@ -539,6 +652,7 @@ mod tests {
             TaskConfig {
                 name: "deploy-cli-release".into(),
                 command: "echo deploy".into(),
+                delegate_to_hub: false,
                 activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,
@@ -547,6 +661,7 @@ mod tests {
             TaskConfig {
                 name: "dev-hub".into(),
                 command: "echo dev".into(),
+                delegate_to_hub: false,
                 activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,
@@ -574,6 +689,7 @@ mod tests {
             TaskConfig {
                 name: "deploy-cli-release".into(),
                 command: "echo deploy".into(),
+                delegate_to_hub: false,
                 activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,
@@ -582,6 +698,7 @@ mod tests {
             TaskConfig {
                 name: "deploy-core-runner".into(),
                 command: "echo runner".into(),
+                delegate_to_hub: false,
                 activate_on_cd_to_root: false,
                 dependencies: Vec::new(),
                 description: None,

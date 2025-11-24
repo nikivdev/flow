@@ -25,7 +25,7 @@ pub enum Commands {
     Search,
     #[command(
         about = "Ensure the background hub daemon is running (spawns it if missing).",
-        long_about = "Checks the /health endpoint on the configured host/port (defaults to 127.0.0.1:6000). If unreachable, a daemon is launched in the background using ~/.config/flow/config.toml, then a TUI opens so you can inspect managed servers and aggregated logs."
+        long_about = "Checks the /health endpoint on the configured host/port (defaults to 127.0.0.1:9050). If unreachable, a daemon is launched in the background using the lin runtime recorded via `lin register` (or PATH), then a TUI opens so you can inspect managed servers and aggregated logs."
     )]
     Hub(HubCommand),
     #[command(
@@ -149,6 +149,15 @@ pub struct TaskRunOpts {
     /// Path to the project flow config (flow.toml).
     #[arg(long, default_value = "flow.toml")]
     pub config: PathBuf,
+    /// Hand off the task to the hub daemon instead of running it locally.
+    #[arg(long)]
+    pub delegate_to_hub: bool,
+    /// Hub host to delegate tasks to (defaults to the local lin daemon).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub hub_host: IpAddr,
+    /// Hub port to delegate tasks to.
+    #[arg(long, default_value_t = 9050)]
+    pub hub_port: u16,
     /// Name of the task to execute.
     #[arg(value_name = "TASK")]
     pub name: String,
@@ -187,10 +196,10 @@ pub struct HubOpts {
     pub host: IpAddr,
 
     /// TCP port for the daemon's HTTP interface.
-    #[arg(long, default_value_t = 6000)]
+    #[arg(long, default_value_t = 9050)]
     pub port: u16,
 
-    /// Optional path to the global flow config (defaults to ~/.config/flow/config.toml).
+    /// Optional path to the lin hub config (defaults to lin's built-in lookup).
     #[arg(long)]
     pub config: Option<PathBuf>,
 

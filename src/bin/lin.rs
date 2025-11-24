@@ -11,8 +11,7 @@ use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer;
 
 use flowd::{
-    config,
-    init_tracing,
+    config, init_tracing,
     lin_runtime::{self, LinRuntime},
     watchers::WatchManager,
 };

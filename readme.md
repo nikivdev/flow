@@ -55,7 +55,7 @@ And if you run `f` in the project it will fuzzy search through all tasks you can
 
 There is component in flow that is a hub. It's a daemon that does things. Flow is not responsible for what the daemon does, all it does is it makes sure this daemon runs and in future perhaps auto heals or restarts as the idea is that the daemon should always be running.
 
-There is an implementation of such hub built in private called `lin`. Will be possible to use soon, for now it's being tested in private as there are bugs. The goal of lin is to declaratively specify servers to run and trace all terminal I/O. In future more.
+There is an implementation of such hub built in private called `lin`. Will be possible to use soon, for now it's being tested in private as there are bugs. The goal of lin is to declaratively specify servers to run and trace all terminal I/O. In future more. Flow keeps a pointer to your production lin binary at `~/.config/flow/hub-runtime.json` (written by `lin register`); `f hub start` health-checks `http://127.0.0.1:9050/health` and launches that registered binary in daemon mode (passing `--config` if you supply one). If you want to experiment with a dev build, run it on another port so Flow can keep the production copy alive on the default port.
 
 There are also plans for flow to handle communication between hubs. But flow will always try to abstract away the job of the actual hub to the hub itself as the hub can do many things. Right now it is assumed there is only 1 hub but in future there could be multiple hubs in theory.
 

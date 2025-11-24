@@ -1,10 +1,13 @@
 use std::{
     fs,
+    net::IpAddr,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use reqwest::blocking::Client;
 
 use crate::{
     cli::{HubAction, HubCommand, HubOpts},
@@ -25,34 +28,55 @@ pub fn run(cmd: HubCommand) -> Result<()> {
 }
 
 fn ensure_daemon(opts: HubOpts, runtime: &LinRuntime) -> Result<()> {
-    let config_path = opts.config.unwrap_or_else(config::default_config_path);
-    let cfg = config::load_or_default(&config_path);
+    let host = opts.host;
+    let port = opts.port;
+    let lin_config = opts.config.as_ref().map(|path| {
+        if path.is_absolute() {
+            path.clone()
+        } else {
+            config::expand_path(&path.to_string_lossy())
+        }
+    });
 
-    // If there is nothing to watch, bail early.
-    if cfg.watchers.is_empty() {
-        println!(
-            "No watchers defined in {}; lin hub will not be started.",
-            config_path.display()
-        );
+    if hub_healthy(host, port) {
+        if !opts.no_ui {
+            println!(
+                "Lin watcher daemon already running at {}",
+                format_addr(host, port)
+            );
+        }
         return Ok(());
     }
 
-    ensure_lin_running(runtime, &config_path, cfg.watchers.len())?;
-
-    if !opts.no_ui {
-        println!(
-            "Lin watcher daemon ensured with {} watcher(s) (config: {}).",
-            cfg.watchers.len(),
-            config_path.display()
-        );
+    if let Some(pid) = load_lin_pid()? {
+        if process_alive(pid)? {
+            terminate_process(pid).ok();
+        }
+        remove_lin_pid().ok();
     }
 
+    println!(
+        "Starting lin watcher daemon using {}{}",
+        runtime.binary.display(),
+        lin_config
+            .as_ref()
+            .map(|p| format!(" (config: {})", p.display()))
+            .unwrap_or_default()
+    );
+    start_lin_process(&runtime.binary, host, port, lin_config.as_deref())?;
+
+    if !opts.no_ui {
+        println!("Lin watcher daemon ensured at {}", format_addr(host, port));
+    }
     Ok(())
 }
 
 fn stop_daemon(runtime: &LinRuntime) -> Result<()> {
     stop_lin_process().ok();
-    println!("Lin hub stopped (if it was running) [{}]", runtime.binary.display());
+    println!(
+        "Lin hub stopped (if it was running) [{}]",
+        runtime.binary.display()
+    );
     Ok(())
 }
 fn ensure_hub_runtime() -> Result<LinRuntime> {
@@ -69,30 +93,23 @@ fn ensure_hub_runtime() -> Result<LinRuntime> {
     Ok(runtime)
 }
 
-fn ensure_lin_running(runtime: &LinRuntime, config_path: &Path, watcher_count: usize) -> Result<()> {
-    if watcher_count == 0 {
-        return Ok(());
-    }
-
-    if let Some(pid) = load_lin_pid()? {
-        if process_alive(pid)? {
-            return Ok(());
-        }
-        remove_lin_pid().ok();
-    }
-
-    println!(
-        "Starting lin watcher daemon ({} watcher{}) using {}",
-        watcher_count,
-        if watcher_count == 1 { "" } else { "s" },
-        config_path.display()
-    );
-    start_lin_process(&runtime.binary, config_path)
-}
-
-fn start_lin_process(binary: &Path, config_path: &Path) -> Result<()> {
+fn start_lin_process(
+    binary: &Path,
+    host: IpAddr,
+    port: u16,
+    config_path: Option<&Path>,
+) -> Result<()> {
     let mut cmd = Command::new(binary);
-    cmd.arg("--config").arg(config_path);
+    cmd.arg("daemon")
+        .arg("--host")
+        .arg(host.to_string())
+        .arg("--port")
+        .arg(port.to_string());
+
+    if let Some(path) = config_path {
+        cmd.arg("--config").arg(path);
+    }
+
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -128,11 +145,7 @@ fn load_lin_pid() -> Result<Option<u32>> {
     let contents =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let pid: u32 = contents.trim().parse().ok().unwrap_or(0);
-    if pid == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(pid))
-    }
+    if pid == 0 { Ok(None) } else { Ok(Some(pid)) }
 }
 
 fn persist_lin_pid(pid: u32) -> Result<()> {
@@ -152,6 +165,38 @@ fn remove_lin_pid() -> Result<()> {
         fs::remove_file(path).ok();
     }
     Ok(())
+}
+
+fn hub_healthy(host: IpAddr, port: u16) -> bool {
+    let url = format_health_url(host, port);
+    let client = Client::builder()
+        .timeout(Duration::from_millis(750))
+        .build();
+
+    let Ok(client) = client else {
+        return false;
+    };
+
+    client
+        .get(url)
+        .send()
+        .and_then(|resp| resp.error_for_status())
+        .map(|_| true)
+        .unwrap_or(false)
+}
+
+fn format_addr(host: IpAddr, port: u16) -> String {
+    match host {
+        IpAddr::V4(_) => format!("http://{host}:{port}"),
+        IpAddr::V6(_) => format!("http://[{host}]:{port}"),
+    }
+}
+
+fn format_health_url(host: IpAddr, port: u16) -> String {
+    match host {
+        IpAddr::V4(_) => format!("http://{host}:{port}/health"),
+        IpAddr::V6(_) => format!("http://[{host}]:{port}/health"),
+    }
 }
 
 fn process_alive(pid: u32) -> Result<bool> {

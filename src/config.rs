@@ -171,6 +171,9 @@ pub struct TaskConfig {
     pub name: String,
     /// Shell command that should be executed for this task.
     pub command: String,
+    /// Whether this task should be handed off to the hub daemon instead of running locally.
+    #[serde(default, rename = "delegate-to-hub", alias = "delegate_to_hub")]
+    pub delegate_to_hub: bool,
     /// Whether this task should run automatically when entering the project root.
     #[serde(default)]
     pub activate_on_cd_to_root: bool,
