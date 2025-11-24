@@ -115,15 +115,16 @@ fn write_env_json(project_root: &Path, manifest_path: &Path, lockfile_path: &Pat
     let top_level = flox_root.join("env.json");
     let nested = flox_root.join("env").join("env.json");
 
-    let top_level_json = EnvJson {
-        version: ENV_VERSION,
-        manifest: "env/manifest.toml".to_string(),
-        lockfile: "env/manifest.lock".to_string(),
-    };
     let nested_json = EnvJson {
         version: ENV_VERSION,
         manifest: manifest_path.to_string_lossy().to_string(),
         lockfile: lockfile_path.to_string_lossy().to_string(),
+    };
+    // top-level env.json with relative paths for flox CLI expectations
+    let top_level_json = EnvJson {
+        version: ENV_VERSION,
+        manifest: "env/manifest.toml".to_string(),
+        lockfile: "env/manifest.lock".to_string(),
     };
 
     if let Some(parent) = top_level.parent() {

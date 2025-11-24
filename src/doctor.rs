@@ -7,11 +7,26 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::DoctorOpts;
+use crate::{cli::DoctorOpts, lin_runtime};
 
 /// Ensure the lin watcher daemon is available, prompting to install a bundled
 /// copy if it is missing from PATH. Returns the resolved binary path.
 pub fn ensure_lin_available_interactive() -> Result<PathBuf> {
+    if let Ok(Some(runtime)) = lin_runtime::load_runtime() {
+        if runtime.binary.exists() {
+            println!(
+                "✅ lin watcher daemon registered at {}",
+                runtime.binary.display()
+            );
+            return Ok(runtime.binary);
+        } else {
+            println!(
+                "⚠️  Registered lin binary at {} is missing; falling back to PATH lookup.",
+                runtime.binary.display()
+            );
+        }
+    }
+
     if let Ok(path) = which::which("lin") {
         println!("✅ lin watcher daemon found at {}", path.display());
         return Ok(path);

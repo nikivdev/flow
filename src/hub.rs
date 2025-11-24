@@ -5,11 +5,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
 
 use crate::{
     cli::{HubAction, HubCommand, HubOpts},
     config, doctor,
+    lin_runtime::{self, LinRuntime},
 };
 
 /// Flow acts as a thin launcher that makes sure the lin hub daemon is running.
@@ -24,7 +24,7 @@ pub fn run(cmd: HubCommand) -> Result<()> {
     }
 }
 
-fn ensure_daemon(opts: HubOpts, runtime: &HubRuntime) -> Result<()> {
+fn ensure_daemon(opts: HubOpts, runtime: &LinRuntime) -> Result<()> {
     let config_path = opts.config.unwrap_or_else(config::default_config_path);
     let cfg = config::load_or_default(&config_path);
 
@@ -50,78 +50,26 @@ fn ensure_daemon(opts: HubOpts, runtime: &HubRuntime) -> Result<()> {
     Ok(())
 }
 
-fn stop_daemon(runtime: &HubRuntime) -> Result<()> {
+fn stop_daemon(runtime: &LinRuntime) -> Result<()> {
     stop_lin_process().ok();
     println!("Lin hub stopped (if it was running) [{}]", runtime.binary.display());
     Ok(())
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HubRuntime {
-    binary: PathBuf,
-    version: Option<String>,
-}
-
-fn ensure_hub_runtime() -> Result<HubRuntime> {
-    if let Some(existing) = load_hub_runtime()? {
+fn ensure_hub_runtime() -> Result<LinRuntime> {
+    if let Some(existing) = lin_runtime::load_runtime()? {
         return Ok(existing);
     }
 
-    let runtime = prompt_hub_runtime()?;
-    persist_hub_runtime(&runtime)?;
+    let binary = doctor::ensure_lin_available_interactive()?;
+    let runtime = LinRuntime {
+        version: lin_runtime::detect_binary_version(&binary),
+        binary,
+    };
+    lin_runtime::persist_runtime(&runtime)?;
     Ok(runtime)
 }
 
-fn prompt_hub_runtime() -> Result<HubRuntime> {
-    let binary = doctor::ensure_lin_available_interactive()?;
-    Ok(HubRuntime {
-        version: detect_binary_version(&binary),
-        binary,
-    })
-}
-
-fn detect_binary_version(path: &Path) -> Option<String> {
-    Command::new(path)
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .map(|s| s.trim().to_string())
-}
-
-fn hub_runtime_path() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".config/flow/hub-runtime.json")
-    } else {
-        PathBuf::from(".config/flow/hub-runtime.json")
-    }
-}
-
-fn load_hub_runtime() -> Result<Option<HubRuntime>> {
-    let path = hub_runtime_path();
-    if !path.exists() {
-        return Ok(None);
-    }
-    let contents =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let runtime: HubRuntime = serde_json::from_str(&contents)
-        .with_context(|| format!("failed to parse hub runtime at {}", path.display()))?;
-    Ok(Some(runtime))
-}
-
-fn persist_hub_runtime(runtime: &HubRuntime) -> Result<()> {
-    let path = hub_runtime_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let payload = serde_json::to_string_pretty(runtime)
-        .context("failed to serialize hub runtime selection")?;
-    fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn ensure_lin_running(runtime: &HubRuntime, config_path: &Path, watcher_count: usize) -> Result<()> {
+fn ensure_lin_running(runtime: &LinRuntime, config_path: &Path, watcher_count: usize) -> Result<()> {
     if watcher_count == 0 {
         return Ok(());
     }
