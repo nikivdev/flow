@@ -3,6 +3,7 @@ pub mod config;
 pub mod doctor;
 pub mod flox;
 pub mod hub;
+pub mod lin_runtime;
 pub mod init;
 pub mod palette;
 pub mod tasks;

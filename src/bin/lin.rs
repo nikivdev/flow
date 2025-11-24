@@ -6,11 +6,16 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer;
 
-use flowd::{config, init_tracing, watchers::WatchManager};
+use flowd::{
+    config,
+    init_tracing,
+    lin_runtime::{self, LinRuntime},
+    watchers::WatchManager,
+};
 
 /// Standalone watcher daemon that mirrors the watch config from flow.
 #[derive(Parser, Debug)]
@@ -21,27 +26,35 @@ use flowd::{config, init_tracing, watchers::WatchManager};
     arg_required_else_help = false
 )]
 struct LinCli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to the flow config TOML (defaults to ~/.config/flow/flow.toml).
-    #[arg(long)]
+    #[arg(long, global = true)]
     config: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Command {
+    /// Run the watcher daemon (default if no subcommand is provided).
+    Daemon,
+    /// Register this lin binary so `flow` can launch it automatically.
+    Register,
 }
 
 fn main() -> Result<()> {
     init_tracing();
 
     let cli = LinCli::parse();
-    let config_path = cli
-        .config
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                config::expand_path(&path.to_string_lossy())
-            }
-        })
-        .unwrap_or_else(config::default_config_path);
+    let command = cli.command.unwrap_or(Command::Daemon);
 
-    run(config_path)
+    match command {
+        Command::Daemon => {
+            let config_path = resolve_config_path(cli.config);
+            run(config_path)
+        }
+        Command::Register => register_runtime(),
+    }
 }
 
 fn run(config_path: PathBuf) -> Result<()> {
@@ -82,6 +95,34 @@ fn run(config_path: PathBuf) -> Result<()> {
     drop(manager);
     tracing::info!("lin watcher daemon shutting down");
     Ok(())
+}
+
+fn register_runtime() -> Result<()> {
+    let binary = std::env::current_exe().context("failed to resolve current executable")?;
+    let runtime = LinRuntime {
+        version: lin_runtime::detect_binary_version(&binary),
+        binary: binary.clone(),
+    };
+
+    lin_runtime::persist_runtime(&runtime)?;
+    println!(
+        "Registered lin for flow at {}\nMetadata written to {}",
+        binary.display(),
+        lin_runtime::runtime_path().display()
+    );
+
+    Ok(())
+}
+
+fn resolve_config_path(raw: Option<PathBuf>) -> PathBuf {
+    raw.map(|path| {
+        if path.is_absolute() {
+            path
+        } else {
+            config::expand_path(&path.to_string_lossy())
+        }
+    })
+    .unwrap_or_else(config::default_config_path)
 }
 
 fn start_watchers(config_path: &Path) -> Result<Option<WatchManager>> {
