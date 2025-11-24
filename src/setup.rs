@@ -14,6 +14,9 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         if tasks::find_task(&cfg, "setup").is_some() {
             return tasks::run(TaskRunOpts {
                 config: config_path,
+                delegate_to_hub: false,
+                hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+                hub_port: 9050,
                 name: "setup".to_string(),
             });
         }

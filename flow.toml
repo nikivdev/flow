@@ -50,6 +50,7 @@ name = "commit"
 command = "fast commitPush"
 description = "Commit with AI"
 dependencies = ["fast"]        # references [dependencies].fast above
+delegate_to_hub = true
 
 [storage]
 provider = "1focus.ai"
