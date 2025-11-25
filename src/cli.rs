@@ -38,6 +38,11 @@ pub enum Commands {
         long_about = "Checks for flox (for managed deps), lin (hub helper), and direnv + shell hook presence."
     )]
     Doctor(DoctorOpts),
+    #[command(
+        about = "List tasks from the current project flow.toml (name + description).",
+        long_about = "Prints the tasks defined in the active flow.toml along with any descriptions, suitable for piping into a launcher."
+    )]
+    Tasks(TasksOpts),
     /// Execute a specific project task (hidden; used by the palette and task shortcuts).
     #[command(hide = true)]
     Run(TaskRunOpts),

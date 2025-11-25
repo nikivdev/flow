@@ -47,6 +47,7 @@ And if you run `f` in the project it will fuzzy search through all tasks you can
 ## Commands
 
 - `f init` — scaffold a starter `flow.toml` in the current directory with stub `setup`/`dev` tasks.
+- `f tasks` — list tasks from the current `flow.toml` (name + description).
 - `f` (or `f <task>`) — interactive picker / direct task execution when a local `flow.toml` exists.
 - `f search` / `f s` — fuzzy search global commands/tasks (falls back to `~/.config/flow/flow.toml` if present).
 - `f hub start|stop` — ensure the `lin` hub is running (or stop it). Use `f hub --help` for flags.

@@ -49,7 +49,7 @@ description = "Build the CLI/daemon with --release and copy the binary to ~/.loc
 name = "commit"
 command = "fast commitPush"
 description = "Commit with AI"
-dependencies = ["fast"]        # references [dependencies].fast above
+dependencies = ["fast"]
 delegate_to_hub = true
 
 [storage]
