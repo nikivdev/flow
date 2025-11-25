@@ -20,6 +20,9 @@ fn main() -> Result<()> {
         Some(Commands::Doctor(opts)) => {
             doctor::run(opts)?;
         }
+        Some(Commands::Tasks(opts)) => {
+            tasks::list(opts)?;
+        }
         Some(Commands::Run(opts)) => {
             tasks::run(opts)?;
         }
