@@ -68,10 +68,6 @@ install_from_binary_url() {
     chmod +x "${BIN_DIR}/f"
 }
 
-is_github_repo() {
-    [[ "${REPO_URL}" =~ ^https://github.com/[^/]+/[^/]+/?$ ]]
-}
-
 download_source_tarball() {
     need_cmd curl
     need_cmd tar
@@ -80,19 +76,22 @@ download_source_tarball() {
     local repo="$REPO_URL"
     repo="${repo%/}"
     local tar_url=""
-    if is_github_repo; then
-        # Use codeload to avoid git auth prompts.
-        local owner_repo="${repo#https://github.com/}"
-        owner_repo="${owner_repo%.git}"
-        local owner="${owner_repo%%/*}"
-        local repo_name="${owner_repo#*/}"
-        if [[ -z "${owner}" || -z "${repo_name}" || "${repo_name}" == "${owner_repo}" ]]; then
-            fail "could not parse owner/repo from ${REPO_URL}"
-        fi
-        tar_url="https://codeload.github.com/${owner}/${repo_name}/tar.gz/${REF}"
-    else
-        fail "FLOW_REPO_URL must be a GitHub https URL when not using FLOW_BINARY_URL (got ${REPO_URL})"
-    fi
+    case "${repo}" in
+        https://github.com/*/*)
+            # Use codeload to avoid git auth prompts.
+            local owner_repo="${repo#https://github.com/}"
+            owner_repo="${owner_repo%.git}"
+            local owner="${owner_repo%%/*}"
+            local repo_name="${owner_repo#*/}"
+            if [[ -z "${owner}" || -z "${repo_name}" || "${repo_name}" == "${owner_repo}" ]]; then
+                fail "could not parse owner/repo from ${REPO_URL}"
+            fi
+            tar_url="https://codeload.github.com/${owner}/${repo_name}/tar.gz/${REF}"
+            ;;
+        *)
+            fail "FLOW_REPO_URL must be a GitHub https URL when not using FLOW_BINARY_URL (got ${REPO_URL})"
+            ;;
+    esac
 
     info "Downloading source tarball ${tar_url}"
     mkdir -p "${dest}"
