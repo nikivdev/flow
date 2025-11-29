@@ -82,10 +82,13 @@ download_source_tarball() {
     local tar_url=""
     if is_github_repo; then
         # Use codeload to avoid git auth prompts.
-        # shellcheck disable=SC2001
-        local owner repo_name
-        owner="$(echo "${repo}" | sed -E 's#https://github.com/([^/]+)/.*#\\1#')"
-        repo_name="$(echo "${repo}" | sed -E 's#https://github.com/[^/]+/([^/]+)#\\1#')"
+        local owner_repo="${repo#https://github.com/}"
+        owner_repo="${owner_repo%.git}"
+        local owner="${owner_repo%%/*}"
+        local repo_name="${owner_repo#*/}"
+        if [[ -z "${owner}" || -z "${repo_name}" || "${repo_name}" == "${owner_repo}" ]]; then
+            fail "could not parse owner/repo from ${REPO_URL}"
+        fi
         tar_url="https://codeload.github.com/${owner}/${repo_name}/tar.gz/${REF}"
     else
         fail "FLOW_REPO_URL must be a GitHub https URL when not using FLOW_BINARY_URL (got ${REPO_URL})"
