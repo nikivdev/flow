@@ -1,0 +1,49 @@
+project_name: flow
+
+before:
+  hooks:
+    - rustup default stable
+    - cargo install --locked cargo-zigbuild
+
+builds:
+  - id: f
+    builder: rust
+    binary: f
+    tool: cargo
+    command: zigbuild
+    flags:
+      - --release
+    targets:
+      - aarch64-apple-darwin
+      - x86_64-apple-darwin
+      - aarch64-unknown-linux-gnu
+      - x86_64-unknown-linux-gnu
+  - id: lin
+    builder: rust
+    binary: lin
+    tool: cargo
+    command: zigbuild
+    flags:
+      - --release
+    targets:
+      - aarch64-apple-darwin
+      - x86_64-apple-darwin
+      - aarch64-unknown-linux-gnu
+      - x86_64-unknown-linux-gnu
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds:
+      - f
+      - lin
+    files:
+      - LICENSE*
+      - README*
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+
+changelog:
+  sort: asc
