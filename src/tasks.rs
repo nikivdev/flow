@@ -1,18 +1,24 @@
 use std::{
+    fs,
+    io::{Read, Write},
     net::IpAddr,
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    process::{Command, ExitStatus, Stdio},
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde_json::json;
+use which::which;
 
 use crate::{
     cli::{HubAction, HubCommand, HubOpts, TaskActivateOpts, TaskRunOpts, TasksOpts},
     config::{self, Config, FloxInstallSpec, TaskConfig},
     flox::{self, FloxEnv},
+    history::{self, InvocationRecord},
     hub,
 };
 
@@ -44,10 +50,29 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     let resolved = resolve_task_dependencies(task, &cfg)?;
     let workdir = config_path.parent().unwrap_or(Path::new("."));
 
+    let command_str = task.command.trim().to_string();
     let should_delegate = opts.delegate_to_hub || task.delegate_to_hub;
     if should_delegate {
         match delegate_task_to_hub(task, &resolved, workdir, opts.hub_host, opts.hub_port) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                let mut record = InvocationRecord::new(
+                    workdir.display().to_string(),
+                    config_path.display().to_string(),
+                    &task.name,
+                    &command_str,
+                    false,
+                );
+                record.success = true;
+                record.status = Some(0);
+                record.output = format!(
+                    "delegated to hub at {}:{}",
+                    opts.hub_host, opts.hub_port
+                );
+                if let Err(err) = history::record(record) {
+                    tracing::warn!(?err, "failed to write task history");
+                }
+                return Ok(());
+            }
             Err(err) => {
                 println!(
                     "⚠️  Failed to delegate task '{}' to hub ({}); falling back to local execution.",
@@ -58,9 +83,11 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     }
 
     let flox_pkgs = collect_flox_packages(&cfg, &resolved.flox);
-    if flox_pkgs.is_empty() {
-        ensure_command_dependencies_available(&resolved.commands)?;
-    } else {
+    let flox_disabled_env = std::env::var_os("FLOW_DISABLE_FLOX").is_some();
+    let flox_disabled_marker = flox_disabled_marker(workdir).exists();
+    let flox_enabled = !flox_pkgs.is_empty() && !flox_disabled_env && !flox_disabled_marker;
+
+    if flox_enabled {
         println!(
             "Skipping host PATH checks; using managed deps [{}]",
             flox_pkgs
@@ -69,9 +96,15 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    } else {
+        if flox_disabled_env {
+            println!("FLOW_DISABLE_FLOX is set; running on host PATH");
+        } else if flox_disabled_marker {
+            println!("flox disabled for this project; remove .flox.disabled to re-enable");
+        }
+        ensure_command_dependencies_available(&resolved.commands)?;
     }
-    let flox_env = prepare_flox_env(workdir, &flox_pkgs)?;
-    execute_task(task, workdir, flox_env.as_ref())
+    execute_task(task, &config_path, workdir, &flox_pkgs, flox_enabled)
 }
 
 pub fn activate(opts: TaskActivateOpts) -> Result<()> {
@@ -108,10 +141,11 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
                 .join(", ")
         );
     }
-    let flox_env = prepare_flox_env(workdir, &flox_pkgs)?;
-
     for task in tasks {
-        execute_task(task, workdir, flox_env.as_ref())?;
+        let flox_disabled_env = std::env::var_os("FLOW_DISABLE_FLOX").is_some();
+        let flox_disabled_marker = flox_disabled_marker(workdir).exists();
+        let flox_enabled = !flox_pkgs.is_empty() && !flox_disabled_env && !flox_disabled_marker;
+        execute_task(task, &config_path, workdir, &flox_pkgs, flox_enabled)?;
     }
 
     Ok(())
@@ -136,32 +170,93 @@ fn resolve_path(path: PathBuf) -> Result<PathBuf> {
     }
 }
 
-fn execute_task(task: &TaskConfig, workdir: &Path, flox_env: Option<&FloxEnv>) -> Result<()> {
+fn execute_task(
+    task: &TaskConfig,
+    config_path: &Path,
+    workdir: &Path,
+    flox_pkgs: &[(String, FloxInstallSpec)],
+    flox_enabled: bool,
+) -> Result<()> {
     let command = task.command.trim();
     if command.is_empty() {
         bail!("task '{}' has an empty command", task.name);
     }
 
     println!("Running task '{}': {}", task.name, command);
-    if let Some(env) = flox_env {
-        flox::run_in_env(env, workdir, command)
-    } else {
-        let status = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(workdir)
-            .status()
-            .with_context(|| format!("failed to spawn command for task '{}'", task.name))?;
 
-        if status.success() {
-            Ok(())
-        } else {
-            bail!(
-                "task '{}' exited with status {}",
-                task.name,
-                status.code().unwrap_or(-1)
-            );
+    let mut record = InvocationRecord::new(
+        workdir.display().to_string(),
+        config_path.display().to_string(),
+        &task.name,
+        command,
+        !flox_pkgs.is_empty(),
+    );
+    let started = Instant::now();
+    let mut combined_output = String::new();
+    let status: ExitStatus;
+
+    let flox_disabled = flox_disabled_marker(workdir).exists();
+
+    if flox_pkgs.is_empty() || flox_disabled || !flox_enabled {
+        if (flox_disabled || !flox_enabled) && !flox_pkgs.is_empty() {
+            println!("flox disabled for this project; using host PATH");
+            combined_output.push_str("[flox disabled for project]\n");
         }
+        let (st, out) = run_host_command(workdir, command)?;
+        status = st;
+        combined_output.push_str(&out);
+    } else {
+        match run_flox_with_reset(flox_pkgs, workdir, command) {
+            Ok(Some((st, out))) => {
+                combined_output.push_str(&out);
+                if st.success() {
+                    status = st;
+                } else {
+                    println!(
+                        "flox activate failed (status {:?}); retrying on host PATH",
+                        st.code()
+                    );
+                    let (host_status, host_out) = run_host_command(workdir, command)?;
+                    combined_output
+                        .push_str("\n[flox activate failed; retried on host PATH]\n");
+                    combined_output.push_str(&host_out);
+                    status = host_status;
+                }
+            }
+            Ok(None) => {
+                println!("flox disabled after repeated errors; using host PATH");
+                combined_output.push_str("[flox disabled after errors]\n");
+                let (host_status, host_out) = run_host_command(workdir, command)?;
+                combined_output.push_str(&host_out);
+                status = host_status;
+            }
+            Err(err) => {
+                println!("flox activate failed ({err}); retrying on host PATH");
+                let (host_status, host_out) = run_host_command(workdir, command)?;
+                combined_output.push_str("\n[flox activate failed; retried on host PATH]\n");
+                combined_output.push_str(&host_out);
+                status = host_status;
+            }
+        }
+    }
+
+    record.duration_ms = started.elapsed().as_millis();
+    record.status = status.code();
+    record.success = status.success();
+    record.output = combined_output;
+
+    if let Err(err) = history::record(record) {
+        tracing::warn!(?err, "failed to write task history");
+    }
+
+    if status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "task '{}' exited with status {}",
+            task.name,
+            status.code().unwrap_or(-1)
+        );
     }
 }
 
@@ -249,6 +344,143 @@ fn generate_abbreviation(name: &str) -> Option<String> {
     if abbr.len() >= 2 { Some(abbr) } else { None }
 }
 
+fn run_host_command(workdir: &Path, command: &str) -> Result<(ExitStatus, String)> {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c").arg(command).current_dir(workdir);
+    run_command_with_tee(cmd).with_context(|| "failed to spawn command without managed env")
+}
+
+fn run_flox_with_reset(
+    flox_pkgs: &[(String, FloxInstallSpec)],
+    workdir: &Path,
+    command: &str,
+) -> Result<Option<(ExitStatus, String)>> {
+    let mut combined_output = String::new();
+    let mut reset_done = false;
+
+    loop {
+        let env = flox::ensure_env(workdir, flox_pkgs)?;
+        match run_flox_command(&env, workdir, command) {
+            Ok((status, out)) => {
+                combined_output.push_str(&out);
+                if status.success() {
+                    return Ok(Some((status, combined_output)));
+                }
+                if !reset_done {
+                    reset_flox_env(workdir)?;
+                    combined_output
+                        .push_str("\n[flox activate failed; reset .flox and retrying]\n");
+                    reset_done = true;
+                    continue;
+                }
+                mark_flox_disabled(workdir, "flox activate repeatedly failed")?;
+                return Ok(None);
+            }
+            Err(err) => {
+                combined_output.push_str(&format!("[flox activate error: {err}]\n"));
+                if !reset_done {
+                    reset_flox_env(workdir)?;
+                    combined_output.push_str("[reset .flox and retrying]\n");
+                    reset_done = true;
+                    continue;
+                }
+                mark_flox_disabled(workdir, "flox activate error after reset")?;
+                return Ok(None);
+            }
+        }
+    }
+}
+
+fn run_flox_command(env: &FloxEnv, workdir: &Path, command: &str) -> Result<(ExitStatus, String)> {
+    let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
+    let mut cmd = Command::new(flox_bin);
+    cmd.arg("activate")
+        .arg("-d")
+        .arg(&env.project_root)
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(workdir);
+    run_command_with_tee(cmd).with_context(|| "failed to spawn flox activate for task")
+}
+
+fn run_command_with_tee(mut cmd: Command) -> Result<(ExitStatus, String)> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| "failed to spawn command")?;
+
+    let output = Arc::new(Mutex::new(String::new()));
+    let mut handles = Vec::new();
+
+    if let Some(stdout) = child.stdout.take() {
+        handles.push(tee_stream(stdout, std::io::stdout(), output.clone()));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        handles.push(tee_stream(stderr, std::io::stderr(), output.clone()));
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let status = child
+        .wait()
+        .with_context(|| "failed to wait for command completion")?;
+
+    let collected = output
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| String::new());
+
+    Ok((status, collected))
+}
+
+fn tee_stream<R, W>(mut reader: R, mut writer: W, buffer: Arc<Mutex<String>>) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            let read = match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+
+            let _ = writer.write_all(&chunk[..read]);
+            let _ = writer.flush();
+
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_str(&String::from_utf8_lossy(&chunk[..read]));
+            }
+        }
+    })
+}
+
+fn reset_flox_env(project_root: &Path) -> Result<()> {
+    let dir = project_root.join(".flox");
+    if dir.exists() {
+        fs::remove_dir_all(&dir)
+            .with_context(|| format!("failed to remove flox env at {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+fn flox_disabled_marker(project_root: &Path) -> PathBuf {
+    project_root.join(".flox.disabled")
+}
+
+fn mark_flox_disabled(project_root: &Path, reason: &str) -> Result<()> {
+    let marker = flox_disabled_marker(project_root);
+    fs::write(&marker, reason)
+        .with_context(|| format!("failed to write flox disable marker at {}", marker.display()))
+}
+
 #[derive(Debug, Default)]
 struct ResolvedDependencies {
     commands: Vec<String>,
@@ -328,24 +560,6 @@ fn dependency_help(command: &str) -> Option<&'static str> {
         ),
         _ => None,
     }
-}
-
-fn prepare_flox_env(
-    project_root: &Path,
-    deps: &[(String, FloxInstallSpec)],
-) -> Result<Option<FloxEnv>> {
-    if deps.is_empty() {
-        return Ok(None);
-    }
-
-    let env = flox::ensure_env(project_root, deps)?;
-    let names: Vec<_> = deps.iter().map(|(name, _)| name.as_str()).collect();
-    println!(
-        "Ensuring flox deps [{}] (manifest: {})",
-        names.join(", "),
-        env.manifest_path.display()
-    );
-    Ok(Some(env))
 }
 
 fn collect_flox_packages(

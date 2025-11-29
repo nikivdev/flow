@@ -1,6 +1,6 @@
 version = 1
 
-[dependencies]
+[deps]
 fast = "github.com/1focus-ai/fast"
 
 [flox]
@@ -44,6 +44,10 @@ description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
 name = "deploy-cli-release"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh"
 description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
+
+[[tasks]]
+name = "test-flow-task-tracing"
+command = "bun i-run.ts"
 
 [[tasks]]
 name = "commit"
