@@ -16,27 +16,27 @@
     {
       "attr_path": "cargo",
       "broken": false,
-      "derivation": "/nix/store/5r0l78j53v9vqvc8yb28kw4ml9wabivm-cargo-1.89.0.drv",
+      "derivation": "/nix/store/w8v6lw3wk5r7d1ki1q2whfn2m4wvhz10-cargo-1.91.1.drv",
       "description": "Downloads your Rust project's dependencies and builds your project",
       "install_id": "cargo",
       "license": "[ MIT, Apache-2.0 ]",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "name": "cargo-1.89.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "name": "cargo-1.91.1",
       "pname": "cargo",
-      "rev": "b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "rev_count": 888552,
-      "rev_date": "2025-11-02T19:18:41Z",
-      "scrape_date": "2025-11-04T00:35:18.202964Z",
+      "rev": "2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "rev_count": 903292,
+      "rev_date": "2025-11-27T11:14:36Z",
+      "scrape_date": "2025-11-29T03:00:18.659481Z",
       "stabilities": [
         "unstable"
       ],
       "unfree": false,
-      "version": "1.89.0",
+      "version": "1.91.1",
       "outputs_to_install": [
         "out"
       ],
       "outputs": {
-        "out": "/nix/store/f61dvjzzqj7c9xv07naqx6ga84vj10ip-cargo-1.89.0"
+        "out": "/nix/store/45b258b3av4kwr5pljhaghpkn2b076gp-cargo-1.91.1"
       },
       "system": "aarch64-darwin",
       "group": "toplevel",
@@ -45,27 +45,27 @@
     {
       "attr_path": "cargo",
       "broken": false,
-      "derivation": "/nix/store/9b48lwz5mva14p0p0m2m6xxcc4vq6yzg-cargo-1.89.0.drv",
+      "derivation": "/nix/store/52kja9770r3k85xj7xvm96fsbnvc4vv7-cargo-1.91.1.drv",
       "description": "Downloads your Rust project's dependencies and builds your project",
       "install_id": "cargo",
       "license": "[ MIT, Apache-2.0 ]",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "name": "cargo-1.89.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "name": "cargo-1.91.1",
       "pname": "cargo",
-      "rev": "b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "rev_count": 888552,
-      "rev_date": "2025-11-02T19:18:41Z",
-      "scrape_date": "2025-11-05T16:28:57.461564Z",
+      "rev": "2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "rev_count": 903292,
+      "rev_date": "2025-11-27T11:14:36Z",
+      "scrape_date": "2025-11-29T03:15:56.747434Z",
       "stabilities": [
         "unstable"
       ],
       "unfree": false,
-      "version": "1.89.0",
+      "version": "1.91.1",
       "outputs_to_install": [
         "out"
       ],
       "outputs": {
-        "out": "/nix/store/cp19l4m09lp45cm86ilvqpl1n1bwf5fz-cargo-1.89.0"
+        "out": "/nix/store/0dc8isk49j5nixxswvl8kdsvz8wvzah8-cargo-1.91.1"
       },
       "system": "aarch64-linux",
       "group": "toplevel",
@@ -74,27 +74,27 @@
     {
       "attr_path": "cargo",
       "broken": false,
-      "derivation": "/nix/store/9c96ifqn99sc26fyvrwgrl7217bn9qil-cargo-1.89.0.drv",
+      "derivation": "/nix/store/j26lwdqqqq82k0kq0jarn4g1dj6iwp9j-cargo-1.91.1.drv",
       "description": "Downloads your Rust project's dependencies and builds your project",
       "install_id": "cargo",
       "license": "[ MIT, Apache-2.0 ]",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "name": "cargo-1.89.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "name": "cargo-1.91.1",
       "pname": "cargo",
-      "rev": "b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "rev_count": 888552,
-      "rev_date": "2025-11-02T19:18:41Z",
-      "scrape_date": "2025-11-05T16:54:57.240090Z",
+      "rev": "2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "rev_count": 903292,
+      "rev_date": "2025-11-27T11:14:36Z",
+      "scrape_date": "2025-11-29T03:31:59.290482Z",
       "stabilities": [
         "unstable"
       ],
       "unfree": false,
-      "version": "1.89.0",
+      "version": "1.91.1",
       "outputs_to_install": [
         "out"
       ],
       "outputs": {
-        "out": "/nix/store/mdrdfm4q2076c8pp3gk798nzd6g0b5jn-cargo-1.89.0"
+        "out": "/nix/store/vc9ij5iq2ga02875g3i8dxz7mpa11ygf-cargo-1.91.1"
       },
       "system": "x86_64-darwin",
       "group": "toplevel",
@@ -103,27 +103,27 @@
     {
       "attr_path": "cargo",
       "broken": false,
-      "derivation": "/nix/store/cdxbvr8pkywshy5h5x1s8lcmxfmyks6b-cargo-1.89.0.drv",
+      "derivation": "/nix/store/msbpsqfhp12rpibgbrjgh8nnb7rxb78g-cargo-1.91.1.drv",
       "description": "Downloads your Rust project's dependencies and builds your project",
       "install_id": "cargo",
       "license": "[ MIT, Apache-2.0 ]",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "name": "cargo-1.89.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "name": "cargo-1.91.1",
       "pname": "cargo",
-      "rev": "b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "rev_count": 888552,
-      "rev_date": "2025-11-02T19:18:41Z",
-      "scrape_date": "2025-11-05T17:20:46.748193Z",
+      "rev": "2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "rev_count": 903292,
+      "rev_date": "2025-11-27T11:14:36Z",
+      "scrape_date": "2025-11-29T03:48:00.862571Z",
       "stabilities": [
         "unstable"
       ],
       "unfree": false,
-      "version": "1.89.0",
+      "version": "1.91.1",
       "outputs_to_install": [
         "out"
       ],
       "outputs": {
-        "out": "/nix/store/ynhfvh8h1da3l2hnm15ab2fh3h8a6lf4-cargo-1.89.0"
+        "out": "/nix/store/742kq790y4nd92s4l4arg7ij8h7is5ar-cargo-1.91.1"
       },
       "system": "x86_64-linux",
       "group": "toplevel",
@@ -132,17 +132,17 @@
     {
       "attr_path": "eza",
       "broken": false,
-      "derivation": "/nix/store/ss3p3m7s8nssrasnrzilihc64kg2gwra-eza-0.23.4.drv",
+      "derivation": "/nix/store/0s1hby9hbk2bfdhxh90jrzram5c1vdmp-eza-0.23.4.drv",
       "description": "Modern, maintained replacement for ls",
       "install_id": "eza",
       "license": "EUPL-1.2",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=2fad6eac6077f03fe109c4d4eb171cf96791faa4",
       "name": "eza-0.23.4",
       "pname": "eza",
-      "rev": "b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "rev_count": 888552,
-      "rev_date": "2025-11-02T19:18:41Z",
-      "scrape_date": "2025-11-04T00:35:18.828190Z",
+      "rev": "2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "rev_count": 903292,
+      "rev_date": "2025-11-27T11:14:36Z",
+      "scrape_date": "2025-11-29T03:00:19.389375Z",
       "stabilities": [
         "unstable"
       ],
@@ -153,8 +153,8 @@
         "out"
       ],
       "outputs": {
-        "man": "/nix/store/nnbrw0mzlsbh80yaaimsqdwrsn7b4h9r-eza-0.23.4-man",
-        "out": "/nix/store/6cq1zws9f99g6g1y9apxb87n0apcvxfw-eza-0.23.4"
+        "man": "/nix/store/p2l0dkhwiycpq2gs1hcqzbk3djcm8jk6-eza-0.23.4-man",
+        "out": "/nix/store/rqy1v1px7narahsl37yq7qchfnk7b0fg-eza-0.23.4"
       },
       "system": "aarch64-darwin",
       "group": "toplevel",
@@ -163,17 +163,17 @@
     {
       "attr_path": "eza",
       "broken": false,
-      "derivation": "/nix/store/j6b71mmgwy0q6lk5hpzd7krd39c4m98k-eza-0.23.4.drv",
+      "derivation": "/nix/store/pmrwnmlczxl4s6dg91ygiw2z11wazfvz-eza-0.23.4.drv",
       "description": "Modern, maintained replacement for ls",
       "install_id": "eza",
       "license": "EUPL-1.2",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=2fad6eac6077f03fe109c4d4eb171cf96791faa4",
       "name": "eza-0.23.4",
       "pname": "eza",
-      "rev": "b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "rev_count": 888552,
-      "rev_date": "2025-11-02T19:18:41Z",
-      "scrape_date": "2025-11-05T16:28:58.346191Z",
+      "rev": "2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "rev_count": 903292,
+      "rev_date": "2025-11-27T11:14:36Z",
+      "scrape_date": "2025-11-29T03:15:57.771793Z",
       "stabilities": [
         "unstable"
       ],
@@ -184,8 +184,8 @@
         "out"
       ],
       "outputs": {
-        "man": "/nix/store/83fd99qfiwxyb6ajvfc9mldmga65d6if-eza-0.23.4-man",
-        "out": "/nix/store/xni2d1haam2dshpk5h75xg1mzng3lmaj-eza-0.23.4"
+        "man": "/nix/store/kr6y7s2nxq0xzqa17d0sbsds3prlyrai-eza-0.23.4-man",
+        "out": "/nix/store/5ngi6pqhcg505n54365wfx96qk7chq7l-eza-0.23.4"
       },
       "system": "aarch64-linux",
       "group": "toplevel",
@@ -194,17 +194,17 @@
     {
       "attr_path": "eza",
       "broken": false,
-      "derivation": "/nix/store/nq0vxw5h85r3hby02269h1vk4jknfbzn-eza-0.23.4.drv",
+      "derivation": "/nix/store/rw1p38f5afcznf3lrlam0flqsc9zxzjb-eza-0.23.4.drv",
       "description": "Modern, maintained replacement for ls",
       "install_id": "eza",
       "license": "EUPL-1.2",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=2fad6eac6077f03fe109c4d4eb171cf96791faa4",
       "name": "eza-0.23.4",
       "pname": "eza",
-      "rev": "b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "rev_count": 888552,
-      "rev_date": "2025-11-02T19:18:41Z",
-      "scrape_date": "2025-11-05T16:54:57.875522Z",
+      "rev": "2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "rev_count": 903292,
+      "rev_date": "2025-11-27T11:14:36Z",
+      "scrape_date": "2025-11-29T03:32:00.019852Z",
       "stabilities": [
         "unstable"
       ],
@@ -215,8 +215,8 @@
         "out"
       ],
       "outputs": {
-        "man": "/nix/store/d9jx0g4d75yvh5y2rbq1w2b9a566c1x2-eza-0.23.4-man",
-        "out": "/nix/store/a7icr308lda4znhi7n0p1y2pwzcn6c4l-eza-0.23.4"
+        "man": "/nix/store/zlws95hx7v49cfkr2zm0ca4yp2q7ni0d-eza-0.23.4-man",
+        "out": "/nix/store/idqsr5rm00kzzk3fy307g68y8lqfacmx-eza-0.23.4"
       },
       "system": "x86_64-darwin",
       "group": "toplevel",
@@ -225,17 +225,17 @@
     {
       "attr_path": "eza",
       "broken": false,
-      "derivation": "/nix/store/mrk9c8fc85s87p1ya8s8nb5fips5is5p-eza-0.23.4.drv",
+      "derivation": "/nix/store/5bmgm6759318qpjqg0fnjypsamaa69vv-eza-0.23.4.drv",
       "description": "Modern, maintained replacement for ls",
       "install_id": "eza",
       "license": "EUPL-1.2",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=2fad6eac6077f03fe109c4d4eb171cf96791faa4",
       "name": "eza-0.23.4",
       "pname": "eza",
-      "rev": "b3d51a0365f6695e7dd5cdf3e180604530ed33b4",
-      "rev_count": 888552,
-      "rev_date": "2025-11-02T19:18:41Z",
-      "scrape_date": "2025-11-05T17:20:47.744290Z",
+      "rev": "2fad6eac6077f03fe109c4d4eb171cf96791faa4",
+      "rev_count": 903292,
+      "rev_date": "2025-11-27T11:14:36Z",
+      "scrape_date": "2025-11-29T03:48:02.037149Z",
       "stabilities": [
         "unstable"
       ],
@@ -246,8 +246,8 @@
         "out"
       ],
       "outputs": {
-        "man": "/nix/store/wv77mj059v7dj9bj78dw2zmfm8ra6h1m-eza-0.23.4-man",
-        "out": "/nix/store/jxi8ybh1r6bl9frbblsk5sg4vddy6099-eza-0.23.4"
+        "man": "/nix/store/q8vga5159q8iyhkpkkfkkj29f0w0s7fj-eza-0.23.4-man",
+        "out": "/nix/store/z1h5sg9kdhkfxycz590gjxsymv9xvn0x-eza-0.23.4"
       },
       "system": "x86_64-linux",
       "group": "toplevel",

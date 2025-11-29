@@ -33,6 +33,7 @@ notify-debouncer-mini = "0.4"
 shellexpand = "3"
 shell-words = "1.1"
 base64 = "0.22"
+strip-ansi-escapes = "0.1"
 
 [dev-dependencies]
 mockito = "1.7"
