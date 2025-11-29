@@ -7,10 +7,11 @@ set -euo pipefail
 #   FLOW_INSTALL_ROOT=/usr/local         # overrides install prefix (default: ~/.local)
 #   FLOW_BIN_DIR=/usr/local/bin          # overrides bin dir (defaults to <root>/bin)
 #   FLOW_REF=<git ref>                   # install a specific commit/tag/branch
+#   FLOW_REPO_URL=<repo url>             # override repo (default: https://github.com/nikivdev/flow)
 #   FLOW_BINARY_URL=<url>                # skip build; download a prebuilt f binary
 #   FLOW_INSTALL_LIN=0                   # skip installing the lin helper binary
 
-REPO_URL="https://github.com/nikiv/flow"
+REPO_URL="${FLOW_REPO_URL:-https://github.com/nikivdev/flow}"
 REF="${FLOW_REF:-}"
 INSTALL_LIN="${FLOW_INSTALL_LIN:-1}"
 
@@ -83,6 +84,7 @@ install_from_source() {
         args+=(--rev "${REF}")
     fi
 
+    export CARGO_NET_GIT_FETCH_WITH_CLI="${CARGO_NET_GIT_FETCH_WITH_CLI:-true}"
     cargo "${args[@]}"
 }
 

@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/nikiv/flow/main/scripts/install.sh 
 
 - macOS/Linux; needs `curl`, `git`, `cargo` (get Rust via https://rustup.rs if you don't have it).
 - Installs `f` and a `flow` symlink to `~/.local/bin` (override with `FLOW_BIN_DIR=/usr/local/bin`).
-- Options: `FLOW_REF=<tag/branch/sha>`, `FLOW_INSTALL_LIN=0` to skip `lin`, `FLOW_BINARY_URL=<url>` to supply a prebuilt `f`.
+- Options: `FLOW_REF=<tag/branch/sha>`, `FLOW_INSTALL_LIN=0` to skip `lin`, `FLOW_BINARY_URL=<url>` to supply a prebuilt `f`, `FLOW_REPO_URL=<repo>` if you need a different clone URL.
 - Ensure the bin dir is on `PATH` (e.g. `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`), then run `f --version`.
 
 Manual build remains available:
