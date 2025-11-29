@@ -7,12 +7,12 @@ The goal of this CLI is to first parse out `flow.toml` files like the one in [th
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nikiv/flow/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | bash
 ```
 
-- macOS/Linux; needs `curl`, `git`, `cargo` (get Rust via https://rustup.rs if you don't have it).
+- macOS/Linux; needs `curl`, `tar`, `cargo` (get Rust via https://rustup.rs if you don't have it). Git/credentials not required.
 - Installs `f` and a `flow` symlink to `~/.local/bin` (override with `FLOW_BIN_DIR=/usr/local/bin`).
-- Options: `FLOW_REF=<tag/branch/sha>`, `FLOW_INSTALL_LIN=0` to skip `lin`, `FLOW_BINARY_URL=<url>` to supply a prebuilt `f`, `FLOW_REPO_URL=<repo>` if you need a different clone URL.
+- Options: `FLOW_REF=<tag/branch/sha>` (defaults to `main`), `FLOW_INSTALL_LIN=0` to skip `lin`, `FLOW_BINARY_URL=<url>` to supply a prebuilt `f`, `FLOW_REPO_URL=<github repo>` to override source.
 - Ensure the bin dir is on `PATH` (e.g. `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`), then run `f --version`.
 
 Manual build remains available:

@@ -2,17 +2,17 @@
 set -euo pipefail
 
 # Installs flow/f to the current user. Usage:
-#   curl -fsSL https://raw.githubusercontent.com/nikiv/flow/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | bash
 # Customize with:
 #   FLOW_INSTALL_ROOT=/usr/local         # overrides install prefix (default: ~/.local)
 #   FLOW_BIN_DIR=/usr/local/bin          # overrides bin dir (defaults to <root>/bin)
-#   FLOW_REF=<git ref>                   # install a specific commit/tag/branch
+#   FLOW_REF=<git ref>                   # install a specific commit/tag/branch (default: main)
 #   FLOW_REPO_URL=<repo url>             # override repo (default: https://github.com/nikivdev/flow)
 #   FLOW_BINARY_URL=<url>                # skip build; download a prebuilt f binary
 #   FLOW_INSTALL_LIN=0                   # skip installing the lin helper binary
 
 REPO_URL="${FLOW_REPO_URL:-https://github.com/nikivdev/flow}"
-REF="${FLOW_REF:-}"
+REF="${FLOW_REF:-main}"
 INSTALL_LIN="${FLOW_INSTALL_LIN:-1}"
 
 fail() {
@@ -68,23 +68,50 @@ install_from_binary_url() {
     chmod +x "${BIN_DIR}/f"
 }
 
-install_from_source() {
+is_github_repo() {
+    [[ "${REPO_URL}" =~ ^https://github.com/[^/]+/[^/]+/?$ ]]
+}
+
+download_source_tarball() {
     need_cmd curl
-    need_cmd git
+    need_cmd tar
+    local dest="$1"
+
+    local repo="$REPO_URL"
+    repo="${repo%/}"
+    local tar_url=""
+    if is_github_repo; then
+        # Use codeload to avoid git auth prompts.
+        # shellcheck disable=SC2001
+        local owner repo_name
+        owner="$(echo "${repo}" | sed -E 's#https://github.com/([^/]+)/.*#\\1#')"
+        repo_name="$(echo "${repo}" | sed -E 's#https://github.com/[^/]+/([^/]+)#\\1#')"
+        tar_url="https://codeload.github.com/${owner}/${repo_name}/tar.gz/${REF}"
+    else
+        fail "FLOW_REPO_URL must be a GitHub https URL when not using FLOW_BINARY_URL (got ${REPO_URL})"
+    fi
+
+    info "Downloading source tarball ${tar_url}"
+    mkdir -p "${dest}"
+    curl -fsSL "${tar_url}" | tar -xz -C "${dest}" --strip-components=1
+}
+
+install_from_source() {
     need_cmd cargo
-
     mkdir -p "${BIN_DIR}"
-    info "Building flow from source with cargo (this may take a moment)..."
 
-    local args=(install --locked --force --git "${REPO_URL}" --root "${INSTALL_ROOT}" --bin f)
+    local tmp
+    tmp="$(mktemp -d)" || fail "failed to create temp dir"
+    trap 'rm -rf "${tmp}"' EXIT
+
+    download_source_tarball "${tmp}"
+
+    info "Building flow from source with cargo (this may take a moment)..."
+    local args=(install --locked --force --path "${tmp}" --root "${INSTALL_ROOT}" --bin f)
     if [[ "${INSTALL_LIN}" != "0" ]]; then
         args+=(--bin lin)
     fi
-    if [[ -n "${REF}" ]]; then
-        args+=(--rev "${REF}")
-    fi
 
-    export CARGO_NET_GIT_FETCH_WITH_CLI="${CARGO_NET_GIT_FETCH_WITH_CLI:-true}"
     cargo "${args[@]}"
 }
 
