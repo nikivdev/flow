@@ -6,14 +6,22 @@ set -euo pipefail
 # Customize with:
 #   FLOW_INSTALL_ROOT=/usr/local         # overrides install prefix (default: ~/.local)
 #   FLOW_BIN_DIR=/usr/local/bin          # overrides bin dir (defaults to <root>/bin)
-#   FLOW_REF=<git ref>                   # install a specific commit/tag/branch (default: main)
+#   FLOW_VERSION=<tag>                   # release version to fetch (default: latest release)
+#   FLOW_REF=<git ref>                   # fallback git ref for source build (default: main)
 #   FLOW_REPO_URL=<repo url>             # override repo (default: https://github.com/nikivdev/flow)
+#   FLOW_RELEASE_BASE=<base url>         # override release base (default: GitHub releases)
 #   FLOW_BINARY_URL=<url>                # skip build; download a prebuilt f binary
 #   FLOW_INSTALL_LIN=0                   # skip installing the lin helper binary
+#   FLOW_NO_RELEASE=1                    # force source build even if a release exists
 
 REPO_URL="${FLOW_REPO_URL:-https://github.com/nikivdev/flow}"
 REF="${FLOW_REF:-main}"
 INSTALL_LIN="${FLOW_INSTALL_LIN:-1}"
+RESOLVED_VERSION=""
+OS_NAME=""
+ARCH_NAME=""
+OWNER=""
+REPO_NAME=""
 
 fail() {
     echo "flow installer: $*" >&2
@@ -58,6 +66,42 @@ need_cmd() {
     command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+detect_platform() {
+    local uname_s uname_m
+    uname_s="$(uname -s)"
+    uname_m="$(uname -m)"
+
+    case "${uname_s}" in
+        Darwin) OS_NAME="darwin" ;;
+        Linux) OS_NAME="linux" ;;
+        *) fail "unsupported OS: ${uname_s}" ;;
+    esac
+
+    case "${uname_m}" in
+        arm64|aarch64) ARCH_NAME="arm64" ;;
+        x86_64|amd64) ARCH_NAME="amd64" ;;
+        *) fail "unsupported architecture: ${uname_m}" ;;
+    esac
+}
+
+parse_repo_url() {
+    local repo="${REPO_URL%/}"
+    repo="${repo%.git}"
+    case "${repo}" in
+        https://github.com/*/*)
+            repo="${repo#https://github.com/}"
+            OWNER="${repo%%/*}"
+            REPO_NAME="${repo#*/}"
+            if [[ -z "${OWNER}" || -z "${REPO_NAME}" || "${REPO_NAME}" == "${repo}" ]]; then
+                fail "could not parse owner/repo from ${REPO_URL}"
+            fi
+            ;;
+        *)
+            fail "FLOW_REPO_URL must be a GitHub https URL when not using FLOW_BINARY_URL (got ${REPO_URL})"
+            ;;
+    esac
+}
+
 install_from_binary_url() {
     local url="$1"
     need_cmd curl
@@ -68,30 +112,82 @@ install_from_binary_url() {
     chmod +x "${BIN_DIR}/f"
 }
 
+resolve_release_version() {
+    if [[ -n "${FLOW_VERSION:-}" ]]; then
+        RESOLVED_VERSION="${FLOW_VERSION}"
+        return
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        return
+    fi
+
+    local api="https://api.github.com/repos/${OWNER}/${REPO_NAME}/releases/latest"
+    local tag
+    tag="$(curl -fsSL "${api}" 2>/dev/null | sed -n 's/  *\"tag_name\" *: *\"\\(.*\\)\".*/\\1/p' | head -n1 || true)"
+    if [[ -n "${tag}" ]]; then
+        RESOLVED_VERSION="${tag}"
+    fi
+}
+
+install_from_release() {
+    local version="$1"
+    local asset="flow_${version}_${OS_NAME}_${ARCH_NAME}.tar.gz"
+    local base="${FLOW_RELEASE_BASE:-https://github.com/${OWNER}/${REPO_NAME}/releases/download}"
+    local url="${base}/${version}/${asset}"
+
+    need_cmd curl
+    need_cmd tar
+
+    info "Downloading release ${version} (${OS_NAME}/${ARCH_NAME})"
+    local tmp_tar
+    tmp_tar="$(mktemp)" || fail "failed to create temp file"
+    if ! curl -fsSL "${url}" -o "${tmp_tar}"; then
+        info "Release download failed; tried ${url}"
+        rm -f "${tmp_tar}"
+        return 1
+    fi
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d)" || fail "failed to create temp dir"
+
+    if ! tar -xzf "${tmp_tar}" -C "${tmp_dir}"; then
+        info "Failed to unpack release tarball"
+        rm -rf "${tmp_dir}" "${tmp_tar}"
+        return 1
+    fi
+
+    local extracted
+    extracted="$(find "${tmp_dir}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+    [[ -z "${extracted}" ]] && extracted="${tmp_dir}"
+
+    mkdir -p "${BIN_DIR}"
+    local copied=0
+    for bin in f lin; do
+        if [[ -f "${extracted}/${bin}" ]]; then
+            cp "${extracted}/${bin}" "${BIN_DIR}/${bin}"
+            chmod +x "${BIN_DIR}/${bin}"
+            copied=1
+        fi
+    done
+
+    rm -rf "${tmp_dir}" "${tmp_tar}"
+
+    if [[ "${copied}" -eq 0 ]]; then
+        info "Release tarball did not contain expected binaries"
+        return 1
+    fi
+
+    info "Installed release ${version} to ${BIN_DIR}"
+    return 0
+}
+
 download_source_tarball() {
     need_cmd curl
     need_cmd tar
     local dest="$1"
 
-    local repo="$REPO_URL"
-    repo="${repo%/}"
-    local tar_url=""
-    case "${repo}" in
-        https://github.com/*/*)
-            # Use codeload to avoid git auth prompts.
-            local owner_repo="${repo#https://github.com/}"
-            owner_repo="${owner_repo%.git}"
-            local owner="${owner_repo%%/*}"
-            local repo_name="${owner_repo#*/}"
-            if [[ -z "${owner}" || -z "${repo_name}" || "${repo_name}" == "${owner_repo}" ]]; then
-                fail "could not parse owner/repo from ${REPO_URL}"
-            fi
-            tar_url="https://codeload.github.com/${owner}/${repo_name}/tar.gz/${REF}"
-            ;;
-        *)
-            fail "FLOW_REPO_URL must be a GitHub https URL when not using FLOW_BINARY_URL (got ${REPO_URL})"
-            ;;
-    esac
+    local tar_url="https://codeload.github.com/${OWNER}/${REPO_NAME}/tar.gz/${REF}"
 
     info "Downloading source tarball ${tar_url}"
     mkdir -p "${dest}"
@@ -136,10 +232,20 @@ ensure_path_hint() {
 
 main() {
     resolve_paths
+    detect_platform
+    parse_repo_url
     info "Installing to ${BIN_DIR}"
 
     if [[ -n "${FLOW_BINARY_URL:-}" ]]; then
         install_from_binary_url "${FLOW_BINARY_URL}"
+    elif [[ -z "${FLOW_NO_RELEASE:-}" ]]; then
+        resolve_release_version
+        if [[ -n "${RESOLVED_VERSION}" ]] && install_from_release "${RESOLVED_VERSION}"; then
+            :
+        else
+            info "Falling back to source build (release not found or unavailable)."
+            install_from_source
+        fi
     else
         install_from_source
     fi

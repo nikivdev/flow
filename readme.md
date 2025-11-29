@@ -10,10 +10,10 @@ The goal of this CLI is to first parse out `flow.toml` files like the one in [th
 curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | bash
 ```
 
-- macOS/Linux; needs `curl`, `tar`, `cargo` (get Rust via https://rustup.rs if you don't have it). Git/credentials not required.
-- Installs `f` and a `flow` symlink to `~/.local/bin` (override with `FLOW_BIN_DIR=/usr/local/bin`).
-- Options: `FLOW_REF=<tag/branch/sha>` (defaults to `main`), `FLOW_INSTALL_LIN=0` to skip `lin`, `FLOW_BINARY_URL=<url>` to supply a prebuilt `f`, `FLOW_REPO_URL=<github repo>` to override source.
-- Ensure the bin dir is on `PATH` (e.g. `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`), then run `f --version`.
+- macOS/Linux. Needs `curl` + `tar`. Installs `f` and a `flow` symlink to `~/.local/bin` (set `FLOW_BIN_DIR=/usr/local/bin` to change).
+- Defaults to the latest GoReleaser binary; only falls back to building from source if a release isn’t found.
+- Optional envs: `FLOW_VERSION=vX.Y.Z` (pin), `FLOW_INSTALL_LIN=0` (skip lin), `FLOW_NO_RELEASE=1` (force source build).
+- Add the bin dir to PATH if needed (e.g. `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`), then run `f --version`.
 
 Manual build remains available:
 
@@ -22,6 +22,13 @@ cargo build --bin f
 # Optional: build the bundled lin watcher/hub helper if you don't already have lin installed
 cargo build --bin lin
 ```
+
+## Release builds (GoReleaser)
+
+- One-time deps: `brew install goreleaser zig` (or get binaries), `cargo install --locked cargo-zigbuild`, `rustup default stable`.
+- Quick local dry run: `goreleaser release --snapshot --clean`
+- Publish a tag: `git tag v0.1.0 && git push origin v0.1.0` then `GITHUB_TOKEN=... goreleaser release --clean` (or let CI run on the tag).
+- Outputs `flow_<version>_<os>_<arch>.tar.gz` + checksums for darwin/linux (amd64/arm64); installer pulls these by default.
 
 Once you have `f` (also available as `flow`) CLI, create `flow.toml` in some project with tasks like:
 
