@@ -49,6 +49,10 @@ pub enum Commands {
     /// Invoke tasks directly via `f <task>` without typing `run`.
     #[command(external_subcommand)]
     TaskShortcut(Vec<String>),
+    #[command(
+        about = "Show the last task run (command, status, and output) recorded by flow."
+    )]
+    LastCmd,
 }
 
 #[derive(Args, Debug, Clone)]

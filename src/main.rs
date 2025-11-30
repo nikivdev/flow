@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
     cli::{Cli, Commands, TaskRunOpts, TasksOpts},
-    doctor, hub, init, init_tracing, palette, tasks,
+    doctor, history, hub, init, init_tracing, palette, tasks,
 };
 use std::net::IpAddr;
 
@@ -53,6 +53,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Search) => {
             palette::run_global()?;
+        }
+        Some(Commands::LastCmd) => {
+            history::print_last_record()?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
