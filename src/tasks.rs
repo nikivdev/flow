@@ -12,6 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde_json::json;
+use shell_words;
 use which::which;
 
 use crate::{
@@ -50,16 +51,34 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     let resolved = resolve_task_dependencies(task, &cfg)?;
     let workdir = config_path.parent().unwrap_or(Path::new("."));
 
-    let command_str = task.command.trim().to_string();
+    let base_command = task.command.trim();
+    let arg_command = if opts.args.is_empty() {
+        base_command.to_string()
+    } else {
+        let quoted: Vec<String> = opts
+            .args
+            .iter()
+            .map(|arg| shell_words::quote(arg).into_owned())
+            .collect();
+        format!("{} {}", base_command, quoted.join(" "))
+    };
+
     let should_delegate = opts.delegate_to_hub || task.delegate_to_hub;
     if should_delegate {
-        match delegate_task_to_hub(task, &resolved, workdir, opts.hub_host, opts.hub_port) {
+        match delegate_task_to_hub(
+            task,
+            &resolved,
+            workdir,
+            opts.hub_host,
+            opts.hub_port,
+            &arg_command,
+        ) {
             Ok(()) => {
                 let mut record = InvocationRecord::new(
                     workdir.display().to_string(),
                     config_path.display().to_string(),
                     &task.name,
-                    &command_str,
+                    &arg_command,
                     false,
                 );
                 record.success = true;
@@ -104,7 +123,7 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
         }
         ensure_command_dependencies_available(&resolved.commands)?;
     }
-    execute_task(task, &config_path, workdir, &flox_pkgs, flox_enabled)
+    execute_task(task, &config_path, workdir, &flox_pkgs, flox_enabled, &arg_command)
 }
 
 pub fn activate(opts: TaskActivateOpts) -> Result<()> {
@@ -145,7 +164,15 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
         let flox_disabled_env = std::env::var_os("FLOW_DISABLE_FLOX").is_some();
         let flox_disabled_marker = flox_disabled_marker(workdir).exists();
         let flox_enabled = !flox_pkgs.is_empty() && !flox_disabled_env && !flox_disabled_marker;
-        execute_task(task, &config_path, workdir, &flox_pkgs, flox_enabled)?;
+        let command = task.command.trim().to_string();
+        execute_task(
+            task,
+            &config_path,
+            workdir,
+            &flox_pkgs,
+            flox_enabled,
+            &command,
+        )?;
     }
 
     Ok(())
@@ -176,8 +203,8 @@ fn execute_task(
     workdir: &Path,
     flox_pkgs: &[(String, FloxInstallSpec)],
     flox_enabled: bool,
+    command: &str,
 ) -> Result<()> {
-    let command = task.command.trim();
     if command.is_empty() {
         bail!("task '{}' has an empty command", task.name);
     }
@@ -586,6 +613,7 @@ fn delegate_task_to_hub(
     workdir: &Path,
     host: IpAddr,
     port: u16,
+    command: &str,
 ) -> Result<()> {
     ensure_hub_running(host, port)?;
     let url = format_task_submit_url(host, port);
@@ -603,7 +631,7 @@ fn delegate_task_to_hub(
     let payload = json!({
         "task": {
             "name": task.name,
-            "command": task.command,
+            "command": command,
             "dependencies": {
                 "commands": deps.commands,
                 "flox": flox_specs,
@@ -718,7 +746,15 @@ mod tests {
             description: None,
             shortcuts: Vec::new(),
         };
-        let err = execute_task(&task, Path::new("."), None).unwrap_err();
+        let err = execute_task(
+            &task,
+            Path::new("flow.toml"),
+            Path::new("."),
+            &[],
+            false,
+            "",
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("empty command"),
             "unexpected error: {err:?}"

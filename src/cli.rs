@@ -166,6 +166,9 @@ pub struct TaskRunOpts {
     /// Name of the task to execute.
     #[arg(value_name = "TASK")]
     pub name: String,
+    /// Additional arguments passed to the task command.
+    #[arg(value_name = "ARGS", trailing_var_arg = true)]
+    pub args: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
