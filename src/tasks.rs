@@ -225,42 +225,54 @@ fn execute_task(
     let flox_disabled = flox_disabled_marker(workdir).exists();
 
     if flox_pkgs.is_empty() || flox_disabled || !flox_enabled {
-        if (flox_disabled || !flox_enabled) && !flox_pkgs.is_empty() {
-            println!("flox disabled for this project; using host PATH");
-            combined_output.push_str("[flox disabled for project]\n");
-        }
         let (st, out) = run_host_command(workdir, command)?;
         status = st;
         combined_output.push_str(&out);
     } else {
-        match run_flox_with_reset(flox_pkgs, workdir, command) {
-            Ok(Some((st, out))) => {
-                combined_output.push_str(&out);
-                if st.success() {
-                    status = st;
-                } else {
-                    println!(
-                        "flox activate failed (status {:?}); retrying on host PATH",
-                        st.code()
-                    );
+        match flox_health_check(workdir, flox_pkgs) {
+            Ok(true) => match run_flox_with_reset(flox_pkgs, workdir, command) {
+                Ok(Some((st, out))) => {
+                    combined_output.push_str(&out);
+                    if st.success() {
+                        status = st;
+                    } else {
+                        println!(
+                            "flox activate failed (status {:?}); retrying on host PATH",
+                            st.code()
+                        );
+                        let (host_status, host_out) = run_host_command(workdir, command)?;
+                        combined_output
+                            .push_str("\n[flox activate failed; retried on host PATH]\n");
+                        combined_output.push_str(&host_out);
+                        status = host_status;
+                    }
+                }
+                Ok(None) => {
+                    println!("flox disabled after repeated errors; using host PATH");
+                    combined_output.push_str("[flox disabled after errors]\n");
                     let (host_status, host_out) = run_host_command(workdir, command)?;
-                    combined_output
-                        .push_str("\n[flox activate failed; retried on host PATH]\n");
                     combined_output.push_str(&host_out);
                     status = host_status;
                 }
-            }
-            Ok(None) => {
-                println!("flox disabled after repeated errors; using host PATH");
-                combined_output.push_str("[flox disabled after errors]\n");
+                Err(err) => {
+                    println!("flox activate failed ({err}); retrying on host PATH");
+                    let (host_status, host_out) = run_host_command(workdir, command)?;
+                    combined_output.push_str("\n[flox activate failed; retried on host PATH]\n");
+                    combined_output.push_str(&host_out);
+                    status = host_status;
+                }
+            },
+            Ok(false) => {
+                println!("flox disabled after health check; using host PATH");
+                combined_output.push_str("[flox disabled after health check]\n");
                 let (host_status, host_out) = run_host_command(workdir, command)?;
                 combined_output.push_str(&host_out);
                 status = host_status;
             }
             Err(err) => {
-                println!("flox activate failed ({err}); retrying on host PATH");
+                println!("flox health check failed ({err}); using host PATH");
+                combined_output.push_str("[flox health check failed; using host PATH]\n");
                 let (host_status, host_out) = run_host_command(workdir, command)?;
-                combined_output.push_str("\n[flox activate failed; retried on host PATH]\n");
                 combined_output.push_str(&host_out);
                 status = host_status;
             }
@@ -414,6 +426,30 @@ fn run_flox_with_reset(
                 mark_flox_disabled(workdir, "flox activate error after reset")?;
                 return Ok(None);
             }
+        }
+    }
+}
+
+fn flox_health_check(project_root: &Path, flox_pkgs: &[(String, FloxInstallSpec)]) -> Result<bool> {
+    let env = flox::ensure_env(project_root, flox_pkgs)?;
+    let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
+    let mut cmd = Command::new(flox_bin);
+    cmd.arg("activate")
+        .arg("-d")
+        .arg(&env.project_root)
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(":")
+        .current_dir(project_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    match cmd.status() {
+        Ok(status) if status.success() => Ok(true),
+        _ => {
+            mark_flox_disabled(project_root, "flox health check failed")?;
+            Ok(false)
         }
     }
 }
