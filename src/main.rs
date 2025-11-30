@@ -57,6 +57,9 @@ fn main() -> Result<()> {
         Some(Commands::LastCmd) => {
             history::print_last_record()?;
         }
+        Some(Commands::LastCmdFull) => {
+            history::print_last_record_full()?;
+        }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
                 bail!("no task name provided");
