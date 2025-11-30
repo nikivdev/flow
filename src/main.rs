@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{Parser, error::ErrorKind};
 use flowd::{
     cli::{Cli, Commands, TaskRunOpts, TasksOpts},
     doctor, hub, init, init_tracing, palette, tasks,
@@ -9,7 +9,32 @@ use std::net::IpAddr;
 fn main() -> Result<()> {
     init_tracing();
 
-    let cli = Cli::parse();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let cli = match Cli::try_parse_from(&raw_args) {
+        Ok(cli) => cli,
+        Err(err) => {
+            if matches!(
+                err.kind(),
+                ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
+            ) {
+                // Fallback: treat first positional as task name and rest as args.
+                let mut iter = raw_args.into_iter();
+                let _bin = iter.next();
+                if let Some(task_name) = iter.next() {
+                    let args: Vec<String> = iter.collect();
+                    return tasks::run(TaskRunOpts {
+                        config: TasksOpts::default().config,
+                        delegate_to_hub: false,
+                        hub_host: IpAddr::from([127, 0, 0, 1]),
+                        hub_port: 9050,
+                        name: task_name,
+                        args,
+                    });
+                }
+            }
+            err.exit()
+        }
+    };
     match cli.command {
         Some(Commands::Hub(cmd)) => {
             hub::run(cmd)?;
@@ -33,19 +58,13 @@ fn main() -> Result<()> {
             let Some(task_name) = args.first() else {
                 bail!("no task name provided");
             };
-            if args.len() > 1 {
-                bail!(
-                    "task '{}' does not accept additional arguments: {}",
-                    task_name,
-                    args[1..].join(" ")
-                );
-            }
             tasks::run(TaskRunOpts {
                 config: TasksOpts::default().config,
                 delegate_to_hub: false,
                 hub_host: IpAddr::from([127, 0, 0, 1]),
                 hub_port: 9050,
                 name: task_name.clone(),
+                args: args[1..].to_vec(),
             })?;
         }
         None => {

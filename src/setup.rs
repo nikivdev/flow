@@ -18,6 +18,7 @@ pub fn run(opts: SetupOpts) -> Result<()> {
                 hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
                 hub_port: 9050,
                 name: "setup".to_string(),
+                args: Vec::new(),
             });
         }
 
