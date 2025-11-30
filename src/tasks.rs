@@ -118,8 +118,6 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     } else {
         if flox_disabled_env {
             println!("FLOW_DISABLE_FLOX is set; running on host PATH");
-        } else if flox_disabled_marker {
-            println!("flox disabled for this project; remove .flox.disabled to re-enable");
         }
         ensure_command_dependencies_available(&resolved.commands)?;
     }
