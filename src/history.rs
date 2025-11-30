@@ -1,7 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,6 +16,8 @@ pub struct InvocationRecord {
     pub config_path: String,
     pub task_name: String,
     pub command: String,
+    #[serde(default)]
+    pub user_input: String,
     pub status: Option<i32>,
     pub success: bool,
     pub used_flox: bool,
@@ -29,6 +31,7 @@ impl InvocationRecord {
         config_path: impl Into<String>,
         task_name: impl Into<String>,
         command: impl Into<String>,
+        user_input: impl Into<String>,
         used_flox: bool,
     ) -> Self {
         Self {
@@ -38,6 +41,7 @@ impl InvocationRecord {
             config_path: config_path.into(),
             task_name: task_name.into(),
             command: command.into(),
+            user_input: user_input.into(),
             status: None,
             success: false,
             used_flox,
@@ -65,32 +69,54 @@ pub fn record(invocation: InvocationRecord) -> Result<()> {
     Ok(())
 }
 
-/// Print the most recent invocation with output and status.
+/// Print the most recent invocation with only the user input and the resulting output or error.
 pub fn print_last_record() -> Result<()> {
     let path = history_path();
-    if !path.exists() {
-        println!("No history found at {}", path.display());
+    let record = load_last_record(&path)?;
+    let Some(rec) = record else {
+        if path.exists() {
+            println!("No valid history entries found in {}", path.display());
+        } else {
+            println!("No history found at {}", path.display());
+        }
         return Ok(());
+    };
+
+    let user_input = if rec.user_input.trim().is_empty() {
+        rec.task_name.clone()
+    } else {
+        rec.user_input.clone()
+    };
+    println!("{user_input}");
+
+    if rec.output.trim().is_empty() {
+        if !rec.success {
+            let status = rec
+                .status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            println!("error (status: {status})");
+        }
+    } else {
+        print!("{}", rec.output);
+        if !rec.output.ends_with('\n') {
+            println!();
+        }
     }
 
-    let contents = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read history at {}", path.display()))?;
-    let mut last: Option<InvocationRecord> = None;
-    for line in contents.lines().rev() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<InvocationRecord>(line) {
-            Ok(rec) => {
-                last = Some(rec);
-                break;
-            }
-            Err(_) => continue,
-        }
-    }
+    Ok(())
+}
 
-    let Some(rec) = last else {
-        println!("No valid history entries found in {}", path.display());
+/// Print the most recent invocation with output and status.
+pub fn print_last_record_full() -> Result<()> {
+    let path = history_path();
+    let record = load_last_record(&path)?;
+    let Some(rec) = record else {
+        if path.exists() {
+            println!("No valid history entries found in {}", path.display());
+        } else {
+            println!("No history found at {}", path.display());
+        }
         return Ok(());
     };
 
@@ -110,6 +136,25 @@ pub fn print_last_record() -> Result<()> {
     println!("--- output ---");
     print!("{}", rec.output);
     Ok(())
+}
+
+fn load_last_record(path: &Path) -> Result<Option<InvocationRecord>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read history at {}", path.display()))?;
+    for line in contents.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(rec) = serde_json::from_str::<InvocationRecord>(line) {
+            return Ok(Some(rec));
+        }
+    }
+
+    Ok(None)
 }
 
 fn history_path() -> PathBuf {

@@ -52,15 +52,20 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     let workdir = config_path.parent().unwrap_or(Path::new("."));
 
     let base_command = task.command.trim();
+    let quoted_args: Vec<String> = opts
+        .args
+        .iter()
+        .map(|arg| shell_words::quote(arg).into_owned())
+        .collect();
     let arg_command = if opts.args.is_empty() {
         base_command.to_string()
     } else {
-        let quoted: Vec<String> = opts
-            .args
-            .iter()
-            .map(|arg| shell_words::quote(arg).into_owned())
-            .collect();
-        format!("{} {}", base_command, quoted.join(" "))
+        format!("{} {}", base_command, quoted_args.join(" "))
+    };
+    let user_input = if opts.args.is_empty() {
+        task.name.clone()
+    } else {
+        format!("{} {}", task.name, quoted_args.join(" "))
     };
 
     let should_delegate = opts.delegate_to_hub || task.delegate_to_hub;
@@ -79,14 +84,12 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
                     config_path.display().to_string(),
                     &task.name,
                     &arg_command,
+                    &user_input,
                     false,
                 );
                 record.success = true;
                 record.status = Some(0);
-                record.output = format!(
-                    "delegated to hub at {}:{}",
-                    opts.hub_host, opts.hub_port
-                );
+                record.output = format!("delegated to hub at {}:{}", opts.hub_host, opts.hub_port);
                 if let Err(err) = history::record(record) {
                     tracing::warn!(?err, "failed to write task history");
                 }
@@ -121,7 +124,15 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
         }
         ensure_command_dependencies_available(&resolved.commands)?;
     }
-    execute_task(task, &config_path, workdir, &flox_pkgs, flox_enabled, &arg_command)
+    execute_task(
+        task,
+        &config_path,
+        workdir,
+        &flox_pkgs,
+        flox_enabled,
+        &arg_command,
+        &user_input,
+    )
 }
 
 pub fn activate(opts: TaskActivateOpts) -> Result<()> {
@@ -170,6 +181,7 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
             &flox_pkgs,
             flox_enabled,
             &command,
+            &task.name,
         )?;
     }
 
@@ -202,6 +214,7 @@ fn execute_task(
     flox_pkgs: &[(String, FloxInstallSpec)],
     flox_enabled: bool,
     command: &str,
+    user_input: &str,
 ) -> Result<()> {
     if command.is_empty() {
         bail!("task '{}' has an empty command", task.name);
@@ -214,6 +227,7 @@ fn execute_task(
         config_path.display().to_string(),
         &task.name,
         command,
+        user_input,
         !flox_pkgs.is_empty(),
     );
     let started = Instant::now();
@@ -499,7 +513,11 @@ fn run_command_with_tee(mut cmd: Command) -> Result<(ExitStatus, String)> {
     Ok((status, collected))
 }
 
-fn tee_stream<R, W>(mut reader: R, mut writer: W, buffer: Arc<Mutex<String>>) -> thread::JoinHandle<()>
+fn tee_stream<R, W>(
+    mut reader: R,
+    mut writer: W,
+    buffer: Arc<Mutex<String>>,
+) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
@@ -538,8 +556,12 @@ fn flox_disabled_marker(project_root: &Path) -> PathBuf {
 
 fn mark_flox_disabled(project_root: &Path, reason: &str) -> Result<()> {
     let marker = flox_disabled_marker(project_root);
-    fs::write(&marker, reason)
-        .with_context(|| format!("failed to write flox disable marker at {}", marker.display()))
+    fs::write(&marker, reason).with_context(|| {
+        format!(
+            "failed to write flox disable marker at {}",
+            marker.display()
+        )
+    })
 }
 
 #[derive(Debug, Default)]
@@ -787,6 +809,7 @@ mod tests {
             &[],
             false,
             "",
+            &task.name,
         )
         .unwrap_err();
         assert!(
