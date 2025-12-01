@@ -72,6 +72,9 @@ fn main() -> Result<()> {
         Some(Commands::Projects) => {
             projects::show_projects()?;
         }
+        Some(Commands::Active(opts)) => {
+            projects::handle_active(opts)?;
+        }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
                 bail!("no task name provided");

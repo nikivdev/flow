@@ -115,6 +115,11 @@ pub enum Commands {
         long_about = "Shows all projects that have been registered (projects with a 'name' field in flow.toml)."
     )]
     Projects,
+    #[command(
+        about = "Show or set the active project.",
+        long_about = "The active project is used as a fallback for commands like `f logs` when not in a project directory."
+    )]
+    Active(ActiveOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -306,6 +311,16 @@ pub struct TaskLogsOpts {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorOpts {}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ActiveOpts {
+    /// Project name to set as active.
+    #[arg(value_name = "PROJECT")]
+    pub project: Option<String>,
+    /// Clear the active project.
+    #[arg(long, short)]
+    pub clear: bool,
+}
 
 #[derive(Args, Debug, Clone)]
 pub struct InitOpts {

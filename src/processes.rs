@@ -278,15 +278,17 @@ pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
         return show_all_logs(opts.lines);
     }
 
-    // If --project is specified, look up by project name
+    // Resolve project: --project flag > flow.toml in cwd > active project
     let (project_root, config_path, project_name) = if let Some(ref name) = opts.project {
+        // Explicit project name
         match projects::resolve_project(name)? {
             Some(entry) => (entry.project_root, entry.config_path, Some(entry.name)),
             None => {
                 bail!("Project '{}' not found. Use `f projects` to see registered projects.", name);
             }
         }
-    } else {
+    } else if opts.config.exists() {
+        // flow.toml in current directory
         let (cfg_path, cfg) = tasks::load_project_config(opts.config.clone())?;
         let canonical = cfg_path.canonicalize().unwrap_or_else(|_| cfg_path.clone());
         let root = cfg_path
@@ -295,6 +297,16 @@ pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
             .canonicalize()
             .unwrap_or_else(|_| cfg_path.parent().unwrap_or(Path::new(".")).to_path_buf());
         (root, canonical, cfg.project_name)
+    } else if let Some(active) = projects::get_active_project() {
+        // Fall back to active project
+        match projects::resolve_project(&active)? {
+            Some(entry) => (entry.project_root, entry.config_path, Some(entry.name)),
+            None => {
+                bail!("Active project '{}' not found. Use `f projects` to see registered projects.", active);
+            }
+        }
+    } else {
+        bail!("No flow.toml in current directory and no active project set.\nRun a task in a project first, or use: f logs -p <project>");
     };
 
     // If no task specified, try to find available logs - prefer running tasks
@@ -493,40 +505,6 @@ fn get_project_log_files(project_root: &Path, project_name: Option<&str>) -> Vec
         }
     }
     tasks
-}
-
-fn list_project_logs(project_root: &Path, project_name: Option<&str>) -> Result<()> {
-    let base = log_dir();
-    let slug = if let Some(name) = project_name {
-        let clean = sanitize_component(name);
-        if clean.is_empty() {
-            format!("proj-{}", short_hash(&project_root.display().to_string()))
-        } else {
-            format!("{clean}-{}", short_hash(&project_root.display().to_string()))
-        }
-    } else {
-        format!("proj-{}", short_hash(&project_root.display().to_string()))
-    };
-
-    let project_log_dir = base.join(&slug);
-    if !project_log_dir.exists() {
-        println!("No logs found for this project.");
-        println!("Expected at: {}", project_log_dir.display());
-        return Ok(());
-    }
-
-    println!("Available logs for this project:");
-    for entry in fs::read_dir(&project_log_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "log").unwrap_or(false) {
-            let task_name = path.file_stem().and_then(|n| n.to_str()).unwrap_or("unknown");
-            println!("  {}", task_name);
-        }
-    }
-    println!("\nUse: f logs <task> [-f]");
-
-    Ok(())
 }
 
 fn tail_lines(path: &Path, n: usize) -> Result<()> {

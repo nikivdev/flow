@@ -57,6 +57,12 @@ pub fn list(opts: TasksOpts) -> Result<()> {
 pub fn run(opts: TaskRunOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(opts.config)?;
     let project_name = cfg.project_name.clone();
+
+    // Set active project when running a task
+    if let Some(ref name) = project_name {
+        let _ = projects::set_active_project(name);
+    }
+
     let Some(task) = find_task(&cfg, &opts.name) else {
         bail!(
             "task '{}' not found in {}",
@@ -1084,6 +1090,7 @@ mod tests {
             &task,
             Path::new("flow.toml"),
             Path::new("."),
+            String::new(),
             None,
             &[],
             false,

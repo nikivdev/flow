@@ -1,9 +1,11 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use crate::cli::ActiveOpts;
 use crate::{db, running};
 
 /// Single project record.
@@ -141,5 +143,67 @@ fn create_schema(conn: &Connection) -> Result<()> {
         "#,
     )
     .context("failed to create schema")?;
+    Ok(())
+}
+
+// ============================================================================
+// Active Project
+// ============================================================================
+
+fn active_project_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/flow/active_project")
+}
+
+/// Set the active project name.
+pub fn set_active_project(name: &str) -> Result<()> {
+    let path = active_project_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("failed to create config dir")?;
+    }
+    fs::write(&path, name).context("failed to write active project")?;
+    Ok(())
+}
+
+/// Get the current active project name, if set.
+pub fn get_active_project() -> Option<String> {
+    let path = active_project_path();
+    fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Clear the active project.
+pub fn clear_active_project() -> Result<()> {
+    let path = active_project_path();
+    if path.exists() {
+        fs::remove_file(&path).context("failed to remove active project")?;
+    }
+    Ok(())
+}
+
+/// Handle the `f active` command.
+pub fn handle_active(opts: ActiveOpts) -> Result<()> {
+    if opts.clear {
+        clear_active_project()?;
+        println!("Active project cleared.");
+        return Ok(());
+    }
+
+    if let Some(name) = opts.project {
+        // Verify project exists
+        if resolve_project(&name)?.is_none() {
+            anyhow::bail!("Project '{}' not found. Use `f projects` to see registered projects.", name);
+        }
+        set_active_project(&name)?;
+        println!("Active project set to: {}", name);
+        return Ok(());
+    }
+
+    // Show current active project
+    match get_active_project() {
+        Some(name) => println!("{}", name),
+        None => println!("No active project set."),
+    }
     Ok(())
 }
