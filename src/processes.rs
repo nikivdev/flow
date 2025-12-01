@@ -1,11 +1,16 @@
-use std::path::Path;
+use std::collections::hash_map::DefaultHasher;
+use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{KillOpts, ProcessOpts};
+use crate::cli::{KillOpts, ProcessOpts, TaskLogsOpts};
+use crate::projects;
 use crate::running;
 use crate::tasks;
 
@@ -206,4 +211,366 @@ fn terminate_process_group(pgid: u32, force: bool, timeout: u64) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Task Logs
+// ============================================================================
+
+fn log_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/flow/logs")
+}
+
+fn sanitize_component(raw: &str) -> String {
+    let mut s = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            s.push(ch);
+        } else {
+            s.push('-');
+        }
+    }
+    s.trim_matches('-').to_lowercase()
+}
+
+fn short_hash(input: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// Get the log path for a project/task
+fn get_log_path(project_root: &Path, project_name: Option<&str>, task_name: &str) -> PathBuf {
+    let base = log_dir();
+    let slug = if let Some(name) = project_name {
+        let clean = sanitize_component(name);
+        if clean.is_empty() {
+            format!("proj-{}", short_hash(&project_root.display().to_string()))
+        } else {
+            format!("{clean}-{}", short_hash(&project_root.display().to_string()))
+        }
+    } else {
+        format!("proj-{}", short_hash(&project_root.display().to_string()))
+    };
+
+    let task = {
+        let clean = sanitize_component(task_name);
+        if clean.is_empty() {
+            "task".to_string()
+        } else {
+            clean
+        }
+    };
+
+    base.join(slug).join(format!("{task}.log"))
+}
+
+/// Show task logs
+pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
+    if opts.list {
+        return list_available_logs(opts.all);
+    }
+
+    if opts.all {
+        return show_all_logs(opts.lines);
+    }
+
+    // If --project is specified, look up by project name
+    let (project_root, config_path, project_name) = if let Some(ref name) = opts.project {
+        match projects::resolve_project(name)? {
+            Some(entry) => (entry.project_root, entry.config_path, Some(entry.name)),
+            None => {
+                bail!("Project '{}' not found. Use `f projects` to see registered projects.", name);
+            }
+        }
+    } else {
+        let (cfg_path, cfg) = tasks::load_project_config(opts.config.clone())?;
+        let canonical = cfg_path.canonicalize().unwrap_or_else(|_| cfg_path.clone());
+        let root = cfg_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .canonicalize()
+            .unwrap_or_else(|_| cfg_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        (root, canonical, cfg.project_name)
+    };
+
+    // If no task specified, try to find available logs or a single task to follow
+    let task_name = match opts.task {
+        Some(name) => name,
+        None => {
+            // Check for available log files
+            let logs = get_project_log_files(&project_root, project_name.as_deref());
+
+            if logs.is_empty() {
+                println!("No logs found for this project.");
+                return Ok(());
+            } else if logs.len() == 1 {
+                // Single log file - use it automatically
+                logs[0].clone()
+            } else if opts.follow {
+                // Multiple logs - prefer running tasks when following
+                let running = running::get_project_processes(&config_path).unwrap_or_default();
+                let running_tasks: Vec<_> = running.iter().map(|p| p.task_name.clone()).collect();
+
+                // Filter logs to only running tasks
+                let running_logs: Vec<_> = logs.iter()
+                    .filter(|log| running_tasks.contains(log))
+                    .cloned()
+                    .collect();
+
+                if running_logs.len() == 1 {
+                    // Single running task - follow it
+                    running_logs[0].clone()
+                } else if running_logs.is_empty() {
+                    // No running tasks, show all available logs
+                    println!("No running tasks. Available logs:");
+                    for log in &logs {
+                        println!("  f logs {} -f", log);
+                    }
+                    return Ok(());
+                } else {
+                    // Multiple running tasks
+                    println!("Multiple running tasks. Specify which to follow:");
+                    for log in &running_logs {
+                        println!("  f logs {} -f", log);
+                    }
+                    return Ok(());
+                }
+            } else {
+                // List available log files for this project
+                return list_project_logs(&project_root, project_name.as_deref());
+            }
+        }
+    };
+
+    let log_path = get_log_path(&project_root, project_name.as_deref(), &task_name);
+
+    if !log_path.exists() {
+        bail!("No log file found for task '{}' at {}", task_name, log_path.display());
+    }
+
+    if opts.follow {
+        tail_follow(&log_path, opts.lines)?;
+    } else {
+        tail_lines(&log_path, opts.lines)?;
+    }
+
+    Ok(())
+}
+
+fn show_all_logs(lines: usize) -> Result<()> {
+    let base = log_dir();
+    if !base.exists() {
+        println!("No logs found at {}", base.display());
+        return Ok(());
+    }
+
+    // Find the most recently modified log file
+    let mut newest: Option<(PathBuf, u64)> = None;
+
+    for entry in fs::read_dir(&base)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            for log_entry in fs::read_dir(&path)? {
+                let log_entry = log_entry?;
+                let log_path = log_entry.path();
+                if log_path.extension().map(|e| e == "log").unwrap_or(false) {
+                    if let Ok(meta) = fs::metadata(&log_path) {
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        if newest.as_ref().map(|(_, t)| modified > *t).unwrap_or(true) {
+                            newest = Some((log_path, modified));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    match newest {
+        Some((path, _)) => {
+            println!("Showing most recent log: {}\n", path.display());
+            tail_lines(&path, lines)
+        }
+        None => {
+            println!("No log files found.");
+            Ok(())
+        }
+    }
+}
+
+fn list_available_logs(_all: bool) -> Result<()> {
+    let base = log_dir();
+    if !base.exists() {
+        println!("No logs found at {}", base.display());
+        return Ok(());
+    }
+
+    println!("Available logs in {}:", base.display());
+
+    for entry in fs::read_dir(&base)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let project_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+            println!("\n{}:", project_name);
+
+            for log_entry in fs::read_dir(&path)? {
+                let log_entry = log_entry?;
+                let log_path = log_entry.path();
+                if log_path.extension().map(|e| e == "log").unwrap_or(false) {
+                    let task_name = log_path
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    let metadata = fs::metadata(&log_path)?;
+                    let size = metadata.len();
+                    let modified = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let age = format_relative_time(now.saturating_sub(modified));
+
+                    println!("  {} ({} bytes, modified {})", task_name, size, age);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn format_relative_time(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{}s ago", seconds)
+    } else if seconds < 3600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86400 {
+        format!("{}h ago", seconds / 3600)
+    } else {
+        format!("{}d ago", seconds / 86400)
+    }
+}
+
+/// Get list of task names that have log files for a project
+fn get_project_log_files(project_root: &Path, project_name: Option<&str>) -> Vec<String> {
+    let base = log_dir();
+    let slug = if let Some(name) = project_name {
+        let clean = sanitize_component(name);
+        if clean.is_empty() {
+            format!("proj-{}", short_hash(&project_root.display().to_string()))
+        } else {
+            format!("{clean}-{}", short_hash(&project_root.display().to_string()))
+        }
+    } else {
+        format!("proj-{}", short_hash(&project_root.display().to_string()))
+    };
+
+    let project_log_dir = base.join(&slug);
+    if !project_log_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut tasks = Vec::new();
+    if let Ok(entries) = fs::read_dir(&project_log_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "log").unwrap_or(false) {
+                if let Some(task_name) = path.file_stem().and_then(|n| n.to_str()) {
+                    tasks.push(task_name.to_string());
+                }
+            }
+        }
+    }
+    tasks
+}
+
+fn list_project_logs(project_root: &Path, project_name: Option<&str>) -> Result<()> {
+    let base = log_dir();
+    let slug = if let Some(name) = project_name {
+        let clean = sanitize_component(name);
+        if clean.is_empty() {
+            format!("proj-{}", short_hash(&project_root.display().to_string()))
+        } else {
+            format!("{clean}-{}", short_hash(&project_root.display().to_string()))
+        }
+    } else {
+        format!("proj-{}", short_hash(&project_root.display().to_string()))
+    };
+
+    let project_log_dir = base.join(&slug);
+    if !project_log_dir.exists() {
+        println!("No logs found for this project.");
+        println!("Expected at: {}", project_log_dir.display());
+        return Ok(());
+    }
+
+    println!("Available logs for this project:");
+    for entry in fs::read_dir(&project_log_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "log").unwrap_or(false) {
+            let task_name = path.file_stem().and_then(|n| n.to_str()).unwrap_or("unknown");
+            println!("  {}", task_name);
+        }
+    }
+    println!("\nUse: f logs <task> [-f]");
+
+    Ok(())
+}
+
+fn tail_lines(path: &Path, n: usize) -> Result<()> {
+    let file = File::open(path).context("failed to open log file")?;
+    let reader = BufReader::new(file);
+    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+
+    let start = lines.len().saturating_sub(n);
+    for line in &lines[start..] {
+        println!("{}", line);
+    }
+
+    Ok(())
+}
+
+fn tail_follow(path: &Path, initial_lines: usize) -> Result<()> {
+    // First show the last N lines
+    tail_lines(path, initial_lines)?;
+
+    // Then follow
+    let mut file = File::open(path).context("failed to open log file")?;
+    file.seek(SeekFrom::End(0))?;
+
+    println!("\n--- Following {} (Ctrl+C to stop) ---", path.display());
+
+    let mut buf = vec![0u8; 4096];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => {
+                // No new data, sleep and retry
+                thread::sleep(Duration::from_millis(100));
+            }
+            Ok(n) => {
+                print!("{}", String::from_utf8_lossy(&buf[..n]));
+            }
+            Err(e) => {
+                bail!("Error reading log file: {}", e);
+            }
+        }
+    }
 }

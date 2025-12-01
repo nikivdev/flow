@@ -105,6 +105,16 @@ pub enum Commands {
         long_about = "Kill flow-started processes by task name, PID, or all for the project. Sends SIGTERM first, then SIGKILL after timeout."
     )]
     Kill(KillOpts),
+    #[command(
+        about = "View logs from running or recent tasks.",
+        long_about = "Tail the log output of a running task. Use -f to follow in real-time."
+    )]
+    Logs(TaskLogsOpts),
+    #[command(
+        about = "List registered projects.",
+        long_about = "Shows all projects that have been registered (projects with a 'name' field in flow.toml)."
+    )]
+    Projects,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -264,6 +274,31 @@ pub struct KillOpts {
     /// Timeout in seconds before sending SIGKILL (default: 5).
     #[arg(long, default_value_t = 5)]
     pub timeout: u64,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TaskLogsOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+    /// Task name to view logs for.
+    #[arg(value_name = "TASK")]
+    pub task: Option<String>,
+    /// Follow the log in real-time (like tail -f).
+    #[arg(long, short)]
+    pub follow: bool,
+    /// Number of lines to show from the end.
+    #[arg(long, short = 'n', default_value_t = 50)]
+    pub lines: usize,
+    /// Show logs for all projects.
+    #[arg(long)]
+    pub all: bool,
+    /// List available log files instead of showing content.
+    #[arg(long, short)]
+    pub list: bool,
+    /// Look up logs by registered project name instead of config path.
+    #[arg(long, short)]
+    pub project: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
