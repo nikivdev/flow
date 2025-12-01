@@ -299,6 +299,9 @@ pub struct TaskLogsOpts {
     /// Look up logs by registered project name instead of config path.
     #[arg(long, short)]
     pub project: Option<String>,
+    /// Suppress headers, output only log content.
+    #[arg(long, short)]
+    pub quiet: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
