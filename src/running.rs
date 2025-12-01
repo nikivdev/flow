@@ -122,16 +122,22 @@ pub fn get_project_processes(config_path: &Path) -> Result<Vec<RunningProcess>> 
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
+        use std::process::Stdio;
         Command::new("kill")
             .arg("-0")
             .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
     }
     #[cfg(windows)]
     {
+        use std::process::Stdio;
         Command::new("tasklist")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .output()
             .map(|o| {
                 o.status.success() && String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())

@@ -5,7 +5,7 @@ use std::{net::IpAddr, path::PathBuf};
 #[derive(Parser, Debug)]
 #[command(
     name = "flow",
-    version,
+    version = version_with_build_time(),
     about = "Your second OS",
     subcommand_required = false,
     arg_required_else_help = false
@@ -13,6 +13,48 @@ use std::{net::IpAddr, path::PathBuf};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+}
+
+/// Returns version string with relative build time (e.g., "0.1.0 (built 5m ago)")
+fn version_with_build_time() -> &'static str {
+    use std::sync::OnceLock;
+    static VERSION: OnceLock<String> = OnceLock::new();
+
+    // Include the generated timestamp file to force recompilation when it changes
+    const BUILD_TIMESTAMP_STR: &str = include_str!(concat!(env!("OUT_DIR"), "/build_timestamp.txt"));
+
+    VERSION.get_or_init(|| {
+        let version = env!("CARGO_PKG_VERSION");
+        let build_timestamp: u64 = BUILD_TIMESTAMP_STR.trim().parse().unwrap_or(0);
+
+        if build_timestamp == 0 {
+            return version.to_string();
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let elapsed = now.saturating_sub(build_timestamp);
+        let relative = format_relative_time(elapsed);
+
+        format!("{version} (built {relative})")
+    })
+}
+
+fn format_relative_time(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{}s ago", seconds)
+    } else if seconds < 3600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86400 {
+        let hours = seconds / 3600;
+        format!("{}h ago", hours)
+    } else {
+        let days = seconds / 86400;
+        format!("{}d ago", days)
+    }
 }
 
 #[derive(Subcommand, Debug)]

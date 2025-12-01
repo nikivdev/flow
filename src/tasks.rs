@@ -1,5 +1,7 @@
 use std::{
-    fs,
+    collections::hash_map::DefaultHasher,
+    fs::{self, File, OpenOptions},
+    hash::{Hash, Hasher},
     io::{Read, Write},
     net::IpAddr,
     path::{Path, PathBuf},
@@ -33,6 +35,7 @@ pub struct TaskContext {
     pub project_root: PathBuf,
     pub used_flox: bool,
     pub project_name: Option<String>,
+    pub log_path: Option<PathBuf>,
 }
 
 pub fn list(opts: TasksOpts) -> Result<()> {
@@ -119,29 +122,37 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     }
 
     let flox_pkgs = collect_flox_packages(&cfg, &resolved.flox);
+    let mut preamble = String::new();
     let flox_disabled_env = std::env::var_os("FLOW_DISABLE_FLOX").is_some();
     let flox_disabled_marker = flox_disabled_marker(workdir).exists();
     let flox_enabled = !flox_pkgs.is_empty() && !flox_disabled_env && !flox_disabled_marker;
 
     if flox_enabled {
-        println!(
-            "Skipping host PATH checks; using managed deps [{}]",
-            flox_pkgs
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+        log_and_capture(
+            &mut preamble,
+            &format!(
+                "Skipping host PATH checks; using managed deps [{}]",
+                flox_pkgs
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         );
     } else {
         if flox_disabled_env {
-            println!("FLOW_DISABLE_FLOX is set; running on host PATH");
+            log_and_capture(
+                &mut preamble,
+                "FLOW_DISABLE_FLOX is set; running on host PATH",
+            );
         }
-        ensure_command_dependencies_available(&resolved.commands)?;
+        ensure_command_dependencies_available(&resolved.commands, Some(&mut preamble))?;
     }
     execute_task(
         task,
         &config_path,
         workdir,
+        preamble,
         project_name.as_deref(),
         &flox_pkgs,
         flox_enabled,
@@ -173,16 +184,20 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
     }
 
     let flox_pkgs = collect_flox_packages(&cfg, &combined.flox);
+    let mut preamble = String::new();
     if flox_pkgs.is_empty() {
-        ensure_command_dependencies_available(&combined.commands)?;
+        ensure_command_dependencies_available(&combined.commands, Some(&mut preamble))?;
     } else {
-        println!(
-            "Skipping host PATH checks; using managed deps [{}]",
-            flox_pkgs
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+        log_and_capture(
+            &mut preamble,
+            &format!(
+                "Skipping host PATH checks; using managed deps [{}]",
+                flox_pkgs
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         );
     }
     for task in tasks {
@@ -194,6 +209,7 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
             task,
             &config_path,
             workdir,
+            preamble.clone(),
             project_name.as_deref(),
             &flox_pkgs,
             flox_enabled,
@@ -229,10 +245,78 @@ fn resolve_path(path: PathBuf) -> Result<PathBuf> {
     }
 }
 
+fn log_and_capture(buf: &mut String, msg: &str) {
+    println!("{msg}");
+    buf.push_str(msg);
+    if !msg.ends_with('\n') {
+        buf.push('\n');
+    }
+}
+
+fn log_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/flow/logs")
+}
+
+fn sanitize_component(raw: &str) -> String {
+    let mut s = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            s.push(ch);
+        } else {
+            s.push('-');
+        }
+    }
+    s.trim_matches('-').to_lowercase()
+}
+
+fn short_hash(input: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+fn task_log_path(ctx: &TaskContext) -> Option<PathBuf> {
+    let base = log_dir();
+    let slug = if let Some(name) = ctx.project_name.as_deref() {
+        let clean = sanitize_component(name);
+        if clean.is_empty() {
+            format!(
+                "proj-{}",
+                short_hash(&ctx.project_root.display().to_string())
+            )
+        } else {
+            format!(
+                "{clean}-{}",
+                short_hash(&ctx.project_root.display().to_string())
+            )
+        }
+    } else {
+        format!(
+            "proj-{}",
+            short_hash(&ctx.project_root.display().to_string())
+        )
+    };
+
+    let task = {
+        let clean = sanitize_component(&ctx.task_name);
+        if clean.is_empty() {
+            "task".to_string()
+        } else {
+            clean
+        }
+    };
+
+    Some(base.join(slug).join(format!("{task}.log")))
+}
+
 fn execute_task(
     task: &TaskConfig,
     config_path: &Path,
     workdir: &Path,
+    mut preamble: String,
     project_name: Option<&str>,
     flox_pkgs: &[(String, FloxInstallSpec)],
     flox_enabled: bool,
@@ -243,7 +327,10 @@ fn execute_task(
         bail!("task '{}' has an empty command", task.name);
     }
 
-    println!("Running task '{}': {}", task.name, command);
+    log_and_capture(
+        &mut preamble,
+        &format!("Running task '{}': {}", task.name, command),
+    );
 
     // Create context for PID tracking
     let canonical_config = config_path
@@ -259,6 +346,7 @@ fn execute_task(
         project_root: canonical_workdir.clone(),
         used_flox: flox_enabled && !flox_pkgs.is_empty(),
         project_name: project_name.map(|s| s.to_string()),
+        log_path: None,
     };
 
     let mut record = InvocationRecord::new(
@@ -271,16 +359,33 @@ fn execute_task(
         !flox_pkgs.is_empty(),
     );
     let started = Instant::now();
-    let mut combined_output = String::new();
+    let mut combined_output = preamble;
     let status: ExitStatus;
 
     let flox_disabled = flox_disabled_marker(workdir).exists();
 
     if flox_pkgs.is_empty() || flox_disabled || !flox_enabled {
+        if flox_disabled {
+            log_and_capture(
+                &mut combined_output,
+                "flox disabled for this project (marker present); using host PATH",
+            );
+        }
         let (st, out) = run_host_command(workdir, command, Some(task_ctx.clone()))?;
         status = st;
         combined_output.push_str(&out);
     } else {
+        log_and_capture(
+            &mut combined_output,
+            &format!(
+                "Skipping host PATH checks; using managed deps [{}]",
+                flox_pkgs
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
         match flox_health_check(workdir, flox_pkgs) {
             Ok(true) => {
                 match run_flox_with_reset(flox_pkgs, workdir, command, Some(task_ctx.clone())) {
@@ -289,9 +394,12 @@ fn execute_task(
                         if st.success() {
                             status = st;
                         } else {
-                            println!(
-                                "flox activate failed (status {:?}); retrying on host PATH",
-                                st.code()
+                            log_and_capture(
+                                &mut combined_output,
+                                &format!(
+                                    "flox activate failed (status {:?}); retrying on host PATH",
+                                    st.code()
+                                ),
                             );
                             let (host_status, host_out) =
                                 run_host_command(workdir, command, Some(task_ctx.clone()))?;
@@ -302,7 +410,10 @@ fn execute_task(
                         }
                     }
                     Ok(None) => {
-                        println!("flox disabled after repeated errors; using host PATH");
+                        log_and_capture(
+                            &mut combined_output,
+                            "flox disabled after repeated errors; using host PATH",
+                        );
                         combined_output.push_str("[flox disabled after errors]\n");
                         let (host_status, host_out) =
                             run_host_command(workdir, command, Some(task_ctx.clone()))?;
@@ -310,7 +421,10 @@ fn execute_task(
                         status = host_status;
                     }
                     Err(err) => {
-                        println!("flox activate failed ({err}); retrying on host PATH");
+                        log_and_capture(
+                            &mut combined_output,
+                            &format!("flox activate failed ({err}); retrying on host PATH"),
+                        );
                         let (host_status, host_out) =
                             run_host_command(workdir, command, Some(task_ctx.clone()))?;
                         combined_output
@@ -321,7 +435,10 @@ fn execute_task(
                 }
             }
             Ok(false) => {
-                println!("flox disabled after health check; using host PATH");
+                log_and_capture(
+                    &mut combined_output,
+                    "flox disabled after health check; using host PATH",
+                );
                 combined_output.push_str("[flox disabled after health check]\n");
                 let (host_status, host_out) =
                     run_host_command(workdir, command, Some(task_ctx.clone()))?;
@@ -329,7 +446,10 @@ fn execute_task(
                 status = host_status;
             }
             Err(err) => {
-                println!("flox health check failed ({err}); using host PATH");
+                log_and_capture(
+                    &mut combined_output,
+                    &format!("flox health check failed ({err}); using host PATH"),
+                );
                 combined_output.push_str("[flox health check failed; using host PATH]\n");
                 let (host_status, host_out) = run_host_command(workdir, command, Some(task_ctx))?;
                 combined_output.push_str(&host_out);
@@ -576,13 +696,60 @@ fn run_command_with_tee(
     }
 
     let output = Arc::new(Mutex::new(String::new()));
+    // Set up optional log file for streaming output
+    let (ctx, log_file) = match ctx {
+        Some(mut c) => {
+            let path = task_log_path(&c);
+            if let Some(path) = path {
+                if let Some(parent) = path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                match OpenOptions::new().create(true).append(true).open(&path) {
+                    Ok(mut file) => {
+                        let header = format!(
+                            "\n--- {} | task:{} | cmd:{} ---\n",
+                            running::now_ms(),
+                            c.task_name,
+                            c.command
+                        );
+                        let _ = file.write_all(header.as_bytes());
+                        if let Ok(mut buf) = output.lock() {
+                            buf.push_str(&format!("Logging to {}\n", path.display()));
+                        }
+                        println!("Logging to {}", path.display());
+                        c.log_path = Some(path.clone());
+                        (Some(c), Some(Arc::new(Mutex::new(file))))
+                    }
+                    Err(err) => {
+                        if let Ok(mut buf) = output.lock() {
+                            buf.push_str(&format!("failed to open log file: {err}\n"));
+                        }
+                        (Some(c), None)
+                    }
+                }
+            } else {
+                (Some(c), None)
+            }
+        }
+        None => (None, None),
+    };
     let mut handles = Vec::new();
 
     if let Some(stdout) = child.stdout.take() {
-        handles.push(tee_stream(stdout, std::io::stdout(), output.clone()));
+        handles.push(tee_stream(
+            stdout,
+            std::io::stdout(),
+            output.clone(),
+            log_file.clone(),
+        ));
     }
     if let Some(stderr) = child.stderr.take() {
-        handles.push(tee_stream(stderr, std::io::stderr(), output.clone()));
+        handles.push(tee_stream(
+            stderr,
+            std::io::stderr(),
+            output.clone(),
+            log_file.clone(),
+        ));
     }
 
     for handle in handles {
@@ -612,6 +779,7 @@ fn tee_stream<R, W>(
     mut reader: R,
     mut writer: W,
     buffer: Arc<Mutex<String>>,
+    log_file: Option<Arc<Mutex<File>>>,
 ) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
@@ -628,6 +796,13 @@ where
 
             let _ = writer.write_all(&chunk[..read]);
             let _ = writer.flush();
+
+            if let Some(file) = log_file.as_ref() {
+                if let Ok(mut f) = file.lock() {
+                    let _ = f.write_all(&chunk[..read]);
+                    let _ = f.flush();
+                }
+            }
 
             if let Ok(mut buf) = buffer.lock() {
                 buf.push_str(&String::from_utf8_lossy(&chunk[..read]));
@@ -703,15 +878,23 @@ fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<Resolved
     Ok(resolved)
 }
 
-fn ensure_command_dependencies_available(commands: &[String]) -> Result<()> {
+fn ensure_command_dependencies_available(
+    commands: &[String],
+    log: Option<&mut String>,
+) -> Result<()> {
     if commands.is_empty() {
         return Ok(());
     }
 
-    println!(
+    let msg = format!(
         "Ensuring dependencies are available on PATH: {}",
         commands.join(", ")
     );
+    if let Some(buf) = log {
+        log_and_capture(buf, &msg);
+    } else {
+        println!("{msg}");
+    }
     for command in commands {
         which::which(command).with_context(|| dependency_error(command))?;
     }
