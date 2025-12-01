@@ -71,6 +71,60 @@ pub fn resolve_project(name: &str) -> Result<Option<ProjectEntry>> {
     }
 }
 
+/// List all registered projects, ordered by most recently updated.
+pub fn list_projects() -> Result<Vec<ProjectEntry>> {
+    let conn = open_db()?;
+    create_schema(&conn)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT name, project_root, config_path, updated_ms FROM projects ORDER BY updated_ms DESC",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next()? {
+        entries.push(ProjectEntry {
+            name: row.get(0)?,
+            project_root: PathBuf::from(row.get::<_, String>(1)?),
+            config_path: PathBuf::from(row.get::<_, String>(2)?),
+            updated_ms: row.get::<_, i64>(3)? as u128,
+        });
+    }
+    Ok(entries)
+}
+
+/// Print all registered projects.
+pub fn show_projects() -> Result<()> {
+    let projects = list_projects()?;
+    if projects.is_empty() {
+        println!("No registered projects.");
+        println!("Projects are registered when you run a task in a flow.toml with a 'name' field.");
+        return Ok(());
+    }
+
+    println!("Registered projects:\n");
+    for entry in &projects {
+        let age = format_age(entry.updated_ms);
+        println!("  {} ({})", entry.name, age);
+        println!("    {}", entry.project_root.display());
+    }
+    Ok(())
+}
+
+fn format_age(timestamp_ms: u128) -> String {
+    let now = running::now_ms();
+    let elapsed_secs = ((now.saturating_sub(timestamp_ms)) / 1000) as u64;
+
+    if elapsed_secs < 60 {
+        format!("{}s ago", elapsed_secs)
+    } else if elapsed_secs < 3600 {
+        format!("{}m ago", elapsed_secs / 60)
+    } else if elapsed_secs < 86400 {
+        format!("{}h ago", elapsed_secs / 3600)
+    } else {
+        format!("{}d ago", elapsed_secs / 86400)
+    }
+}
+
 fn open_db() -> Result<Connection> {
     db::open_db()
 }
