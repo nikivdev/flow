@@ -719,10 +719,6 @@ fn run_command_with_tee(
                             c.command
                         );
                         let _ = file.write_all(header.as_bytes());
-                        if let Ok(mut buf) = output.lock() {
-                            buf.push_str(&format!("Logging to {}\n", path.display()));
-                        }
-                        println!("Logging to {}", path.display());
                         c.log_path = Some(path.clone());
                         (Some(c), Some(Arc::new(Mutex::new(file))))
                     }
