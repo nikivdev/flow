@@ -13,6 +13,8 @@ pub struct InvocationRecord {
     pub timestamp_ms: u128,
     pub duration_ms: u128,
     pub project_root: String,
+    #[serde(default)]
+    pub project_name: Option<String>,
     pub config_path: String,
     pub task_name: String,
     pub command: String,
@@ -29,6 +31,7 @@ impl InvocationRecord {
     pub fn new(
         project_root: impl Into<String>,
         config_path: impl Into<String>,
+        project_name: Option<&str>,
         task_name: impl Into<String>,
         command: impl Into<String>,
         user_input: impl Into<String>,
@@ -38,6 +41,7 @@ impl InvocationRecord {
             timestamp_ms: now_ms(),
             duration_ms: 0,
             project_root: project_root.into(),
+            project_name: project_name.map(|s| s.to_string()),
             config_path: config_path.into(),
             task_name: task_name.into(),
             command: command.into(),
@@ -123,6 +127,9 @@ pub fn print_last_record_full() -> Result<()> {
     println!("task: {}", rec.task_name);
     println!("command: {}", rec.command);
     println!("project: {}", rec.project_root);
+    if let Some(name) = rec.project_name.as_deref() {
+        println!("project_name: {name}");
+    }
     println!("config: {}", rec.config_path);
     println!(
         "status: {} (code: {})",

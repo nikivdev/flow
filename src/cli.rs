@@ -53,6 +53,16 @@ pub enum Commands {
     LastCmd,
     #[command(about = "Show the last task run (command, status, and output) recorded by flow.")]
     LastCmdFull,
+    #[command(
+        about = "List running flow processes for the current project.",
+        long_about = "Lists flow-started processes tracked for this project. Use --all to see processes across all projects."
+    )]
+    Ps(ProcessOpts),
+    #[command(
+        about = "Stop running flow processes.",
+        long_about = "Kill flow-started processes by task name, PID, or all for the project. Sends SIGTERM first, then SIGKILL after timeout."
+    )]
+    Kill(KillOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -180,6 +190,38 @@ pub struct TaskActivateOpts {
     /// Path to the project flow config (flow.toml).
     #[arg(long, default_value = "flow.toml")]
     pub config: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProcessOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+    /// Show all running flow processes across all projects.
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct KillOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+    /// Kill by task name.
+    #[arg(value_name = "TASK")]
+    pub task: Option<String>,
+    /// Kill by PID directly.
+    #[arg(long)]
+    pub pid: Option<u32>,
+    /// Kill all processes for this project.
+    #[arg(long)]
+    pub all: bool,
+    /// Force kill (SIGKILL) without graceful shutdown.
+    #[arg(long, short)]
+    pub force: bool,
+    /// Timeout in seconds before sending SIGKILL (default: 5).
+    #[arg(long, default_value_t = 5)]
+    pub timeout: u64,
 }
 
 #[derive(Args, Debug, Clone, Default)]
