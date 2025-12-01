@@ -297,51 +297,45 @@ pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
         (root, canonical, cfg.project_name)
     };
 
-    // If no task specified, try to find available logs or a single task to follow
+    // If no task specified, try to find available logs - prefer running tasks
     let task_name = match opts.task {
         Some(name) => name,
         None => {
-            // Check for available log files
             let logs = get_project_log_files(&project_root, project_name.as_deref());
 
             if logs.is_empty() {
                 println!("No logs found for this project.");
                 return Ok(());
-            } else if logs.len() == 1 {
-                // Single log file - use it automatically
-                logs[0].clone()
-            } else if opts.follow {
-                // Multiple logs - prefer running tasks when following
-                let running = running::get_project_processes(&config_path).unwrap_or_default();
-                let running_tasks: Vec<_> = running.iter().map(|p| p.task_name.clone()).collect();
+            }
 
-                // Filter logs to only running tasks
-                let running_logs: Vec<_> = logs.iter()
-                    .filter(|log| running_tasks.contains(log))
-                    .cloned()
-                    .collect();
+            // Check for running tasks
+            let running = running::get_project_processes(&config_path).unwrap_or_default();
+            let running_tasks: Vec<_> = running.iter().map(|p| p.task_name.clone()).collect();
+            let running_logs: Vec<_> = logs.iter()
+                .filter(|log| running_tasks.contains(log))
+                .cloned()
+                .collect();
 
-                if running_logs.len() == 1 {
-                    // Single running task - follow it
-                    running_logs[0].clone()
-                } else if running_logs.is_empty() {
-                    // No running tasks, show all available logs
-                    println!("No running tasks. Available logs:");
-                    for log in &logs {
-                        println!("  f logs {} -f", log);
-                    }
-                    return Ok(());
-                } else {
-                    // Multiple running tasks
-                    println!("Multiple running tasks. Specify which to follow:");
-                    for log in &running_logs {
-                        println!("  f logs {} -f", log);
-                    }
-                    return Ok(());
+            if running_logs.len() == 1 {
+                // Single running task - use it
+                running_logs[0].clone()
+            } else if running_logs.len() > 1 {
+                // Multiple running tasks
+                println!("Multiple running tasks. Specify which to view:");
+                for log in &running_logs {
+                    println!("  f logs {}", log);
                 }
+                return Ok(());
+            } else if logs.len() == 1 {
+                // No running tasks, but only one log file
+                logs[0].clone()
             } else {
-                // List available log files for this project
-                return list_project_logs(&project_root, project_name.as_deref());
+                // No running tasks, multiple log files
+                println!("No running tasks. Available logs:");
+                for log in &logs {
+                    println!("  f logs {}", log);
+                }
+                return Ok(());
             }
         }
     };
@@ -353,7 +347,7 @@ pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
     }
 
     if opts.follow {
-        tail_follow(&log_path, opts.lines)?;
+        tail_follow(&log_path, opts.lines, opts.quiet)?;
     } else {
         tail_lines(&log_path, opts.lines)?;
     }
@@ -548,7 +542,7 @@ fn tail_lines(path: &Path, n: usize) -> Result<()> {
     Ok(())
 }
 
-fn tail_follow(path: &Path, initial_lines: usize) -> Result<()> {
+fn tail_follow(path: &Path, initial_lines: usize, quiet: bool) -> Result<()> {
     // First show the last N lines
     tail_lines(path, initial_lines)?;
 
@@ -556,7 +550,9 @@ fn tail_follow(path: &Path, initial_lines: usize) -> Result<()> {
     let mut file = File::open(path).context("failed to open log file")?;
     file.seek(SeekFrom::End(0))?;
 
-    println!("\n--- Following {} (Ctrl+C to stop) ---", path.display());
+    if !quiet {
+        println!("\n--- Following {} (Ctrl+C to stop) ---", path.display());
+    }
 
     let mut buf = vec![0u8; 4096];
     loop {
