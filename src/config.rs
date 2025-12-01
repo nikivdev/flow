@@ -200,6 +200,9 @@ pub struct TaskConfig {
         deserialize_with = "deserialize_shortcuts"
     )]
     pub shortcuts: Vec<String>,
+    /// Whether this task requires interactive input (stdin passthrough, TTY).
+    #[serde(default)]
+    pub interactive: bool,
 }
 
 /// Definition of a dependency that can be referenced by automation tasks.

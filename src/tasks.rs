@@ -36,6 +36,7 @@ pub struct TaskContext {
     pub used_flox: bool,
     pub project_name: Option<String>,
     pub log_path: Option<PathBuf>,
+    pub interactive: bool,
 }
 
 pub fn list(opts: TasksOpts) -> Result<()> {
@@ -353,6 +354,7 @@ fn execute_task(
         used_flox: flox_enabled && !flox_pkgs.is_empty(),
         project_name: project_name.map(|s| s.to_string()),
         log_path: None,
+        interactive: task.interactive,
     };
 
     let mut record = InvocationRecord::new(
@@ -667,11 +669,53 @@ fn run_command_with_tee(
     mut cmd: Command,
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
+    let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
+
     // Create new process group on Unix for reliable child process management
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+    }
+
+    // Interactive mode: inherit all stdio for TTY passthrough
+    if interactive {
+        let mut child = cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| "failed to spawn interactive command")?;
+
+        let pid = child.id();
+
+        // Register the process
+        if let Some(ref task_ctx) = ctx {
+            let pgid = running::get_pgid(pid).unwrap_or(pid);
+            let entry = RunningProcess {
+                pid,
+                pgid,
+                task_name: task_ctx.task_name.clone(),
+                command: task_ctx.command.clone(),
+                started_at: running::now_ms(),
+                config_path: task_ctx.config_path.clone(),
+                project_root: task_ctx.project_root.clone(),
+                used_flox: task_ctx.used_flox,
+                project_name: task_ctx.project_name.clone(),
+            };
+            if let Err(err) = running::register_process(entry) {
+                tracing::warn!(?err, "failed to register running process");
+            }
+        }
+
+        let status = child.wait().with_context(|| "failed to wait on child")?;
+
+        // Unregister on exit
+        if let Err(err) = running::unregister_process(pid) {
+            tracing::debug!(?err, "failed to unregister process");
+        }
+
+        return Ok((status, String::new()));
     }
 
     let mut child = cmd
