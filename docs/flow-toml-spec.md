@@ -6,6 +6,7 @@ Minimal schema for Flow CLI tasks and managed dependencies. Designed for easy re
 
 ```toml
 version = 1
+name = "my-project"      # optional human-friendly project name
 
 [deps]                # optional: command deps or managed pkg specs
 # key = "cmd"         # single command on PATH
@@ -38,6 +39,7 @@ fr = "f run"
 ## Semantics
 
 - `version`: currently `1`.
+- `name`: optional display name for the project (useful in history/metadata).
 - `[deps]`: map of dependency names to either:
   - string (single command to check on PATH),
   - string array (multiple commands),

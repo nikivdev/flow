@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
     cli::{Cli, Commands, TaskRunOpts, TasksOpts},
-    doctor, history, hub, init, init_tracing, palette, tasks,
+    doctor, history, hub, init, init_tracing, palette, processes, tasks,
 };
 use std::net::IpAddr;
 
@@ -59,6 +59,12 @@ fn main() -> Result<()> {
         }
         Some(Commands::LastCmdFull) => {
             history::print_last_record_full()?;
+        }
+        Some(Commands::Ps(opts)) => {
+            processes::show_project_processes(opts)?;
+        }
+        Some(Commands::Kill(opts)) => {
+            processes::kill_processes(opts)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

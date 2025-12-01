@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod db;
 pub mod doctor;
 pub mod flox;
 pub mod history;
@@ -7,6 +8,9 @@ pub mod hub;
 pub mod init;
 pub mod lin_runtime;
 pub mod palette;
+pub mod processes;
+pub mod projects;
+pub mod running;
 pub mod tasks;
 pub mod watchers;
 

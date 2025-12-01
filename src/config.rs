@@ -13,6 +13,14 @@ use shellexpand::tilde;
 pub struct Config {
     #[serde(default)]
     pub version: Option<u32>,
+    /// Optional human-friendly project name (applies to local project configs).
+    #[serde(
+        default,
+        rename = "name",
+        alias = "project_name",
+        alias = "project-name"
+    )]
+    pub project_name: Option<String>,
     #[serde(default)]
     pub options: OptionsConfig,
     #[serde(default, alias = "server", alias = "server-local")]
@@ -43,6 +51,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: None,
+            project_name: None,
             options: OptionsConfig::default(),
             servers: Vec::new(),
             remote_servers: Vec::new(),
@@ -543,6 +552,9 @@ fn resolve_include_path(base: &Path, include: &str) -> PathBuf {
 }
 
 fn merge_config(base: &mut Config, other: Config) {
+    if base.project_name.is_none() {
+        base.project_name = other.project_name;
+    }
     base.options.merge(other.options);
     base.servers.extend(other.servers);
     base.remote_servers.extend(other.remote_servers);

@@ -20,8 +20,20 @@ use crate::{
     config::{self, Config, FloxInstallSpec, TaskConfig},
     flox::{self, FloxEnv},
     history::{self, InvocationRecord},
-    hub,
+    hub, projects,
+    running::{self, RunningProcess},
 };
+
+/// Context for registering a running task process
+#[derive(Debug, Clone)]
+pub struct TaskContext {
+    pub task_name: String,
+    pub command: String,
+    pub config_path: PathBuf,
+    pub project_root: PathBuf,
+    pub used_flox: bool,
+    pub project_name: Option<String>,
+}
 
 pub fn list(opts: TasksOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(opts.config)?;
@@ -41,6 +53,7 @@ pub fn list(opts: TasksOpts) -> Result<()> {
 
 pub fn run(opts: TaskRunOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(opts.config)?;
+    let project_name = cfg.project_name.clone();
     let Some(task) = find_task(&cfg, &opts.name) else {
         bail!(
             "task '{}' not found in {}",
@@ -82,6 +95,7 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
                 let mut record = InvocationRecord::new(
                     workdir.display().to_string(),
                     config_path.display().to_string(),
+                    project_name.as_deref(),
                     &task.name,
                     &arg_command,
                     &user_input,
@@ -128,6 +142,7 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
         task,
         &config_path,
         workdir,
+        project_name.as_deref(),
         &flox_pkgs,
         flox_enabled,
         &arg_command,
@@ -138,6 +153,7 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
 pub fn activate(opts: TaskActivateOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(opts.config)?;
     let workdir = config_path.parent().unwrap_or(Path::new("."));
+    let project_name = cfg.project_name.clone();
 
     let tasks: Vec<&TaskConfig> = cfg
         .tasks
@@ -178,6 +194,7 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
             task,
             &config_path,
             workdir,
+            project_name.as_deref(),
             &flox_pkgs,
             flox_enabled,
             &command,
@@ -196,6 +213,11 @@ pub(crate) fn load_project_config(path: PathBuf) -> Result<(PathBuf, Config)> {
             config_path.display()
         )
     })?;
+    if let Some(name) = cfg.project_name.as_deref() {
+        if let Err(err) = projects::register_project(name, &config_path) {
+            tracing::debug!(?err, "failed to register project name");
+        }
+    }
     Ok((config_path, cfg))
 }
 
@@ -211,6 +233,7 @@ fn execute_task(
     task: &TaskConfig,
     config_path: &Path,
     workdir: &Path,
+    project_name: Option<&str>,
     flox_pkgs: &[(String, FloxInstallSpec)],
     flox_enabled: bool,
     command: &str,
@@ -222,9 +245,26 @@ fn execute_task(
 
     println!("Running task '{}': {}", task.name, command);
 
+    // Create context for PID tracking
+    let canonical_config = config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.to_path_buf());
+    let canonical_workdir = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    let task_ctx = TaskContext {
+        task_name: task.name.clone(),
+        command: command.to_string(),
+        config_path: canonical_config,
+        project_root: canonical_workdir.clone(),
+        used_flox: flox_enabled && !flox_pkgs.is_empty(),
+        project_name: project_name.map(|s| s.to_string()),
+    };
+
     let mut record = InvocationRecord::new(
         workdir.display().to_string(),
         config_path.display().to_string(),
+        project_name,
         &task.name,
         command,
         user_input,
@@ -237,54 +277,61 @@ fn execute_task(
     let flox_disabled = flox_disabled_marker(workdir).exists();
 
     if flox_pkgs.is_empty() || flox_disabled || !flox_enabled {
-        let (st, out) = run_host_command(workdir, command)?;
+        let (st, out) = run_host_command(workdir, command, Some(task_ctx.clone()))?;
         status = st;
         combined_output.push_str(&out);
     } else {
         match flox_health_check(workdir, flox_pkgs) {
-            Ok(true) => match run_flox_with_reset(flox_pkgs, workdir, command) {
-                Ok(Some((st, out))) => {
-                    combined_output.push_str(&out);
-                    if st.success() {
-                        status = st;
-                    } else {
-                        println!(
-                            "flox activate failed (status {:?}); retrying on host PATH",
-                            st.code()
-                        );
-                        let (host_status, host_out) = run_host_command(workdir, command)?;
+            Ok(true) => {
+                match run_flox_with_reset(flox_pkgs, workdir, command, Some(task_ctx.clone())) {
+                    Ok(Some((st, out))) => {
+                        combined_output.push_str(&out);
+                        if st.success() {
+                            status = st;
+                        } else {
+                            println!(
+                                "flox activate failed (status {:?}); retrying on host PATH",
+                                st.code()
+                            );
+                            let (host_status, host_out) =
+                                run_host_command(workdir, command, Some(task_ctx.clone()))?;
+                            combined_output
+                                .push_str("\n[flox activate failed; retried on host PATH]\n");
+                            combined_output.push_str(&host_out);
+                            status = host_status;
+                        }
+                    }
+                    Ok(None) => {
+                        println!("flox disabled after repeated errors; using host PATH");
+                        combined_output.push_str("[flox disabled after errors]\n");
+                        let (host_status, host_out) =
+                            run_host_command(workdir, command, Some(task_ctx.clone()))?;
+                        combined_output.push_str(&host_out);
+                        status = host_status;
+                    }
+                    Err(err) => {
+                        println!("flox activate failed ({err}); retrying on host PATH");
+                        let (host_status, host_out) =
+                            run_host_command(workdir, command, Some(task_ctx.clone()))?;
                         combined_output
                             .push_str("\n[flox activate failed; retried on host PATH]\n");
                         combined_output.push_str(&host_out);
                         status = host_status;
                     }
                 }
-                Ok(None) => {
-                    println!("flox disabled after repeated errors; using host PATH");
-                    combined_output.push_str("[flox disabled after errors]\n");
-                    let (host_status, host_out) = run_host_command(workdir, command)?;
-                    combined_output.push_str(&host_out);
-                    status = host_status;
-                }
-                Err(err) => {
-                    println!("flox activate failed ({err}); retrying on host PATH");
-                    let (host_status, host_out) = run_host_command(workdir, command)?;
-                    combined_output.push_str("\n[flox activate failed; retried on host PATH]\n");
-                    combined_output.push_str(&host_out);
-                    status = host_status;
-                }
-            },
+            }
             Ok(false) => {
                 println!("flox disabled after health check; using host PATH");
                 combined_output.push_str("[flox disabled after health check]\n");
-                let (host_status, host_out) = run_host_command(workdir, command)?;
+                let (host_status, host_out) =
+                    run_host_command(workdir, command, Some(task_ctx.clone()))?;
                 combined_output.push_str(&host_out);
                 status = host_status;
             }
             Err(err) => {
                 println!("flox health check failed ({err}); using host PATH");
                 combined_output.push_str("[flox health check failed; using host PATH]\n");
-                let (host_status, host_out) = run_host_command(workdir, command)?;
+                let (host_status, host_out) = run_host_command(workdir, command, Some(task_ctx))?;
                 combined_output.push_str(&host_out);
                 status = host_status;
             }
@@ -395,23 +442,28 @@ fn generate_abbreviation(name: &str) -> Option<String> {
     if abbr.len() >= 2 { Some(abbr) } else { None }
 }
 
-fn run_host_command(workdir: &Path, command: &str) -> Result<(ExitStatus, String)> {
+fn run_host_command(
+    workdir: &Path,
+    command: &str,
+    ctx: Option<TaskContext>,
+) -> Result<(ExitStatus, String)> {
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(command).current_dir(workdir);
-    run_command_with_tee(cmd).with_context(|| "failed to spawn command without managed env")
+    run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn command without managed env")
 }
 
 fn run_flox_with_reset(
     flox_pkgs: &[(String, FloxInstallSpec)],
     workdir: &Path,
     command: &str,
+    ctx: Option<TaskContext>,
 ) -> Result<Option<(ExitStatus, String)>> {
     let mut combined_output = String::new();
     let mut reset_done = false;
 
     loop {
         let env = flox::ensure_env(workdir, flox_pkgs)?;
-        match run_flox_command(&env, workdir, command) {
+        match run_flox_command(&env, workdir, command, ctx.clone()) {
             Ok((status, out)) => {
                 combined_output.push_str(&out);
                 if status.success() {
@@ -466,7 +518,12 @@ fn flox_health_check(project_root: &Path, flox_pkgs: &[(String, FloxInstallSpec)
     }
 }
 
-fn run_flox_command(env: &FloxEnv, workdir: &Path, command: &str) -> Result<(ExitStatus, String)> {
+fn run_flox_command(
+    env: &FloxEnv,
+    workdir: &Path,
+    command: &str,
+    ctx: Option<TaskContext>,
+) -> Result<(ExitStatus, String)> {
     let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
     let mut cmd = Command::new(flox_bin);
     cmd.arg("activate")
@@ -477,15 +534,46 @@ fn run_flox_command(env: &FloxEnv, workdir: &Path, command: &str) -> Result<(Exi
         .arg("-c")
         .arg(command)
         .current_dir(workdir);
-    run_command_with_tee(cmd).with_context(|| "failed to spawn flox activate for task")
+    run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn flox activate for task")
 }
 
-fn run_command_with_tee(mut cmd: Command) -> Result<(ExitStatus, String)> {
+fn run_command_with_tee(
+    mut cmd: Command,
+    ctx: Option<TaskContext>,
+) -> Result<(ExitStatus, String)> {
+    // Create new process group on Unix for reliable child process management
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| "failed to spawn command")?;
+
+    let pid = child.id();
+
+    // Register the process if we have task context
+    if let Some(ref task_ctx) = ctx {
+        let pgid = running::get_pgid(pid).unwrap_or(pid);
+        let entry = RunningProcess {
+            pid,
+            pgid,
+            task_name: task_ctx.task_name.clone(),
+            command: task_ctx.command.clone(),
+            started_at: running::now_ms(),
+            config_path: task_ctx.config_path.clone(),
+            project_root: task_ctx.project_root.clone(),
+            used_flox: task_ctx.used_flox,
+            project_name: task_ctx.project_name.clone(),
+        };
+        if let Err(err) = running::register_process(entry) {
+            tracing::warn!(?err, "failed to register running process");
+        }
+    }
 
     let output = Arc::new(Mutex::new(String::new()));
     let mut handles = Vec::new();
@@ -504,6 +592,13 @@ fn run_command_with_tee(mut cmd: Command) -> Result<(ExitStatus, String)> {
     let status = child
         .wait()
         .with_context(|| "failed to wait for command completion")?;
+
+    // Unregister the process
+    if ctx.is_some() {
+        if let Err(err) = running::unregister_process(pid) {
+            tracing::warn!(?err, "failed to unregister process");
+        }
+    }
 
     let collected = output
         .lock()
@@ -806,6 +901,7 @@ mod tests {
             &task,
             Path::new("flow.toml"),
             Path::new("."),
+            None,
             &[],
             false,
             "",

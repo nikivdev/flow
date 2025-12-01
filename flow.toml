@@ -1,4 +1,5 @@
 version = 1
+name = "flow"
 
 [deps]
 fast = "github.com/1focus-ai/fast"
@@ -48,6 +49,10 @@ description = "Build the CLI/daemon with --release and copy the binary to ~/.loc
 [[tasks]]
 name = "test-flow-task-tracing"
 command = "bun i-run.ts"
+
+[[tasks]]
+name = "test-flow-server-tracing"
+command = "bun i-server.ts"
 
 [[tasks]]
 name = "commit"
