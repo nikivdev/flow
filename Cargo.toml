@@ -7,12 +7,9 @@ edition = "2024"
 name = "f"
 path = "src/main.rs"
 
-[[bin]]
-name = "lin"
-path = "src/bin/lin.rs"
-
 [dependencies]
 axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 futures = "0.3"
