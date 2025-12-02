@@ -335,6 +335,16 @@ pub struct ServerOpts {
     /// Port for the HTTP server.
     #[arg(long, default_value_t = 9060)]
     pub port: u16,
+    #[command(subcommand)]
+    pub action: Option<ServerAction>,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum ServerAction {
+    #[command(about = "Start the server in the foreground")]
+    Foreground,
+    #[command(about = "Stop the background server")]
+    Stop,
 }
 
 #[derive(Args, Debug, Clone)]
