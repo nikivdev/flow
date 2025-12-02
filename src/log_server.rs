@@ -1,29 +1,94 @@
+use std::fs;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
     Router,
     extract::Query,
     http::{Method, StatusCode},
-    response::{IntoResponse, Json},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Json,
+    },
     routing::{get, post},
 };
+use futures::stream::{self, Stream, StreamExt};
+use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::cli::ServerOpts;
+use crate::cli::{ServerAction, ServerOpts};
 use crate::log_store::{self, LogEntry, LogQuery};
 
 /// Run the flow HTTP server for log ingestion.
 pub fn run(opts: ServerOpts) -> Result<()> {
-    // Initialize database and schema on startup
-    println!("Initializing database...");
-    let conn = log_store::open_log_db().context("failed to initialize log database")?;
-    drop(conn); // Close connection, will be reopened per-request
-    println!("Database ready.");
+    let host = opts.host.clone();
+    let port = opts.port;
 
-    let addr: SocketAddr = format!("{}:{}", opts.host, opts.port)
+    match opts.action {
+        Some(ServerAction::Stop) => stop_server(),
+        Some(ServerAction::Foreground) => run_foreground(&host, port),
+        None => ensure_server(&host, port),
+    }
+}
+
+/// Ensure server is running in background, start if not
+fn ensure_server(host: &str, port: u16) -> Result<()> {
+    if server_healthy(host, port) {
+        println!("Flow server already running at http://{}:{}", host, port);
+        return Ok(());
+    }
+
+    // Kill stale process if exists
+    if let Some(pid) = load_server_pid()? {
+        if process_alive(pid) {
+            terminate_process(pid).ok();
+        }
+        remove_server_pid().ok();
+    }
+
+    // Start in background
+    let exe = std::env::current_exe().context("failed to get current exe")?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("server")
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("foreground")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let child = cmd.spawn().context("failed to start server process")?;
+    persist_server_pid(child.id())?;
+
+    // Wait for health
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(100));
+        if server_healthy(host, port) {
+            println!("Flow server started at http://{}:{}", host, port);
+            return Ok(());
+        }
+    }
+
+    println!("Flow server starting at http://{}:{} (may take a moment)", host, port);
+    Ok(())
+}
+
+/// Run server in foreground (used by background process)
+fn run_foreground(host: &str, port: u16) -> Result<()> {
+    // Initialize database and schema on startup
+    let conn = log_store::open_log_db().context("failed to initialize log database")?;
+    drop(conn);
+
+    let addr: SocketAddr = format!("{}:{}", host, port)
         .parse()
         .context("invalid host:port")?;
 
@@ -39,9 +104,8 @@ pub fn run(opts: ServerOpts) -> Result<()> {
             .route("/health", get(health))
             .route("/logs/ingest", post(logs_ingest))
             .route("/logs/query", get(logs_query))
+            .route("/logs/errors/stream", get(logs_errors_stream))
             .layer(cors);
-
-        println!("flow server listening on http://{}", addr);
 
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -53,6 +117,83 @@ pub fn run(opts: ServerOpts) -> Result<()> {
 
         Ok(())
     })
+}
+
+fn stop_server() -> Result<()> {
+    if let Some(pid) = load_server_pid()? {
+        terminate_process(pid).ok();
+        remove_server_pid().ok();
+        println!("Flow server stopped");
+    } else {
+        println!("Flow server not running");
+    }
+    Ok(())
+}
+
+fn server_pid_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/flow/server.pid")
+}
+
+fn load_server_pid() -> Result<Option<u32>> {
+    let path = server_pid_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path)?;
+    let pid: u32 = contents.trim().parse().unwrap_or(0);
+    Ok(if pid == 0 { None } else { Some(pid) })
+}
+
+fn persist_server_pid(pid: u32) -> Result<()> {
+    let path = server_pid_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, pid.to_string())?;
+    Ok(())
+}
+
+fn remove_server_pid() -> Result<()> {
+    let path = server_pid_path();
+    if path.exists() {
+        fs::remove_file(path).ok();
+    }
+    Ok(())
+}
+
+fn server_healthy(host: &str, port: u16) -> bool {
+    let url = format!("http://{}:{}/health", host, port);
+    Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .ok()
+        .and_then(|c| c.get(&url).send().ok())
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+fn process_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn terminate_process(pid: u32) -> Result<()> {
+    let status = Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+        .context("failed to kill process")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("kill failed")
+    }
 }
 
 async fn health() -> impl IntoResponse {
@@ -133,4 +274,60 @@ async fn logs_query(Query(query): Query<LogQuery>) -> impl IntoResponse {
                 .into_response()
         }
     }
+}
+
+/// SSE stream of error logs - polls DB and emits new errors
+async fn logs_errors_stream() -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let last_id = Arc::new(AtomicI64::new(0));
+
+    // Get current max ID to start from
+    if let Ok(conn) = log_store::open_log_db() {
+        if let Ok(entries) = log_store::query_logs(&conn, &LogQuery {
+            log_type: Some("error".to_string()),
+            limit: 1,
+            ..Default::default()
+        }) {
+            if let Some(entry) = entries.first() {
+                last_id.store(entry.id, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let stream = stream::unfold(last_id, |last_id| async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let current_last = last_id.load(Ordering::SeqCst);
+        let new_errors = tokio::task::spawn_blocking(move || {
+            let conn = match log_store::open_log_db() {
+                Ok(c) => c,
+                Err(_) => return Vec::new(),
+            };
+
+            log_store::query_logs(&conn, &LogQuery {
+                log_type: Some("error".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.id > current_last)
+            .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+
+        let events: Vec<Result<Event, std::convert::Infallible>> = new_errors
+            .into_iter()
+            .map(|entry| {
+                last_id.store(entry.id.max(last_id.load(Ordering::SeqCst)), Ordering::SeqCst);
+                let data = serde_json::to_string(&entry).unwrap_or_default();
+                Ok(Event::default().data(data))
+            })
+            .collect();
+
+        Some((stream::iter(events), last_id))
+    })
+    .flatten();
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
