@@ -17,7 +17,7 @@ use axum::{
         IntoResponse, Json,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::get,
+    routing::{get, post},
 };
 use futures::{Stream, StreamExt};
 use notify::RecursiveMode;
@@ -30,6 +30,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::{
     cli::DaemonOpts,
     config::{self, Config, ServerConfig},
+    log_store::{self, LogEntry, LogQuery},
     screen::ScreenBroadcaster,
     servers::{LogLine, ManagedServer, ServerSnapshot},
     terminal,
@@ -107,6 +108,9 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
         .route("/logs", get(all_logs))
         .route("/servers/:name/logs", get(server_logs))
         .route("/servers/:name/logs/stream", get(server_logs_stream))
+        // Log ingestion endpoints
+        .route("/logs/ingest", post(logs_ingest))
+        .route("/logs/query", get(logs_query))
         .with_state(state);
 
     let addr = SocketAddr::from((opts.host, opts.port));
@@ -428,5 +432,88 @@ fn same_file(a: &Path, b: &Path) -> bool {
 async fn shutdown_signal() {
     if tokio::signal::ctrl_c().await.is_ok() {
         tracing::info!("shutdown signal received");
+    }
+}
+
+// ============================================================================
+// Log Ingestion Endpoints
+// ============================================================================
+
+/// Request body for log ingestion - single entry or batch.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum IngestRequest {
+    Single(LogEntry),
+    Batch(Vec<LogEntry>),
+}
+
+/// POST /logs/ingest - Ingest log entries into the database.
+async fn logs_ingest(Json(payload): Json<IngestRequest>) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        let mut conn = match log_store::open_log_db() {
+            Ok(c) => c,
+            Err(e) => return Err(e),
+        };
+
+        match payload {
+            IngestRequest::Single(entry) => {
+                let id = log_store::insert_log(&conn, &entry)?;
+                Ok(json!({ "inserted": 1, "ids": [id] }))
+            }
+            IngestRequest::Batch(entries) => {
+                let ids = log_store::insert_logs(&mut conn, &entries)?;
+                Ok(json!({ "inserted": ids.len(), "ids": ids }))
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(Err(err)) => {
+            tracing::error!(?err, "log ingest failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            tracing::error!(?err, "log ingest task panicked");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal error" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET /logs/query - Query stored logs with filters.
+async fn logs_query(Query(query): Query<LogQuery>) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = log_store::open_log_db()?;
+        log_store::query_logs(&conn, &query)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(entries)) => (StatusCode::OK, Json(entries)).into_response(),
+        Ok(Err(err)) => {
+            tracing::error!(?err, "log query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            tracing::error!(?err, "log query task panicked");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal error" })),
+            )
+                .into_response()
+        }
     }
 }
