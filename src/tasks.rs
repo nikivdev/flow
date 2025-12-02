@@ -153,7 +153,7 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
                 "FLOW_DISABLE_FLOX is set; running on host PATH",
             );
         }
-        ensure_command_dependencies_available(&resolved.commands, Some(&mut preamble))?;
+        ensure_command_dependencies_available(&resolved.commands)?;
     }
     execute_task(
         task,
@@ -193,7 +193,7 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
     let flox_pkgs = collect_flox_packages(&cfg, &combined.flox);
     let mut preamble = String::new();
     if flox_pkgs.is_empty() {
-        ensure_command_dependencies_available(&combined.commands, Some(&mut preamble))?;
+        ensure_command_dependencies_available(&combined.commands)?;
     } else {
         log_and_capture(
             &mut preamble,
@@ -896,7 +896,14 @@ fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<Resolved
     for dep_name in &task.dependencies {
         if let Some(spec) = cfg.dependencies.get(dep_name) {
             match spec {
-                config::DependencySpec::Single(cmd) => resolved.commands.push(cmd.clone()),
+                config::DependencySpec::Single(cmd) => {
+                    // If value looks like a URL/path, use the key as binary name
+                    if cmd.contains('/') {
+                        resolved.commands.push(dep_name.clone());
+                    } else {
+                        resolved.commands.push(cmd.clone());
+                    }
+                }
                 config::DependencySpec::Multiple(cmds) => resolved.commands.extend(cmds.clone()),
                 config::DependencySpec::Flox(pkg) => {
                     resolved.flox.push((dep_name.clone(), pkg.clone()));
@@ -924,23 +931,11 @@ fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<Resolved
     Ok(resolved)
 }
 
-fn ensure_command_dependencies_available(
-    commands: &[String],
-    log: Option<&mut String>,
-) -> Result<()> {
+fn ensure_command_dependencies_available(commands: &[String]) -> Result<()> {
     if commands.is_empty() {
         return Ok(());
     }
 
-    let msg = format!(
-        "Ensuring dependencies are available on PATH: {}",
-        commands.join(", ")
-    );
-    if let Some(buf) = log {
-        log_and_capture(buf, &msg);
-    } else {
-        println!("{msg}");
-    }
     for command in commands {
         which::which(command).with_context(|| dependency_error(command))?;
     }
