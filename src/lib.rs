@@ -7,6 +7,7 @@ pub mod history;
 pub mod hub;
 pub mod init;
 pub mod lin_runtime;
+pub mod log_store;
 pub mod palette;
 pub mod processes;
 pub mod projects;
