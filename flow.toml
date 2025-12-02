@@ -55,6 +55,11 @@ name = "test-flow-server-tracing"
 command = "bun i-server.ts"
 
 [[tasks]]
+name = "test-log-server"
+command = "bun tests/test_log_server.ts"
+description = "Test log ingestion and query endpoints (requires 'f server' running)"
+
+[[tasks]]
 name = "commit"
 command = "fast commitPush"
 description = "Commit with AI"

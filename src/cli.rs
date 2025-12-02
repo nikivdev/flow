@@ -120,6 +120,11 @@ pub enum Commands {
         long_about = "The active project is used as a fallback for commands like `f logs` when not in a project directory."
     )]
     Active(ActiveOpts),
+    #[command(
+        about = "Start the flow HTTP server for log ingestion and queries.",
+        long_about = "Runs an HTTP server with endpoints for log ingestion (/logs/ingest) and queries (/logs/query)."
+    )]
+    Server(ServerOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -320,6 +325,16 @@ pub struct ActiveOpts {
     /// Clear the active project.
     #[arg(long, short)]
     pub clear: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ServerOpts {
+    /// Host to bind the server to.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+    /// Port for the HTTP server.
+    #[arg(long, default_value_t = 9060)]
+    pub port: u16,
 }
 
 #[derive(Args, Debug, Clone)]
