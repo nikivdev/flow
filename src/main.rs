@@ -1,10 +1,11 @@
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    cli::{Cli, Commands, TaskRunOpts, TasksOpts},
+    cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     doctor, history, hub, init, init_tracing, log_server, palette, processes, projects, tasks,
 };
 use std::net::IpAddr;
+use std::path::Path;
 
 fn main() -> Result<()> {
     init_tracing();
@@ -60,6 +61,9 @@ fn main() -> Result<()> {
         Some(Commands::LastCmdFull) => {
             history::print_last_record_full()?;
         }
+        Some(Commands::Rerun(opts)) => {
+            rerun(opts)?;
+        }
         Some(Commands::Ps(opts)) => {
             processes::show_project_processes(opts)?;
         }
@@ -97,4 +101,36 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn rerun(opts: RerunOpts) -> Result<()> {
+    let project_root = if opts.config.is_absolute() {
+        opts.config
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
+    };
+
+    let record = history::load_last_record_for_project(&project_root)?;
+    let Some(rec) = record else {
+        bail!("no previous task found for this project");
+    };
+
+    // Parse user_input to extract task name and args
+    let parts: Vec<&str> = rec.user_input.split_whitespace().collect();
+    let task_name = parts.first().map(|s| s.to_string()).unwrap_or(rec.task_name.clone());
+    let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+
+    println!("Re-running: {}", rec.user_input);
+
+    tasks::run(TaskRunOpts {
+        config: opts.config,
+        delegate_to_hub: false,
+        hub_host: IpAddr::from([127, 0, 0, 1]),
+        hub_port: 9050,
+        name: task_name,
+        args,
+    })
 }

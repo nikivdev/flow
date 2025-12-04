@@ -164,6 +164,35 @@ fn load_last_record(path: &Path) -> Result<Option<InvocationRecord>> {
     Ok(None)
 }
 
+/// Load the last invocation record for a specific project root.
+pub fn load_last_record_for_project(project_root: &Path) -> Result<Option<InvocationRecord>> {
+    let path = history_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let canonical_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_str = canonical_root.to_string_lossy();
+
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read history at {}", path.display()))?;
+
+    for line in contents.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(rec) = serde_json::from_str::<InvocationRecord>(line) {
+            if rec.project_root == canonical_str {
+                return Ok(Some(rec));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 fn history_path() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
