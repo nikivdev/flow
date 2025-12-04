@@ -225,6 +225,7 @@ fn terminate_process(pid: u32) -> Result<()> {
     {
         let status = Command::new("kill")
             .arg(format!("{pid}"))
+            .stderr(std::process::Stdio::null())
             .status()
             .context("failed to invoke kill command")?;
         if status.success() {
