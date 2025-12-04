@@ -95,6 +95,8 @@ pub enum Commands {
     LastCmd,
     #[command(about = "Show the last task run (command, status, and output) recorded by flow.")]
     LastCmdFull,
+    #[command(about = "Re-run the last task executed in this project.")]
+    Rerun(RerunOpts),
     #[command(
         about = "List running flow processes for the current project.",
         long_about = "Lists flow-started processes tracked for this project. Use --all to see processes across all projects."
@@ -316,6 +318,13 @@ pub struct TaskLogsOpts {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorOpts {}
+
+#[derive(Args, Debug, Clone)]
+pub struct RerunOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+}
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ActiveOpts {
