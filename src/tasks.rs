@@ -74,14 +74,15 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     let resolved = resolve_task_dependencies(task, &cfg)?;
     let workdir = config_path.parent().unwrap_or(Path::new("."));
 
-    let base_command = task.command.trim();
+    let base_command = task.command.trim().to_string();
     let quoted_args: Vec<String> = opts
         .args
         .iter()
         .map(|arg| shell_words::quote(arg).into_owned())
         .collect();
-    let arg_command = if opts.args.is_empty() {
-        base_command.to_string()
+    // For display/logging purposes, show command with args appended
+    let display_command = if opts.args.is_empty() {
+        base_command.clone()
     } else {
         format!("{} {}", base_command, quoted_args.join(" "))
     };
@@ -99,7 +100,7 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
             workdir,
             opts.hub_host,
             opts.hub_port,
-            &arg_command,
+            &display_command,
         ) {
             Ok(()) => {
                 let mut record = InvocationRecord::new(
@@ -107,7 +108,7 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
                     config_path.display().to_string(),
                     project_name.as_deref(),
                     &task.name,
-                    &arg_command,
+                    &display_command,
                     &user_input,
                     false,
                 );
@@ -163,7 +164,8 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
         project_name.as_deref(),
         &flox_pkgs,
         flox_enabled,
-        &arg_command,
+        &base_command,
+        &opts.args,
         &user_input,
     )
 }
@@ -212,6 +214,7 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
         let flox_disabled_marker = flox_disabled_marker(workdir).exists();
         let flox_enabled = !flox_pkgs.is_empty() && !flox_disabled_env && !flox_disabled_marker;
         let command = task.command.trim().to_string();
+        let empty_args: Vec<String> = Vec::new();
         execute_task(
             task,
             &config_path,
@@ -221,6 +224,7 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
             &flox_pkgs,
             flox_enabled,
             &command,
+            &empty_args,
             &task.name,
         )?;
     }
@@ -328,6 +332,7 @@ fn execute_task(
     flox_pkgs: &[(String, FloxInstallSpec)],
     flox_enabled: bool,
     command: &str,
+    args: &[String],
     user_input: &str,
 ) -> Result<()> {
     if command.is_empty() {
@@ -379,7 +384,7 @@ fn execute_task(
                 "flox disabled for this project (marker present); using host PATH",
             );
         }
-        let (st, out) = run_host_command(workdir, command, Some(task_ctx.clone()))?;
+        let (st, out) = run_host_command(workdir, command, args, Some(task_ctx.clone()))?;
         status = st;
         combined_output.push_str(&out);
     } else {
@@ -396,7 +401,7 @@ fn execute_task(
         );
         match flox_health_check(workdir, flox_pkgs) {
             Ok(true) => {
-                match run_flox_with_reset(flox_pkgs, workdir, command, Some(task_ctx.clone())) {
+                match run_flox_with_reset(flox_pkgs, workdir, command, args, Some(task_ctx.clone())) {
                     Ok(Some((st, out))) => {
                         combined_output.push_str(&out);
                         if st.success() {
@@ -410,7 +415,7 @@ fn execute_task(
                                 ),
                             );
                             let (host_status, host_out) =
-                                run_host_command(workdir, command, Some(task_ctx.clone()))?;
+                                run_host_command(workdir, command, args, Some(task_ctx.clone()))?;
                             combined_output
                                 .push_str("\n[flox activate failed; retried on host PATH]\n");
                             combined_output.push_str(&host_out);
@@ -424,7 +429,7 @@ fn execute_task(
                         );
                         combined_output.push_str("[flox disabled after errors]\n");
                         let (host_status, host_out) =
-                            run_host_command(workdir, command, Some(task_ctx.clone()))?;
+                            run_host_command(workdir, command, args, Some(task_ctx.clone()))?;
                         combined_output.push_str(&host_out);
                         status = host_status;
                     }
@@ -434,7 +439,7 @@ fn execute_task(
                             &format!("flox activate failed ({err}); retrying on host PATH"),
                         );
                         let (host_status, host_out) =
-                            run_host_command(workdir, command, Some(task_ctx.clone()))?;
+                            run_host_command(workdir, command, args, Some(task_ctx.clone()))?;
                         combined_output
                             .push_str("\n[flox activate failed; retried on host PATH]\n");
                         combined_output.push_str(&host_out);
@@ -449,7 +454,7 @@ fn execute_task(
                 );
                 combined_output.push_str("[flox disabled after health check]\n");
                 let (host_status, host_out) =
-                    run_host_command(workdir, command, Some(task_ctx.clone()))?;
+                    run_host_command(workdir, command, args, Some(task_ctx.clone()))?;
                 combined_output.push_str(&host_out);
                 status = host_status;
             }
@@ -459,7 +464,7 @@ fn execute_task(
                     &format!("flox health check failed ({err}); using host PATH"),
                 );
                 combined_output.push_str("[flox health check failed; using host PATH]\n");
-                let (host_status, host_out) = run_host_command(workdir, command, Some(task_ctx))?;
+                let (host_status, host_out) = run_host_command(workdir, command, args, Some(task_ctx))?;
                 combined_output.push_str(&host_out);
                 status = host_status;
             }
@@ -573,10 +578,15 @@ fn generate_abbreviation(name: &str) -> Option<String> {
 fn run_host_command(
     workdir: &Path,
     command: &str,
+    args: &[String],
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
     let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(command).current_dir(workdir);
+    cmd.arg("-c").arg(command).arg("--");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.current_dir(workdir);
     run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn command without managed env")
 }
 
@@ -584,6 +594,7 @@ fn run_flox_with_reset(
     flox_pkgs: &[(String, FloxInstallSpec)],
     workdir: &Path,
     command: &str,
+    args: &[String],
     ctx: Option<TaskContext>,
 ) -> Result<Option<(ExitStatus, String)>> {
     let mut combined_output = String::new();
@@ -591,7 +602,7 @@ fn run_flox_with_reset(
 
     loop {
         let env = flox::ensure_env(workdir, flox_pkgs)?;
-        match run_flox_command(&env, workdir, command, ctx.clone()) {
+        match run_flox_command(&env, workdir, command, args, ctx.clone()) {
             Ok((status, out)) => {
                 combined_output.push_str(&out);
                 if status.success() {
@@ -650,6 +661,7 @@ fn run_flox_command(
     env: &FloxEnv,
     workdir: &Path,
     command: &str,
+    args: &[String],
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
     let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
@@ -661,7 +673,11 @@ fn run_flox_command(
         .arg("/bin/sh")
         .arg("-c")
         .arg(command)
-        .current_dir(workdir);
+        .arg("--");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.current_dir(workdir);
     run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn flox activate for task")
 }
 
@@ -1121,6 +1137,7 @@ mod tests {
             description: None,
             shortcuts: Vec::new(),
         };
+        let empty_args: Vec<String> = Vec::new();
         let err = execute_task(
             &task,
             Path::new("flow.toml"),
@@ -1130,6 +1147,7 @@ mod tests {
             &[],
             false,
             "",
+            &empty_args,
             &task.name,
         )
         .unwrap_err();
