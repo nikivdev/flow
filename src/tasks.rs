@@ -2,7 +2,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     fs::{self, File, OpenOptions},
     hash::{Hash, Hasher},
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     net::IpAddr,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -10,6 +10,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
@@ -581,6 +583,14 @@ fn run_host_command(
     args: &[String],
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
+    // For interactive tasks, run directly with inherited stdio
+    // This ensures proper TTY handling for readline, prompts, etc.
+    let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
+
+    if interactive && std::io::stdin().is_terminal() {
+        return run_interactive_command(workdir, command, args, ctx);
+    }
+
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c").arg(command).arg("--");
     for arg in args {
@@ -664,6 +674,13 @@ fn run_flox_command(
     args: &[String],
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
+    // For interactive tasks, run directly with inherited stdio
+    let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
+
+    if interactive && std::io::stdin().is_terminal() {
+        return run_flox_interactive_command(env, workdir, command, args, ctx);
+    }
+
     let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
     let mut cmd = Command::new(flox_bin);
     cmd.arg("activate")
@@ -681,7 +698,477 @@ fn run_flox_command(
     run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn flox activate for task")
 }
 
+/// Run an interactive flox command with inherited stdio for proper TTY handling.
+fn run_flox_interactive_command(
+    env: &FloxEnv,
+    workdir: &Path,
+    command: &str,
+    args: &[String],
+    ctx: Option<TaskContext>,
+) -> Result<(ExitStatus, String)> {
+    let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
+
+    let mut cmd = Command::new(flox_bin);
+    cmd.arg("activate")
+        .arg("-d")
+        .arg(&env.project_root)
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .arg("--");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.current_dir(workdir);
+
+    // Inherit all stdio for full TTY passthrough
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    // NOTE: Do NOT create a new process group for interactive commands.
+    // The child must remain in the foreground process group to read from the terminal.
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "failed to spawn interactive flox command")?;
+
+    let pid = child.id();
+
+    if let Some(ref task_ctx) = ctx {
+        let pgid = running::get_pgid(pid).unwrap_or(pid);
+        let entry = RunningProcess {
+            pid,
+            pgid,
+            task_name: task_ctx.task_name.clone(),
+            command: task_ctx.command.clone(),
+            started_at: running::now_ms(),
+            config_path: task_ctx.config_path.clone(),
+            project_root: task_ctx.project_root.clone(),
+            used_flox: task_ctx.used_flox,
+            project_name: task_ctx.project_name.clone(),
+        };
+        if let Err(err) = running::register_process(entry) {
+            tracing::warn!(?err, "failed to register running process");
+        }
+    }
+
+    let status = child.wait().with_context(|| "failed to wait on interactive flox command")?;
+
+    if ctx.is_some() {
+        if let Err(err) = running::unregister_process(pid) {
+            tracing::debug!(?err, "failed to unregister process");
+        }
+    }
+
+    // No output captured for interactive commands
+    Ok((status, String::new()))
+}
+
 fn run_command_with_tee(
+    cmd: Command,
+    ctx: Option<TaskContext>,
+) -> Result<(ExitStatus, String)> {
+    // Only use `script` for tasks explicitly marked as interactive
+    // This avoids issues with non-interactive tasks hanging
+    let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
+    let use_script = interactive && std::io::stdin().is_terminal() && cfg!(unix);
+
+    if use_script {
+        run_command_with_script(cmd, ctx)
+    } else {
+        run_command_with_pipes(cmd, ctx)
+    }
+}
+
+/// Use the `script` command to run a command interactively while capturing output.
+/// This is more reliable than manual PTY handling for diverse programs.
+fn run_command_with_script(
+    cmd: Command,
+    ctx: Option<TaskContext>,
+) -> Result<(ExitStatus, String)> {
+    // Create a temp file for capturing output
+    let temp_dir = std::env::temp_dir();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let script_log = temp_dir.join(format!("flow_script_{}.log", timestamp));
+
+    // Build the inner command string
+    let program = cmd.get_program().to_string_lossy().to_string();
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+    let cwd = cmd.get_current_dir().map(|p| p.to_path_buf());
+
+    // Construct the command to pass to script
+    let inner_cmd = if args.is_empty() {
+        shell_words::quote(&program).to_string()
+    } else {
+        format!(
+            "{} {}",
+            shell_words::quote(&program),
+            args.iter()
+                .map(|a| shell_words::quote(a).to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+
+    // Build the script command
+    // macOS: script -q <logfile> /bin/sh -c "command"
+    // Linux: script -q -c "command" <logfile>
+    let mut script_cmd = Command::new("script");
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS script: script [-q] file [command ...]
+        // We need to pass the shell and -c as separate args after the file
+        script_cmd
+            .arg("-q")
+            .arg("-F") // Flush immediately
+            .arg(&script_log)
+            .args(["/bin/sh", "-c", &inner_cmd]);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        script_cmd
+            .arg("-q")
+            .arg("-c")
+            .arg(&inner_cmd)
+            .arg(&script_log);
+    }
+
+    if let Some(dir) = cwd {
+        script_cmd.current_dir(dir);
+    }
+
+    // Run with inherited stdio for full interactivity
+    script_cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    // Create process group for proper signal handling
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        script_cmd.process_group(0);
+    }
+
+    let mut child = script_cmd
+        .spawn()
+        .with_context(|| "failed to spawn script command")?;
+
+    let pid = child.id();
+
+    // Register the process if we have task context
+    if let Some(ref task_ctx) = ctx {
+        let pgid = running::get_pgid(pid).unwrap_or(pid);
+        let entry = RunningProcess {
+            pid,
+            pgid,
+            task_name: task_ctx.task_name.clone(),
+            command: task_ctx.command.clone(),
+            started_at: running::now_ms(),
+            config_path: task_ctx.config_path.clone(),
+            project_root: task_ctx.project_root.clone(),
+            used_flox: task_ctx.used_flox,
+            project_name: task_ctx.project_name.clone(),
+        };
+        if let Err(err) = running::register_process(entry) {
+            tracing::warn!(?err, "failed to register running process");
+        }
+    }
+
+    let status = child.wait().with_context(|| "failed to wait on script command")?;
+
+    // Unregister the process
+    if ctx.is_some() {
+        if let Err(err) = running::unregister_process(pid) {
+            tracing::debug!(?err, "failed to unregister process");
+        }
+    }
+
+    // Read the captured output
+    let output = fs::read_to_string(&script_log).unwrap_or_default();
+
+    // Clean up temp file
+    let _ = fs::remove_file(&script_log);
+
+    // Also write to log file if configured
+    if let Some(ref task_ctx) = ctx {
+        if let Some(log_path) = task_log_path(task_ctx) {
+            if let Some(parent) = log_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+                let header = format!(
+                    "\n--- {} | task:{} | cmd:{} ---\n",
+                    running::now_ms(),
+                    task_ctx.task_name,
+                    task_ctx.command
+                );
+                let _ = file.write_all(header.as_bytes());
+                let _ = file.write_all(output.as_bytes());
+            }
+        }
+    }
+
+    // Strip ANSI codes for history but keep colors for display (already shown)
+    let clean_output = strip_ansi_escapes::strip(&output)
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or(output);
+
+    Ok((status, clean_output))
+}
+
+/// Run an interactive command with inherited stdio for proper TTY handling.
+/// Output is not captured (returns empty string) since interactive commands
+/// need direct terminal access for readline, prompts, etc.
+fn run_interactive_command(
+    workdir: &Path,
+    command: &str,
+    args: &[String],
+    ctx: Option<TaskContext>,
+) -> Result<(ExitStatus, String)> {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c").arg(command).arg("--");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.current_dir(workdir);
+
+    // Inherit all stdio for full TTY passthrough
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    // NOTE: Do NOT create a new process group for interactive commands.
+    // The child must remain in the foreground process group to read from the terminal.
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| "failed to spawn interactive command")?;
+
+    let pid = child.id();
+
+    // Register the process if we have task context
+    if let Some(ref task_ctx) = ctx {
+        let pgid = running::get_pgid(pid).unwrap_or(pid);
+        let entry = RunningProcess {
+            pid,
+            pgid,
+            task_name: task_ctx.task_name.clone(),
+            command: task_ctx.command.clone(),
+            started_at: running::now_ms(),
+            config_path: task_ctx.config_path.clone(),
+            project_root: task_ctx.project_root.clone(),
+            used_flox: task_ctx.used_flox,
+            project_name: task_ctx.project_name.clone(),
+        };
+        if let Err(err) = running::register_process(entry) {
+            tracing::warn!(?err, "failed to register running process");
+        }
+    }
+
+    let status = child.wait().with_context(|| "failed to wait on interactive command")?;
+
+    // Unregister the process
+    if ctx.is_some() {
+        if let Err(err) = running::unregister_process(pid) {
+            tracing::debug!(?err, "failed to unregister process");
+        }
+    }
+
+    // No output captured for interactive commands
+    Ok((status, String::new()))
+}
+
+#[allow(dead_code)]
+fn run_command_with_pty(
+    cmd: Command,
+    ctx: Option<TaskContext>,
+) -> Result<(ExitStatus, String)> {
+    let pty_system = NativePtySystem::default();
+
+    // Get terminal size or use defaults
+    let size = crossterm::terminal::size()
+        .map(|(cols, rows)| PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap_or(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+
+    let pair = pty_system
+        .openpty(size)
+        .map_err(|e| anyhow::anyhow!("failed to open pty: {}", e))?;
+
+    // Build command for PTY - extract info from the std::process::Command
+    // We need to reconstruct the command since portable-pty uses its own CommandBuilder
+    let program = cmd.get_program().to_string_lossy().to_string();
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+    let cwd = cmd.get_current_dir().map(|p| p.to_path_buf());
+
+    let mut pty_cmd = CommandBuilder::new(&program);
+    for arg in &args {
+        pty_cmd.arg(arg);
+    }
+    if let Some(dir) = cwd {
+        pty_cmd.cwd(dir);
+    }
+
+    let mut child = pair
+        .slave
+        .spawn_command(pty_cmd)
+        .map_err(|e| anyhow::anyhow!("failed to spawn command in pty: {}", e))?;
+
+    // Drop the slave side in the parent
+    drop(pair.slave);
+
+    let pid = child.process_id().unwrap_or(0);
+
+    // Register the process if we have task context
+    if let Some(ref task_ctx) = ctx {
+        let entry = RunningProcess {
+            pid,
+            pgid: pid, // PTY processes are their own group
+            task_name: task_ctx.task_name.clone(),
+            command: task_ctx.command.clone(),
+            started_at: running::now_ms(),
+            config_path: task_ctx.config_path.clone(),
+            project_root: task_ctx.project_root.clone(),
+            used_flox: task_ctx.used_flox,
+            project_name: task_ctx.project_name.clone(),
+        };
+        if let Err(err) = running::register_process(entry) {
+            tracing::warn!(?err, "failed to register running process");
+        }
+    }
+
+    let output = Arc::new(Mutex::new(String::new()));
+
+    // Set up optional log file
+    let log_file = ctx.as_ref().and_then(|c| {
+        let path = task_log_path(c)?;
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(mut file) => {
+                let header = format!(
+                    "\n--- {} | task:{} | cmd:{} ---\n",
+                    running::now_ms(),
+                    c.task_name,
+                    c.command
+                );
+                let _ = file.write_all(header.as_bytes());
+                Some(Arc::new(Mutex::new(file)))
+            }
+            Err(_) => None,
+        }
+    });
+
+    // Get reader/writer for PTY master
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| anyhow::anyhow!("failed to clone pty reader: {}", e))?;
+    let writer = pair.master;
+
+    // Thread to forward stdin to PTY
+    let stdin_handle = {
+        let mut writer = writer
+            .take_writer()
+            .map_err(|e| anyhow::anyhow!("failed to take pty writer: {}", e))?;
+        thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if writer.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                        let _ = writer.flush();
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    };
+
+    // Thread to read PTY output and tee to stdout + capture
+    let output_clone = output.clone();
+    let log_file_clone = log_file.clone();
+    let output_handle = thread::spawn(move || {
+        let mut stdout = std::io::stdout();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = stdout.write_all(&buf[..n]);
+                    let _ = stdout.flush();
+
+                    if let Some(ref file) = log_file_clone {
+                        if let Ok(mut f) = file.lock() {
+                            let _ = f.write_all(&buf[..n]);
+                            let _ = f.flush();
+                        }
+                    }
+
+                    if let Ok(mut out) = output_clone.lock() {
+                        out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Wait for the child process
+    let exit_status = child
+        .wait()
+        .map_err(|e| anyhow::anyhow!("failed to wait on child: {}", e))?;
+
+    // Wait for output thread (stdin thread may block on read, so we don't join it)
+    let _ = output_handle.join();
+    drop(stdin_handle); // Let it terminate naturally
+
+    // Unregister the process
+    if ctx.is_some() {
+        if let Err(err) = running::unregister_process(pid) {
+            tracing::debug!(?err, "failed to unregister process");
+        }
+    }
+
+    let collected = output
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| String::new());
+
+    // Convert portable_pty ExitStatus to std::process::ExitStatus
+    let code = exit_status.exit_code();
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("exit {}", code))
+        .status()
+        .unwrap_or_else(|_| std::process::ExitStatus::default());
+
+    Ok((status, collected))
+}
+
+fn run_command_with_pipes(
     mut cmd: Command,
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
@@ -1103,6 +1590,7 @@ mod tests {
                 dependencies: Vec::new(),
                 description: Some("Run lint checks".to_string()),
                 shortcuts: Vec::new(),
+                interactive: false,
             },
             TaskConfig {
                 name: "test".to_string(),
@@ -1112,6 +1600,7 @@ mod tests {
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: Vec::new(),
+                interactive: false,
             },
         ];
 
@@ -1136,6 +1625,7 @@ mod tests {
             dependencies: Vec::new(),
             description: None,
             shortcuts: Vec::new(),
+            interactive: false,
         };
         let empty_args: Vec<String> = Vec::new();
         let err = execute_task(
@@ -1175,6 +1665,7 @@ mod tests {
             dependencies: vec!["fast".into(), "toolkit".into()],
             description: None,
             shortcuts: Vec::new(),
+            interactive: false,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -1207,6 +1698,7 @@ mod tests {
             dependencies: vec!["ripgrep".into()],
             description: None,
             shortcuts: Vec::new(),
+            interactive: false,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -1240,6 +1732,7 @@ mod tests {
             dependencies: vec!["node".into()],
             description: None,
             shortcuts: Vec::new(),
+            interactive: false,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -1260,6 +1753,7 @@ mod tests {
             dependencies: vec!["unknown".into()],
             description: None,
             shortcuts: Vec::new(),
+            interactive: false,
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
@@ -1282,6 +1776,7 @@ mod tests {
             dependencies: vec!["unknown".into()],
             description: None,
             shortcuts: Vec::new(),
+            interactive: false,
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
@@ -1303,6 +1798,7 @@ mod tests {
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: vec!["dcr-alias".into()],
+                interactive: false,
             },
             TaskConfig {
                 name: "dev-hub".into(),
@@ -1312,6 +1808,7 @@ mod tests {
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: Vec::new(),
+                interactive: false,
             },
         ];
 
@@ -1340,6 +1837,7 @@ mod tests {
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: Vec::new(),
+                interactive: false,
             },
             TaskConfig {
                 name: "deploy-core-runner".into(),
@@ -1349,6 +1847,7 @@ mod tests {
                 dependencies: Vec::new(),
                 description: None,
                 shortcuts: Vec::new(),
+                interactive: false,
             },
         ];
 

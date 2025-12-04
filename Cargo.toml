@@ -31,6 +31,7 @@ shellexpand = "3"
 shell-words = "1.1"
 base64 = "0.22"
 strip-ansi-escapes = "0.1"
+portable-pty = "0.8"
 
 [dev-dependencies]
 mockito = "1.7"
