@@ -13,6 +13,7 @@ tower-http = { version = "0.5", features = ["cors"] }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 futures = "0.3"
+ignore = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.36", features = ["full"] }
@@ -35,3 +36,4 @@ portable-pty = "0.8"
 
 [dev-dependencies]
 mockito = "1.7"
+tempfile = "3"

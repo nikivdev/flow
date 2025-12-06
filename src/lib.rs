@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod config;
 pub mod db;
+pub mod discover;
 pub mod doctor;
 pub mod flox;
 pub mod history;

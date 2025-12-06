@@ -22,6 +22,7 @@ use which::which;
 use crate::{
     cli::{HubAction, HubCommand, HubOpts, TaskActivateOpts, TaskRunOpts, TasksOpts},
     config::{self, Config, FloxInstallSpec, TaskConfig},
+    discover,
     flox::{self, FloxEnv},
     history::{self, InvocationRecord},
     hub, projects,
@@ -42,15 +43,25 @@ pub struct TaskContext {
 }
 
 pub fn list(opts: TasksOpts) -> Result<()> {
-    let (config_path, cfg) = load_project_config(opts.config)?;
+    // Determine root directory for discovery
+    let root = if opts.config.is_absolute() {
+        opts.config
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
 
-    if cfg.tasks.is_empty() {
-        println!("No tasks defined in {}", config_path.display());
+    let discovery = discover::discover_tasks(&root)?;
+
+    if discovery.tasks.is_empty() {
+        println!("No tasks defined in {} or subdirectories", root.display());
         return Ok(());
     }
 
-    println!("Tasks defined in {}:", config_path.display());
-    for line in format_task_lines(&cfg.tasks) {
+    println!("Tasks (root: {}):", root.display());
+    for line in format_discovered_task_lines(&discovery.tasks) {
         println!("{line}");
     }
 
@@ -493,6 +504,7 @@ fn execute_task(
     }
 }
 
+#[cfg(test)]
 fn format_task_lines(tasks: &[TaskConfig]) -> Vec<String> {
     let mut lines = Vec::new();
     for (idx, task) in tasks.iter().enumerate() {
@@ -506,6 +518,38 @@ fn format_task_lines(tasks: &[TaskConfig]) -> Vec<String> {
             idx + 1,
             task.name,
             shortcut_display,
+            task.command
+        ));
+        if let Some(desc) = &task.description {
+            lines.push(format!("    {desc}"));
+        }
+    }
+    lines
+}
+
+fn format_discovered_task_lines(tasks: &[discover::DiscoveredTask]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (idx, discovered) in tasks.iter().enumerate() {
+        let task = &discovered.task;
+        let shortcut_display = if task.shortcuts.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", task.shortcuts.join(", "))
+        };
+
+        // Show relative path for nested tasks
+        let path_suffix = if let Some(path_label) = discovered.path_label() {
+            format!(" ({})", path_label)
+        } else {
+            String::new()
+        };
+
+        lines.push(format!(
+            "{:>2}. {}{}{} – {}",
+            idx + 1,
+            task.name,
+            shortcut_display,
+            path_suffix,
             task.command
         ));
         if let Some(desc) = &task.description {

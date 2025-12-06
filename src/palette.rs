@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use crate::{
     cli::TasksOpts,
     config::{self, TaskConfig},
+    discover::{self, DiscoveredTask},
 };
 
 pub fn run(opts: TasksOpts) -> Result<()> {
@@ -122,6 +123,34 @@ impl PaletteEntry {
 
         Self { display, exec }
     }
+
+    fn from_discovered(discovered: &DiscoveredTask) -> Self {
+        let summary = discovered
+            .task
+            .description
+            .as_deref()
+            .unwrap_or_else(|| discovered.task.command.as_str());
+
+        let display = if let Some(path_label) = discovered.path_label() {
+            format!(
+                "[task] {} ({}) – {}",
+                discovered.task.name,
+                path_label,
+                truncate(summary, 80)
+            )
+        } else {
+            format!("[task] {} – {}", discovered.task.name, truncate(summary, 96))
+        };
+
+        let exec = vec![
+            "run".into(),
+            "--config".into(),
+            discovered.config_path.display().to_string(),
+            discovered.task.name.clone(),
+        ];
+
+        Self { display, exec }
+    }
 }
 
 fn build_entries(project_opts: Option<TasksOpts>) -> Result<Vec<PaletteEntry>> {
@@ -130,11 +159,23 @@ fn build_entries(project_opts: Option<TasksOpts>) -> Result<Vec<PaletteEntry>> {
     let mut has_project = false;
 
     if let Some(opts) = project_opts {
-        if let Some((config_path, cfg)) = load_project_if_exists(opts)? {
+        // Determine the root directory for discovery
+        let root = if opts.config.is_absolute() {
+            opts.config
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        };
+
+        // Discover all nested flow.toml files
+        let discovery = discover::discover_tasks(&root)?;
+
+        if !discovery.tasks.is_empty() {
             has_project = true;
-            let config_arg = config_path.display().to_string();
-            for task in &cfg.tasks {
-                entries.push(PaletteEntry::from_task(task, &config_arg));
+            for discovered in &discovery.tasks {
+                entries.push(PaletteEntry::from_discovered(discovered));
             }
         }
     }
@@ -174,23 +215,6 @@ fn load_if_exists(path: PathBuf) -> Result<Option<(PathBuf, config::Config)>> {
         Ok(Some((path, cfg)))
     } else {
         Ok(None)
-    }
-}
-
-fn load_project_if_exists(opts: TasksOpts) -> Result<Option<(PathBuf, config::Config)>> {
-    let config_path = resolve_path(opts.config)?;
-    if !config_path.exists() {
-        return Ok(None);
-    }
-    let cfg = config::load(&config_path)?;
-    Ok(Some((config_path, cfg)))
-}
-
-fn resolve_path(path: PathBuf) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Ok(std::env::current_dir()?.join(path))
     }
 }
 
