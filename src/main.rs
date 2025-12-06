@@ -2,7 +2,8 @@ use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    doctor, history, hub, init, init_tracing, log_server, palette, processes, projects, tasks,
+    doctor, history, hub, init, init_tracing, log_server, palette, processes, projects, task_match,
+    tasks,
 };
 use std::net::IpAddr;
 use std::path::Path;
@@ -81,6 +82,14 @@ fn main() -> Result<()> {
         }
         Some(Commands::Server(opts)) => {
             log_server::run(opts)?;
+        }
+        Some(Commands::Match(opts)) => {
+            task_match::run(task_match::MatchOpts {
+                query: opts.query.join(" "),
+                model: opts.model,
+                port: Some(opts.port),
+                execute: !opts.dry_run,
+            })?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
