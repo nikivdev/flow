@@ -8,12 +8,14 @@ pub mod history;
 pub mod hub;
 pub mod init;
 pub mod lin_runtime;
+pub mod lmstudio;
 pub mod log_server;
 pub mod log_store;
 pub mod palette;
 pub mod processes;
 pub mod projects;
 pub mod running;
+pub mod task_match;
 pub mod tasks;
 pub mod watchers;
 

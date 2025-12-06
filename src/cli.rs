@@ -127,6 +127,12 @@ pub enum Commands {
         long_about = "Runs an HTTP server with endpoints for log ingestion (/logs/ingest) and queries (/logs/query)."
     )]
     Server(ServerOpts),
+    #[command(
+        about = "Match a natural language query to a task using LM Studio.",
+        long_about = "Uses a local LM Studio model to intelligently match your query to an available task. Requires LM Studio running on localhost:1234 (or custom port).",
+        alias = "m"
+    )]
+    Match(MatchOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -469,4 +475,23 @@ pub struct IndexOpts {
     /// SQLite destination for snapshots (defaults to ~/.db/flow/flow.sqlite).
     #[arg(long)]
     pub database: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MatchOpts {
+    /// Natural language query describing the task you want to run.
+    #[arg(value_name = "QUERY", trailing_var_arg = true, num_args = 1..)]
+    pub query: Vec<String>,
+
+    /// LM Studio model to use (defaults to qwen3-8b).
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// LM Studio API port (defaults to 1234).
+    #[arg(long, default_value_t = 1234)]
+    pub port: u16,
+
+    /// Only show the match without running the task.
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
 }
