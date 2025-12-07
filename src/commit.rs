@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
@@ -42,35 +43,45 @@ struct ResponseMessage {
 
 /// Run the commit workflow: stage, generate message, commit, push.
 pub fn run(push: bool) -> Result<()> {
+    info!(push = push, "starting commit workflow");
+
     // Ensure we're in a git repo
     ensure_git_repo()?;
+    debug!("verified git repository");
 
     // Get API key
     let api_key = get_openai_key()?;
+    debug!("got OpenAI API key");
 
     // Stage all changes
     print!("Staging changes... ");
     io::stdout().flush()?;
     git_run(&["add", "."])?;
     println!("done");
+    debug!("staged all changes");
 
     // Get diff
     let diff = git_capture(&["diff", "--cached"])?;
     if diff.trim().is_empty() {
         bail!("No staged changes to commit");
     }
+    debug!(diff_len = diff.len(), "got cached diff");
 
     // Get status
     let status = git_capture(&["status", "--short"]).unwrap_or_default();
+    debug!(status_lines = status.lines().count(), "got git status");
 
     // Truncate diff if needed
     let (diff_for_prompt, truncated) = truncate_diff(&diff);
+    debug!(truncated = truncated, prompt_len = diff_for_prompt.len(), "prepared diff for prompt");
 
     // Generate commit message
     print!("Generating commit message... ");
     io::stdout().flush()?;
+    info!(model = MODEL, "calling OpenAI API");
     let message = generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?;
     println!("done\n");
+    debug!(message_len = message.len(), "got commit message");
 
     // Show the message
     println!("Commit message:");
@@ -80,6 +91,7 @@ pub fn run(push: bool) -> Result<()> {
 
     // Commit
     let paragraphs = split_paragraphs(&message);
+    debug!(paragraphs = paragraphs.len(), "split message into paragraphs");
     let mut args = vec!["commit"];
     for p in &paragraphs {
         args.push("-m");
@@ -87,6 +99,7 @@ pub fn run(push: bool) -> Result<()> {
     }
     git_run(&args)?;
     println!("✓ Committed");
+    info!("created commit");
 
     // Push if requested
     if push {
@@ -94,6 +107,7 @@ pub fn run(push: bool) -> Result<()> {
         io::stdout().flush()?;
         git_run(&["push"])?;
         println!("done");
+        info!("pushed to remote");
     }
 
     Ok(())

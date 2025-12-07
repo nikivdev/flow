@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::{
     cli::TaskRunOpts,
@@ -33,32 +33,83 @@ pub struct MatchResult {
     pub relative_dir: String,
 }
 
+// Built-in commands that can be run directly if no task matches
+const BUILTIN_COMMANDS: &[(&str, &[&str])] = &[
+    ("commit", &["commit", "c"]),
+];
+
+fn run_builtin(name: &str, execute: bool) -> Result<()> {
+    match name {
+        "commit" => {
+            println!("Running: commit");
+            if execute {
+                crate::commit::run(true)?;
+            }
+        }
+        _ => bail!("Unknown built-in: {}", name),
+    }
+    Ok(())
+}
+
+fn find_builtin(query: &str) -> Option<&'static str> {
+    let q = query.trim().to_lowercase();
+    for (name, aliases) in BUILTIN_COMMANDS {
+        if aliases.iter().any(|a| *a == q) {
+            return Some(name);
+        }
+    }
+    None
+}
+
 /// Match a user query to a task and optionally execute it.
 pub fn run(opts: MatchOpts) -> Result<()> {
     // Discover all tasks
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let discovery = discover::discover_tasks(&root)?;
 
-    if discovery.tasks.is_empty() {
-        bail!("No tasks found in {} or subdirectories", root.display());
-    }
-
     // Try direct match first (exact name, shortcut, or abbreviation) - no LLM needed
     let (task_name, was_direct_match) =
         if let Some(direct) = try_direct_match(&opts.query, &discovery.tasks) {
             (direct, true)
+        } else if let Some(builtin) = find_builtin(&opts.query) {
+            // No task match, but matches a built-in command
+            return run_builtin(builtin, opts.execute);
+        } else if discovery.tasks.is_empty() {
+            // No tasks and no built-in match
+            bail!("No tasks found in {} or subdirectories", root.display());
         } else {
             // No direct match, use LM Studio
             let prompt = build_matching_prompt(&opts.query, &discovery.tasks);
 
             // Query LM Studio (will fail with clear error if not running)
-            let response = lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port)
-                .with_context(|| {
-                    format!(
-                        "No direct match for '{}'. LM Studio query failed",
-                        opts.query
-                    )
-                })?;
+            let response = match lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port) {
+                Ok(r) if !r.trim().is_empty() => r,
+                Ok(_) => {
+                    // Empty response - check for built-in before failing
+                    if let Some(builtin) = find_builtin(&opts.query) {
+                        return run_builtin(builtin, opts.execute);
+                    }
+                    let task_list: Vec<_> = discovery.tasks.iter().map(|t| t.task.name.as_str()).collect();
+                    bail!(
+                        "No match for '{}'. LM Studio returned empty response.\n\nAvailable tasks:\n  {}",
+                        opts.query,
+                        task_list.join("\n  ")
+                    );
+                }
+                Err(e) => {
+                    // LM Studio error - fall back to built-in if available
+                    if let Some(builtin) = find_builtin(&opts.query) {
+                        return run_builtin(builtin, opts.execute);
+                    }
+                    let task_list: Vec<_> = discovery.tasks.iter().map(|t| t.task.name.as_str()).collect();
+                    bail!(
+                        "No direct match for '{}'. LM Studio error: {}\n\nAvailable tasks:\n  {}",
+                        opts.query,
+                        e,
+                        task_list.join("\n  ")
+                    );
+                }
+            };
 
             // Parse the response to get the task name
             (extract_task_name(&response, &discovery.tasks)?, false)
