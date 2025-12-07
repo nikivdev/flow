@@ -1,9 +1,6 @@
 version = 1
 name = "flow"
 
-[deps]
-fast = "github.com/1focus-ai/fast"
-
 [flox]
 [flox.install]
 cargo.pkg-path = "cargo"
@@ -63,13 +60,6 @@ description = "Test log ingestion and query endpoints (requires 'f server' runni
 name = "test-args"
 command = "echo \"arg1=$1 arg2=$2 all=$@\""
 description = "Test that task args are passed correctly"
-
-[[tasks]]
-name = "commit"
-command = "fast commitPush"
-description = "Commit with AI"
-dependencies = ["fast"]
-delegate_to_hub = true
 
 [storage]
 provider = "1focus.ai"

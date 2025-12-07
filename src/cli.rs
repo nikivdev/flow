@@ -133,6 +133,12 @@ pub enum Commands {
         alias = "m"
     )]
     Match(MatchOpts),
+    #[command(
+        about = "AI-powered git commit: stage, generate message, commit, and push.",
+        long_about = "Stages all changes, uses OpenAI to generate a commit message from the diff, commits, and pushes. Requires OPENAI_API_KEY environment variable.",
+        alias = "c"
+    )]
+    Commit(CommitOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -494,4 +500,11 @@ pub struct MatchOpts {
     /// Only show the match without running the task.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CommitOpts {
+    /// Skip pushing after commit.
+    #[arg(long, short = 'n')]
+    pub no_push: bool,
 }
