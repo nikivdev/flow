@@ -86,6 +86,7 @@ pub fn quick_prompt(prompt: &str, model: Option<&str>, port: Option<u16>) -> Res
 }
 
 /// Check if LM Studio is running and accessible.
+#[allow(dead_code)]
 pub fn is_available(port: Option<u16>) -> bool {
     let port = port.unwrap_or(DEFAULT_PORT);
     let client = match Client::builder()

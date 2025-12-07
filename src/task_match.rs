@@ -34,14 +34,6 @@ pub struct MatchResult {
 
 /// Match a user query to a task and optionally execute it.
 pub fn run(opts: MatchOpts) -> Result<()> {
-    // Check if LM Studio is available
-    if !lmstudio::is_available(opts.port) {
-        bail!(
-            "LM Studio is not running on port {}. Start LM Studio first.",
-            opts.port.unwrap_or(1234)
-        );
-    }
-
     // Discover all tasks
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let discovery = discover::discover_tasks(&root)?;
@@ -50,15 +42,25 @@ pub fn run(opts: MatchOpts) -> Result<()> {
         bail!("No tasks found in {} or subdirectories", root.display());
     }
 
-    // Build the prompt for LM Studio
-    let prompt = build_matching_prompt(&opts.query, &discovery.tasks);
+    // Try direct match first (exact name, shortcut, or abbreviation) - no LLM needed
+    let task_name = if let Some(direct) = try_direct_match(&opts.query, &discovery.tasks) {
+        direct
+    } else {
+        // No direct match, use LM Studio
+        let prompt = build_matching_prompt(&opts.query, &discovery.tasks);
 
-    // Query LM Studio
-    let response = lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port)
-        .context("failed to get response from LM Studio")?;
+        // Query LM Studio (will fail with clear error if not running)
+        let response = lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port)
+            .with_context(|| {
+                format!(
+                    "No direct match for '{}'. LM Studio query failed",
+                    opts.query
+                )
+            })?;
 
-    // Parse the response to get the task name
-    let task_name = extract_task_name(&response, &discovery.tasks)?;
+        // Parse the response to get the task name
+        extract_task_name(&response, &discovery.tasks)?
+    };
 
     // Find the matched task
     let matched = discovery
@@ -91,6 +93,63 @@ pub fn run(opts: MatchOpts) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Try to match query directly to a task name, shortcut, or abbreviation.
+fn try_direct_match(query: &str, tasks: &[DiscoveredTask]) -> Option<String> {
+    let query = query.trim();
+
+    // Exact name match (case-insensitive)
+    if let Some(task) = tasks
+        .iter()
+        .find(|t| t.task.name.eq_ignore_ascii_case(query))
+    {
+        return Some(task.task.name.clone());
+    }
+
+    // Shortcut match
+    if let Some(task) = tasks.iter().find(|t| {
+        t.task
+            .shortcuts
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(query))
+    }) {
+        return Some(task.task.name.clone());
+    }
+
+    // Abbreviation match (only if unambiguous)
+    let needle = query.to_ascii_lowercase();
+    if needle.len() >= 2 {
+        let mut matches = tasks.iter().filter(|t| {
+            generate_abbreviation(&t.task.name)
+                .map(|abbr| abbr == needle)
+                .unwrap_or(false)
+        });
+
+        if let Some(first) = matches.next() {
+            if matches.next().is_none() {
+                return Some(first.task.name.clone());
+            }
+        }
+    }
+
+    None
+}
+
+fn generate_abbreviation(name: &str) -> Option<String> {
+    let mut abbr = String::new();
+    let mut new_segment = true;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if new_segment {
+                abbr.push(ch.to_ascii_lowercase());
+                new_segment = false;
+            }
+        } else {
+            new_segment = true;
+        }
+    }
+    if abbr.len() >= 2 { Some(abbr) } else { None }
 }
 
 fn build_matching_prompt(query: &str, tasks: &[DiscoveredTask]) -> String {
