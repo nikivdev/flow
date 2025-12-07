@@ -568,6 +568,7 @@ fn show_hub_task_logs(task_id: &str, follow: bool) -> Result<()> {
         name: String,
         command: String,
         cwd: Option<String>,
+        #[allow(dead_code)]
         started_at: u64,
         finished_at: Option<u64>,
         exit_code: Option<i32>,
@@ -576,6 +577,7 @@ fn show_hub_task_logs(task_id: &str, follow: bool) -> Result<()> {
 
     #[derive(Debug, Deserialize)]
     struct OutputLine {
+        #[allow(dead_code)]
         timestamp_ms: u64,
         stream: String,
         line: String,
@@ -591,7 +593,6 @@ fn show_hub_task_logs(task_id: &str, follow: bool) -> Result<()> {
     if follow {
         // Poll for updates
         let mut last_output_count = 0;
-        let mut task_finished = false;
 
         loop {
             let resp = client.get(&url).send();
@@ -609,14 +610,11 @@ fn show_hub_task_logs(task_id: &str, follow: bool) -> Result<()> {
 
                     // Check if task is done
                     if log.finished_at.is_some() {
-                        if !task_finished {
-                            task_finished = true;
-                            if let Some(code) = log.exit_code {
-                                if code == 0 {
-                                    println!("\n✓ Task completed successfully");
-                                } else {
-                                    println!("\n✗ Task failed with exit code {}", code);
-                                }
+                        if let Some(code) = log.exit_code {
+                            if code == 0 {
+                                println!("\n✓ Task completed successfully");
+                            } else {
+                                println!("\n✗ Task failed with exit code {}", code);
                             }
                         }
                         break;
