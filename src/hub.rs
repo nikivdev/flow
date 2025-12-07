@@ -167,7 +167,8 @@ fn remove_lin_pid() -> Result<()> {
     Ok(())
 }
 
-fn hub_healthy(host: IpAddr, port: u16) -> bool {
+/// Check if the hub is healthy and responding.
+pub fn hub_healthy(host: IpAddr, port: u16) -> bool {
     let url = format_health_url(host, port);
     let client = Client::builder()
         .timeout(Duration::from_millis(750))

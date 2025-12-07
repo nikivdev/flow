@@ -326,6 +326,9 @@ pub struct TaskLogsOpts {
     /// Suppress headers, output only log content.
     #[arg(long, short)]
     pub quiet: bool,
+    /// Hub task ID to fetch logs for (from delegated tasks).
+    #[arg(long)]
+    pub task_id: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -377,29 +380,29 @@ pub struct InitOpts {
 
 #[derive(Args, Debug, Clone)]
 pub struct HubCommand {
-    #[command(flatten)]
-    pub opts: HubOpts,
-
     #[command(subcommand)]
     pub action: Option<HubAction>,
+
+    #[command(flatten)]
+    pub opts: HubOpts,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct HubOpts {
     /// Hostname or IP address of the hub daemon.
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "127.0.0.1", global = true)]
     pub host: IpAddr,
 
     /// TCP port for the daemon's HTTP interface.
-    #[arg(long, default_value_t = 9050)]
+    #[arg(long, default_value_t = 9050, global = true)]
     pub port: u16,
 
     /// Optional path to the lin hub config (defaults to lin's built-in lookup).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
     /// Skip launching the hub TUI after ensuring the daemon is running.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub no_ui: bool,
 }
 
@@ -507,4 +510,7 @@ pub struct CommitOpts {
     /// Skip pushing after commit.
     #[arg(long, short = 'n')]
     pub no_push: bool,
+    /// Run synchronously (don't delegate to hub).
+    #[arg(long)]
+    pub sync: bool,
 }
