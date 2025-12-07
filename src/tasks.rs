@@ -1700,6 +1700,7 @@ mod tests {
                 description: Some("Run lint checks".to_string()),
                 shortcuts: Vec::new(),
                 interactive: false,
+                confirm_on_match: false,
             },
             TaskConfig {
                 name: "test".to_string(),
@@ -1710,6 +1711,7 @@ mod tests {
                 description: None,
                 shortcuts: Vec::new(),
                 interactive: false,
+                confirm_on_match: false,
             },
         ];
 
@@ -1735,6 +1737,7 @@ mod tests {
             description: None,
             shortcuts: Vec::new(),
             interactive: false,
+            confirm_on_match: false,
         };
         let empty_args: Vec<String> = Vec::new();
         let err = execute_task(
@@ -1775,6 +1778,7 @@ mod tests {
             description: None,
             shortcuts: Vec::new(),
             interactive: false,
+            confirm_on_match: false,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -1808,6 +1812,7 @@ mod tests {
             description: None,
             shortcuts: Vec::new(),
             interactive: false,
+            confirm_on_match: false,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -1842,6 +1847,7 @@ mod tests {
             description: None,
             shortcuts: Vec::new(),
             interactive: false,
+            confirm_on_match: false,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -1863,6 +1869,7 @@ mod tests {
             description: None,
             shortcuts: Vec::new(),
             interactive: false,
+            confirm_on_match: false,
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
@@ -1886,6 +1893,7 @@ mod tests {
             description: None,
             shortcuts: Vec::new(),
             interactive: false,
+            confirm_on_match: false,
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
@@ -1908,6 +1916,7 @@ mod tests {
                 description: None,
                 shortcuts: vec!["dcr-alias".into()],
                 interactive: false,
+                confirm_on_match: false,
             },
             TaskConfig {
                 name: "dev-hub".into(),
@@ -1918,6 +1927,7 @@ mod tests {
                 description: None,
                 shortcuts: Vec::new(),
                 interactive: false,
+                confirm_on_match: false,
             },
         ];
 
@@ -1947,6 +1957,7 @@ mod tests {
                 description: None,
                 shortcuts: Vec::new(),
                 interactive: false,
+                confirm_on_match: false,
             },
             TaskConfig {
                 name: "deploy-core-runner".into(),
@@ -1957,6 +1968,7 @@ mod tests {
                 description: None,
                 shortcuts: Vec::new(),
                 interactive: false,
+                confirm_on_match: false,
             },
         ];
 
