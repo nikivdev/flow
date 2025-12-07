@@ -1,14 +1,62 @@
 # flow
 
-> Your second OS. SDK that has it all. Streaming, OS control with agents. Declarative. Synced.
+> Project level config for insanely fast feedback loops
 
-The goal of this CLI is to first parse out `flow.toml` files like the one in [this repo](flow.toml).
+The goal of this CLI is to parse out `flow.toml` files like the one in [this repo](flow.toml).
 
 ## Install
+
+> [!NOTE]
+> Below `curl ` seems to be breaking, unclear why so for now to use `flow`, build it from source. PRs welcome to fix the `curl ` command ♥️
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | bash
 ```
+
+## Short summary
+
+Currently [this thread](https://x.com/nikivdev/status/1997297174074499247) gives good overview of how you can use this tool to move fast with AI.
+
+I would suggest to open the repo and ask questions with claude code or codex how to make best use of the app. What it does well now is that you can define tasks in config.
+
+Like so:
+
+```
+version = 1
+name = "ts"
+
+[deps]
+fast = "github.com/1focus-ai/fast"
+
+[[tasks]]
+name = "setup"
+command = "bun i"
+
+[[tasks]]
+name = "dev"
+command = "bun --watch run.ts"
+
+[[tasks]]
+name = "commit"
+command = "fast commitPush"
+description = "Commit with AI"
+dependencies = ["fast"]
+delegate_to_hub = true
+```
+
+Above is from [ts repo](https://github.com/nikivdev/ts). Then you can run `f` to fuzzy search through tasks to run. Or do `f <task>` to run specific task.
+
+If you setup [LM Studio](https://lmstudio.ai) & load MLX model like OpenAI 20B one, you can even make mistakes in `f <task>` and it would do a tool call match for you.
+
+All flow tasks are traced for output/error after you ran them. `f last-cmd` would return the last commands output. In practice you can do this, open [warp](https://warp.dev) or [cursor](https://cursor.com) and then just ask agents things, you can literally say, `make me a flow.toml task to do..` then you run the task with `f <task>` or `f rerun` to rerun last ran task.
+
+And on errors, what I do at least is have [Keyboard Maestro](https://keyboardmaestro.com/main) macro to paste the output instantly into the agent. This way the feedback loop is insanely tight and you can iterate very fast.
+
+Below readme is mostly generated with AI so feel free to ignore.
+
+I also use `flow` CLI to manage [hubs](#hub) but its experimental as the hub implementation I am running is closed code. The big idea is that `flow` just keeps the hub alive and that's it.
+
+## Building (does not work..)
 
 - macOS/Linux. Needs `curl` + `tar`. Installs `f` and a `flow` symlink to `~/.local/bin` (set `FLOW_BIN_DIR=/usr/local/bin` to change).
 - Defaults to the latest GoReleaser binary; only falls back to building from source if a release isn’t found.
@@ -23,7 +71,7 @@ cargo build --bin f
 cargo build --bin lin
 ```
 
-## Release builds (GoReleaser)
+## Release builds (GoReleaser) (does not work..)
 
 - One-time deps: `brew install goreleaser zig` (or get binaries), `cargo install --locked cargo-zigbuild`, `rustup default stable`.
 - Quick local dry run: `goreleaser release --snapshot --clean`
@@ -98,7 +146,9 @@ Lightweight CLI that reads project-local `flow.toml` files, surfaces tasks, and 
 
 ## Contributing
 
-Any PR to improve is welcome. [codex](https://github.com/openai/codex) & [cursor](https://cursor.com) are nice for dev. Great **working** & **useful** patches are most appreciated (ideally). Issues with bugs or ideas are welcome too.
+Make issues with bugs/features. Any PR to improve project is welcome. Ideally with **working** & **useful** patches but non finished ideas are great too. If idea/feature is sound, it will be merged eventually.
+
+[This](https://nikiv.dev/how-i-code) is nice overview of a coding workflow that works that you can adapt.
 
 ### 🖤
 
