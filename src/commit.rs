@@ -1,15 +1,22 @@
 //! AI-powered git commit command using OpenAI.
 
 use std::io::{self, Write};
+use std::net::IpAddr;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tracing::{debug, info};
+
+use crate::hub;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
+const HUB_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+const HUB_PORT: u16 = 9050;
 
 const SYSTEM_PROMPT: &str = "You are an expert software engineer who writes clear, concise git commit messages. Use imperative mood, keep the subject line under 72 characters, and include an optional body with bullet points if helpful. Never wrap the message in quotes. Never include secrets, credentials, or file contents from .env files, environment variables, keys, or other sensitive data—even if they appear in the diff.";
 
@@ -42,7 +49,18 @@ struct ResponseMessage {
 }
 
 /// Run the commit workflow: stage, generate message, commit, push.
+/// If hub is running, delegates to it for async execution.
 pub fn run(push: bool) -> Result<()> {
+    // Check if hub is running - if so, delegate
+    if hub::hub_healthy(HUB_HOST, HUB_PORT) {
+        return delegate_to_hub(push);
+    }
+
+    run_sync(push)
+}
+
+/// Run commit synchronously (called directly or by hub).
+pub fn run_sync(push: bool) -> Result<()> {
     info!(push = push, "starting commit workflow");
 
     // Ensure we're in a git repo
@@ -273,4 +291,56 @@ fn split_paragraphs(message: &str) -> Vec<String> {
     }
 
     paragraphs
+}
+
+fn delegate_to_hub(push: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+
+    // Build the command to run using the current executable path
+    let push_flag = if push { "" } else { " --no-push" };
+    let flow_bin = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "flow".to_string());
+    let command = format!("{} commit --sync{}", flow_bin, push_flag);
+
+    let url = format!("http://{}:{}/tasks/run", HUB_HOST, HUB_PORT);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("failed to create HTTP client")?;
+
+    let payload = json!({
+        "task": {
+            "name": "commit",
+            "command": command,
+            "dependencies": {
+                "commands": [],
+                "flox": [],
+            },
+        },
+        "cwd": cwd.to_string_lossy(),
+        "flow_version": env!("CARGO_PKG_VERSION"),
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .context("failed to submit commit to hub")?;
+
+    if resp.status().is_success() {
+        // Parse response to get task_id
+        let body: serde_json::Value = resp.json().unwrap_or_default();
+        if let Some(task_id) = body.get("task_id").and_then(|v| v.as_str()) {
+            println!("Delegated commit to hub");
+            println!("  View logs: f logs --task-id {}", task_id);
+        } else {
+            println!("Delegated commit to hub");
+        }
+        Ok(())
+    } else {
+        let body = resp.text().unwrap_or_default();
+        bail!("hub returned error: {}", body);
+    }
 }

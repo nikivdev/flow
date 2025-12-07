@@ -86,7 +86,11 @@ fn main() -> Result<()> {
             })?;
         }
         Some(Commands::Commit(opts)) => {
-            commit::run(!opts.no_push)?;
+            if opts.sync {
+                commit::run_sync(!opts.no_push)?;
+            } else {
+                commit::run(!opts.no_push)?;
+            }
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

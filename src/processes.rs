@@ -270,6 +270,11 @@ fn get_log_path(project_root: &Path, project_name: Option<&str>, task_name: &str
 
 /// Show task logs
 pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
+    // If task_id is provided, fetch from hub
+    if let Some(ref task_id) = opts.task_id {
+        return show_hub_task_logs(task_id, opts.follow);
+    }
+
     if opts.list {
         return list_available_logs(opts.all);
     }
@@ -547,4 +552,128 @@ fn tail_follow(path: &Path, initial_lines: usize, quiet: bool) -> Result<()> {
             }
         }
     }
+}
+
+/// Fetch and display logs for a hub task by ID
+fn show_hub_task_logs(task_id: &str, follow: bool) -> Result<()> {
+    use reqwest::blocking::Client;
+    use serde::Deserialize;
+
+    const HUB_HOST: &str = "127.0.0.1";
+    const HUB_PORT: u16 = 9050;
+
+    #[derive(Debug, Deserialize)]
+    struct TaskLog {
+        id: String,
+        name: String,
+        command: String,
+        cwd: Option<String>,
+        started_at: u64,
+        finished_at: Option<u64>,
+        exit_code: Option<i32>,
+        output: Vec<OutputLine>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct OutputLine {
+        timestamp_ms: u64,
+        stream: String,
+        line: String,
+    }
+
+    let url = format!("http://{}:{}/tasks/logs/{}", HUB_HOST, HUB_PORT, task_id);
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("failed to create HTTP client")?;
+
+    if follow {
+        // Poll for updates
+        let mut last_output_count = 0;
+        let mut task_finished = false;
+
+        loop {
+            let resp = client.get(&url).send();
+
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    let log: TaskLog = r.json().context("failed to parse task log")?;
+
+                    // Print new output lines
+                    for line in log.output.iter().skip(last_output_count) {
+                        let prefix = if line.stream == "stderr" { "!" } else { " " };
+                        println!("{} {}", prefix, line.line);
+                    }
+                    last_output_count = log.output.len();
+
+                    // Check if task is done
+                    if log.finished_at.is_some() {
+                        if !task_finished {
+                            task_finished = true;
+                            if let Some(code) = log.exit_code {
+                                if code == 0 {
+                                    println!("\n✓ Task completed successfully");
+                                } else {
+                                    println!("\n✗ Task failed with exit code {}", code);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+                Ok(r) if r.status().as_u16() == 404 => {
+                    // Task not found yet, wait
+                    thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+                Ok(r) => {
+                    bail!("Hub returned error: {}", r.status());
+                }
+                Err(e) => {
+                    bail!("Failed to fetch task logs: {}", e);
+                }
+            }
+
+            thread::sleep(Duration::from_millis(500));
+        }
+    } else {
+        // One-shot fetch
+        let resp = client.get(&url).send().context("failed to fetch task logs")?;
+
+        if resp.status().as_u16() == 404 {
+            bail!("Task '{}' not found. It may still be queued.", task_id);
+        }
+
+        if !resp.status().is_success() {
+            bail!("Hub returned error: {}", resp.status());
+        }
+
+        let log: TaskLog = resp.json().context("failed to parse task log")?;
+
+        println!("Task: {} ({})", log.name, log.id);
+        println!("Command: {}", log.command);
+        if let Some(cwd) = &log.cwd {
+            println!("Working dir: {}", cwd);
+        }
+        println!();
+
+        for line in &log.output {
+            let prefix = if line.stream == "stderr" { "!" } else { " " };
+            println!("{} {}", prefix, line.line);
+        }
+
+        if let Some(code) = log.exit_code {
+            println!();
+            if code == 0 {
+                println!("✓ Exit code: {}", code);
+            } else {
+                println!("✗ Exit code: {}", code);
+            }
+        } else {
+            println!("\n⋯ Task still running...");
+        }
+    }
+
+    Ok(())
 }
