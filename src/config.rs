@@ -203,6 +203,9 @@ pub struct TaskConfig {
     /// Whether this task requires interactive input (stdin passthrough, TTY).
     #[serde(default)]
     pub interactive: bool,
+    /// Require confirmation when matched via LM Studio (for destructive tasks).
+    #[serde(default, alias = "confirm-on-match")]
+    pub confirm_on_match: bool,
 }
 
 /// Definition of a dependency that can be referenced by automation tasks.

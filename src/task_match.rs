@@ -1,5 +1,6 @@
 //! Match user query to a task using LM Studio.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -43,24 +44,25 @@ pub fn run(opts: MatchOpts) -> Result<()> {
     }
 
     // Try direct match first (exact name, shortcut, or abbreviation) - no LLM needed
-    let task_name = if let Some(direct) = try_direct_match(&opts.query, &discovery.tasks) {
-        direct
-    } else {
-        // No direct match, use LM Studio
-        let prompt = build_matching_prompt(&opts.query, &discovery.tasks);
+    let (task_name, was_direct_match) =
+        if let Some(direct) = try_direct_match(&opts.query, &discovery.tasks) {
+            (direct, true)
+        } else {
+            // No direct match, use LM Studio
+            let prompt = build_matching_prompt(&opts.query, &discovery.tasks);
 
-        // Query LM Studio (will fail with clear error if not running)
-        let response = lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port)
-            .with_context(|| {
-                format!(
-                    "No direct match for '{}'. LM Studio query failed",
-                    opts.query
-                )
-            })?;
+            // Query LM Studio (will fail with clear error if not running)
+            let response = lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port)
+                .with_context(|| {
+                    format!(
+                        "No direct match for '{}'. LM Studio query failed",
+                        opts.query
+                    )
+                })?;
 
-        // Parse the response to get the task name
-        extract_task_name(&response, &discovery.tasks)?
-    };
+            // Parse the response to get the task name
+            (extract_task_name(&response, &discovery.tasks)?, false)
+        };
 
     // Find the matched task
     let matched = discovery
@@ -80,6 +82,16 @@ pub fn run(opts: MatchOpts) -> Result<()> {
     }
 
     if opts.execute {
+        // Check if confirmation is needed (only for LLM matches on tasks with confirm_on_match)
+        let needs_confirm = !was_direct_match && matched.task.confirm_on_match;
+
+        if needs_confirm {
+            print!("Press Enter to confirm, Ctrl+C to cancel: ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+        }
+
         // Execute the matched task
         let run_opts = TaskRunOpts {
             config: matched.config_path.clone(),
@@ -239,6 +251,7 @@ mod tests {
                 description: desc.map(|s| s.to_string()),
                 shortcuts: Vec::new(),
                 interactive: false,
+                confirm_on_match: false,
             },
             config_path: PathBuf::from("flow.toml"),
             relative_dir: String::new(),
