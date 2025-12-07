@@ -193,6 +193,14 @@ pub fn run(opts: MatchOpts) -> Result<()> {
     Ok(())
 }
 
+/// Normalize a string by removing hyphens, underscores, and lowercasing
+fn normalize_name(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '-' && *c != '_')
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
 /// Try to match query directly to a task name, shortcut, or abbreviation.
 fn try_direct_match(query: &str, tasks: &[DiscoveredTask]) -> Option<String> {
     let query = query.trim();
@@ -213,6 +221,16 @@ fn try_direct_match(query: &str, tasks: &[DiscoveredTask]) -> Option<String> {
             .any(|s| s.eq_ignore_ascii_case(query))
     }) {
         return Some(task.task.name.clone());
+    }
+
+    // Normalized match (ignoring hyphens/underscores, only if unambiguous)
+    let normalized_query = normalize_name(query);
+    let mut normalized_matches: Vec<_> = tasks
+        .iter()
+        .filter(|t| normalize_name(&t.task.name) == normalized_query)
+        .collect();
+    if normalized_matches.len() == 1 {
+        return Some(normalized_matches.remove(0).task.name.clone());
     }
 
     // Abbreviation match (only if unambiguous)
