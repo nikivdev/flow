@@ -68,6 +68,71 @@ pub fn list(opts: TasksOpts) -> Result<()> {
     Ok(())
 }
 
+/// Run a task, searching nested flow.toml files if not found in root.
+pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let discovery = discover::discover_tasks(&root)?;
+
+    // Find the task in discovered tasks
+    let discovered = discovery.tasks.iter().find(|d| {
+        d.task.name.eq_ignore_ascii_case(task_name)
+            || d.task
+                .shortcuts
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(task_name))
+    });
+
+    // Also try abbreviation matching
+    let discovered = discovered.or_else(|| {
+        let needle = task_name.to_ascii_lowercase();
+        if needle.len() < 2 {
+            return None;
+        }
+        let mut matches = discovery.tasks.iter().filter(|d| {
+            generate_abbreviation(&d.task.name)
+                .map(|abbr| abbr == needle)
+                .unwrap_or(false)
+        });
+        let first = matches.next()?;
+        // Only match if unambiguous
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(first)
+        }
+    });
+
+    let Some(discovered) = discovered else {
+        // List available tasks in error message
+        let available: Vec<_> = discovery
+            .tasks
+            .iter()
+            .map(|d| {
+                if d.relative_dir.is_empty() {
+                    d.task.name.clone()
+                } else {
+                    format!("{} ({})", d.task.name, d.relative_dir)
+                }
+            })
+            .collect();
+        bail!(
+            "task '{}' not found.\nAvailable tasks: {}",
+            task_name,
+            available.join(", ")
+        );
+    };
+
+    // Run the task with its specific config path
+    run(TaskRunOpts {
+        config: discovered.config_path.clone(),
+        delegate_to_hub: false,
+        hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+        hub_port: 9050,
+        name: discovered.task.name.clone(),
+        args,
+    })
+}
+
 pub fn run(opts: TaskRunOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(opts.config)?;
     let project_name = cfg.project_name.clone();

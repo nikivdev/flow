@@ -1,3 +1,6 @@
+use std::net::IpAddr;
+use std::path::Path;
+
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
@@ -5,8 +8,6 @@ use flowd::{
     doctor, history, hub, init, init_tracing, log_server, palette, processes, projects, task_match,
     tasks,
 };
-use std::net::IpAddr;
-use std::path::Path;
 
 fn main() -> Result<()> {
     init_tracing();
@@ -24,14 +25,7 @@ fn main() -> Result<()> {
                 let _bin = iter.next();
                 if let Some(task_name) = iter.next() {
                     let args: Vec<String> = iter.collect();
-                    return tasks::run(TaskRunOpts {
-                        config: TasksOpts::default().config,
-                        delegate_to_hub: false,
-                        hub_host: IpAddr::from([127, 0, 0, 1]),
-                        hub_port: 9050,
-                        name: task_name,
-                        args,
-                    });
+                    return tasks::run_with_discovery(&task_name, args);
                 }
             }
             err.exit()
@@ -95,14 +89,7 @@ fn main() -> Result<()> {
             let Some(task_name) = args.first() else {
                 bail!("no task name provided");
             };
-            tasks::run(TaskRunOpts {
-                config: TasksOpts::default().config,
-                delegate_to_hub: false,
-                hub_host: IpAddr::from([127, 0, 0, 1]),
-                hub_port: 9050,
-                name: task_name.clone(),
-                args: args[1..].to_vec(),
-            })?;
+            tasks::run_with_discovery(task_name, args[1..].to_vec())?;
         }
         None => {
             palette::run(TasksOpts::default())?;
