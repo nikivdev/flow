@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::{
     cli::TaskRunOpts,
@@ -38,6 +38,12 @@ const BUILTIN_COMMANDS: &[(&str, &[&str])] = &[
     ("commit", &["commit", "c"]),
 ];
 
+// CLI subcommands that should be passed through to the CLI parser, not matched as tasks
+const CLI_SUBCOMMANDS: &[&str] = &[
+    "logs", "hub", "ps", "kill", "projects", "active", "server", "init", "doctor",
+    "tasks", "search", "rerun", "last-cmd", "last-cmd-full", "match", "help",
+];
+
 fn run_builtin(name: &str, execute: bool) -> Result<()> {
     match name {
         "commit" => {
@@ -61,8 +67,37 @@ fn find_builtin(query: &str) -> Option<&'static str> {
     None
 }
 
+/// Check if query starts with a CLI subcommand that needs pass-through
+fn is_cli_subcommand(query: &str) -> bool {
+    let first_word = query.split_whitespace().next().unwrap_or("");
+    CLI_SUBCOMMANDS.iter().any(|cmd| cmd.eq_ignore_ascii_case(first_word))
+}
+
+/// Re-invoke the CLI with the original arguments (bypassing match)
+fn passthrough_to_cli(query: &str) -> Result<()> {
+    use std::process::Command;
+
+    let exe = std::env::current_exe().context("failed to get current executable")?;
+    let args: Vec<&str> = query.split_whitespace().collect();
+
+    let status = Command::new(&exe)
+        .args(&args)
+        .status()
+        .with_context(|| format!("failed to run: {} {}", exe.display(), args.join(" ")))?;
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
 /// Match a user query to a task and optionally execute it.
 pub fn run(opts: MatchOpts) -> Result<()> {
+    // Check if this is a CLI subcommand that should bypass matching
+    if is_cli_subcommand(&opts.query) {
+        return passthrough_to_cli(&opts.query);
+    }
+
     // Discover all tasks
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let discovery = discover::discover_tasks(&root)?;
