@@ -1026,9 +1026,7 @@ fn run_command_with_script(
     }
 
     // Strip ANSI codes for history but keep colors for display (already shown)
-    let clean_output = strip_ansi_escapes::strip(&output)
-        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
-        .unwrap_or(output);
+    let clean_output = String::from_utf8_lossy(&strip_ansi_escapes::strip(&output)).to_string();
 
     Ok((status, clean_output))
 }

@@ -8,30 +8,30 @@ name = "f"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.7"
-tower-http = { version = "0.5", features = ["cors"] }
-anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 ignore = "0.4"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.36", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
-ratatui = { version = "0.27", default-features = false, features = ["crossterm"] }
-crossterm = "0.27"
-reqwest = { version = "0.11", features = ["json", "blocking"] }
-which = "6"
-rusqlite = { version = "0.31", features = ["bundled"] }
-notify = "6"
-notify-debouncer-mini = "0.4"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+crossterm = "0.28"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+which = "7"
+rusqlite = { version = "0.32", features = ["bundled"] }
+notify = "8"
+notify-debouncer-mini = "0.7"
 shellexpand = "3"
-shell-words = "1.1"
+shell-words = "1"
 base64 = "0.22"
-strip-ansi-escapes = "0.1"
+strip-ansi-escapes = "0.2"
 portable-pty = "0.8"
 
 [dev-dependencies]
