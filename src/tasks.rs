@@ -136,6 +136,7 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
 pub fn run(opts: TaskRunOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(opts.config)?;
     let project_name = cfg.project_name.clone();
+    let workdir = config_path.parent().unwrap_or(Path::new("."));
 
     // Set active project when running a task
     if let Some(ref name) = project_name {
@@ -149,25 +150,51 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
             config_path.display()
         );
     };
-    let resolved = resolve_task_dependencies(task, &cfg)?;
-    let workdir = config_path.parent().unwrap_or(Path::new("."));
 
-    let base_command = task.command.trim().to_string();
+    // Build user_input early so we can record failures
     let quoted_args: Vec<String> = opts
         .args
         .iter()
         .map(|arg| shell_words::quote(arg).into_owned())
         .collect();
-    // For display/logging purposes, show command with args appended
+    let user_input = if opts.args.is_empty() {
+        task.name.clone()
+    } else {
+        format!("{} {}", task.name, quoted_args.join(" "))
+    };
+    let base_command = task.command.trim().to_string();
     let display_command = if opts.args.is_empty() {
         base_command.clone()
     } else {
         format!("{} {}", base_command, quoted_args.join(" "))
     };
-    let user_input = if opts.args.is_empty() {
-        task.name.clone()
-    } else {
-        format!("{} {}", task.name, quoted_args.join(" "))
+
+    // Helper to record a failed invocation
+    let record_failure = |error_msg: &str| {
+        let mut record = InvocationRecord::new(
+            workdir.display().to_string(),
+            config_path.display().to_string(),
+            project_name.as_deref(),
+            &task.name,
+            &display_command,
+            &user_input,
+            false,
+        );
+        record.success = false;
+        record.status = Some(1);
+        record.output = error_msg.to_string();
+        if let Err(err) = history::record(record) {
+            tracing::warn!(?err, "failed to write task history");
+        }
+    };
+
+    // Resolve dependencies and record failure if it fails
+    let resolved = match resolve_task_dependencies(task, &cfg) {
+        Ok(r) => r,
+        Err(err) => {
+            record_failure(&err.to_string());
+            return Err(err);
+        }
     };
 
     let should_delegate = opts.delegate_to_hub || task.delegate_to_hub;
@@ -232,7 +259,10 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
                 "FLOW_DISABLE_FLOX is set; running on host PATH",
             );
         }
-        ensure_command_dependencies_available(&resolved.commands)?;
+        if let Err(err) = ensure_command_dependencies_available(&resolved.commands) {
+            record_failure(&err.to_string());
+            return Err(err);
+        }
     }
     execute_task(
         task,
