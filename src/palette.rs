@@ -23,10 +23,17 @@ pub fn run_global() -> Result<()> {
     present(entries)
 }
 
-fn run_fzf<'a>(entries: &'a [PaletteEntry]) -> Result<Option<&'a PaletteEntry>> {
+struct FzfResult<'a> {
+    entry: &'a PaletteEntry,
+    with_args: bool,
+}
+
+fn run_fzf<'a>(entries: &'a [PaletteEntry]) -> Result<Option<FzfResult<'a>>> {
     let mut child = Command::new("fzf")
         .arg("--prompt")
         .arg("f> ")
+        .arg("--expect")
+        .arg("ctrl-f") // ctrl-f to run with args prompt
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -43,22 +50,31 @@ fn run_fzf<'a>(entries: &'a [PaletteEntry]) -> Result<Option<&'a PaletteEntry>> 
     if !output.status.success() {
         return Ok(None);
     }
-    let selection = String::from_utf8(output.stdout)
-        .context("fzf output was not valid UTF-8")?
-        .trim()
-        .to_string();
+    let raw = String::from_utf8(output.stdout).context("fzf output was not valid UTF-8")?;
+    let mut lines = raw.lines();
+
+    // First line is the key pressed (if any from --expect)
+    let key = lines.next().unwrap_or("");
+    let with_args = key == "ctrl-f";
+
+    // Second line is the selection
+    let selection = lines.next().unwrap_or("").trim();
     if selection.is_empty() {
         return Ok(None);
     }
 
     let entry = entries.iter().find(|entry| entry.display == selection);
-    Ok(entry)
+    Ok(entry.map(|e| FzfResult {
+        entry: e,
+        with_args,
+    }))
 }
 
-fn run_entry(entry: &PaletteEntry) -> Result<()> {
+fn run_entry(entry: &PaletteEntry, extra_args: Vec<String>) -> Result<()> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     let status = Command::new(exe)
         .args(&entry.exec)
+        .args(&extra_args)
         .status()
         .with_context(|| format!("failed to run {}", entry.display))?;
 
@@ -88,11 +104,40 @@ fn present(entries: Vec<PaletteEntry>) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(selected) = run_fzf(&entries)? {
-        run_entry(selected)?;
+    if let Some(result) = run_fzf(&entries)? {
+        let extra_args = if result.with_args {
+            prompt_for_args(&result.entry.display)?
+        } else {
+            Vec::new()
+        };
+        run_entry(result.entry, extra_args)?;
     }
 
     Ok(())
+}
+
+fn prompt_for_args(task_display: &str) -> Result<Vec<String>> {
+    use std::io::{self, BufRead};
+
+    // Extract task name from display (e.g., "[task] foo – description" -> "foo")
+    let task_name = task_display
+        .strip_prefix("[task] ")
+        .and_then(|s| s.split(" – ").next())
+        .and_then(|s| s.split(" (").next()) // handle "(path)" suffix
+        .unwrap_or("task");
+
+    print!("f {} ", task_name);
+    io::stdout().flush()?;
+
+    let stdin = io::stdin();
+    let line = stdin.lock().lines().next();
+    let input = match line {
+        Some(Ok(s)) => s,
+        _ => return Ok(Vec::new()),
+    };
+
+    let args = shell_words::split(&input).context("failed to parse arguments")?;
+    Ok(args)
 }
 
 struct PaletteEntry {
