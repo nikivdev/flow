@@ -103,9 +103,9 @@ pub fn run(opts: MatchOpts) -> Result<()> {
     let discovery = discover::discover_tasks(&root)?;
 
     // Try direct match first (exact name, shortcut, or abbreviation) - no LLM needed
-    let (task_name, was_direct_match) =
+    let (task_name, task_args, was_direct_match) =
         if let Some(direct) = try_direct_match(&opts.query, &discovery.tasks) {
-            (direct, true)
+            (direct.task_name, direct.args, true)
         } else if let Some(builtin) = find_builtin(&opts.query) {
             // No task match, but matches a built-in command
             return run_builtin(builtin, opts.execute);
@@ -146,8 +146,8 @@ pub fn run(opts: MatchOpts) -> Result<()> {
                 }
             };
 
-            // Parse the response to get the task name
-            (extract_task_name(&response, &discovery.tasks)?, false)
+            // Parse the response to get the task name (no args for LLM matches)
+            (extract_task_name(&response, &discovery.tasks)?, Vec::new(), false)
         };
 
     // Find the matched task
@@ -185,7 +185,7 @@ pub fn run(opts: MatchOpts) -> Result<()> {
             hub_host: "127.0.0.1".parse().unwrap(),
             hub_port: 9050,
             name: matched.task.name.clone(),
-            args: Vec::new(),
+            args: task_args.clone(),
         };
         tasks::run(run_opts)?;
     }
@@ -201,16 +201,33 @@ fn normalize_name(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Result of a direct match attempt - includes task name and any extra args
+struct DirectMatchResult {
+    task_name: String,
+    args: Vec<String>,
+}
+
 /// Try to match query directly to a task name, shortcut, or abbreviation.
-fn try_direct_match(query: &str, tasks: &[DiscoveredTask]) -> Option<String> {
+/// Returns the task name and any remaining arguments.
+fn try_direct_match(query: &str, tasks: &[DiscoveredTask]) -> Option<DirectMatchResult> {
     let query = query.trim();
+    let parts: Vec<&str> = query.split_whitespace().collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    let first = parts[0];
+    let rest: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
 
     // Exact name match (case-insensitive)
     if let Some(task) = tasks
         .iter()
-        .find(|t| t.task.name.eq_ignore_ascii_case(query))
+        .find(|t| t.task.name.eq_ignore_ascii_case(first))
     {
-        return Some(task.task.name.clone());
+        return Some(DirectMatchResult {
+            task_name: task.task.name.clone(),
+            args: rest,
+        });
     }
 
     // Shortcut match
@@ -218,23 +235,29 @@ fn try_direct_match(query: &str, tasks: &[DiscoveredTask]) -> Option<String> {
         t.task
             .shortcuts
             .iter()
-            .any(|s| s.eq_ignore_ascii_case(query))
+            .any(|s| s.eq_ignore_ascii_case(first))
     }) {
-        return Some(task.task.name.clone());
+        return Some(DirectMatchResult {
+            task_name: task.task.name.clone(),
+            args: rest,
+        });
     }
 
     // Normalized match (ignoring hyphens/underscores, only if unambiguous)
-    let normalized_query = normalize_name(query);
+    let normalized_query = normalize_name(first);
     let mut normalized_matches: Vec<_> = tasks
         .iter()
         .filter(|t| normalize_name(&t.task.name) == normalized_query)
         .collect();
     if normalized_matches.len() == 1 {
-        return Some(normalized_matches.remove(0).task.name.clone());
+        return Some(DirectMatchResult {
+            task_name: normalized_matches.remove(0).task.name.clone(),
+            args: rest,
+        });
     }
 
     // Abbreviation match (only if unambiguous)
-    let needle = query.to_ascii_lowercase();
+    let needle = first.to_ascii_lowercase();
     if needle.len() >= 2 {
         let mut matches = tasks.iter().filter(|t| {
             generate_abbreviation(&t.task.name)
@@ -242,9 +265,12 @@ fn try_direct_match(query: &str, tasks: &[DiscoveredTask]) -> Option<String> {
                 .unwrap_or(false)
         });
 
-        if let Some(first) = matches.next() {
+        if let Some(first_match) = matches.next() {
             if matches.next().is_none() {
-                return Some(first.task.name.clone());
+                return Some(DirectMatchResult {
+                    task_name: first_match.task.name.clone(),
+                    args: rest,
+                });
             }
         }
     }
