@@ -33,7 +33,7 @@ fn run_fzf<'a>(entries: &'a [PaletteEntry]) -> Result<Option<FzfResult<'a>>> {
         .arg("--prompt")
         .arg("f> ")
         .arg("--expect")
-        .arg("ctrl-f") // ctrl-f to run with args prompt
+        .arg("tab") // tab to run with args prompt
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -55,7 +55,7 @@ fn run_fzf<'a>(entries: &'a [PaletteEntry]) -> Result<Option<FzfResult<'a>>> {
 
     // First line is the key pressed (if any from --expect)
     let key = lines.next().unwrap_or("");
-    let with_args = key == "ctrl-f";
+    let with_args = key == "tab";
 
     // Second line is the selection
     let selection = lines.next().unwrap_or("").trim();
