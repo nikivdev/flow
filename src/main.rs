@@ -5,8 +5,8 @@ use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    commit, doctor, fixup, history, hub, init, init_tracing, log_server, palette, processes,
-    projects, task_match, tasks,
+    commit, daemon, doctor, fixup, history, hub, init, init_tracing, log_server, palette,
+    processes, projects, task_match, tasks,
 };
 
 fn main() -> Result<()> {
@@ -94,6 +94,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Fixup(opts)) => {
             fixup::run(opts)?;
+        }
+        Some(Commands::Daemon(cmd)) => {
+            daemon::run(cmd)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
