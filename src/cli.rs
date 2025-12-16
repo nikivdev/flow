@@ -144,6 +144,12 @@ pub enum Commands {
         long_about = "Automatically fixes common issues in flow.toml that can break parsing, such as invalid escape sequences (\\$, \\n in basic strings), unclosed quotes, and other TOML syntax errors."
     )]
     Fixup(FixupOpts),
+    #[command(
+        about = "Manage background daemons (start, stop, status).",
+        long_about = "Start, stop, and monitor background daemons defined in flow.toml. Daemons are long-running processes like sync servers, API servers, or file watchers.",
+        alias = "d"
+    )]
+    Daemon(DaemonCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -528,4 +534,34 @@ pub struct FixupOpts {
     /// Only show what would be fixed without making changes.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DaemonCommand {
+    #[command(subcommand)]
+    pub action: Option<DaemonAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DaemonAction {
+    /// Start a daemon by name.
+    Start {
+        /// Name of the daemon to start.
+        name: String,
+    },
+    /// Stop a running daemon.
+    Stop {
+        /// Name of the daemon to stop.
+        name: String,
+    },
+    /// Restart a daemon (stop then start).
+    Restart {
+        /// Name of the daemon to restart.
+        name: String,
+    },
+    /// Show status of all configured daemons.
+    Status,
+    /// List available daemons.
+    #[command(alias = "ls")]
+    List,
 }

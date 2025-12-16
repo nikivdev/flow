@@ -45,6 +45,9 @@ pub struct Config {
     pub stream: Option<StreamConfig>,
     #[serde(default, rename = "server-hub")]
     pub server_hub: Option<ServerHubConfig>,
+    /// Background daemons that flow can manage (start/stop/status).
+    #[serde(default, alias = "daemon")]
+    pub daemons: Vec<DaemonConfig>,
 }
 
 impl Default for Config {
@@ -64,6 +67,7 @@ impl Default for Config {
             watchers: Vec::new(),
             stream: None,
             server_hub: None,
+            daemons: Vec::new(),
         }
     }
 }
@@ -435,6 +439,76 @@ pub struct StreamConfig {
     pub toggle_url: Option<String>,
 }
 
+/// Configuration for a background daemon that flow can manage.
+///
+/// Example in flow.toml:
+/// ```toml
+/// [[daemon]]
+/// name = "lin"
+/// binary = "lin"
+/// command = "daemon"
+/// args = ["--host", "127.0.0.1", "--port", "9050"]
+/// health_url = "http://127.0.0.1:9050/health"
+///
+/// [[daemon]]
+/// name = "base"
+/// binary = "base"
+/// command = "jazz"
+/// args = ["--port", "7201"]
+/// health_url = "http://127.0.0.1:7201/health"
+/// working_dir = "~/org/1f/base"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct DaemonConfig {
+    /// Unique name for this daemon (used in `f daemon start <name>`).
+    pub name: String,
+    /// Binary to execute (can be a name on PATH or absolute path).
+    pub binary: String,
+    /// Subcommand to run the daemon (e.g., "daemon", "jazz", "serve").
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Additional arguments passed after the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Health check URL to determine if daemon is running.
+    #[serde(default, alias = "health")]
+    pub health_url: Option<String>,
+    /// Port the daemon listens on (extracted from health_url if not specified).
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Host the daemon binds to.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Working directory for the daemon process.
+    #[serde(default, alias = "path")]
+    pub working_dir: Option<String>,
+    /// Environment variables to set for the daemon.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Whether to start this daemon automatically when flow starts.
+    #[serde(default)]
+    pub autostart: bool,
+    /// Description of what this daemon does.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl DaemonConfig {
+    /// Get the effective health URL, building from host/port if not specified.
+    pub fn effective_health_url(&self) -> Option<String> {
+        if let Some(url) = &self.health_url {
+            return Some(url.clone());
+        }
+        let host = self.host.as_deref().unwrap_or("127.0.0.1");
+        self.port.map(|p| format!("http://{}:{}/health", host, p))
+    }
+
+    /// Get the effective host.
+    pub fn effective_host(&self) -> &str {
+        self.host.as_deref().unwrap_or("127.0.0.1")
+    }
+}
+
 impl DependencySpec {
     /// Add one or more command names to the provided buffer.
     pub fn extend_commands(&self, buffer: &mut Vec<String>) {
@@ -566,6 +640,7 @@ fn merge_config(base: &mut Config, other: Config) {
     base.remote_servers.extend(other.remote_servers);
     base.tasks.extend(other.tasks);
     base.watchers.extend(other.watchers);
+    base.daemons.extend(other.daemons);
     base.stream = base.stream.take().or(other.stream);
     base.storage = base.storage.take().or(other.storage);
     base.server_hub = base.server_hub.take().or(other.server_hub);

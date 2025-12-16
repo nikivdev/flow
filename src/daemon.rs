@@ -1,0 +1,512 @@
+//! Generic daemon management for flow.
+//!
+//! Allows starting, stopping, and monitoring background daemons defined in flow.toml.
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
+
+use anyhow::{Context, Result, bail};
+use reqwest::blocking::Client;
+
+use crate::{
+    cli::{DaemonAction, DaemonCommand},
+    config::{self, DaemonConfig},
+};
+
+/// Run the daemon command.
+pub fn run(cmd: DaemonCommand) -> Result<()> {
+    let action = cmd.action.unwrap_or(DaemonAction::Status);
+
+    match action {
+        DaemonAction::Start { name } => start_daemon(&name)?,
+        DaemonAction::Stop { name } => stop_daemon(&name)?,
+        DaemonAction::Restart { name } => {
+            stop_daemon(&name).ok();
+            std::thread::sleep(Duration::from_millis(500));
+            start_daemon(&name)?;
+        }
+        DaemonAction::Status => show_status()?,
+        DaemonAction::List => list_daemons()?,
+    }
+
+    Ok(())
+}
+
+/// Start a daemon by name.
+pub fn start_daemon(name: &str) -> Result<()> {
+    let daemon = find_daemon_config(name)?;
+
+    // Check if already running
+    if let Some(url) = daemon.effective_health_url() {
+        if check_health(&url) {
+            println!("✓ {} is already running", name);
+            return Ok(());
+        }
+    }
+
+    // Check if there's a stale PID
+    if let Some(pid) = load_daemon_pid(name)? {
+        if process_alive(pid)? {
+            terminate_process(pid).ok();
+        }
+        remove_daemon_pid(name).ok();
+    }
+
+    // Find the binary
+    let binary = find_binary(&daemon.binary)?;
+
+    // Build the command
+    let mut cmd = Command::new(&binary);
+
+    if let Some(subcommand) = &daemon.command {
+        cmd.arg(subcommand);
+    }
+
+    for arg in &daemon.args {
+        cmd.arg(arg);
+    }
+
+    // Set working directory
+    if let Some(wd) = &daemon.working_dir {
+        let expanded = config::expand_path(wd);
+        if expanded.exists() {
+            cmd.current_dir(&expanded);
+        }
+    }
+
+    // Set environment variables
+    for (key, value) in &daemon.env {
+        cmd.env(key, value);
+    }
+
+    // Detach from terminal
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    // Start in own process group so we can kill all children
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    println!(
+        "Starting {} using {}{}",
+        name,
+        binary.display(),
+        daemon
+            .command
+            .as_ref()
+            .map(|c| format!(" {}", c))
+            .unwrap_or_default()
+    );
+
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("failed to start {} from {}", name, binary.display()))?;
+
+    persist_daemon_pid(name, child.id())?;
+
+    // Wait a moment and check health
+    std::thread::sleep(Duration::from_millis(500));
+
+    if let Some(url) = daemon.effective_health_url() {
+        if check_health(&url) {
+            println!("✓ {} started successfully", name);
+        } else {
+            println!("⚠ {} started but health check failed (may need more time)", name);
+        }
+    } else {
+        println!("✓ {} started (no health check configured)", name);
+    }
+
+    Ok(())
+}
+
+/// Stop a daemon by name.
+pub fn stop_daemon(name: &str) -> Result<()> {
+    let daemon = find_daemon_config(name).ok();
+
+    if let Some(pid) = load_daemon_pid(name)? {
+        if process_alive(pid)? {
+            terminate_process(pid)?;
+            println!("✓ {} stopped (PID {})", name, pid);
+        } else {
+            println!("✓ {} was not running", name);
+        }
+        remove_daemon_pid(name).ok();
+    } else {
+        println!("✓ {} was not running (no PID file)", name);
+    }
+
+    // Also try to kill any process listening on the daemon's port
+    // This handles cases where child processes outlive the parent
+    if let Some(daemon) = daemon {
+        if let Some(port) = daemon.port {
+            kill_process_on_port(port).ok();
+        } else if let Some(url) = &daemon.health_url {
+            if let Some(port) = extract_port_from_url(url) {
+                kill_process_on_port(port).ok();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Show status of all configured daemons.
+pub fn show_status() -> Result<()> {
+    let config = load_merged_config()?;
+
+    if config.daemons.is_empty() {
+        println!("No daemons configured.");
+        println!();
+        println!("Add daemons to ~/.config/flow/flow.toml or project flow.toml:");
+        println!();
+        println!("  [[daemon]]");
+        println!("  name = \"my-daemon\"");
+        println!("  binary = \"my-app\"");
+        println!("  command = \"serve\"");
+        println!("  health_url = \"http://127.0.0.1:8080/health\"");
+        return Ok(());
+    }
+
+    println!("Daemon Status:");
+    println!();
+
+    for daemon in &config.daemons {
+        let status = get_daemon_status(&daemon);
+        let icon = if status.running { "✓" } else { "✗" };
+        let state = if status.running { "running" } else { "stopped" };
+
+        print!("  {} {}: {}", icon, daemon.name, state);
+
+        if let Some(url) = daemon.effective_health_url() {
+            if status.running {
+                print!(" ({})", url.replace("/health", ""));
+            }
+        }
+
+        if let Some(pid) = status.pid {
+            print!(" [PID {}]", pid);
+        }
+
+        println!();
+
+        if let Some(desc) = &daemon.description {
+            println!("      {}", desc);
+        }
+    }
+
+    Ok(())
+}
+
+/// List available daemons.
+pub fn list_daemons() -> Result<()> {
+    let config = load_merged_config()?;
+
+    if config.daemons.is_empty() {
+        println!("No daemons configured.");
+        return Ok(());
+    }
+
+    println!("Available daemons:");
+    println!();
+
+    for daemon in &config.daemons {
+        print!("  {}", daemon.name);
+        if let Some(desc) = &daemon.description {
+            print!(" - {}", desc);
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Status of a daemon.
+#[derive(Debug)]
+pub struct DaemonStatus {
+    pub running: bool,
+    pub pid: Option<u32>,
+}
+
+/// Get the status of a specific daemon.
+pub fn get_daemon_status(daemon: &DaemonConfig) -> DaemonStatus {
+    let pid = load_daemon_pid(&daemon.name).ok().flatten();
+
+    let running = if let Some(url) = daemon.effective_health_url() {
+        check_health(&url)
+    } else if let Some(pid) = pid {
+        process_alive(pid).unwrap_or(false)
+    } else {
+        false
+    };
+
+    DaemonStatus { running, pid }
+}
+
+/// Find a daemon config by name from merged configs.
+fn find_daemon_config(name: &str) -> Result<DaemonConfig> {
+    let config = load_merged_config()?;
+
+    config
+        .daemons
+        .into_iter()
+        .find(|d| d.name == name)
+        .ok_or_else(|| anyhow::anyhow!("daemon '{}' not found in config", name))
+}
+
+/// Load merged config from global and local sources.
+fn load_merged_config() -> Result<config::Config> {
+    let mut merged = config::Config::default();
+
+    // Load global config
+    let global_path = config::default_config_path();
+    if global_path.exists() {
+        if let Ok(global_cfg) = config::load(&global_path) {
+            merged.daemons.extend(global_cfg.daemons);
+        }
+    }
+
+    // Load local config if it exists
+    let local_path = std::env::current_dir()
+        .map(|d| d.join("flow.toml"))
+        .unwrap_or_else(|_| PathBuf::from("flow.toml"));
+
+    if local_path.exists() {
+        if let Ok(local_cfg) = config::load(&local_path) {
+            merged.daemons.extend(local_cfg.daemons);
+        }
+    }
+
+    Ok(merged)
+}
+
+/// Find a binary on PATH or as an absolute path.
+fn find_binary(name: &str) -> Result<PathBuf> {
+    // If it's an absolute path, use it directly
+    let path = Path::new(name);
+    if path.is_absolute() && path.exists() {
+        return Ok(path.to_path_buf());
+    }
+
+    // Expand ~ if present
+    let expanded = config::expand_path(name);
+    if expanded.exists() {
+        return Ok(expanded);
+    }
+
+    // Try to find on PATH using `which`
+    let output = Command::new("which")
+        .arg(name)
+        .output()
+        .with_context(|| format!("failed to find binary '{}'", name))?;
+
+    if output.status.success() {
+        let path_str = String::from_utf8_lossy(&output.stdout);
+        let path = PathBuf::from(path_str.trim());
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    bail!("binary '{}' not found", name)
+}
+
+/// Check if a health endpoint is responding.
+fn check_health(url: &str) -> bool {
+    let client = Client::builder()
+        .timeout(Duration::from_millis(750))
+        .build();
+
+    let Ok(client) = client else {
+        return false;
+    };
+
+    client
+        .get(url)
+        .send()
+        .and_then(|resp| resp.error_for_status())
+        .map(|_| true)
+        .unwrap_or(false)
+}
+
+// ============================================================================
+// PID file management
+// ============================================================================
+
+fn daemon_pid_path(name: &str) -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(format!(".config/flow/{}.pid", name))
+    } else {
+        PathBuf::from(format!(".config/flow/{}.pid", name))
+    }
+}
+
+fn load_daemon_pid(name: &str) -> Result<Option<u32>> {
+    let path = daemon_pid_path(name);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let pid: u32 = contents.trim().parse().ok().unwrap_or(0);
+    if pid == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(pid))
+    }
+}
+
+fn persist_daemon_pid(name: &str, pid: u32) -> Result<()> {
+    let path = daemon_pid_path(name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create pid dir {}", parent.display()))?;
+    }
+    fs::write(&path, pid.to_string())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn remove_daemon_pid(name: &str) -> Result<()> {
+    let path = daemon_pid_path(name);
+    if path.exists() {
+        fs::remove_file(path).ok();
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Process management
+// ============================================================================
+
+fn process_alive(pid: u32) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill").arg("-0").arg(pid.to_string()).status();
+        return Ok(status.map(|s| s.success()).unwrap_or(false));
+    }
+
+    #[cfg(windows)]
+    {
+        let output = Command::new("tasklist")
+            .output()
+            .context("failed to invoke tasklist")?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        let needle = pid.to_string();
+        let body = String::from_utf8_lossy(&output.stdout);
+        Ok(body.lines().any(|line| line.contains(&needle)))
+    }
+}
+
+fn terminate_process(pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // First try to kill the process group (negative PID)
+        // This ensures child processes are also terminated
+        let pgid_kill = Command::new("kill")
+            .arg(format!("-{pid}"))
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        // Also kill the process directly
+        let status = Command::new("kill")
+            .arg(format!("{pid}"))
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("failed to invoke kill command")?;
+
+        // If either succeeded, we're good
+        if status.success() || pgid_kill.map(|s| s.success()).unwrap_or(false) {
+            return Ok(());
+        }
+        bail!(
+            "kill command exited with status {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"]) // /T kills child processes too
+            .status()
+            .context("failed to invoke taskkill")?;
+        if status.success() {
+            return Ok(());
+        }
+        bail!(
+            "taskkill exited with status {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+}
+
+/// Extract port number from a URL like "http://127.0.0.1:7201/health"
+fn extract_port_from_url(url: &str) -> Option<u16> {
+    // Simple extraction: find the port after the last colon before any path
+    let url = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let host_port = url.split('/').next()?;
+    let port_str = host_port.rsplit(':').next()?;
+    port_str.parse().ok()
+}
+
+/// Kill any process listening on the given port.
+#[cfg(unix)]
+fn kill_process_on_port(port: u16) -> Result<()> {
+    // Use lsof to find the process
+    let output = Command::new("lsof")
+        .args(["-ti", &format!(":{}", port)])
+        .output()
+        .context("failed to run lsof")?;
+
+    if !output.status.success() {
+        return Ok(()); // No process found on port
+    }
+
+    let pids = String::from_utf8_lossy(&output.stdout);
+    for pid_str in pids.lines() {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            terminate_process(pid).ok();
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn kill_process_on_port(port: u16) -> Result<()> {
+    // Use netstat to find the process
+    let output = Command::new("netstat")
+        .args(["-ano"])
+        .output()
+        .context("failed to run netstat")?;
+
+    if !output.status.success() {
+        return Ok(());
+    }
+
+    let port_pattern = format!(":{}", port);
+    let lines = String::from_utf8_lossy(&output.stdout);
+    for line in lines.lines() {
+        if line.contains(&port_pattern) && line.contains("LISTENING") {
+            // Last column is PID
+            if let Some(pid_str) = line.split_whitespace().last() {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    terminate_process(pid).ok();
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
