@@ -33,6 +33,7 @@ shell-words = "1"
 base64 = "0.22"
 strip-ansi-escapes = "0.2"
 portable-pty = "0.8"
+regex = "1.12.2"
 
 [dev-dependencies]
 mockito = "1.7"

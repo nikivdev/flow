@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod discover;
 pub mod doctor;
+pub mod fixup;
 pub mod flox;
 pub mod history;
 pub mod hub;
