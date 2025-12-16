@@ -139,6 +139,11 @@ pub enum Commands {
         alias = "c"
     )]
     Commit(CommitOpts),
+    #[command(
+        about = "Fix common TOML syntax errors in flow.toml.",
+        long_about = "Automatically fixes common issues in flow.toml that can break parsing, such as invalid escape sequences (\\$, \\n in basic strings), unclosed quotes, and other TOML syntax errors."
+    )]
+    Fixup(FixupOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -513,4 +518,14 @@ pub struct CommitOpts {
     /// Run synchronously (don't delegate to hub).
     #[arg(long)]
     pub sync: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct FixupOpts {
+    /// Path to the flow.toml to fix (defaults to ./flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+    /// Only show what would be fixed without making changes.
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
 }

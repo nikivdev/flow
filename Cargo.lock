@@ -526,6 +526,7 @@ dependencies = [
  "notify-debouncer-mini",
  "portable-pty",
  "ratatui",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
