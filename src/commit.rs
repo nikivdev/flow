@@ -123,9 +123,42 @@ pub fn run_sync(push: bool) -> Result<()> {
     if push {
         print!("Pushing... ");
         io::stdout().flush()?;
-        git_run(&["push"])?;
-        println!("done");
-        info!("pushed to remote");
+
+        match git_try(&["push"]) {
+            Ok(_) => {
+                println!("done");
+                info!("pushed to remote");
+            }
+            Err(_) => {
+                // Push failed, likely remote has new commits
+                println!("failed (remote ahead)");
+                print!("Pulling with rebase... ");
+                io::stdout().flush()?;
+
+                match git_try(&["pull", "--rebase"]) {
+                    Ok(_) => {
+                        println!("done");
+                        print!("Pushing... ");
+                        io::stdout().flush()?;
+                        git_run(&["push"])?;
+                        println!("done");
+                        info!("pulled and pushed to remote");
+                    }
+                    Err(_) => {
+                        println!("conflict!");
+                        println!();
+                        println!("Rebase conflict detected. Resolve manually:");
+                        println!("  1. Fix conflicts in the listed files");
+                        println!("  2. git add <files>");
+                        println!("  3. git rebase --continue");
+                        println!("  4. git push");
+                        println!();
+                        println!("Or abort with: git rebase --abort");
+                        bail!("Rebase conflict - manual resolution required");
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -160,6 +193,21 @@ fn git_run(args: &[&str]) -> Result<()> {
 
     if !status.success() {
         bail!("git {} failed with status {}", args.join(" "), status);
+    }
+    Ok(())
+}
+
+/// Try to run a git command, returning Ok/Err without bailing.
+fn git_try(args: &[&str]) -> Result<()> {
+    let status = Command::new("git")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+
+    if !status.success() {
+        bail!("git {} failed", args.join(" "));
     }
     Ok(())
 }
