@@ -134,6 +134,7 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
 }
 
 pub fn run(opts: TaskRunOpts) -> Result<()> {
+    let config_path_for_deps = opts.config.clone();
     let (config_path, cfg) = load_project_config(opts.config)?;
     let project_name = cfg.project_name.clone();
     let workdir = config_path.parent().unwrap_or(Path::new("."));
@@ -196,6 +197,26 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
             return Err(err);
         }
     };
+
+    // Run task dependencies first (tasks that must complete before this one)
+    if !resolved.task_deps.is_empty() {
+        for dep_task_name in &resolved.task_deps {
+            println!("Running dependency task '{}'...", dep_task_name);
+            let dep_opts = TaskRunOpts {
+                config: config_path_for_deps.clone(),
+                delegate_to_hub: false,
+                hub_host: opts.hub_host,
+                hub_port: opts.hub_port,
+                name: dep_task_name.clone(),
+                args: vec![],
+            };
+            if let Err(err) = run(dep_opts) {
+                record_failure(&format!("dependency task '{}' failed: {}", dep_task_name, err));
+                bail!("dependency task '{}' failed: {}", dep_task_name, err);
+            }
+            println!();
+        }
+    }
 
     let should_delegate = opts.delegate_to_hub || task.delegate_to_hub;
     if should_delegate {
@@ -1524,6 +1545,8 @@ fn mark_flox_disabled(project_root: &Path, reason: &str) -> Result<()> {
 struct ResolvedDependencies {
     commands: Vec<String>,
     flox: Vec<(String, FloxInstallSpec)>,
+    /// Task names that must run before this task.
+    task_deps: Vec<String>,
 }
 
 fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<ResolvedDependencies> {
@@ -1534,6 +1557,7 @@ fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<Resolved
     let mut missing = Vec::new();
     let mut resolved = ResolvedDependencies::default();
     for dep_name in &task.dependencies {
+        // First check if it's a [deps] entry
         if let Some(spec) = cfg.dependencies.get(dep_name) {
             match spec {
                 config::DependencySpec::Single(cmd) => {
@@ -1552,8 +1576,15 @@ fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<Resolved
             continue;
         }
 
+        // Check if it's a flox install
         if let Some(flox) = cfg.flox.as_ref().and_then(|f| f.install.get(dep_name)) {
             resolved.flox.push((dep_name.clone(), flox.clone()));
+            continue;
+        }
+
+        // Check if it's a task name (for task ordering)
+        if cfg.tasks.iter().any(|t| t.name == *dep_name) {
+            resolved.task_deps.push(dep_name.clone());
             continue;
         }
 
@@ -1562,7 +1593,7 @@ fn resolve_task_dependencies(task: &TaskConfig, cfg: &Config) -> Result<Resolved
 
     if !missing.is_empty() {
         bail!(
-            "task '{}' references unknown dependencies: {} (define them under [dependencies] or [flox.install]/[flox.deps])",
+            "task '{}' references unknown dependencies: {} (define them under [deps], [flox.install], or as a task name)",
             task.name,
             missing.join(", ")
         );
