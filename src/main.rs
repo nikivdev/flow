@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
     ai, cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    commit, daemon, doctor, fixup, history, hub, init, init_tracing, log_server, palette,
+    commit, daemon, doctor, env, fixup, history, hub, init, init_tracing, log_server, palette,
     processes, projects, task_match, tasks,
 };
 
@@ -100,6 +100,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Ai(cmd)) => {
             ai::run(cmd.action)?;
+        }
+        Some(Commands::Env(cmd)) => {
+            env::run(cmd.action)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

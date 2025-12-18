@@ -155,6 +155,11 @@ pub enum Commands {
         long_about = "Track, list, and resume Claude Code sessions for the current project. Sessions are stored in .ai/sessions/claude/ and can be named for easy recall."
     )]
     Ai(AiCommand),
+    #[command(
+        about = "Manage environment variables via 1focus.",
+        long_about = "Fetch, set, and manage environment variables for your project via 1focus. Authenticate with `f env login`, then use `f env pull` to fetch envs."
+    )]
+    Env(EnvCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -609,4 +614,53 @@ pub enum AiAction {
     Init,
     /// Import all existing Claude sessions for this project from ~/.claude.
     Import,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct EnvCommand {
+    #[command(subcommand)]
+    pub action: Option<EnvAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum EnvAction {
+    /// Authenticate with 1focus to fetch env vars.
+    Login,
+    /// Fetch env vars from 1focus and write to .env.
+    Pull {
+        /// Environment to fetch (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+    },
+    /// Push local .env to 1focus.
+    Push {
+        /// Environment to push to (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+    },
+    /// List env vars for this project.
+    #[command(alias = "ls")]
+    List {
+        /// Environment to list (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+    },
+    /// Set a single env var.
+    Set {
+        /// KEY=VALUE pair to set.
+        pair: String,
+        /// Environment to set in (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+    },
+    /// Delete env var(s).
+    Delete {
+        /// Key(s) to delete.
+        keys: Vec<String>,
+        /// Environment to delete from (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+    },
+    /// Show current auth status.
+    Status,
 }

@@ -3,6 +3,7 @@ pub mod cli;
 pub mod commit;
 pub mod config;
 pub mod daemon;
+pub mod env;
 pub mod db;
 pub mod discover;
 pub mod doctor;
