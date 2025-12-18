@@ -79,7 +79,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Match(opts)) => {
             task_match::run(task_match::MatchOpts {
-                query: opts.query.join(" "),
+                args: opts.query,
                 model: opts.model,
                 port: Some(opts.port),
                 execute: !opts.dry_run,
