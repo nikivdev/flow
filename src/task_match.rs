@@ -15,8 +15,8 @@ use crate::{
 /// Options for the match command.
 #[derive(Debug, Clone)]
 pub struct MatchOpts {
-    /// The user's natural language query.
-    pub query: String,
+    /// The user's query as separate arguments (preserves quoting from shell).
+    pub args: Vec<String>,
     /// LM Studio model to use.
     pub model: Option<String>,
     /// LM Studio API port.
@@ -67,21 +67,21 @@ fn find_builtin(query: &str) -> Option<&'static str> {
     None
 }
 
-/// Check if query starts with a CLI subcommand that needs pass-through
-fn is_cli_subcommand(query: &str) -> bool {
-    let first_word = query.split_whitespace().next().unwrap_or("");
-    CLI_SUBCOMMANDS.iter().any(|cmd| cmd.eq_ignore_ascii_case(first_word))
+/// Check if the first arg is a CLI subcommand that needs pass-through
+fn is_cli_subcommand(args: &[String]) -> bool {
+    args.first()
+        .map(|first| CLI_SUBCOMMANDS.iter().any(|cmd| cmd.eq_ignore_ascii_case(first)))
+        .unwrap_or(false)
 }
 
 /// Re-invoke the CLI with the original arguments (bypassing match)
-fn passthrough_to_cli(query: &str) -> Result<()> {
+fn passthrough_to_cli(args: &[String]) -> Result<()> {
     use std::process::Command;
 
     let exe = std::env::current_exe().context("failed to get current executable")?;
-    let args: Vec<&str> = query.split_whitespace().collect();
 
     let status = Command::new(&exe)
-        .args(&args)
+        .args(args)
         .status()
         .with_context(|| format!("failed to run: {} {}", exe.display(), args.join(" ")))?;
 
@@ -94,9 +94,12 @@ fn passthrough_to_cli(query: &str) -> Result<()> {
 /// Match a user query to a task and optionally execute it.
 pub fn run(opts: MatchOpts) -> Result<()> {
     // Check if this is a CLI subcommand that should bypass matching
-    if is_cli_subcommand(&opts.query) {
-        return passthrough_to_cli(&opts.query);
+    if is_cli_subcommand(&opts.args) {
+        return passthrough_to_cli(&opts.args);
     }
+
+    // Join args for display/LLM purposes (but task execution uses the preserved args)
+    let query_display = opts.args.join(" ");
 
     // Discover all tasks
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -104,9 +107,9 @@ pub fn run(opts: MatchOpts) -> Result<()> {
 
     // Try direct match first (exact name, shortcut, or abbreviation) - no LLM needed
     let (task_name, task_args, was_direct_match) =
-        if let Some(direct) = try_direct_match(&opts.query, &discovery.tasks) {
+        if let Some(direct) = try_direct_match(&opts.args, &discovery.tasks) {
             (direct.task_name, direct.args, true)
-        } else if let Some(builtin) = find_builtin(&opts.query) {
+        } else if let Some(builtin) = find_builtin(&query_display) {
             // No task match, but matches a built-in command
             return run_builtin(builtin, opts.execute);
         } else if discovery.tasks.is_empty() {
@@ -114,32 +117,32 @@ pub fn run(opts: MatchOpts) -> Result<()> {
             bail!("No tasks found in {} or subdirectories", root.display());
         } else {
             // No direct match, use LM Studio
-            let prompt = build_matching_prompt(&opts.query, &discovery.tasks);
+            let prompt = build_matching_prompt(&query_display, &discovery.tasks);
 
             // Query LM Studio (will fail with clear error if not running)
             let response = match lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port) {
                 Ok(r) if !r.trim().is_empty() => r,
                 Ok(_) => {
                     // Empty response - check for built-in before failing
-                    if let Some(builtin) = find_builtin(&opts.query) {
+                    if let Some(builtin) = find_builtin(&query_display) {
                         return run_builtin(builtin, opts.execute);
                     }
                     let task_list: Vec<_> = discovery.tasks.iter().map(|t| t.task.name.as_str()).collect();
                     bail!(
                         "No match for '{}'. LM Studio returned empty response.\n\nAvailable tasks:\n  {}",
-                        opts.query,
+                        query_display,
                         task_list.join("\n  ")
                     );
                 }
                 Err(e) => {
                     // LM Studio error - fall back to built-in if available
-                    if let Some(builtin) = find_builtin(&opts.query) {
+                    if let Some(builtin) = find_builtin(&query_display) {
                         return run_builtin(builtin, opts.execute);
                     }
                     let task_list: Vec<_> = discovery.tasks.iter().map(|t| t.task.name.as_str()).collect();
                     bail!(
                         "No direct match for '{}'. LM Studio error: {}\n\nAvailable tasks:\n  {}",
-                        opts.query,
+                        query_display,
                         e,
                         task_list.join("\n  ")
                     );
@@ -209,15 +212,13 @@ struct DirectMatchResult {
 
 /// Try to match query directly to a task name, shortcut, or abbreviation.
 /// Returns the task name and any remaining arguments.
-fn try_direct_match(query: &str, tasks: &[DiscoveredTask]) -> Option<DirectMatchResult> {
-    let query = query.trim();
-    let parts: Vec<&str> = query.split_whitespace().collect();
-    if parts.is_empty() {
+fn try_direct_match(args: &[String], tasks: &[DiscoveredTask]) -> Option<DirectMatchResult> {
+    if args.is_empty() {
         return None;
     }
 
-    let first = parts[0];
-    let rest: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+    let first = args[0].trim();
+    let rest: Vec<String> = args[1..].to_vec();
 
     // Exact name match (case-insensitive)
     if let Some(task) = tasks
