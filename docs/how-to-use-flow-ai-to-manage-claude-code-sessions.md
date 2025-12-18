@@ -11,33 +11,39 @@ f ai
 # Import all existing sessions from ~/.claude
 f ai import
 
-# Resume a session by name or number
-f ai resume my-feature
-f ai resume 1
-
 # Save the most recent session with a name
 f ai save my-feature
+
+# Resume a specific session
+f ai resume my-feature
 ```
 
 ## Commands
 
-### `f ai` / `f ai list`
+### `f ai`
 
-Opens a fuzzy finder (fzf) to search and select a session to resume.
+Opens a fuzzy finder to search and select a session to resume.
 
 ```
 ai>
-★ my-feature – Adding user authentication flow
-★ refactor-api – Refactoring the API layer for better error handling
-  3f34ac70 (2025-12-15 08:22) Adding user authentication flow…
-  f0d978c9 (2025-12-12 12:41) Fix database connection pooling…
+3d ago | in here when i run `f` it does now show tasks from the flow…
+6d ago | when doing `f` and doing fuzzy search i can now do ctrl+f t…
+1w ago | just tried to run a task and then ran `f last-cmd` but it g…
+1w ago | want to add support for nested flow.toml
+1w ago | get issue in project where it does not accept input from fl…
+2w ago | normal tasks work
+2w ago | in spec/tracing-flow.md create plan how to do this
 ```
 
-- Type to filter sessions
+- Type to filter sessions by content
 - Press Enter to resume the selected session
 - Press Esc to cancel
-- Sessions with ★ are saved/bookmarked
-- Unsaved sessions show ID, timestamp, and first message
+- Sessions show relative time (`3d ago`, `1w ago`, `yesterday`) and first message
+
+If you've saved a session with a custom name, it appears with the name:
+```
+my-feature | 3d ago | in here when i run `f` it does now show tasks…
+```
 
 ### `f ai import`
 
@@ -50,17 +56,8 @@ f ai import
 This will:
 - Initialize the `.ai/` folder structure if needed
 - Scan Claude's storage for sessions in this project
-- Auto-generate names from date + first message words
+- Auto-generate internal names for tracking
 - Skip sessions that are already imported
-
-Example output:
-```
-Imported: 20251215-adding-auth-flow (3f34ac70)
-Imported: 20251212-fix-database (f0d978c9)
-Imported: 20251209-refactor-api (a284b9a5)
-
-Imported 3 sessions, skipped 0 (already exists)
-```
 
 ### `f ai save <name>`
 
@@ -79,18 +76,14 @@ f ai save old-feature --id f0d978c9
 
 ### `f ai resume [session]`
 
-Resumes a Claude Code session. Accepts:
+Resumes a Claude Code session directly (without fuzzy finder). Accepts:
 - Session name: `f ai resume auth-feature`
 - Session ID prefix (8+ chars): `f ai resume 3f34ac70`
-- List number: `f ai resume 1`
 - No argument (resumes most recent): `f ai resume`
 
 ```bash
 # Resume by saved name
 f ai resume auth-feature
-
-# Resume by number from list
-f ai resume 2
 
 # Resume most recent session
 f ai resume
@@ -157,24 +150,7 @@ your-project/
 │       └── claude/
 │           ├── index.json      # Saved session metadata
 │           └── notes/          # Personal session notes
-│               ├── auth-feature.md
-│               └── refactor.md
-```
-
-### index.json
-
-Stores saved session metadata:
-```json
-{
-  "sessions": {
-    "auth-feature": {
-      "id": "3f34ac70-7baa-4b75-913f-67f0e168b1f4",
-      "description": "Adding user authentication flow with OAuth2...",
-      "saved_at": "2025-12-15T16:22:00Z",
-      "last_resumed": null
-    }
-  }
-}
+│               └── auth-feature.md
 ```
 
 ## Git Integration
@@ -189,15 +165,17 @@ To track notes with git, edit `.ai/.gitignore`.
 
 Flow reads Claude Code's session storage at `~/.claude/projects/<project-path>/` where each session is stored as a `.jsonl` file with conversation history.
 
-When you run `f ai list`, Flow:
+When you run `f ai`, Flow:
 1. Converts your current directory to Claude's project folder name
 2. Reads all session files in that folder
-3. Extracts timestamps and first messages for display
-4. Cross-references with your saved sessions in `.ai/`
+3. Extracts timestamps and first messages
+4. Shows relative times (3d ago, 1w ago, yesterday)
+5. Opens fzf for fuzzy selection
+6. Resumes the selected session with `claude --resume`
 
 ## Tips
 
-1. **After a productive session**: Run `f ai save meaningful-name` to bookmark it
-2. **Starting on a new machine**: Run `f ai import` to populate saved sessions
-3. **Picking up where you left off**: `f ai resume` continues the most recent session
-4. **Documenting decisions**: Use `f ai notes` to capture context for future you
+1. **Quick resume**: Just run `f ai`, type a few chars to filter, press Enter
+2. **Name important sessions**: `f ai save feature-name` after productive work
+3. **Pick up where you left off**: `f ai resume` continues the most recent session
+4. **Document decisions**: Use `f ai notes` to capture context for future you
