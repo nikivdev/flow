@@ -150,6 +150,11 @@ pub enum Commands {
         alias = "d"
     )]
     Daemon(DaemonCommand),
+    #[command(
+        about = "Manage AI coding sessions (Claude Code).",
+        long_about = "Track, list, and resume Claude Code sessions for the current project. Sessions are stored in .ai/sessions/claude/ and can be named for easy recall."
+    )]
+    Ai(AiCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -564,4 +569,44 @@ pub enum DaemonAction {
     /// List available daemons.
     #[command(alias = "ls")]
     List,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AiCommand {
+    #[command(subcommand)]
+    pub action: Option<AiAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AiAction {
+    /// List Claude Code sessions for this project.
+    #[command(alias = "ls")]
+    List,
+    /// Resume a Claude Code session by name or ID.
+    Resume {
+        /// Session name or ID to resume.
+        session: Option<String>,
+    },
+    /// Save/bookmark the current or most recent session with a name.
+    Save {
+        /// Name for the session.
+        name: String,
+        /// Session ID to save (defaults to most recent).
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Open or create notes for a session.
+    Notes {
+        /// Session name or ID.
+        session: String,
+    },
+    /// Remove a saved session from tracking (doesn't delete the actual session).
+    Remove {
+        /// Session name or ID to remove.
+        session: String,
+    },
+    /// Initialize .ai folder structure in current project.
+    Init,
+    /// Import all existing Claude sessions for this project from ~/.claude.
+    Import,
 }

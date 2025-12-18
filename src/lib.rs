@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod cli;
 pub mod commit;
 pub mod config;

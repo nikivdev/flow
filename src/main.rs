@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
+    ai, cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     commit, daemon, doctor, fixup, history, hub, init, init_tracing, log_server, palette,
     processes, projects, task_match, tasks,
 };
@@ -97,6 +97,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Daemon(cmd)) => {
             daemon::run(cmd)?;
+        }
+        Some(Commands::Ai(cmd)) => {
+            ai::run(cmd.action)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
