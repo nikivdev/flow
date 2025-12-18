@@ -8,8 +8,9 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -237,18 +238,13 @@ fn get_most_recent_session_id() -> Result<Option<String>> {
     Ok(sessions.first().map(|s| s.session_id.clone()))
 }
 
-/// Format timestamp for display (extract date portion).
-fn format_timestamp(ts: &str) -> String {
-    // Timestamps are ISO 8601: "2025-12-09T19:21:15.562Z"
-    // Just show the date and time
-    if ts.len() >= 16 {
-        format!("{} {}", &ts[..10], &ts[11..16])
-    } else {
-        ts.to_string()
-    }
+/// Entry for fzf selection
+struct SessionEntry {
+    display: String,
+    session_id: String,
 }
 
-/// List all sessions for this project.
+/// List all sessions and let user fuzzy-select one to resume.
 fn list_sessions() -> Result<()> {
     let index = load_index()?;
     let claude_sessions = read_claude_sessions_for_project()?;
@@ -260,54 +256,204 @@ fn list_sessions() -> Result<()> {
         return Ok(());
     }
 
-    // Show saved sessions first
-    if !index.sessions.is_empty() {
-        println!("Saved sessions:");
-        println!("{}", "─".repeat(60));
-        for (name, session) in &index.sessions {
-            let desc = session.description.as_deref().unwrap_or("");
-            let id_short = &session.id[..8.min(session.id.len())];
-            println!("  {} ({}) {}", name, id_short, desc);
+    // Build entries for fzf - combine saved metadata with claude session data
+    let mut entries: Vec<SessionEntry> = Vec::new();
+
+    // Process all claude sessions, enriching with saved names where available
+    for session in &claude_sessions {
+        // Skip sessions without timestamps or content
+        if session.timestamp.is_none() && session.first_message.is_none() {
+            continue;
         }
-        println!();
+
+        let relative_time = session.timestamp.as_deref()
+            .map(format_relative_time)
+            .unwrap_or_else(|| "".to_string());
+
+        // Check if this session has a human-assigned name (not auto-generated)
+        let saved_name = index.sessions.iter()
+            .find(|(_, s)| s.id == session.session_id)
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !is_auto_generated_name(name));
+
+        let summary = session.first_message.as_deref().unwrap_or("");
+        let summary_clean = clean_summary(summary);
+
+        let display = if let Some(name) = saved_name {
+            // For named sessions, show: name | time | summary
+            format!("{} | {} | {}", name, relative_time, truncate_str(&summary_clean, 40))
+        } else {
+            // For other sessions, show: time | summary
+            format!("{} | {}", relative_time, truncate_str(&summary_clean, 60))
+        };
+
+        entries.push(SessionEntry {
+            display,
+            session_id: session.session_id.clone(),
+        });
     }
 
-    // Show recent Claude sessions
-    if !claude_sessions.is_empty() {
-        println!("Recent Claude sessions:");
-        println!("{}", "─".repeat(60));
-        for (i, session) in claude_sessions.iter().take(10).enumerate() {
-            let id_short = &session.session_id[..8.min(session.session_id.len())];
-            let ts = session.timestamp.as_deref()
-                .map(format_timestamp)
-                .unwrap_or_else(|| "unknown".to_string());
-            let summary = session.first_message.as_deref().unwrap_or("");
-            let summary_short = if summary.len() > 50 {
-                format!("{}...", &summary[..47])
-            } else {
-                summary.to_string()
-            };
-
-            // Check if this is saved
-            let saved_marker = if index.sessions.values().any(|s| s.id == session.session_id) {
-                " *"
-            } else {
-                ""
-            };
-
-            println!("  {}. {} ({}){}", i + 1, id_short, ts, saved_marker);
-            if !summary_short.is_empty() {
-                println!("     {}", summary_short);
-            }
-        }
+    if entries.is_empty() {
+        println!("No sessions available.");
+        return Ok(());
     }
 
-    println!("\nCommands:");
-    println!("  f ai resume [name|id]  - Resume a session");
-    println!("  f ai save <name>       - Save most recent session");
-    println!("  f ai notes <name>      - Open notes for session");
+    // Check for fzf
+    if which::which("fzf").is_err() {
+        println!("fzf not found – install it for fuzzy selection.");
+        println!("\nSessions:");
+        for entry in &entries {
+            println!("{}", entry.display);
+        }
+        return Ok(());
+    }
+
+    // Run fzf
+    if let Some(selected) = run_session_fzf(&entries)? {
+        println!("Resuming session {}...", &selected.session_id[..8.min(selected.session_id.len())]);
+        launch_claude_session(&selected.session_id)?;
+    }
 
     Ok(())
+}
+
+/// Run fzf and return the selected session entry.
+fn run_session_fzf(entries: &[SessionEntry]) -> Result<Option<&SessionEntry>> {
+    let mut child = Command::new("fzf")
+        .arg("--prompt")
+        .arg("ai> ")
+        .arg("--ansi")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to spawn fzf")?;
+
+    {
+        let stdin = child.stdin.as_mut().context("failed to open fzf stdin")?;
+        for entry in entries {
+            writeln!(stdin, "{}", entry.display)?;
+        }
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let selection = String::from_utf8(output.stdout)
+        .context("fzf output was not valid UTF-8")?;
+    let selection = selection.trim();
+
+    if selection.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(entries.iter().find(|e| e.display == selection))
+}
+
+/// Launch claude with --resume.
+fn launch_claude_session(session_id: &str) -> Result<()> {
+    let status = Command::new("claude")
+        .arg("--resume")
+        .arg(session_id)
+        .status()
+        .context("failed to launch claude")?;
+
+    if !status.success() {
+        bail!("claude exited with status {}", status);
+    }
+
+    Ok(())
+}
+
+/// Truncate a string to max chars, adding ellipsis if needed.
+fn truncate_str(s: &str, max: usize) -> String {
+    // Handle newlines - take first line only
+    let first_line = s.lines().next().unwrap_or(s);
+
+    if first_line.chars().count() <= max {
+        first_line.to_string()
+    } else {
+        let truncated: String = first_line.chars().take(max - 1).collect();
+        format!("{}…", truncated)
+    }
+}
+
+/// Format timestamp as relative time (e.g., "3 days ago", "2 hours ago").
+fn format_relative_time(ts: &str) -> String {
+    // Parse ISO 8601 timestamp: "2025-12-09T19:21:15.562Z"
+    let parsed = chrono::DateTime::parse_from_rfc3339(ts)
+        .or_else(|_| {
+            // Try without timezone
+            chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.fZ")
+                .map(|dt| dt.and_utc().fixed_offset())
+        });
+
+    let Ok(dt) = parsed else {
+        return "unknown".to_string();
+    };
+
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(dt);
+
+    let seconds = duration.num_seconds();
+    if seconds < 0 {
+        return "just now".to_string();
+    }
+
+    let minutes = duration.num_minutes();
+    let hours = duration.num_hours();
+    let days = duration.num_days();
+    let weeks = days / 7;
+
+    if seconds < 60 {
+        "just now".to_string()
+    } else if minutes < 60 {
+        format!("{}m ago", minutes)
+    } else if hours < 24 {
+        format!("{}h ago", hours)
+    } else if days == 1 {
+        "yesterday".to_string()
+    } else if days < 7 {
+        format!("{}d ago", days)
+    } else if weeks < 4 {
+        format!("{}w ago", weeks)
+    } else {
+        // Show date for older sessions
+        dt.format("%b %d").to_string()
+    }
+}
+
+/// Check if a session name looks auto-generated (from import).
+fn is_auto_generated_name(name: &str) -> bool {
+    // Auto-generated names start with date like "20251215-" or "unknown-session"
+    name.starts_with("202") && name.chars().nth(8) == Some('-') ||
+    name.starts_with("unknown-session")
+}
+
+/// Clean up a summary string - remove noise, paths, special chars.
+fn clean_summary(s: &str) -> String {
+    // Take first meaningful line (skip empty lines and lines starting with special chars)
+    let meaningful_line = s.lines()
+        .map(|l| l.trim())
+        .find(|l| {
+            !l.is_empty() &&
+            !l.starts_with('~') &&
+            !l.starts_with('/') &&
+            !l.starts_with('>') &&
+            !l.starts_with('❯') &&
+            !l.starts_with('$') &&
+            !l.starts_with('#') &&
+            !l.starts_with("Error:")
+        })
+        .or_else(|| s.lines().find(|l| !l.trim().is_empty()))
+        .unwrap_or(s);
+
+    // Clean up the line
+    meaningful_line
+        .trim()
+        .replace('\t', " ")
+        .replace("  ", " ")
 }
 
 /// Resume a session by name or ID.
@@ -349,17 +495,7 @@ fn resume_session(session: Option<String>) -> Result<()> {
     };
 
     println!("Resuming session {}...", &session_id[..8.min(session_id.len())]);
-
-    // Launch claude with --resume
-    let status = Command::new("claude")
-        .arg("--resume")
-        .arg(&session_id)
-        .status()
-        .context("failed to launch claude")?;
-
-    if !status.success() {
-        bail!("claude exited with status {}", status);
-    }
+    launch_claude_session(&session_id)?;
 
     Ok(())
 }

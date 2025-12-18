@@ -5,7 +5,7 @@ Flow provides built-in session management for Claude Code, allowing you to track
 ## Quick Start
 
 ```bash
-# List all Claude sessions for current project
+# Fuzzy search sessions and resume one
 f ai
 
 # Import all existing sessions from ~/.claude
@@ -23,24 +23,21 @@ f ai save my-feature
 
 ### `f ai` / `f ai list`
 
-Lists all Claude Code sessions for the current project.
+Opens a fuzzy finder (fzf) to search and select a session to resume.
 
 ```
-Saved sessions:
-────────────────────────────────────────────────────────────
-  my-feature (3f34ac70) Adding user authentication flow
-
-Recent Claude sessions:
-────────────────────────────────────────────────────────────
-  1. 3f34ac70 (2025-12-15 08:22) *
-     Adding user authentication flow...
-  2. f0d978c9 (2025-12-12 12:41)
-     Fix database connection pooling...
+ai>
+★ my-feature – Adding user authentication flow
+★ refactor-api – Refactoring the API layer for better error handling
+  3f34ac70 (2025-12-15 08:22) Adding user authentication flow…
+  f0d978c9 (2025-12-12 12:41) Fix database connection pooling…
 ```
 
-- Saved sessions appear at the top with their custom names
-- Recent sessions show with a number for quick reference
-- Sessions marked with `*` are already saved
+- Type to filter sessions
+- Press Enter to resume the selected session
+- Press Esc to cancel
+- Sessions with ★ are saved/bookmarked
+- Unsaved sessions show ID, timestamp, and first message
 
 ### `f ai import`
 
