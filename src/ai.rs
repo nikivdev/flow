@@ -354,11 +354,12 @@ fn run_session_fzf(entries: &[SessionEntry]) -> Result<Option<&SessionEntry>> {
     Ok(entries.iter().find(|e| e.display == selection))
 }
 
-/// Launch claude with --resume.
+/// Launch claude with --resume and --dangerously-skip-permissions.
 fn launch_claude_session(session_id: &str) -> Result<()> {
     let status = Command::new("claude")
         .arg("--resume")
         .arg(session_id)
+        .arg("--dangerously-skip-permissions")
         .status()
         .context("failed to launch claude")?;
 
