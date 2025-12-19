@@ -246,6 +246,9 @@ struct SessionEntry {
 
 /// List all sessions and let user fuzzy-select one to resume.
 fn list_sessions() -> Result<()> {
+    // Auto-import any new sessions silently
+    auto_import_sessions()?;
+
     let index = load_index()?;
     let claude_sessions = read_claude_sessions_for_project()?;
 
@@ -622,6 +625,55 @@ fn init_ai_folder() -> Result<()> {
     println!("  .ai/sessions/claude/index.json");
     println!("  .ai/sessions/claude/notes/");
     println!("  .ai/.gitignore");
+
+    Ok(())
+}
+
+/// Silently auto-import any new Claude sessions (called by list_sessions).
+fn auto_import_sessions() -> Result<()> {
+    // Silently ensure .ai folder exists
+    let sessions_dir = get_ai_sessions_dir()?;
+    if !sessions_dir.exists() {
+        fs::create_dir_all(&sessions_dir)?;
+        let index_path = sessions_dir.join("index.json");
+        fs::write(&index_path, "{\"sessions\":{}}")?;
+    }
+
+    let sessions = read_claude_sessions_for_project()?;
+    if sessions.is_empty() {
+        return Ok(());
+    }
+
+    let mut index = load_index()?;
+    let mut changed = false;
+
+    for session in &sessions {
+        // Skip if already imported
+        if index.sessions.values().any(|s| s.id == session.session_id) {
+            continue;
+        }
+
+        let name = generate_session_name(session, &index);
+        let saved = SavedSession {
+            id: session.session_id.clone(),
+            description: session.first_message.as_ref().map(|m| {
+                if m.len() > 100 {
+                    format!("{}...", &m[..97])
+                } else {
+                    m.clone()
+                }
+            }),
+            saved_at: chrono::Utc::now().to_rfc3339(),
+            last_resumed: None,
+        };
+
+        index.sessions.insert(name, saved);
+        changed = true;
+    }
+
+    if changed {
+        save_index(&index)?;
+    }
 
     Ok(())
 }
