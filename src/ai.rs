@@ -73,6 +73,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Remove { session } => remove_session(&session)?,
         AiAction::Init => init_ai_folder()?,
         AiAction::Import => import_sessions()?,
+        AiAction::Copy { session } => copy_session(session)?,
     }
 
     Ok(())
@@ -365,6 +366,212 @@ fn launch_claude_session(session_id: &str) -> Result<()> {
 
     if !status.success() {
         bail!("claude exited with status {}", status);
+    }
+
+    Ok(())
+}
+
+/// Copy session history to clipboard.
+fn copy_session(session: Option<String>) -> Result<()> {
+    // Auto-import any new sessions silently
+    auto_import_sessions()?;
+
+    let index = load_index()?;
+    let claude_sessions = read_claude_sessions_for_project()?;
+
+    if claude_sessions.is_empty() {
+        println!("No Claude sessions found for this project.");
+        return Ok(());
+    }
+
+    // Find the session ID
+    let session_id = if let Some(ref query) = session {
+        // Try to find by name or ID
+        if let Some((_, saved)) = index.sessions.iter().find(|(name, _)| name.as_str() == query) {
+            saved.id.clone()
+        } else if claude_sessions.iter().any(|s| s.session_id == *query || s.session_id.starts_with(query)) {
+            claude_sessions.iter()
+                .find(|s| s.session_id == *query || s.session_id.starts_with(query))
+                .map(|s| s.session_id.clone())
+                .ok_or_else(|| anyhow::anyhow!("Session not found: {}", query))?
+        } else {
+            bail!("Session not found: {}", query);
+        }
+    } else {
+        // Show fzf selection
+        let mut entries: Vec<SessionEntry> = Vec::new();
+
+        for session in &claude_sessions {
+            if session.timestamp.is_none() && session.first_message.is_none() {
+                continue;
+            }
+
+            let relative_time = session.timestamp.as_deref()
+                .map(format_relative_time)
+                .unwrap_or_else(|| "".to_string());
+
+            let saved_name = index.sessions.iter()
+                .find(|(_, s)| s.id == session.session_id)
+                .map(|(name, _)| name.as_str())
+                .filter(|name| !is_auto_generated_name(name));
+
+            let summary = session.first_message.as_deref().unwrap_or("");
+            let summary_clean = clean_summary(summary);
+
+            let display = if let Some(name) = saved_name {
+                format!("{} | {} | {}", name, relative_time, truncate_str(&summary_clean, 40))
+            } else {
+                format!("{} | {}", relative_time, truncate_str(&summary_clean, 60))
+            };
+
+            entries.push(SessionEntry {
+                display,
+                session_id: session.session_id.clone(),
+            });
+        }
+
+        if entries.is_empty() {
+            println!("No sessions available.");
+            return Ok(());
+        }
+
+        if which::which("fzf").is_err() {
+            bail!("fzf not found – install it for fuzzy selection");
+        }
+
+        let Some(selected) = run_session_fzf(&entries)? else {
+            return Ok(());
+        };
+
+        selected.session_id.clone()
+    };
+
+    // Read and format the session history
+    let history = read_session_history(&session_id)?;
+
+    // Copy to clipboard
+    copy_to_clipboard(&history)?;
+
+    let line_count = history.lines().count();
+    println!("Copied session history ({} lines) to clipboard", line_count);
+
+    Ok(())
+}
+
+/// Read full session history from JSONL file and format as conversation.
+fn read_session_history(session_id: &str) -> Result<String> {
+    let cwd = std::env::current_dir()?;
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let project_folder = path_to_claude_project_name(&cwd_str);
+    let projects_dir = get_claude_projects_dir();
+    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+
+    if !session_file.exists() {
+        bail!("Session file not found: {}", session_file.display());
+    }
+
+    let content = fs::read_to_string(&session_file)
+        .context("failed to read session file")?;
+
+    let mut history = String::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<ClaudeSessionEntry>(line) {
+            if let Some(ref msg) = entry.message {
+                let role = msg.role.as_deref().unwrap_or("unknown");
+
+                // Format role header
+                let role_label = match role {
+                    "user" => "Human",
+                    "assistant" => "Assistant",
+                    _ => role,
+                };
+
+                // Extract content text
+                let content_text = if let Some(ref content) = msg.content {
+                    match content {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Array(arr) => {
+                            // Content might be array of content blocks
+                            arr.iter()
+                                .filter_map(|v| {
+                                    // Handle text blocks
+                                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                        Some(text.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    continue;
+                };
+
+                if !content_text.is_empty() {
+                    history.push_str(&format!("{}: {}\n\n", role_label, content_text));
+                }
+            }
+        }
+    }
+
+    Ok(history)
+}
+
+/// Copy text to system clipboard.
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("failed to spawn pbcopy")?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(text.as_bytes())?;
+        }
+
+        child.wait()?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try xclip first, then xsel
+        let result = Command::new("xclip")
+            .arg("-selection")
+            .arg("clipboard")
+            .stdin(Stdio::piped())
+            .spawn();
+
+        let mut child = match result {
+            Ok(c) => c,
+            Err(_) => {
+                Command::new("xsel")
+                    .arg("--clipboard")
+                    .arg("--input")
+                    .stdin(Stdio::piped())
+                    .spawn()
+                    .context("failed to spawn xclip or xsel")?
+            }
+        };
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(text.as_bytes())?;
+        }
+
+        child.wait()?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        bail!("clipboard not supported on this platform");
     }
 
     Ok(())

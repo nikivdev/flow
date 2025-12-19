@@ -614,6 +614,11 @@ pub enum AiAction {
     Init,
     /// Import all existing Claude sessions for this project from ~/.claude.
     Import,
+    /// Copy session history to clipboard (fuzzy search to select).
+    Copy {
+        /// Session name or ID to copy (if not provided, shows fuzzy search).
+        session: Option<String>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
