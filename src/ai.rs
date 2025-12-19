@@ -630,8 +630,43 @@ fn init_ai_folder() -> Result<()> {
     Ok(())
 }
 
+/// Ensure .ai is in the project's .gitignore to prevent session leaks.
+fn ensure_gitignore() -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let gitignore_path = cwd.join(".gitignore");
+
+    if gitignore_path.exists() {
+        let content = fs::read_to_string(&gitignore_path).unwrap_or_default();
+        // Check if .ai is already ignored (as a line by itself or with trailing slash)
+        let already_ignored = content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == ".ai" || trimmed == ".ai/" || trimmed == "/.ai" || trimmed == "/.ai/"
+        });
+
+        if !already_ignored {
+            // Append .ai to gitignore
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&gitignore_path)?;
+            // Add newline if file doesn't end with one
+            if !content.ends_with('\n') && !content.is_empty() {
+                writeln!(file)?;
+            }
+            writeln!(file, ".ai/")?;
+        }
+    } else {
+        // Create .gitignore with .ai
+        fs::write(&gitignore_path, ".ai/\n")?;
+    }
+
+    Ok(())
+}
+
 /// Silently auto-import any new Claude sessions (called by list_sessions).
 fn auto_import_sessions() -> Result<()> {
+    // Ensure .ai is in .gitignore to prevent session leaks
+    let _ = ensure_gitignore();
+
     // Silently ensure .ai folder exists
     let sessions_dir = get_ai_sessions_dir()?;
     if !sessions_dir.exists() {
