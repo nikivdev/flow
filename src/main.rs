@@ -133,10 +133,10 @@ fn rerun(opts: RerunOpts) -> Result<()> {
         bail!("no previous task found for this project");
     };
 
-    // Parse user_input to extract task name and args
-    let parts: Vec<&str> = rec.user_input.split_whitespace().collect();
-    let task_name = parts.first().map(|s| s.to_string()).unwrap_or(rec.task_name.clone());
-    let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+    // Parse user_input to extract task name and args (respecting shell quoting)
+    let parts = shell_words::split(&rec.user_input).unwrap_or_else(|_| vec![rec.task_name.clone()]);
+    let task_name = parts.first().cloned().unwrap_or(rec.task_name.clone());
+    let args: Vec<String> = parts.into_iter().skip(1).collect();
 
     println!("Re-running: {}", rec.user_input);
 

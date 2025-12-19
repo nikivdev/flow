@@ -126,6 +126,8 @@ fn prompt_for_args(task_display: &str) -> Result<Vec<String>> {
         .and_then(|s| s.split(" (").next()) // handle "(path)" suffix
         .unwrap_or("task");
 
+    // Show hint about quoting for args with spaces
+    println!("(tip: use quotes for args with spaces, e.g. 'my prompt')");
     print!("f {} ", task_name);
     io::stdout().flush()?;
 
