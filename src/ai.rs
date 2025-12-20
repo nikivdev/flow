@@ -1,10 +1,11 @@
-//! AI session management for Claude Code integration.
+//! AI session management for Claude Code and Codex integration.
 //!
-//! Tracks and manages Claude Code sessions per project, allowing users to:
-//! - List sessions for the current project
+//! Tracks and manages AI coding sessions per project, allowing users to:
+//! - List sessions for the current project (Claude, Codex, or both)
 //! - Save/bookmark sessions with names
 //! - Resume sessions
 //! - Add notes to sessions
+//! - Copy session history to clipboard
 
 use std::collections::HashMap;
 use std::fs;
@@ -16,9 +17,17 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::cli::AiAction;
+use crate::cli::{AiAction, ProviderAiAction};
 
-/// Stored session metadata in .ai/sessions/claude/index.json
+/// AI provider type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    Claude,
+    Codex,
+    All,
+}
+
+/// Stored session metadata in .ai/sessions/<provider>/index.json
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct SessionIndex {
     /// Map of user-friendly names to session metadata
@@ -27,8 +36,11 @@ struct SessionIndex {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct SavedSession {
-    /// Claude's internal session ID (UUID)
+    /// Session ID (UUID)
     id: String,
+    /// Which provider this session is from
+    #[serde(default = "default_provider")]
+    provider: String,
     /// Optional description
     description: Option<String>,
     /// When this session was saved
@@ -37,20 +49,26 @@ struct SavedSession {
     last_resumed: Option<String>,
 }
 
-/// Session info extracted from Claude's session files
+fn default_provider() -> String {
+    "claude".to_string()
+}
+
+/// Session info extracted from session files
 #[derive(Debug, Clone)]
-struct ClaudeSession {
+struct AiSession {
     /// Session ID (UUID)
     session_id: String,
+    /// Which provider (claude, codex)
+    provider: Provider,
     /// First message timestamp
     timestamp: Option<String>,
     /// First user message (as summary)
     first_message: Option<String>,
 }
 
-/// Entry from a Claude session .jsonl file (we only parse what we need)
+/// Entry from a session .jsonl file (we only parse what we need)
 #[derive(Debug, Deserialize)]
-struct ClaudeSessionEntry {
+struct JsonlEntry {
     timestamp: Option<String>,
     message: Option<SessionMessage>,
 }
@@ -66,14 +84,28 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
     let action = action.unwrap_or(AiAction::List);
 
     match action {
-        AiAction::List => list_sessions()?,
-        AiAction::Resume { session } => resume_session(session)?,
+        AiAction::List => list_sessions(Provider::All)?,
+        AiAction::Claude { action } => {
+            match action.unwrap_or(ProviderAiAction::List) {
+                ProviderAiAction::List => list_sessions(Provider::Claude)?,
+                ProviderAiAction::Resume { session } => resume_session(session, Provider::Claude)?,
+                ProviderAiAction::Copy { session } => copy_session(session, Provider::Claude)?,
+            }
+        }
+        AiAction::Codex { action } => {
+            match action.unwrap_or(ProviderAiAction::List) {
+                ProviderAiAction::List => list_sessions(Provider::Codex)?,
+                ProviderAiAction::Resume { session } => resume_session(session, Provider::Codex)?,
+                ProviderAiAction::Copy { session } => copy_session(session, Provider::Codex)?,
+            }
+        }
+        AiAction::Resume { session } => resume_session(session, Provider::All)?,
         AiAction::Save { name, id } => save_session(&name, id)?,
         AiAction::Notes { session } => open_notes(&session)?,
         AiAction::Remove { session } => remove_session(&session)?,
         AiAction::Init => init_ai_folder()?,
         AiAction::Import => import_sessions()?,
-        AiAction::Copy { session } => copy_session(session)?,
+        AiAction::Copy { session } => copy_session(session, Provider::All)?,
     }
 
     Ok(())
@@ -123,22 +155,55 @@ fn get_claude_projects_dir() -> PathBuf {
     home.join(".claude").join("projects")
 }
 
-/// Convert a path to Claude's project folder name (replaces / with -).
-fn path_to_claude_project_name(path: &str) -> String {
+/// Get Codex's projects directory.
+fn get_codex_projects_dir() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".codex").join("projects")
+}
+
+/// Convert a path to project folder name (replaces / with -).
+fn path_to_project_name(path: &str) -> String {
     path.replace('/', "-")
 }
 
-/// Read Claude sessions for the current project from ~/.claude/projects/<project>/.
-fn read_claude_sessions_for_project() -> Result<Vec<ClaudeSession>> {
+/// Read sessions for the current project, filtered by provider.
+fn read_sessions_for_project(provider: Provider) -> Result<Vec<AiSession>> {
+    let mut sessions = Vec::new();
+
+    if provider == Provider::Claude || provider == Provider::All {
+        sessions.extend(read_provider_sessions(Provider::Claude)?);
+    }
+
+    if provider == Provider::Codex || provider == Provider::All {
+        sessions.extend(read_provider_sessions(Provider::Codex)?);
+    }
+
+    // Sort by timestamp descending (most recent first)
+    sessions.sort_by(|a, b| {
+        let ts_a = a.timestamp.as_deref().unwrap_or("");
+        let ts_b = b.timestamp.as_deref().unwrap_or("");
+        ts_b.cmp(ts_a)
+    });
+
+    Ok(sessions)
+}
+
+/// Read sessions for a specific provider.
+fn read_provider_sessions(provider: Provider) -> Result<Vec<AiSession>> {
     let cwd = std::env::current_dir()?;
     let cwd_str = cwd.to_string_lossy().to_string();
-    let project_name = path_to_claude_project_name(&cwd_str);
+    let project_name = path_to_project_name(&cwd_str);
 
-    let projects_dir = get_claude_projects_dir();
+    let projects_dir = match provider {
+        Provider::Claude => get_claude_projects_dir(),
+        Provider::Codex => get_codex_projects_dir(),
+        Provider::All => return Ok(vec![]), // Should use read_sessions_for_project instead
+    };
+
     let project_dir = projects_dir.join(&project_name);
 
     if !project_dir.exists() {
-        debug!("Claude project dir not found at {}", project_dir.display());
+        debug!("{:?} project dir not found at {}", provider, project_dir.display());
         return Ok(vec![]);
     }
 
@@ -164,24 +229,17 @@ fn read_claude_sessions_for_project() -> Result<Vec<ClaudeSession>> {
             }
 
             // Parse the session file
-            if let Some(session) = parse_session_file(&path, filename) {
+            if let Some(session) = parse_session_file(&path, filename, provider) {
                 sessions.push(session);
             }
         }
     }
 
-    // Sort by timestamp descending (most recent first)
-    sessions.sort_by(|a, b| {
-        let ts_a = a.timestamp.as_deref().unwrap_or("");
-        let ts_b = b.timestamp.as_deref().unwrap_or("");
-        ts_b.cmp(ts_a)
-    });
-
     Ok(sessions)
 }
 
 /// Parse a session .jsonl file to extract metadata.
-fn parse_session_file(path: &PathBuf, session_id: &str) -> Option<ClaudeSession> {
+fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> Option<AiSession> {
     let content = fs::read_to_string(path).ok()?;
 
     let mut timestamp = None;
@@ -192,7 +250,7 @@ fn parse_session_file(path: &PathBuf, session_id: &str) -> Option<ClaudeSession>
             continue;
         }
 
-        if let Ok(entry) = serde_json::from_str::<ClaudeSessionEntry>(line) {
+        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             // Get timestamp from first entry
             if timestamp.is_none() {
                 timestamp = entry.timestamp.clone();
@@ -226,8 +284,9 @@ fn parse_session_file(path: &PathBuf, session_id: &str) -> Option<ClaudeSession>
         }
     }
 
-    Some(ClaudeSession {
+    Some(AiSession {
         session_id: session_id.to_string(),
+        provider,
         timestamp,
         first_message,
     })
@@ -235,36 +294,42 @@ fn parse_session_file(path: &PathBuf, session_id: &str) -> Option<ClaudeSession>
 
 /// Get the most recent session ID for this project.
 fn get_most_recent_session_id() -> Result<Option<String>> {
-    let sessions = read_claude_sessions_for_project()?;
+    let sessions = read_sessions_for_project(Provider::All)?;
     Ok(sessions.first().map(|s| s.session_id.clone()))
 }
 
 /// Entry for fzf selection
-struct SessionEntry {
+struct FzfSessionEntry {
     display: String,
     session_id: String,
+    provider: Provider,
 }
 
 /// List all sessions and let user fuzzy-select one to resume.
-fn list_sessions() -> Result<()> {
+fn list_sessions(provider: Provider) -> Result<()> {
     // Auto-import any new sessions silently
     auto_import_sessions()?;
 
     let index = load_index()?;
-    let claude_sessions = read_claude_sessions_for_project()?;
+    let sessions = read_sessions_for_project(provider)?;
 
-    if index.sessions.is_empty() && claude_sessions.is_empty() {
-        println!("No Claude sessions found for this project.");
-        println!("\nTip: Run `claude` in this directory to start a session,");
+    if index.sessions.is_empty() && sessions.is_empty() {
+        let provider_name = match provider {
+            Provider::Claude => "Claude",
+            Provider::Codex => "Codex",
+            Provider::All => "AI",
+        };
+        println!("No {} sessions found for this project.", provider_name);
+        println!("\nTip: Run `claude` or `codex` in this directory to start a session,");
         println!("     then use `f ai save <name>` to bookmark it.");
         return Ok(());
     }
 
-    // Build entries for fzf - combine saved metadata with claude session data
-    let mut entries: Vec<SessionEntry> = Vec::new();
+    // Build entries for fzf - combine saved metadata with session data
+    let mut entries: Vec<FzfSessionEntry> = Vec::new();
 
-    // Process all claude sessions, enriching with saved names where available
-    for session in &claude_sessions {
+    // Process all sessions, enriching with saved names where available
+    for session in &sessions {
         // Skip sessions without timestamps or content
         if session.timestamp.is_none() && session.first_message.is_none() {
             continue;
@@ -283,17 +348,29 @@ fn list_sessions() -> Result<()> {
         let summary = session.first_message.as_deref().unwrap_or("");
         let summary_clean = clean_summary(summary);
 
-        let display = if let Some(name) = saved_name {
-            // For named sessions, show: name | time | summary
-            format!("{} | {} | {}", name, relative_time, truncate_str(&summary_clean, 40))
+        // Add provider indicator when showing all
+        let provider_tag = if provider == Provider::All {
+            match session.provider {
+                Provider::Claude => "claude | ",
+                Provider::Codex => "codex | ",
+                Provider::All => "",
+            }
         } else {
-            // For other sessions, show: time | summary
-            format!("{} | {}", relative_time, truncate_str(&summary_clean, 60))
+            ""
         };
 
-        entries.push(SessionEntry {
+        let display = if let Some(name) = saved_name {
+            // For named sessions, show: [provider] name | time | summary
+            format!("{}{} | {} | {}", provider_tag, name, relative_time, truncate_str(&summary_clean, 40))
+        } else {
+            // For other sessions, show: [provider] time | summary
+            format!("{}{} | {}", provider_tag, relative_time, truncate_str(&summary_clean, 60))
+        };
+
+        entries.push(FzfSessionEntry {
             display,
             session_id: session.session_id.clone(),
+            provider: session.provider,
         });
     }
 
@@ -315,14 +392,14 @@ fn list_sessions() -> Result<()> {
     // Run fzf
     if let Some(selected) = run_session_fzf(&entries)? {
         println!("Resuming session {}...", &selected.session_id[..8.min(selected.session_id.len())]);
-        launch_claude_session(&selected.session_id)?;
+        launch_session(&selected.session_id, selected.provider)?;
     }
 
     Ok(())
 }
 
 /// Run fzf and return the selected session entry.
-fn run_session_fzf(entries: &[SessionEntry]) -> Result<Option<&SessionEntry>> {
+fn run_session_fzf(entries: &[FzfSessionEntry]) -> Result<Option<&FzfSessionEntry>> {
     let mut child = Command::new("fzf")
         .arg("--prompt")
         .arg("ai> ")
@@ -355,53 +432,66 @@ fn run_session_fzf(entries: &[SessionEntry]) -> Result<Option<&SessionEntry>> {
     Ok(entries.iter().find(|e| e.display == selection))
 }
 
-/// Launch claude with --resume and --dangerously-skip-permissions.
-fn launch_claude_session(session_id: &str) -> Result<()> {
-    let status = Command::new("claude")
+/// Launch a session with the appropriate CLI.
+fn launch_session(session_id: &str, provider: Provider) -> Result<()> {
+    let (cmd, name) = match provider {
+        Provider::Claude => ("claude", "claude"),
+        Provider::Codex => ("codex", "codex"),
+        Provider::All => ("claude", "claude"), // Default to claude
+    };
+
+    let status = Command::new(cmd)
         .arg("--resume")
         .arg(session_id)
         .arg("--dangerously-skip-permissions")
         .status()
-        .context("failed to launch claude")?;
+        .with_context(|| format!("failed to launch {}", name))?;
 
     if !status.success() {
-        bail!("claude exited with status {}", status);
+        bail!("{} exited with status {}", name, status);
     }
 
     Ok(())
 }
 
 /// Copy session history to clipboard.
-fn copy_session(session: Option<String>) -> Result<()> {
+fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
     // Auto-import any new sessions silently
     auto_import_sessions()?;
 
     let index = load_index()?;
-    let claude_sessions = read_claude_sessions_for_project()?;
+    let sessions = read_sessions_for_project(provider)?;
 
-    if claude_sessions.is_empty() {
-        println!("No Claude sessions found for this project.");
+    if sessions.is_empty() {
+        let provider_name = match provider {
+            Provider::Claude => "Claude",
+            Provider::Codex => "Codex",
+            Provider::All => "AI",
+        };
+        println!("No {} sessions found for this project.", provider_name);
         return Ok(());
     }
 
-    // Find the session ID
-    let session_id = if let Some(ref query) = session {
+    // Find the session ID and provider
+    let (session_id, session_provider) = if let Some(ref query) = session {
         // Try to find by name or ID
         if let Some((_, saved)) = index.sessions.iter().find(|(name, _)| name.as_str() == query) {
-            saved.id.clone()
-        } else if claude_sessions.iter().any(|s| s.session_id == *query || s.session_id.starts_with(query)) {
-            claude_sessions.iter()
-                .find(|s| s.session_id == *query || s.session_id.starts_with(query))
-                .map(|s| s.session_id.clone())
-                .ok_or_else(|| anyhow::anyhow!("Session not found: {}", query))?
+            // Find the provider for this session
+            let prov = sessions.iter()
+                .find(|s| s.session_id == saved.id)
+                .map(|s| s.provider)
+                .unwrap_or(Provider::Claude);
+            (saved.id.clone(), prov)
+        } else if let Some(s) = sessions.iter().find(|s| s.session_id == *query || s.session_id.starts_with(query)) {
+            (s.session_id.clone(), s.provider)
         } else {
             bail!("Session not found: {}", query);
         }
     } else {
         // Show fzf selection
-        let mut entries: Vec<SessionEntry> = Vec::new();
+        let mut entries: Vec<FzfSessionEntry> = Vec::new();
 
-        for session in &claude_sessions {
+        for session in &sessions {
             if session.timestamp.is_none() && session.first_message.is_none() {
                 continue;
             }
@@ -418,15 +508,27 @@ fn copy_session(session: Option<String>) -> Result<()> {
             let summary = session.first_message.as_deref().unwrap_or("");
             let summary_clean = clean_summary(summary);
 
-            let display = if let Some(name) = saved_name {
-                format!("{} | {} | {}", name, relative_time, truncate_str(&summary_clean, 40))
+            // Add provider indicator when showing all
+            let provider_tag = if provider == Provider::All {
+                match session.provider {
+                    Provider::Claude => "claude | ",
+                    Provider::Codex => "codex | ",
+                    Provider::All => "",
+                }
             } else {
-                format!("{} | {}", relative_time, truncate_str(&summary_clean, 60))
+                ""
             };
 
-            entries.push(SessionEntry {
+            let display = if let Some(name) = saved_name {
+                format!("{}{} | {} | {}", provider_tag, name, relative_time, truncate_str(&summary_clean, 40))
+            } else {
+                format!("{}{} | {}", provider_tag, relative_time, truncate_str(&summary_clean, 60))
+            };
+
+            entries.push(FzfSessionEntry {
                 display,
                 session_id: session.session_id.clone(),
+                provider: session.provider,
             });
         }
 
@@ -443,11 +545,11 @@ fn copy_session(session: Option<String>) -> Result<()> {
             return Ok(());
         };
 
-        selected.session_id.clone()
+        (selected.session_id.clone(), selected.provider)
     };
 
     // Read and format the session history
-    let history = read_session_history(&session_id)?;
+    let history = read_session_history(&session_id, session_provider)?;
 
     // Copy to clipboard
     copy_to_clipboard(&history)?;
@@ -459,11 +561,16 @@ fn copy_session(session: Option<String>) -> Result<()> {
 }
 
 /// Read full session history from JSONL file and format as conversation.
-fn read_session_history(session_id: &str) -> Result<String> {
+fn read_session_history(session_id: &str, provider: Provider) -> Result<String> {
     let cwd = std::env::current_dir()?;
     let cwd_str = cwd.to_string_lossy().to_string();
-    let project_folder = path_to_claude_project_name(&cwd_str);
-    let projects_dir = get_claude_projects_dir();
+    let project_folder = path_to_project_name(&cwd_str);
+
+    let projects_dir = match provider {
+        Provider::Claude | Provider::All => get_claude_projects_dir(),
+        Provider::Codex => get_codex_projects_dir(),
+    };
+
     let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
 
     if !session_file.exists() {
@@ -480,7 +587,7 @@ fn read_session_history(session_id: &str) -> Result<String> {
             continue;
         }
 
-        if let Ok(entry) = serde_json::from_str::<ClaudeSessionEntry>(line) {
+        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             if let Some(ref msg) = entry.message {
                 let role = msg.role.as_deref().unwrap_or("unknown");
 
@@ -668,28 +775,34 @@ fn clean_summary(s: &str) -> String {
 }
 
 /// Resume a session by name or ID.
-fn resume_session(session: Option<String>) -> Result<()> {
+fn resume_session(session: Option<String>, provider: Provider) -> Result<()> {
     let index = load_index()?;
+    let sessions = read_sessions_for_project(provider)?;
 
-    let session_id = match session {
+    let (session_id, session_provider) = match session {
         Some(s) => {
             // Check if it's a saved name
             if let Some(saved) = index.sessions.get(&s) {
-                saved.id.clone()
+                // Find the provider for this session
+                let prov = sessions.iter()
+                    .find(|sess| sess.session_id == saved.id)
+                    .map(|sess| sess.provider)
+                    .unwrap_or(Provider::Claude);
+                (saved.id.clone(), prov)
             } else if s.len() >= 8 {
                 // Might be a session ID or prefix
-                // Try to find in Claude sessions
-                let claude_sessions = read_claude_sessions_for_project()?;
-                claude_sessions.iter()
-                    .find(|cs| cs.session_id.starts_with(&s))
-                    .map(|cs| cs.session_id.clone())
-                    .unwrap_or(s)
+                if let Some(sess) = sessions.iter().find(|sess| sess.session_id.starts_with(&s)) {
+                    (sess.session_id.clone(), sess.provider)
+                } else {
+                    // Assume it's a full ID for claude by default
+                    (s, Provider::Claude)
+                }
             } else {
                 // Try numeric index (1-based)
                 if let Ok(idx) = s.parse::<usize>() {
-                    let claude_sessions = read_claude_sessions_for_project()?;
-                    if idx > 0 && idx <= claude_sessions.len() {
-                        claude_sessions[idx - 1].session_id.clone()
+                    if idx > 0 && idx <= sessions.len() {
+                        let sess = &sessions[idx - 1];
+                        (sess.session_id.clone(), sess.provider)
                     } else {
                         bail!("Session index {} out of range", idx);
                     }
@@ -700,13 +813,14 @@ fn resume_session(session: Option<String>) -> Result<()> {
         }
         None => {
             // Resume most recent
-            get_most_recent_session_id()?
-                .ok_or_else(|| anyhow::anyhow!("No sessions found for this project"))?
+            let sess = sessions.first()
+                .ok_or_else(|| anyhow::anyhow!("No sessions found for this project"))?;
+            (sess.session_id.clone(), sess.provider)
         }
     };
 
     println!("Resuming session {}...", &session_id[..8.min(session_id.len())]);
-    launch_claude_session(&session_id)?;
+    launch_session(&session_id, session_provider)?;
 
     Ok(())
 }
@@ -728,6 +842,7 @@ fn save_session(name: &str, id: Option<String>) -> Result<()> {
 
     let saved = SavedSession {
         id: session_id.clone(),
+        provider: "claude".to_string(), // Default to claude for manually saved sessions
         description: None,
         saved_at: chrono::Utc::now().to_rfc3339(),
         last_resumed: None,
@@ -882,7 +997,7 @@ fn auto_import_sessions() -> Result<()> {
         fs::write(&index_path, "{\"sessions\":{}}")?;
     }
 
-    let sessions = read_claude_sessions_for_project()?;
+    let sessions = read_sessions_for_project(Provider::Claude)?;
     if sessions.is_empty() {
         return Ok(());
     }
@@ -897,8 +1012,14 @@ fn auto_import_sessions() -> Result<()> {
         }
 
         let name = generate_session_name(session, &index);
+        let provider_str = match session.provider {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+            Provider::All => "claude",
+        };
         let saved = SavedSession {
             id: session.session_id.clone(),
+            provider: provider_str.to_string(),
             description: session.first_message.as_ref().map(|m| {
                 if m.len() > 100 {
                     format!("{}...", &m[..97])
@@ -927,7 +1048,7 @@ fn import_sessions() -> Result<()> {
     init_ai_folder()?;
     println!();
 
-    let sessions = read_claude_sessions_for_project()?;
+    let sessions = read_sessions_for_project(Provider::Claude)?;
 
     if sessions.is_empty() {
         println!("No Claude sessions found for this project.");
@@ -948,8 +1069,14 @@ fn import_sessions() -> Result<()> {
         // Generate a name from timestamp and first few words of first message
         let name = generate_session_name(session, &index);
 
+        let provider_str = match session.provider {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+            Provider::All => "claude",
+        };
         let saved = SavedSession {
             id: session.session_id.clone(),
+            provider: provider_str.to_string(),
             description: session.first_message.as_ref().map(|m| {
                 if m.len() > 100 {
                     format!("{}...", &m[..97])
@@ -977,7 +1104,7 @@ fn import_sessions() -> Result<()> {
 }
 
 /// Generate a unique name for a session based on its content.
-fn generate_session_name(session: &ClaudeSession, index: &SessionIndex) -> String {
+fn generate_session_name(session: &AiSession, index: &SessionIndex) -> String {
     // Try to create a name from date + first words of message
     let date_part = session.timestamp.as_deref()
         .map(|ts| ts[..10].replace('-', ""))  // "20251209"
