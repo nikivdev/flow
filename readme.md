@@ -15,6 +15,8 @@ curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.
 
 ## Short summary
 
+For longer list of features available, see [docs/features.md](docs/features.md).
+
 Currently [this thread](https://x.com/nikivdev/status/1997297174074499247) gives good overview of how you can use this tool to move fast with AI.
 
 I would suggest to open the repo and ask questions with claude code or codex how to make best use of the app. What it does well now is that you can define tasks in config.
