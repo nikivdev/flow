@@ -90,6 +90,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 ProviderAiAction::List => list_sessions(Provider::Claude)?,
                 ProviderAiAction::Resume { session } => resume_session(session, Provider::Claude)?,
                 ProviderAiAction::Copy { session } => copy_session(session, Provider::Claude)?,
+                ProviderAiAction::Context { session } => copy_context(session, Provider::Claude)?,
             }
         }
         AiAction::Codex { action } => {
@@ -97,6 +98,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 ProviderAiAction::List => list_sessions(Provider::Codex)?,
                 ProviderAiAction::Resume { session } => resume_session(session, Provider::Codex)?,
                 ProviderAiAction::Copy { session } => copy_session(session, Provider::Codex)?,
+                ProviderAiAction::Context { session } => copy_context(session, Provider::Codex)?,
             }
         }
         AiAction::Resume { session } => resume_session(session, Provider::All)?,
@@ -106,6 +108,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Init => init_ai_folder()?,
         AiAction::Import => import_sessions()?,
         AiAction::Copy { session } => copy_session(session, Provider::All)?,
+        AiAction::Context { session } => copy_context(session, Provider::All)?,
     }
 
     Ok(())
@@ -630,6 +633,205 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
     }
 
     Ok(history)
+}
+
+/// Copy last prompt and response from a session to clipboard.
+fn copy_context(session: Option<String>, provider: Provider) -> Result<()> {
+    // Auto-import any new sessions silently
+    auto_import_sessions()?;
+
+    let index = load_index()?;
+    let sessions = read_sessions_for_project(provider)?;
+
+    if sessions.is_empty() {
+        let provider_name = match provider {
+            Provider::Claude => "Claude",
+            Provider::Codex => "Codex",
+            Provider::All => "AI",
+        };
+        println!("No {} sessions found for this project.", provider_name);
+        return Ok(());
+    }
+
+    // Find the session ID and provider
+    let (session_id, session_provider) = if let Some(ref query) = session {
+        // Try to find by name or ID
+        if let Some((_, saved)) = index.sessions.iter().find(|(name, _)| name.as_str() == query) {
+            let prov = sessions.iter()
+                .find(|s| s.session_id == saved.id)
+                .map(|s| s.provider)
+                .unwrap_or(Provider::Claude);
+            (saved.id.clone(), prov)
+        } else if let Some(s) = sessions.iter().find(|s| s.session_id == *query || s.session_id.starts_with(query)) {
+            (s.session_id.clone(), s.provider)
+        } else {
+            bail!("Session not found: {}", query);
+        }
+    } else {
+        // Show fzf selection
+        let mut entries: Vec<FzfSessionEntry> = Vec::new();
+
+        for session in &sessions {
+            if session.timestamp.is_none() && session.first_message.is_none() {
+                continue;
+            }
+
+            let relative_time = session.timestamp.as_deref()
+                .map(format_relative_time)
+                .unwrap_or_else(|| "".to_string());
+
+            let saved_name = index.sessions.iter()
+                .find(|(_, s)| s.id == session.session_id)
+                .map(|(name, _)| name.as_str())
+                .filter(|name| !is_auto_generated_name(name));
+
+            let summary = session.first_message.as_deref().unwrap_or("");
+            let summary_clean = clean_summary(summary);
+
+            let provider_tag = if provider == Provider::All {
+                match session.provider {
+                    Provider::Claude => "claude | ",
+                    Provider::Codex => "codex | ",
+                    Provider::All => "",
+                }
+            } else {
+                ""
+            };
+
+            let display = if let Some(name) = saved_name {
+                format!("{}{} | {} | {}", provider_tag, name, relative_time, truncate_str(&summary_clean, 40))
+            } else {
+                format!("{}{} | {}", provider_tag, relative_time, truncate_str(&summary_clean, 60))
+            };
+
+            entries.push(FzfSessionEntry {
+                display,
+                session_id: session.session_id.clone(),
+                provider: session.provider,
+            });
+        }
+
+        if entries.is_empty() {
+            println!("No sessions available.");
+            return Ok(());
+        }
+
+        if which::which("fzf").is_err() {
+            bail!("fzf not found – install it for fuzzy selection");
+        }
+
+        let Some(selected) = run_session_fzf(&entries)? else {
+            return Ok(());
+        };
+
+        (selected.session_id.clone(), selected.provider)
+    };
+
+    // Read the last context (last user prompt + assistant response)
+    let context = read_last_context(&session_id, session_provider)?;
+
+    // Copy to clipboard
+    copy_to_clipboard(&context)?;
+
+    let line_count = context.lines().count();
+    println!("Copied last context ({} lines) to clipboard", line_count);
+
+    Ok(())
+}
+
+/// Read last user prompt and assistant response from a session.
+fn read_last_context(session_id: &str, provider: Provider) -> Result<String> {
+    let cwd = std::env::current_dir()?;
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let project_folder = path_to_project_name(&cwd_str);
+
+    let projects_dir = match provider {
+        Provider::Claude | Provider::All => get_claude_projects_dir(),
+        Provider::Codex => get_codex_projects_dir(),
+    };
+
+    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+
+    if !session_file.exists() {
+        bail!("Session file not found: {}", session_file.display());
+    }
+
+    let content = fs::read_to_string(&session_file)
+        .context("failed to read session file")?;
+
+    // Collect all messages, keeping track of the last user and assistant messages
+    let mut last_user: Option<String> = None;
+    let mut last_assistant: Option<String> = None;
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+            if let Some(ref msg) = entry.message {
+                let role = msg.role.as_deref().unwrap_or("unknown");
+
+                let content_text = if let Some(ref content) = msg.content {
+                    match content {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Array(arr) => {
+                            arr.iter()
+                                .filter_map(|v| {
+                                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                        Some(text.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    continue;
+                };
+
+                if content_text.is_empty() {
+                    continue;
+                }
+
+                match role {
+                    "user" => {
+                        last_user = Some(content_text);
+                        // Reset assistant when we see a new user message
+                        last_assistant = None;
+                    }
+                    "assistant" => {
+                        last_assistant = Some(content_text);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Format the context
+    let mut context = String::new();
+
+    if let Some(user_msg) = last_user {
+        context.push_str("Human: ");
+        context.push_str(&user_msg);
+        context.push_str("\n\n");
+    }
+
+    if let Some(assistant_msg) = last_assistant {
+        context.push_str("Assistant: ");
+        context.push_str(&assistant_msg);
+        context.push('\n');
+    }
+
+    if context.is_empty() {
+        bail!("No messages found in session");
+    }
+
+    Ok(context)
 }
 
 /// Copy text to system clipboard.
