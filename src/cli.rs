@@ -584,10 +584,20 @@ pub struct AiCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum AiAction {
-    /// List Claude Code sessions for this project.
+    /// List all AI sessions for this project (Claude + Codex).
     #[command(alias = "ls")]
     List,
-    /// Resume a Claude Code session by name or ID.
+    /// Claude Code sessions only.
+    Claude {
+        #[command(subcommand)]
+        action: Option<ProviderAiAction>,
+    },
+    /// Codex sessions only.
+    Codex {
+        #[command(subcommand)]
+        action: Option<ProviderAiAction>,
+    },
+    /// Resume an AI session by name or ID.
     Resume {
         /// Session name or ID to resume.
         session: Option<String>,
@@ -612,11 +622,29 @@ pub enum AiAction {
     },
     /// Initialize .ai folder structure in current project.
     Init,
-    /// Import all existing Claude sessions for this project from ~/.claude.
+    /// Import all existing sessions for this project.
     Import,
     /// Copy session history to clipboard (fuzzy search to select).
     Copy {
         /// Session name or ID to copy (if not provided, shows fuzzy search).
+        session: Option<String>,
+    },
+}
+
+/// Provider-specific AI actions (for claude/codex subcommands).
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProviderAiAction {
+    /// List sessions for this provider.
+    #[command(alias = "ls")]
+    List,
+    /// Resume a session.
+    Resume {
+        /// Session name or ID to resume.
+        session: Option<String>,
+    },
+    /// Copy session history to clipboard.
+    Copy {
+        /// Session name or ID to copy.
         session: Option<String>,
     },
 }
