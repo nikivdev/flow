@@ -629,6 +629,11 @@ pub enum AiAction {
         /// Session name or ID to copy (if not provided, shows fuzzy search).
         session: Option<String>,
     },
+    /// Copy last prompt and response from a session to clipboard (for context passing).
+    Context {
+        /// Session name or ID (if not provided, shows fuzzy search).
+        session: Option<String>,
+    },
 }
 
 /// Provider-specific AI actions (for claude/codex subcommands).
@@ -644,6 +649,11 @@ pub enum ProviderAiAction {
     },
     /// Copy session history to clipboard.
     Copy {
+        /// Session name or ID to copy.
+        session: Option<String>,
+    },
+    /// Copy last prompt and response to clipboard (for context passing).
+    Context {
         /// Session name or ID to copy.
         session: Option<String>,
     },
