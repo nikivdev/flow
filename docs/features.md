@@ -1,57 +1,385 @@
-## Direnv-powered project daemons + task reruns
+# Flow Features
 
-### Goals
-- Auto-bootstrap a lightweight Flow watcher whenever you `cd` into a project that declares `flow.toml`.
-- Keep the watcher persistent (per repo) instead of relying on `flow run ... --watch`.
-- Let individual tasks declare `rerun_on` globs so Flow re-executes them when matching files change.
-- Keep CPU/RAM overhead minimal by piggybacking on the existing watcher infrastructure (`notify` + debounced pipelines).
+Flow is a CLI tool for managing project tasks, AI coding sessions, and development workflows.
 
-### Direnv integration
-1. Ship a helper command: `flow project start --detach` (alias `flow project ensure`). It:
-   - Detects the repo root (looks for nearest `flow.toml`), hashes the path, and stores PID/socket metadata under `~/.flow/projects/<hash>/`.
-   - Starts a Tokio-based worker (`projectd`) if one isn’t running, then exits immediately.
-2. Provide a one-liner for `.envrc`:
-   ```sh
-   if command -v flow >/dev/null 2>&1; then
-       flow project start --detach >/dev/null 2>&1
-   fi
-   ```
-   Direnv evaluates `.envrc` automatically when you `cd` into the repo, so the project worker is guaranteed to exist without blocking the shell.
-3. Add `flow project stop` to terminate the per-project daemon (useful before upgrades) and `flow project status` for debugging.
+## Quick Reference
 
-### Project daemon responsibilities
-- Load `<project>/flow.toml` and watch it for changes (reuse config reload logic from the main hub).
-- Scan `[[tasks]]` and build an in-memory table of watchers for those that opt into reruns.
-- Expose a Unix socket/pipe so `flow run <task>` can ask the daemon to execute a task immediately without starting a new process (future optimization).
-- Log task executions into `~/.flow/projects/<hash>/logs/<task>.log` for easy inspection.
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `f <task>` | - | Run a task directly |
+| `f search` | `f s` | Fuzzy search global tasks |
+| `f commit` | `f c` | AI-powered git commit |
+| `f commitWithCheck` | `f cc` | Commit with Codex code review |
+| `f ai` | - | Manage AI sessions (Claude/Codex) |
+| `f daemon` | `f d` | Manage background daemons |
+| `f env` | - | Manage environment variables |
+| `f match` | `f m` | Natural language task matching |
 
-### Task schema extension
-```toml
-[[tasks]]
-name = "setup"
-command = "cargo check"
-description = "Ensure workspace compiles"
-rerun_on = ["package.json", "**/*.ts"]
-rerun_debounce_ms = 300          # optional override
+---
+
+## Task Management
+
+### Running Tasks
+
+```bash
+# Run a task directly (most common usage)
+f <task-name> [args...]
+
+# Example: run 'dev' task with arguments
+f dev --port 3000
+
+# Fuzzy search global tasks (outside project directories)
+f search
+f s
 ```
 
-- `rerun_on` is an array of glob patterns relative to the project root. By default Flow groups patterns per task, but internally it merges them so overlapping tasks share a single `notify` watcher.
-- Optional `rerun_paths` can pin directories when globs are expensive (e.g., `["src", "package.json"]`).
-- If `rerun_on` is omitted, the task behaves exactly as today (manual `flow run task` only).
+### Task History
 
-### Execution model
-1. Project daemon builds a `HashMap<PathBuf, WatchGroup>` where each group coalesces tasks watching the same directory tree.
-2. For every incoming `notify` event, the daemon checks the event path against each task’s glob set, respecting per-task debounce windows.
-3. Matching tasks are queued onto a small Executor (e.g., Tokio runtime limited to `N` concurrent tasks). If an invocation is already running, Flow cancels or serializes depending on `task.rerun_mode` (`"restart"` vs `"queue"`).
-4. Command execution reuses the existing `execute_task` helper so environment, working dir, dependency checks, etc., remain identical.
+```bash
+# Show the last task input and output
+f last-cmd
 
-### Performance considerations
-- File watching: use a single `notify` watcher per project root, filter via globset instead of spawning watchers per task.
-- Debounce: share the `notify_debouncer_mini` we already ship; default 200 ms, configurable per task.
-- Idle cost: project daemon stays dormant (only watchers + async runtime). Provide `flow project stop` and auto-shutdown after X minutes of no events if desired.
-- Logging: stream stdout/stderr to rotating log files rather than keeping everything in memory.
+# Show full details of last task run
+f last-cmd-full
 
-### Testing plan (future)
-1. Unit-test glob matching + debounce behavior for `rerun_on`.
-2. Integration test that `flow project start` launches a daemon, registers watchers, and re-executes a sample task when touching `package.json`.
-3. Manual E2E via Direnv in a throwaway repo to ensure `.envrc` auto-start works and multiple projects can coexist.
+# Re-run the last executed task
+f rerun
+```
+
+### Process Management
+
+```bash
+# List running flow processes for current project
+f ps
+f ps --all  # List across all projects
+
+# Stop running processes
+f kill <task-name>
+f kill <pid>
+f kill --all
+```
+
+### Task Logs
+
+```bash
+# View logs from running or recent tasks
+f logs <task-name>
+f logs -f  # Follow in real-time
+```
+
+---
+
+## AI Session Management
+
+Manage Claude Code and Codex sessions with fuzzy search and session tracking.
+
+### Listing Sessions
+
+```bash
+# List all AI sessions for current project (Claude + Codex)
+f ai
+f ai list
+
+# List only Claude sessions
+f ai claude
+f ai claude list
+
+# List only Codex sessions
+f ai codex
+f ai codex list
+```
+
+### Resuming Sessions
+
+```bash
+# Resume a session (fuzzy search)
+f ai resume
+
+# Resume a specific session by name or ID
+f ai resume my-session
+
+# Resume Claude-only sessions
+f ai claude resume
+```
+
+### Copying Session Content
+
+```bash
+# Copy full session history to clipboard (fuzzy search)
+f ai copy
+
+# Copy last exchange (prompt + response) to clipboard
+f ai context
+
+# Copy last 3 exchanges from a specific project
+f ai claude context - /path/to/project 3
+
+# Copy from a specific session
+f ai context my-session /path/to/project 2
+```
+
+The `-` placeholder triggers fuzzy search for session selection.
+
+### Saving & Managing Sessions
+
+```bash
+# Save/bookmark a session with a name
+f ai save my-feature-work
+f ai save bugfix --id <session-id>
+
+# Open or create notes for a session
+f ai notes my-session
+
+# Remove a saved session from tracking
+f ai remove my-session
+
+# Initialize .ai folder structure
+f ai init
+
+# Import existing sessions for this project
+f ai import
+```
+
+---
+
+## AI-Powered Git Commits
+
+### Standard Commit
+
+```bash
+# Stage all changes, generate AI commit message, commit, and push
+f commit
+f c
+
+# Skip pushing after commit
+f commit --no-push
+```
+
+### Commit with Code Review
+
+```bash
+# Run Codex code review before committing
+f commitWithCheck
+f cc
+
+# Review checks for:
+# - Bugs
+# - Security vulnerabilities
+# - Performance issues
+
+# If issues found, prompts for confirmation before proceeding
+```
+
+---
+
+## Background Daemons
+
+Manage long-running processes defined in `flow.toml`.
+
+```bash
+# Start a daemon
+f daemon start <name>
+
+# Stop a daemon
+f daemon stop <name>
+
+# Check daemon status
+f daemon status
+
+# List available daemons
+f daemon list
+f daemon ls
+```
+
+---
+
+## Environment Variables
+
+Manage environment variables via 1focus integration.
+
+### Authentication
+
+```bash
+# Login to 1focus
+f env login
+
+# Check auth status
+f env status
+```
+
+### Managing Variables
+
+```bash
+# Pull env vars to .env file
+f env pull
+f env pull -e staging
+
+# Push local .env to 1focus
+f env push
+f env push -e production
+
+# List env vars
+f env list
+f env ls
+
+# Set a single variable
+f env set KEY=value
+f env set API_KEY=secret -e production
+
+# Delete variable(s)
+f env delete KEY1 KEY2
+```
+
+---
+
+## Natural Language Task Matching
+
+Match tasks using natural language via local LM Studio.
+
+```bash
+# Match a query to a task
+f match "run the tests"
+f m "start development server"
+
+# Requires LM Studio running on localhost:1234
+```
+
+---
+
+## Project Management
+
+### Projects
+
+```bash
+# List registered projects
+f projects
+
+# Show or set active project
+f active
+f active set my-project
+```
+
+### Initialization
+
+```bash
+# Create a new flow.toml in current directory
+f init
+
+# Fix common TOML syntax errors
+f fixup
+```
+
+### Health Check
+
+```bash
+# Verify required tools and shell integrations
+f doctor
+```
+
+---
+
+## Hub (Background Daemon)
+
+The hub manages background task execution and log aggregation.
+
+```bash
+# Ensure hub daemon is running
+f hub
+
+# Start the HTTP server for log ingestion
+f server
+```
+
+---
+
+## flow.toml Configuration
+
+### Basic Task Definition
+
+```toml
+[[tasks]]
+name = "dev"
+description = "Start development server"
+command = "npm run dev"
+
+[[tasks]]
+name = "test"
+description = "Run tests"
+command = "cargo test"
+dependencies = ["cargo"]
+```
+
+### Task with File Watching (Auto-rerun)
+
+```toml
+[[tasks]]
+name = "build"
+command = "cargo build"
+rerun_on = ["src/**/*.rs", "Cargo.toml"]
+rerun_debounce_ms = 300
+```
+
+### Daemons (Background Services)
+
+```toml
+[[daemons]]
+name = "api"
+command = "cargo run --bin server"
+description = "API server"
+
+[[daemons]]
+name = "worker"
+command = "node worker.js"
+```
+
+### Dependencies
+
+```toml
+[deps]
+git = "git"
+node = "node"
+cargo = "cargo"
+```
+
+---
+
+## Shell Integration
+
+### Direnv Integration
+
+Add to `.envrc` for automatic project daemon startup:
+
+```sh
+if command -v flow >/dev/null 2>&1; then
+    flow project start --detach >/dev/null 2>&1
+fi
+```
+
+### Aliases (Recommended)
+
+```bash
+alias f="flow"
+```
+
+---
+
+## File Structure
+
+```
+~/.config/flow/
+├── flow.toml          # Global config
+└── config.toml        # Flow settings
+
+~/.flow/
+└── projects/          # Per-project daemon data
+    └── <hash>/
+        ├── pid
+        └── logs/
+
+<project>/
+├── flow.toml          # Project tasks
+└── .ai/
+    └── sessions/
+        └── claude/
+            └── index.json
+```
