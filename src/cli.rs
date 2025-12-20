@@ -140,6 +140,13 @@ pub enum Commands {
     )]
     Commit(CommitOpts),
     #[command(
+        about = "AI-powered commit with Codex code review for bugs and performance.",
+        long_about = "Like 'commit' but first runs staged changes through Codex to check for bugs and performance issues. Shows any concerns before committing.",
+        alias = "cc",
+        visible_alias = "commitWithCheck"
+    )]
+    CommitWithCheck(CommitOpts),
+    #[command(
         about = "Fix common TOML syntax errors in flow.toml.",
         long_about = "Automatically fixes common issues in flow.toml that can break parsing, such as invalid escape sequences (\\$, \\n in basic strings), unclosed quotes, and other TOML syntax errors."
     )]
@@ -630,9 +637,15 @@ pub enum AiAction {
         session: Option<String>,
     },
     /// Copy last prompt and response from a session to clipboard (for context passing).
+    /// Usage: f ai context [session] [path] [count]
     Context {
         /// Session name or ID (if not provided, shows fuzzy search).
         session: Option<String>,
+        /// Path to project directory (default: current directory).
+        path: Option<String>,
+        /// Number of exchanges to include (default: 1).
+        #[arg(default_value = "1")]
+        count: usize,
     },
 }
 
@@ -653,9 +666,15 @@ pub enum ProviderAiAction {
         session: Option<String>,
     },
     /// Copy last prompt and response to clipboard (for context passing).
+    /// Usage: f ai claude context [session] [path] [count]
     Context {
         /// Session name or ID to copy.
         session: Option<String>,
+        /// Path to project directory (default: current directory).
+        path: Option<String>,
+        /// Number of exchanges to include (default: 1).
+        #[arg(default_value = "1")]
+        count: usize,
     },
 }
 

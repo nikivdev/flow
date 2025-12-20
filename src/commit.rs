@@ -164,6 +164,178 @@ pub fn run_sync(push: bool) -> Result<()> {
     Ok(())
 }
 
+/// Run commit with Codex code review: stage, review with Codex, generate message, commit, push.
+pub fn run_with_check(push: bool) -> Result<()> {
+    info!(push = push, "starting commit with check workflow");
+
+    // Ensure we're in a git repo
+    ensure_git_repo()?;
+
+    // Stage all changes
+    print!("Staging changes... ");
+    io::stdout().flush()?;
+    git_run(&["add", "."])?;
+    println!("done");
+
+    // Get diff
+    let diff = git_capture(&["diff", "--cached"])?;
+    if diff.trim().is_empty() {
+        bail!("No staged changes to commit");
+    }
+
+    // Run Codex review
+    println!("\nRunning Codex code review...");
+    println!("────────────────────────────────────────");
+
+    let review = run_codex_review(&diff)?;
+
+    println!("────────────────────────────────────────\n");
+
+    // Check if review indicates issues
+    let review_lower = review.to_lowercase();
+    let has_issues = review_lower.contains("bug")
+        || review_lower.contains("issue")
+        || review_lower.contains("problem")
+        || review_lower.contains("error")
+        || review_lower.contains("vulnerability")
+        || review_lower.contains("performance issue")
+        || review_lower.contains("memory leak");
+
+    if has_issues {
+        print!("Codex found potential issues. Continue with commit? [y/N] ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_lowercase();
+
+        if input != "y" && input != "yes" {
+            println!("Commit cancelled.");
+            // Unstage changes
+            let _ = git_try(&["reset", "HEAD"]);
+            return Ok(());
+        }
+    } else {
+        println!("✓ Codex review passed");
+    }
+
+    // Continue with normal commit flow
+    let api_key = get_openai_key()?;
+
+    // Get status
+    let status = git_capture(&["status", "--short"]).unwrap_or_default();
+
+    // Truncate diff if needed
+    let (diff_for_prompt, truncated) = truncate_diff(&diff);
+
+    // Generate commit message
+    print!("Generating commit message... ");
+    io::stdout().flush()?;
+    let message = generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?;
+    println!("done\n");
+
+    // Show the message
+    println!("Commit message:");
+    println!("────────────────────────────────────────");
+    println!("{}", message);
+    println!("────────────────────────────────────────\n");
+
+    // Commit
+    let paragraphs = split_paragraphs(&message);
+    let mut args = vec!["commit"];
+    for p in &paragraphs {
+        args.push("-m");
+        args.push(p);
+    }
+    git_run(&args)?;
+    println!("✓ Committed");
+
+    // Push if requested
+    if push {
+        print!("Pushing... ");
+        io::stdout().flush()?;
+
+        match git_try(&["push"]) {
+            Ok(_) => {
+                println!("done");
+            }
+            Err(_) => {
+                println!("failed (remote ahead)");
+                print!("Pulling with rebase... ");
+                io::stdout().flush()?;
+
+                match git_try(&["pull", "--rebase"]) {
+                    Ok(_) => {
+                        println!("done");
+                        print!("Pushing... ");
+                        io::stdout().flush()?;
+                        git_run(&["push"])?;
+                        println!("done");
+                    }
+                    Err(_) => {
+                        println!("conflict!");
+                        println!();
+                        println!("Rebase conflict detected. Resolve manually:");
+                        println!("  1. Fix conflicts in the listed files");
+                        println!("  2. git add <files>");
+                        println!("  3. git rebase --continue");
+                        println!("  4. git push");
+                        println!();
+                        println!("Or abort with: git rebase --abort");
+                        bail!("Rebase conflict - manual resolution required");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run Codex to review staged changes for bugs and performance issues.
+fn run_codex_review(_diff: &str) -> Result<String> {
+    use std::io::{BufRead, BufReader};
+
+    // Use codex review --uncommitted which reviews staged/unstaged/untracked changes
+    let mut child = Command::new("codex")
+        .args([
+            "review",
+            "--uncommitted",
+            "Focus on bugs, security vulnerabilities, and performance issues. Be concise.",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to run codex - is it installed?")?;
+
+    let stdout = child.stdout.take().unwrap();
+    let reader = BufReader::new(stdout);
+
+    let mut output_lines = Vec::new();
+
+    // Stream output to terminal and collect it
+    for line in reader.lines() {
+        if let Ok(line) = line {
+            println!("{}", line);
+            output_lines.push(line);
+        }
+    }
+
+    let status = child.wait()?;
+
+    if !status.success() {
+        bail!("Codex review failed");
+    }
+
+    let result = output_lines.join("\n");
+
+    if result.trim().is_empty() {
+        Ok("LGTM - no issues found".to_string())
+    } else {
+        Ok(result)
+    }
+}
+
 fn ensure_git_repo() -> Result<()> {
     let output = Command::new("git")
         .args(["rev-parse", "--git-dir"])
