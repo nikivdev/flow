@@ -90,7 +90,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 ProviderAiAction::List => list_sessions(Provider::Claude)?,
                 ProviderAiAction::Resume { session } => resume_session(session, Provider::Claude)?,
                 ProviderAiAction::Copy { session } => copy_session(session, Provider::Claude)?,
-                ProviderAiAction::Context { session } => copy_context(session, Provider::Claude)?,
+                ProviderAiAction::Context { session, count, path } => copy_context(session, Provider::Claude, count, path)?,
             }
         }
         AiAction::Codex { action } => {
@@ -98,7 +98,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 ProviderAiAction::List => list_sessions(Provider::Codex)?,
                 ProviderAiAction::Resume { session } => resume_session(session, Provider::Codex)?,
                 ProviderAiAction::Copy { session } => copy_session(session, Provider::Codex)?,
-                ProviderAiAction::Context { session } => copy_context(session, Provider::Codex)?,
+                ProviderAiAction::Context { session, count, path } => copy_context(session, Provider::Codex, count, path)?,
             }
         }
         AiAction::Resume { session } => resume_session(session, Provider::All)?,
@@ -108,7 +108,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Init => init_ai_folder()?,
         AiAction::Import => import_sessions()?,
         AiAction::Copy { session } => copy_session(session, Provider::All)?,
-        AiAction::Context { session } => copy_context(session, Provider::All)?,
+        AiAction::Context { session, count, path } => copy_context(session, Provider::All, count, path)?,
     }
 
     Ok(())
@@ -187,6 +187,72 @@ fn read_sessions_for_project(provider: Provider) -> Result<Vec<AiSession>> {
         let ts_b = b.timestamp.as_deref().unwrap_or("");
         ts_b.cmp(ts_a)
     });
+
+    Ok(sessions)
+}
+
+/// Read sessions for a project at a specific path.
+fn read_sessions_for_path(provider: Provider, path: &PathBuf) -> Result<Vec<AiSession>> {
+    let mut sessions = Vec::new();
+
+    if provider == Provider::Claude || provider == Provider::All {
+        sessions.extend(read_provider_sessions_for_path(Provider::Claude, path)?);
+    }
+
+    if provider == Provider::Codex || provider == Provider::All {
+        sessions.extend(read_provider_sessions_for_path(Provider::Codex, path)?);
+    }
+
+    // Sort by timestamp descending (most recent first)
+    sessions.sort_by(|a, b| {
+        let ts_a = a.timestamp.as_deref().unwrap_or("");
+        let ts_b = b.timestamp.as_deref().unwrap_or("");
+        ts_b.cmp(ts_a)
+    });
+
+    Ok(sessions)
+}
+
+/// Read sessions for a specific provider at a given path.
+fn read_provider_sessions_for_path(provider: Provider, path: &PathBuf) -> Result<Vec<AiSession>> {
+    let path_str = path.to_string_lossy().to_string();
+    let project_name = path_to_project_name(&path_str);
+
+    let projects_dir = match provider {
+        Provider::Claude => get_claude_projects_dir(),
+        Provider::Codex => get_codex_projects_dir(),
+        Provider::All => return Ok(vec![]),
+    };
+
+    let project_dir = projects_dir.join(&project_name);
+
+    if !project_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut sessions = Vec::new();
+
+    let entries = fs::read_dir(&project_dir)
+        .with_context(|| format!("failed to read {}", project_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry?;
+        let file_path = entry.path();
+
+        if file_path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            let filename = file_path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+
+            if filename.starts_with("agent-") {
+                continue;
+            }
+
+            if let Some(session) = parse_session_file(&file_path, filename, provider) {
+                sessions.push(session);
+            }
+        }
+    }
 
     Ok(sessions)
 }
@@ -636,12 +702,22 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
 }
 
 /// Copy last prompt and response from a session to clipboard.
-fn copy_context(session: Option<String>, provider: Provider) -> Result<()> {
+fn copy_context(session: Option<String>, provider: Provider, count: usize, path: Option<String>) -> Result<()> {
     // Auto-import any new sessions silently
     auto_import_sessions()?;
 
+    // Treat "-" as None (trigger fuzzy search)
+    let session = session.filter(|s| s != "-");
+
+    // Determine project path
+    let project_path = if let Some(ref p) = path {
+        PathBuf::from(p)
+    } else {
+        std::env::current_dir()?
+    };
+
     let index = load_index()?;
-    let sessions = read_sessions_for_project(provider)?;
+    let sessions = read_sessions_for_path(provider, &project_path)?;
 
     if sessions.is_empty() {
         let provider_name = match provider {
@@ -727,23 +803,23 @@ fn copy_context(session: Option<String>, provider: Provider) -> Result<()> {
         (selected.session_id.clone(), selected.provider)
     };
 
-    // Read the last context (last user prompt + assistant response)
-    let context = read_last_context(&session_id, session_provider)?;
+    // Read the last N exchanges
+    let context = read_last_context(&session_id, session_provider, count, &project_path)?;
 
     // Copy to clipboard
     copy_to_clipboard(&context)?;
 
+    let exchange_word = if count == 1 { "exchange" } else { "exchanges" };
     let line_count = context.lines().count();
-    println!("Copied last context ({} lines) to clipboard", line_count);
+    println!("Copied last {} {} ({} lines) to clipboard", count, exchange_word, line_count);
 
     Ok(())
 }
 
-/// Read last user prompt and assistant response from a session.
-fn read_last_context(session_id: &str, provider: Provider) -> Result<String> {
-    let cwd = std::env::current_dir()?;
-    let cwd_str = cwd.to_string_lossy().to_string();
-    let project_folder = path_to_project_name(&cwd_str);
+/// Read last N user prompts and assistant responses from a session.
+fn read_last_context(session_id: &str, provider: Provider, count: usize, project_path: &PathBuf) -> Result<String> {
+    let path_str = project_path.to_string_lossy().to_string();
+    let project_folder = path_to_project_name(&path_str);
 
     let projects_dir = match provider {
         Provider::Claude | Provider::All => get_claude_projects_dir(),
@@ -759,9 +835,9 @@ fn read_last_context(session_id: &str, provider: Provider) -> Result<String> {
     let content = fs::read_to_string(&session_file)
         .context("failed to read session file")?;
 
-    // Collect all messages, keeping track of the last user and assistant messages
-    let mut last_user: Option<String> = None;
-    let mut last_assistant: Option<String> = None;
+    // Collect all exchanges (user + assistant pairs)
+    let mut exchanges: Vec<(String, String)> = Vec::new();
+    let mut current_user: Option<String> = None;
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -799,12 +875,12 @@ fn read_last_context(session_id: &str, provider: Provider) -> Result<String> {
 
                 match role {
                     "user" => {
-                        last_user = Some(content_text);
-                        // Reset assistant when we see a new user message
-                        last_assistant = None;
+                        current_user = Some(content_text);
                     }
                     "assistant" => {
-                        last_assistant = Some(content_text);
+                        if let Some(user_msg) = current_user.take() {
+                            exchanges.push((user_msg, content_text));
+                        }
                     }
                     _ => {}
                 }
@@ -812,24 +888,31 @@ fn read_last_context(session_id: &str, provider: Provider) -> Result<String> {
         }
     }
 
+    if exchanges.is_empty() {
+        bail!("No exchanges found in session");
+    }
+
+    // Take the last N exchanges
+    let start = exchanges.len().saturating_sub(count);
+    let last_exchanges = &exchanges[start..];
+
     // Format the context
     let mut context = String::new();
 
-    if let Some(user_msg) = last_user {
+    for (user_msg, assistant_msg) in last_exchanges {
         context.push_str("Human: ");
-        context.push_str(&user_msg);
+        context.push_str(user_msg);
+        context.push_str("\n\n");
+        context.push_str("Assistant: ");
+        context.push_str(assistant_msg);
         context.push_str("\n\n");
     }
 
-    if let Some(assistant_msg) = last_assistant {
-        context.push_str("Assistant: ");
-        context.push_str(&assistant_msg);
-        context.push('\n');
+    // Remove trailing newlines
+    while context.ends_with('\n') {
+        context.pop();
     }
-
-    if context.is_empty() {
-        bail!("No messages found in session");
-    }
+    context.push('\n');
 
     Ok(context)
 }

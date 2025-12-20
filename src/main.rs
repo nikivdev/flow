@@ -92,6 +92,9 @@ fn main() -> Result<()> {
                 commit::run(!opts.no_push)?;
             }
         }
+        Some(Commands::CommitWithCheck(opts)) => {
+            commit::run_with_check(!opts.no_push)?;
+        }
         Some(Commands::Fixup(opts)) => {
             fixup::run(opts)?;
         }
