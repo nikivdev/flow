@@ -89,12 +89,21 @@ pub struct FlowSettings {
 pub struct OptionsConfig {
     #[serde(default, rename = "trace_terminal_io")]
     pub trace_terminal_io: bool,
+    #[serde(
+        default,
+        rename = "commit_with_check_async",
+        alias = "commit-with-check-async"
+    )]
+    pub commit_with_check_async: Option<bool>,
 }
 
 impl OptionsConfig {
     fn merge(&mut self, other: OptionsConfig) {
         if other.trace_terminal_io {
             self.trace_terminal_io = true;
+        }
+        if other.commit_with_check_async.is_some() {
+            self.commit_with_check_async = other.commit_with_check_async;
         }
     }
 }
@@ -995,6 +1004,7 @@ dev = "f run dev"
         let cfg: Config =
             toml::from_str("").expect("empty config should parse with default options");
         assert!(!cfg.options.trace_terminal_io);
+        assert!(cfg.options.commit_with_check_async.is_none());
     }
 
     #[test]
@@ -1005,5 +1015,15 @@ trace_terminal_io = true
 "#;
         let cfg: Config = toml::from_str(toml).expect("options table should parse");
         assert!(cfg.options.trace_terminal_io);
+    }
+
+    #[test]
+    fn options_commit_with_check_async_parses() {
+        let toml = r#"
+[options]
+commit_with_check_async = false
+"#;
+        let cfg: Config = toml::from_str(toml).expect("options table should parse");
+        assert_eq!(cfg.options.commit_with_check_async, Some(false));
     }
 }

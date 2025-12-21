@@ -167,6 +167,10 @@ f cc
 # - Bugs
 # - Security vulnerabilities
 # - Performance issues
+#
+# Optional config:
+# [options]
+# commit_with_check_async = false  # force local sync execution
 
 # If issues found, prompts for confirmation before proceeding
 ```
