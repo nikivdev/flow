@@ -4,72 +4,78 @@ This project is configured for autonomous AI agent workflows with human-in-the-l
 
 ## Response Format
 
-**Every response must end with one of these signals:**
+**Every response MUST end with one of these signals:**
+
+### `runFlowTask: <task> (<project-path>)`
+Use after implementing code changes. This is the PRIMARY signal - most responses should end with this.
+Include the project path so the task runs in the correct directory.
+
+Examples:
+```
+runFlowTask: deploy (cli/flow)
+runFlowTask: build (packages/web)
+runFlowTask: test (src/api)
+runFlowTask: commitWithCheck (.)
+```
 
 ### `notify: <message>`
-Use when you want to tell something to the human. This shows a widget for the user to acknowledge.
+Use ONLY when you cannot proceed or need human input. This pauses the autonomous flow.
 
 Examples:
 ```
-notify: Task completed successfully
-notify: Found 3 potential issues in the code
 notify: Need clarification on the database schema
-notify: Waiting for API key to be configured
+notify: Cannot proceed - missing API key
+notify: Build failed - requires manual fix
 ```
 
-### `runFlowTask: <task>`
-Use when the user's original request seems incomplete and a follow-up flow task should run.
-This shows a widget where the user can approve running the task.
+## Critical Rule: Implementation → Deploy
 
-Examples:
+**After implementing ANY code change, ALWAYS end with:**
 ```
-runFlowTask: f test
-runFlowTask: f build
-runFlowTask: f deploy
-runFlowTask: f commitWithCheck
+runFlowTask: deploy (<project-path>)
 ```
 
-## Guidelines
+This ensures the code gets built and deployed. The human will approve via the widget.
 
-1. **Always end with a signal** - Never leave a response without `notify:` or `runFlowTask:`
-2. **Be specific** - Messages should clearly describe what happened or what's needed
-3. **Chain tasks** - If you think another task should follow, use `runFlowTask:`
-4. **Report issues** - Use `notify:` for errors, warnings, or anything requiring human attention
+## Flow Priority
 
-## Common Patterns
+1. **Code change made** → `runFlowTask: deploy (<path>)`
+2. **Tests needed** → `runFlowTask: test (<path>)`
+3. **Ready to commit** → `runFlowTask: commitWithCheck (<path>)`
+4. **Blocked/need input** → `notify: <reason>`
 
-### After completing work
-```
-notify: Implemented the new feature as requested
-```
+## Examples
 
-### After completing work that needs testing
+### After implementing a feature
 ```
-runFlowTask: f test
-```
+Done. Added the zed-focus-from-warp command.
 
-### After making changes that should be committed
-```
-runFlowTask: f commitWithCheck
+runFlowTask: deploy (cli/flow)
 ```
 
-### When encountering an error
+### After fixing a bug
 ```
-notify: Build failed - missing dependency 'foo'
+Fixed the null pointer exception in user service.
+
+runFlowTask: deploy (packages/api)
+```
+
+### After refactoring
+```
+Refactored authentication to use JWT.
+
+runFlowTask: test (src/auth)
 ```
 
 ### When blocked
 ```
-notify: Cannot proceed - need database credentials
+notify: Cannot implement - need database connection string
 ```
 
 ## Available Flow Tasks
 
-Run `f tasks` to see available tasks for this project.
-
-Common tasks:
-- `f build` - Build the project
-- `f test` - Run tests
-- `f commit` - AI-powered commit
-- `f commitWithCheck` - Commit with Codex code review
-- `f deploy` - Deploy (if configured)
+- `deploy` - Build and deploy the project
+- `build` - Build only
+- `test` - Run tests
+- `commit` - AI-powered commit
+- `commitWithCheck` - Commit with code review
