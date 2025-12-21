@@ -348,9 +348,13 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
                         current_ts = entry_ts.clone();
                     }
                     "assistant" => {
+                        let clean_text = strip_thinking_blocks(&content_text);
+                        if clean_text.trim().is_empty() {
+                            continue;
+                        }
                         if let Some(user_msg) = current_user.take() {
                             let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
-                            exchanges.push((user_msg, content_text, ts.clone()));
+                            exchanges.push((user_msg, clean_text, ts.clone()));
                             last_ts = Some(ts);
                         }
                     }
@@ -1190,8 +1194,12 @@ fn read_last_context(session_id: &str, provider: Provider, count: usize, project
                         current_user = Some(content_text);
                     }
                     "assistant" => {
+                        let clean_text = strip_thinking_blocks(&content_text);
+                        if clean_text.trim().is_empty() {
+                            continue;
+                        }
                         if let Some(user_msg) = current_user.take() {
-                            exchanges.push((user_msg, content_text));
+                            exchanges.push((user_msg, clean_text));
                         }
                     }
                     _ => {}
@@ -1281,16 +1289,39 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Truncate a string to max chars, adding ellipsis if needed.
+/// Strip <thinking> blocks from content (internal Claude processing).
+fn strip_thinking_blocks(s: &str) -> String {
+    let mut remaining = s;
+    let mut out = String::new();
+
+    loop {
+        let Some(start) = remaining.find("<thinking>") else {
+            out.push_str(remaining);
+            break;
+        };
+
+        out.push_str(&remaining[..start]);
+        let after_start = &remaining[start + "<thinking>".len()..];
+
+        let Some(end) = after_start.find("</thinking>") else {
+            break;
+        };
+
+        remaining = &after_start[end + "</thinking>".len()..];
+    }
+
+    out
+}
+
 fn truncate_str(s: &str, max: usize) -> String {
-    // Handle newlines - take first line only
     let first_line = s.lines().next().unwrap_or(s);
 
     if first_line.chars().count() <= max {
         first_line.to_string()
     } else {
-        let truncated: String = first_line.chars().take(max - 1).collect();
-        format!("{}…", truncated)
+        let take_len = max.saturating_sub(3);
+        let truncated: String = first_line.chars().take(take_len).collect();
+        format!("{}...", truncated)
     }
 }
 
@@ -1897,11 +1928,15 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
         bail!("Session not found");
     };
 
-    // Get context since last consumed checkpoint
-    let context = get_cross_project_context(session, opts.count)?;
+    // Get context since last consumed checkpoint (or full if --full)
+    let context = get_cross_project_context(session, opts.count, opts.full)?;
 
     if context.is_empty() {
-        println!("No new context since last consumption.");
+        if opts.full {
+            println!("No context found in session.");
+        } else {
+            println!("No new context since last consumption. Use --full for entire session.");
+        }
         return Ok(());
     }
 
@@ -2047,17 +2082,21 @@ fn folder_to_path(folder: &PathBuf) -> PathBuf {
 }
 
 /// Get context from a cross-project session since last consumed checkpoint.
-fn get_cross_project_context(session: &CrossProjectSession, count: Option<usize>) -> Result<String> {
-    // Load consumed checkpoints for current project
-    let cwd = std::env::current_dir()?;
-    let consumed = load_consumed_checkpoints(&cwd)?;
+fn get_cross_project_context(session: &CrossProjectSession, count: Option<usize>, full: bool) -> Result<String> {
+    // If full mode, ignore checkpoints
+    let since_ts = if full {
+        None
+    } else {
+        // Load consumed checkpoints for current project
+        let cwd = std::env::current_dir()?;
+        let consumed = load_consumed_checkpoints(&cwd)?;
+        let source_key = session.project_path.to_string_lossy().to_string();
+        consumed.consumed.get(&source_key)
+            .map(|e| e.last_timestamp.clone())
+    };
 
-    let source_key = session.project_path.to_string_lossy().to_string();
-    let since_ts = consumed.consumed.get(&source_key)
-        .map(|e| e.last_timestamp.as_str());
-
-    // Read context since checkpoint
-    let (context, _last_ts) = read_cross_project_context(session, since_ts, count)?;
+    // Read context since checkpoint (or full if since_ts is None)
+    let (context, _last_ts) = read_cross_project_context(session, since_ts.as_deref(), count)?;
 
     Ok(context)
 }
@@ -2138,9 +2177,13 @@ fn read_cross_project_context(
                         current_ts = entry_ts.clone();
                     }
                     "assistant" => {
+                        let clean_text = strip_thinking_blocks(&content_text);
+                        if clean_text.trim().is_empty() {
+                            continue;
+                        }
                         if let Some(user_msg) = current_user.take() {
                             let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
-                            exchanges.push((user_msg, content_text, ts.clone()));
+                            exchanges.push((user_msg, clean_text, ts.clone()));
                             last_ts = Some(ts);
                         }
                     }

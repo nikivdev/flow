@@ -406,6 +406,9 @@ pub struct SessionsOpts {
     /// Show sessions but don't copy to clipboard.
     #[arg(long, short)]
     pub list: bool,
+    /// Get full session context, ignoring checkpoints.
+    #[arg(long, short)]
+    pub full: bool,
 }
 
 #[derive(Args, Debug, Clone)]
