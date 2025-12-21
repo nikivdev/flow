@@ -1393,7 +1393,19 @@ fn copy_context(session: Option<String>, provider: Provider, count: usize, path:
     auto_import_sessions()?;
 
     // Treat "-" as None (trigger fuzzy search)
-    let session = session.filter(|s| s != "-");
+    let mut session = session.filter(|s| s != "-");
+    let mut path = path;
+
+    // Allow `f ai context .` to mean "use current path" instead of a session ID.
+    if path.is_none() {
+        if let Some(ref candidate) = session {
+            let candidate_path = PathBuf::from(candidate);
+            if candidate == "." || candidate == ".." || candidate_path.exists() {
+                path = Some(candidate.clone());
+                session = None;
+            }
+        }
+    }
 
     // Determine project path
     let project_path = if let Some(ref p) = path {
