@@ -8,78 +8,81 @@ use std::process::Command;
 use crate::config;
 
 /// Generate agents.md content with project-specific settings.
-fn generate_agents_md(project_name: &str, primary_task: &str) -> String {
+fn generate_agents_md(project_name: &str, _primary_task: &str) -> String {
     format!(r#"# Autonomous Agent Instructions
 
 Project: {project_name}
-Primary task: {primary_task}
 
 This project is configured for autonomous AI agent workflows with human-in-the-loop approval.
 
 ## Response Format
 
-**Every response MUST end with one of these signals:**
+**Every response MUST end with exactly one of these signals on the final line:**
 
-### `runFlowTask: {primary_task} (.)`
-Use after implementing code changes. This is the PRIMARY signal - most responses should end with this.
+### Success signals
 
-Examples:
 ```
-runFlowTask: {primary_task} (.)
-runFlowTask: test (.)
-runFlowTask: commitWithCheck (.)
+done.
 ```
+Use when task completed successfully with high certainty. No further action needed.
 
-### `notify: <message>`
-Use ONLY when you cannot proceed or need human input. This pauses the autonomous flow.
-
-Examples:
 ```
-notify: Need clarification on the database schema
-notify: Cannot proceed - missing API key
-notify: Build failed - requires manual fix
+done: <message>
 ```
+Use when task completed with context to share. Example: `done: Added login command with --token flag`
 
-## Critical Rule: Implementation → {primary_task}
+### Needs human input
 
-**After implementing ANY code change, ALWAYS end with:**
 ```
-runFlowTask: {primary_task} (.)
+needsUpdate: <message>
 ```
+Use when you need human decision or action. Example: `needsUpdate: Should I use OAuth or API key auth?`
 
-This ensures the code gets built and deployed. The human will approve via the widget.
+### Error signals
 
-## Flow Priority
+```
+error: <message>
+```
+Use when task failed or cannot proceed. Example: `error: Build failed - missing dependency xyz`
 
-1. **Code change made** → `runFlowTask: {primary_task} (.)`
-2. **Tests needed** → `runFlowTask: test (.)`
-3. **Ready to commit** → `runFlowTask: commitWithCheck (.)`
-4. **Blocked/need input** → `notify: <reason>`
+## Rules
+
+1. **Always end with a signal** - The last line must be one of the above
+2. **One signal only** - Never combine signals
+3. **Be specific** - Include actionable context in messages
+4. **No quotes** - Write signals exactly as shown, no wrapping quotes
 
 ## Examples
 
-### After implementing a feature
+### Successful implementation
 ```
-Done. Added the new command.
+Added the new CLI command with all requested flags.
 
-runFlowTask: {primary_task} (.)
-```
-
-### After fixing a bug
-```
-Fixed the null pointer exception.
-
-runFlowTask: {primary_task} (.)
+done.
 ```
 
-### When blocked
+### Completed with context
 ```
-notify: Cannot implement - need database connection string
+Refactored the auth module to use the new token format.
+
+done: Auth now supports both JWT and API key methods
 ```
 
-## Available Flow Tasks
+### Need human decision
+```
+Found two approaches for caching:
+1. Redis - better for distributed systems
+2. In-memory - simpler, faster for single instance
 
-Run `f tasks` to see all available tasks for this project.
+needsUpdate: Which caching approach should I use?
+```
+
+### Error occurred
+```
+Attempted to run tests but encountered issues.
+
+error: Test suite requires DATABASE_URL environment variable
+```
 "#)
 }
 
@@ -167,10 +170,12 @@ pub fn run() -> Result<()> {
     println!("Autonomous agent workflow is ready!");
     println!();
     println!("Claude Code and Codex will now end responses with:");
-    println!("  runFlowTask: {} (.)  - Deploy after code changes", primary_task);
-    println!("  notify: <message>       - Tell something to human");
+    println!("  done.              - Task completed successfully");
+    println!("  done: <msg>        - Completed with context");
+    println!("  needsUpdate: <msg> - Needs human decision");
+    println!("  error: <msg>       - Task failed");
     println!();
-    println!("Lin.app will show widgets for approval when these signals are detected.");
+    println!("Lin.app will detect these signals and show appropriate widgets.");
 
     Ok(())
 }
