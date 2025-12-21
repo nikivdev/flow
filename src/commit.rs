@@ -188,8 +188,19 @@ pub fn run_sync(push: bool) -> Result<()> {
 }
 
 /// Run commit with Codex code review: stage, review with Codex, generate message, commit, push.
-/// If `include_context` is true, AI session context is passed to Codex for better understanding.
+/// If hub is running, delegates to it for async execution.
 pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
+    // Check if hub is running - if so, delegate
+    if hub::hub_healthy(HUB_HOST, HUB_PORT) {
+        return delegate_to_hub_with_check(push, include_context);
+    }
+
+    run_with_check_sync(push, include_context)
+}
+
+/// Run commit with Codex code review synchronously (called directly or by hub).
+/// If `include_context` is true, AI session context is passed to Codex for better understanding.
+pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
     info!(push = push, include_context = include_context, "starting commit with check workflow");
 
     // Ensure we're in a git repo
@@ -217,6 +228,19 @@ pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
     } else {
         None
     };
+    if let Some(context) = session_context.as_ref() {
+        let line_count = context.lines().count();
+        println!(
+            "Using AI session context ({} chars, {} lines)",
+            context.len(),
+            line_count
+        );
+        if should_show_review_context() {
+            println!("--- AI session context ---");
+            println!("{}", context);
+            println!("--- End AI session context ---");
+        }
+    }
 
     // Run Codex review
     println!("\nRunning Codex code review...");
@@ -348,6 +372,8 @@ pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
 /// Run Codex to review staged changes for bugs and performance issues.
 fn run_codex_review(diff: &str, session_context: Option<&str>) -> Result<ReviewResult> {
     use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::Instant;
 
     let (diff_for_prompt, _truncated) = truncate_diff(diff);
 
@@ -390,18 +416,41 @@ Diff:\n```diff\n{}\n```",
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let reader = BufReader::new(stdout);
+    let (tx, rx) = mpsc::channel();
+    let start = Instant::now();
+
+    let reader_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().flatten() {
+            let _ = tx.send(ReviewEvent::Line(line));
+        }
+        let _ = tx.send(ReviewEvent::Done);
+    });
 
     let mut output_lines = Vec::new();
-
-    // Stream output to terminal and collect it
-    for line in reader.lines() {
-        if let Ok(line) = line {
-            println!("{}", line);
-            output_lines.push(line);
+    let mut last_progress = Instant::now();
+    loop {
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(ReviewEvent::Line(line)) => {
+                println!("{}", line);
+                output_lines.push(line);
+                last_progress = Instant::now();
+            }
+            Ok(ReviewEvent::Done) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if last_progress.elapsed() >= Duration::from_secs(10) {
+                    println!(
+                        "Waiting on Codex review... ({}s elapsed)",
+                        start.elapsed().as_secs()
+                    );
+                    last_progress = Instant::now();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
+    let _ = reader_handle.join();
     let status = child.wait()?;
     let stderr_output = read_stderr(stderr);
 
@@ -661,6 +710,17 @@ fn read_stderr(stderr: std::process::ChildStderr) -> String {
     buf
 }
 
+enum ReviewEvent {
+    Line(String),
+    Done,
+}
+
+fn should_show_review_context() -> bool {
+    std::env::var("FLOW_SHOW_REVIEW_CONTEXT")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 fn split_paragraphs(message: &str) -> Vec<String> {
     let mut paragraphs = Vec::new();
     let mut current = Vec::new();
@@ -727,6 +787,62 @@ fn delegate_to_hub(push: bool) -> Result<()> {
             println!("  View logs: f logs --task-id {}", task_id);
         } else {
             println!("Delegated commit to hub");
+        }
+        Ok(())
+    } else {
+        let body = resp.text().unwrap_or_default();
+        bail!("hub returned error: {}", body);
+    }
+}
+
+fn delegate_to_hub_with_check(push: bool, include_context: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+
+    // Build the command to run using the current executable path
+    let push_flag = if push { "" } else { " --no-push" };
+    let context_flag = if include_context { "" } else { " --no-context" };
+    let flow_bin = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "flow".to_string());
+    let command = format!(
+        "{} commitWithCheck --sync{}{}",
+        flow_bin, push_flag, context_flag
+    );
+
+    let url = format!("http://{}:{}/tasks/run", HUB_HOST, HUB_PORT);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("failed to create HTTP client")?;
+
+    let payload = json!({
+        "task": {
+            "name": "commitWithCheck",
+            "command": command,
+            "dependencies": {
+                "commands": [],
+                "flox": [],
+            },
+        },
+        "cwd": cwd.to_string_lossy(),
+        "flow_version": env!("CARGO_PKG_VERSION"),
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .context("failed to submit commitWithCheck to hub")?;
+
+    if resp.status().is_success() {
+        // Parse response to get task_id
+        let body: serde_json::Value = resp.json().unwrap_or_default();
+        if let Some(task_id) = body.get("task_id").and_then(|v| v.as_str()) {
+            println!("Delegated commitWithCheck to hub");
+            println!("  View logs: f logs --task-id {}", task_id);
+        } else {
+            println!("Delegated commitWithCheck to hub");
         }
         Ok(())
     } else {
