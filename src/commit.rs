@@ -14,6 +14,7 @@ use tracing::{debug, info};
 
 use crate::ai;
 use crate::hub;
+use crate::notify;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
@@ -346,26 +347,41 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
             }
         }
         if !review.issues.is_empty() {
-            println!("Potential issues:");
+            println!("Issues found:");
             for issue in &review.issues {
                 println!("- {}", issue);
             }
             println!();
         }
-        print!("Codex found potential issues. Continue with commit? [y/N] ");
-        io::stdout().flush()?;
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim().to_lowercase();
+        // Attempt auto-fix via codex
+        println!("Attempting auto-fix...");
+        let fix_prompt = format!(
+            "Fix these issues in the staged changes:\n{}\n\nApply minimal fixes, don't refactor.",
+            review.issues.join("\n")
+        );
 
-        if input != "y" && input != "yes" {
-            println!("Commit cancelled.");
-            // Restore staging state prior to this command.
-            restore_staged_snapshot(&staged_snapshot)?;
-            println!("\nnotify: Codex found issues in code review - commit cancelled");
-            return Ok(());
+        match run_codex_fix(&fix_prompt) {
+            Ok(true) => {
+                println!("✓ Auto-fix applied");
+                // Re-stage any fixed files
+                let _ = git_run(&["add", "-u"]);
+            }
+            Ok(false) => {
+                println!("⚠ Auto-fix had no changes");
+            }
+            Err(e) => {
+                println!("⚠ Auto-fix failed: {}", e);
+                // Send warning alert to Lin
+                let alert_msg = format!("⚠️ Auto-fix failed: {} - committing anyway", e);
+                if let Err(e) = notify::send_warning(&alert_msg) {
+                    debug!("Failed to send alert to Lin: {}", e);
+                }
+            }
         }
+
+        // Always continue with commit - never block
+        println!("Proceeding with commit...");
     } else {
         println!("✓ Codex review passed");
     }
@@ -600,6 +616,39 @@ Diff:\n```diff\n{}\n```",
         issues,
         summary: review_json.and_then(|r| r.summary),
     })
+}
+
+/// Run Codex to auto-fix issues in staged changes.
+/// Returns true if fixes were applied.
+fn run_codex_fix(prompt: &str) -> Result<bool> {
+    // Use codex exec to apply fixes
+    let mut child = Command::new("codex")
+        .args([
+            "exec",
+            "--model",
+            "gpt-5.1-codex-max",
+            "-a",  // auto-edit mode
+            prompt,
+        ])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to run codex - is it installed?")?;
+
+    let status = child.wait()?;
+
+    if !status.success() {
+        bail!("codex exited with status {}", status);
+    }
+
+    // Check if any files changed
+    let diff_output = Command::new("git")
+        .args(["diff", "--name-only"])
+        .output()
+        .context("failed to check for changes")?;
+
+    let has_changes = !diff_output.stdout.is_empty();
+    Ok(has_changes)
 }
 
 fn ensure_git_repo() -> Result<()> {

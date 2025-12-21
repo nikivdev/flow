@@ -1,4 +1,4 @@
-//! Notify command - sends proposals to Lin app for user approval.
+//! Notify command - sends proposals and alerts to Lin app.
 
 use crate::cli::NotifyCommand;
 use anyhow::{Context, Result};
@@ -16,6 +16,17 @@ struct Proposal {
     title: String,
     action: String,
     context: Option<String>,
+    #[serde(rename = "expires_at")]
+    expires_at: i64,
+}
+
+/// Alert format for Lin's NotificationBannerManager.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Alert {
+    id: String,
+    timestamp: i64,
+    text: String,
+    kind: String, // "info", "warning", "error", "success"
     #[serde(rename = "expires_at")]
     expires_at: i64,
 }
@@ -85,4 +96,105 @@ pub fn run(cmd: NotifyCommand) -> Result<()> {
     println!("Proposal sent to Lin: {}", cmd.action);
 
     Ok(())
+}
+
+// ============================================================================
+// Alerts API (for commit rejections, errors, etc.)
+// ============================================================================
+
+/// Get the path to Lin's alerts.json file.
+fn get_alerts_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    let path = home
+        .join("Library")
+        .join("Application Support")
+        .join("Lin")
+        .join("alerts.json");
+    Ok(path)
+}
+
+/// Alert kind for Lin's NotificationBannerManager.
+#[derive(Debug, Clone, Copy)]
+pub enum AlertKind {
+    Info,
+    Warning,
+    Error,
+    Success,
+}
+
+impl AlertKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            AlertKind::Info => "info",
+            AlertKind::Warning => "warning",
+            AlertKind::Error => "error",
+            AlertKind::Success => "success",
+        }
+    }
+}
+
+/// Send an alert to Lin's notification banner.
+/// Alerts are shown as floating banners - errors/warnings stay for 10+ seconds.
+pub fn send_alert(text: &str, kind: AlertKind) -> Result<()> {
+    let alerts_path = get_alerts_path()?;
+
+    // Ensure the directory exists
+    if let Some(parent) = alerts_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Read existing alerts
+    let mut alerts: Vec<Alert> = if alerts_path.exists() {
+        let content = fs::read_to_string(&alerts_path)?;
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Get current timestamp
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("Time went backwards")?
+        .as_secs() as i64;
+
+    // Determine expiry based on kind (warnings/errors stay longer)
+    let duration = match kind {
+        AlertKind::Error | AlertKind::Warning => 30, // 30 seconds for errors/warnings
+        AlertKind::Success => 5,
+        AlertKind::Info => 10,
+    };
+
+    // Create new alert
+    let alert = Alert {
+        id: Uuid::new_v4().to_string(),
+        timestamp: now,
+        text: text.to_string(),
+        kind: kind.as_str().to_string(),
+        expires_at: now + duration,
+    };
+
+    // Add to alerts
+    alerts.push(alert);
+
+    // Clean up old alerts (keep last 20)
+    if alerts.len() > 20 {
+        let skip_count = alerts.len() - 20;
+        alerts = alerts.into_iter().skip(skip_count).collect();
+    }
+
+    // Write back
+    let content = serde_json::to_string_pretty(&alerts)?;
+    fs::write(&alerts_path, content)?;
+
+    Ok(())
+}
+
+/// Send an error alert to Lin.
+pub fn send_error(text: &str) -> Result<()> {
+    send_alert(text, AlertKind::Error)
+}
+
+/// Send a warning alert to Lin.
+pub fn send_warning(text: &str) -> Result<()> {
+    send_alert(text, AlertKind::Warning)
 }
