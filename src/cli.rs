@@ -409,6 +409,9 @@ pub struct SessionsOpts {
     /// Get full session context, ignoring checkpoints.
     #[arg(long, short)]
     pub full: bool,
+    /// Generate summaries for stale sessions (uses Gemini).
+    #[arg(long)]
+    pub summarize: bool,
 }
 
 #[derive(Args, Debug, Clone)]

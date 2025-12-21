@@ -42,6 +42,12 @@ struct SetEnvResponse {
     environment: String,
 }
 
+/// Response from /api/env/personal
+#[derive(Debug, Deserialize)]
+struct PersonalEnvResponse {
+    env: HashMap<String, String>,
+}
+
 /// Get the auth config path.
 fn get_auth_config_path() -> PathBuf {
     let config_dir = dirs::config_dir()
@@ -99,6 +105,40 @@ fn get_api_url(auth: &AuthConfig) -> String {
     auth.api_url
         .clone()
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
+}
+
+pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
+    let auth = load_auth_config()?;
+    let token = match auth.token.as_ref() {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    let api_url = get_api_url(&auth);
+    let url = format!("{}/api/env/personal?keys={}", api_url, key);
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .context("failed to connect to 1focus")?;
+
+    if resp.status() == 401 {
+        return Ok(None);
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    let data: PersonalEnvResponse = resp.json().context("failed to parse response")?;
+    Ok(data.env.get(key).cloned())
 }
 
 /// Run the env subcommand.
