@@ -1174,18 +1174,31 @@ fn run_session_fzf(entries: &[FzfSessionEntry]) -> Result<Option<&FzfSessionEntr
 
 /// Launch a session with the appropriate CLI.
 fn launch_session(session_id: &str, provider: Provider) -> Result<()> {
-    let (cmd, name) = match provider {
-        Provider::Claude => ("claude", "claude"),
-        Provider::Codex => ("codex", "codex"),
-        Provider::All => ("claude", "claude"), // Default to claude
+    let status = match provider {
+        Provider::Claude | Provider::All => {
+            // Claude uses: claude --resume <session_id> --dangerously-skip-permissions
+            Command::new("claude")
+                .arg("--resume")
+                .arg(session_id)
+                .arg("--dangerously-skip-permissions")
+                .status()
+                .with_context(|| "failed to launch claude")?
+        }
+        Provider::Codex => {
+            // Codex uses: codex resume <session_id> --dangerously-bypass-approvals-and-sandbox
+            Command::new("codex")
+                .arg("resume")
+                .arg(session_id)
+                .arg("--dangerously-bypass-approvals-and-sandbox")
+                .status()
+                .with_context(|| "failed to launch codex")?
+        }
     };
 
-    let status = Command::new(cmd)
-        .arg("--resume")
-        .arg(session_id)
-        .arg("--dangerously-skip-permissions")
-        .status()
-        .with_context(|| format!("failed to launch {}", name))?;
+    let name = match provider {
+        Provider::Claude | Provider::All => "claude",
+        Provider::Codex => "codex",
+    };
 
     if !status.success() {
         bail!("{} exited with status {}", name, status);
