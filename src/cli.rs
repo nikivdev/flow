@@ -177,6 +177,12 @@ pub enum Commands {
         long_about = "Sends a proposal to the Lin app widget for user approval. Used for human-in-the-loop AI workflows."
     )]
     Notify(NotifyCommand),
+    #[command(
+        about = "Set up autonomous agent workflow for this project.",
+        long_about = "Validates Lin.app is running and creates agents.md with instructions for Claude Code/Codex to work autonomously with human-in-the-loop approval.",
+        alias = "auto"
+    )]
+    AutoSetup,
 }
 
 #[derive(Args, Debug, Clone)]
