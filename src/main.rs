@@ -11,6 +11,7 @@ use flowd::{
 
 fn main() -> Result<()> {
     init_tracing();
+    flowd::config::load_global_secrets();
 
     let raw_args: Vec<String> = std::env::args().collect();
     let cli = match Cli::try_parse_from(&raw_args) {

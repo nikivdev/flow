@@ -581,10 +581,7 @@ where
 
 /// Default config path: ~/.config/flow/flow.toml (falls back to legacy config.toml)
 pub fn default_config_path() -> PathBuf {
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/flow");
+    let base = global_config_dir();
 
     let primary = base.join("flow.toml");
     if primary.exists() {
@@ -600,6 +597,26 @@ pub fn default_config_path() -> PathBuf {
     primary
 }
 
+/// Global config directory: ~/.config/flow
+pub fn global_config_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/flow")
+}
+
+/// Load global secrets from ~/.config/flow/secrets.toml
+pub fn load_global_secrets() {
+    let secrets_path = global_config_dir().join("secrets.toml");
+    if secrets_path.exists() {
+        if let Ok(secrets) = load_secrets(&secrets_path) {
+            let mut dummy = Config::default();
+            merge_secrets(&mut dummy, secrets);
+            tracing::debug!(path = %secrets_path.display(), "loaded global secrets");
+        }
+    }
+}
+
 pub fn expand_path(raw: &str) -> PathBuf {
     let tilde_expanded = tilde(raw).into_owned();
     let env_expanded = match shellexpand::env(&tilde_expanded) {
@@ -612,7 +629,94 @@ pub fn expand_path(raw: &str) -> PathBuf {
 pub fn load<P: AsRef<Path>>(path: P) -> Result<Config> {
     let path = path.as_ref();
     let mut visited = Vec::new();
-    load_with_includes(path, &mut visited)
+    let mut cfg = load_with_includes(path, &mut visited)?;
+
+    // Load secrets from secrets.toml in the same directory (never shown on stream)
+    if let Some(parent) = path.parent() {
+        let secrets_path = parent.join("secrets.toml");
+        if secrets_path.exists() {
+            if let Ok(secrets) = load_secrets(&secrets_path) {
+                merge_secrets(&mut cfg, secrets);
+                tracing::debug!(path = %secrets_path.display(), "loaded secrets file");
+            }
+        }
+    }
+
+    Ok(cfg)
+}
+
+/// Secrets that can be loaded from a separate file to avoid exposing on stream.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct Secrets {
+    #[serde(default)]
+    env: HashMap<String, String>,
+    #[serde(default)]
+    cloudflare: Option<CloudflareSecrets>,
+    #[serde(default)]
+    openai: Option<ApiKeySecret>,
+    #[serde(default)]
+    anthropic: Option<ApiKeySecret>,
+    #[serde(default)]
+    cerebras: Option<ApiKeySecret>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CloudflareSecrets {
+    account_id: Option<String>,
+    stream_token: Option<String>,
+    stream_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ApiKeySecret {
+    #[serde(alias = "api_key", alias = "key")]
+    api_key: Option<String>,
+}
+
+fn load_secrets(path: &Path) -> Result<Secrets> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read secrets at {}", path.display()))?;
+    let secrets: Secrets = toml::from_str(&contents)
+        .with_context(|| format!("failed to parse secrets at {}", path.display()))?;
+    Ok(secrets)
+}
+
+fn merge_secrets(cfg: &mut Config, secrets: Secrets) {
+    // Inject secrets as environment variables for child processes
+    // SAFETY: We're setting env vars at startup before any threads are spawned
+    unsafe {
+        for (key, value) in secrets.env {
+            std::env::set_var(&key, &value);
+        }
+        if let Some(cf) = secrets.cloudflare {
+            if let Some(v) = cf.account_id {
+                std::env::set_var("CLOUDFLARE_ACCOUNT_ID", &v);
+            }
+            if let Some(v) = cf.stream_token {
+                std::env::set_var("CLOUDFLARE_STREAM_TOKEN", &v);
+            }
+            if let Some(v) = cf.stream_key {
+                std::env::set_var("CLOUDFLARE_STREAM_KEY", &v);
+            }
+        }
+        if let Some(openai) = secrets.openai {
+            if let Some(v) = openai.api_key {
+                std::env::set_var("OPENAI_API_KEY", &v);
+            }
+        }
+        if let Some(anthropic) = secrets.anthropic {
+            if let Some(v) = anthropic.api_key {
+                std::env::set_var("ANTHROPIC_API_KEY", &v);
+            }
+        }
+        if let Some(cerebras) = secrets.cerebras {
+            if let Some(v) = cerebras.api_key {
+                std::env::set_var("CEREBRAS_API_KEY", &v);
+            }
+        }
+    }
+    // Storage config can also reference these env vars
+    let _ = cfg; // cfg itself doesn't need modification, env vars are set
 }
 
 fn load_with_includes(path: &Path, visited: &mut Vec<PathBuf>) -> Result<Config> {
