@@ -500,7 +500,8 @@ fn run_codex_review(diff: &str, session_context: Option<&str>) -> Result<ReviewR
 3. Performance issues\n\
 4. Code quality\n\
 5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
-Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\n\
+Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\
+Never include secrets, credentials, personal data, or other sensitive data in the response.\n\n\
 AI session context (intent behind changes):\n{}\n\n\
 Diff:\n```diff\n{}\n```",
             context,
@@ -514,7 +515,8 @@ Diff:\n```diff\n{}\n```",
 3. Performance issues\n\
 4. Code quality\n\
 5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
-Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\n\
+Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\
+Never include secrets, credentials, personal data, or other sensitive data in the response.\n\n\
 Diff:\n```diff\n{}\n```",
             diff_for_prompt
         )
