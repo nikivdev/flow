@@ -1,0 +1,151 @@
+{
+  "sessions": {
+    "unknown-session-5": {
+      "id": "4d0e5488-e36b-49f6-b655-4861f101bfd4",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-19T15:17:20.756715+00:00",
+      "last_resumed": null
+    },
+    "20251221-resuming-session-019": {
+      "id": "41ed9fe3-61b0-41f3-8bd9-472980cd04b7",
+      "provider": "claude",
+      "description": "r\nResuming session 019b40cb...\nerror: unexpected argument '--resume' found\n\n  tip: to pass '--res...",
+      "saved_at": "2025-12-21T15:57:05.619698+00:00",
+      "last_resumed": null
+    },
+    "20251221-gpt-51-codex-max-use": {
+      "id": "0dfd5daa-05be-427a-b63a-b99ce4cea39f",
+      "provider": "claude",
+      "description": "gpt-5.1-codex-max use this model when doing `commitWithCheck` in codex",
+      "saved_at": "2025-12-21T09:49:16.998287+00:00",
+      "last_resumed": null
+    },
+    "unknown-session": {
+      "id": "a4e698a1-54c3-455a-a553-b68d633c233a",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-18T15:37:57.646861+00:00",
+      "last_resumed": null
+    },
+    "20251201-spectracing-flowmd-c": {
+      "id": "dc72b546-dfae-46b6-88a8-9514c85b2a12",
+      "provider": "claude",
+      "description": "in spec/tracing-flow.md create plan how to do this\nsay I have ongoing process started from `f dev...",
+      "saved_at": "2025-12-18T15:37:57.646860+00:00",
+      "last_resumed": null
+    },
+    "unknown-session-6": {
+      "id": "b81d6625-f9ce-4098-8f8b-9295dcdfa300",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-19T15:34:42.740006+00:00",
+      "last_resumed": null
+    },
+    "20251209-main-40s-": {
+      "id": "a284b9a5-eb84-4fa7-a9d5-b9521fb09f08",
+      "provider": "claude",
+      "description": "~/fork-i/garden-co/jazz main* 40s\n❯ f\nError: task 'sync-persist' references unknown dependencie...",
+      "saved_at": "2025-12-18T15:37:57.646851+00:00",
+      "last_resumed": null
+    },
+    "20251206-want-add-support": {
+      "id": "a723f9d9-58e6-4893-ab3c-bc648ac116ee",
+      "provider": "claude",
+      "description": "want to add support for nested flow.toml \n\nthat is if I run `f` on root of project\n\nI want it to ...",
+      "saved_at": "2025-12-18T15:37:57.646853+00:00",
+      "last_resumed": null
+    },
+    "20251212-when-doing-f": {
+      "id": "f0d978c9-5686-46b8-a333-4d0517ff5e20",
+      "provider": "claude",
+      "description": "when doing `f` and doing fuzzy search i can now do ctrl+f to go into thing where i can pass args\n...",
+      "saved_at": "2025-12-18T15:37:57.646847+00:00",
+      "last_resumed": null
+    },
+    "20251204--hub-kill": {
+      "id": "d6479fc7-984d-4b25-9668-e92d1cf1818c",
+      "provider": "claude",
+      "description": "❯ f hub\nkill: ‘35733’: No such process\nStarting lin watcher daemon using /Users/nikiv/bin/l...",
+      "saved_at": "2025-12-18T15:37:57.646858+00:00",
+      "last_resumed": null
+    },
+    "20251205-get-issue-project": {
+      "id": "e30cc360-9166-458d-9593-36be36167a4a",
+      "provider": "claude",
+      "description": "get issue in project where it does not accept input from flow task\n/Users/nikiv/org/gen/new/flow....",
+      "saved_at": "2025-12-18T15:37:57.646855+00:00",
+      "last_resumed": null
+    },
+    "unknown-session-8": {
+      "id": "91bae91e-1436-4cc9-9e5f-1cbb3183beb5",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-19T18:17:42.286168+00:00",
+      "last_resumed": null
+    },
+    "unknown-session-10": {
+      "id": "e19f3908-7c77-4c52-b7bf-53a5370fdcf7",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-21T15:57:05.619707+00:00",
+      "last_resumed": null
+    },
+    "unknown-session-3": {
+      "id": "ee62c963-1a68-4d26-bb85-66b7ded26766",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-19T01:47:35.166276+00:00",
+      "last_resumed": null
+    },
+    "unknown-session-11": {
+      "id": "e74426e1-19f8-461f-b519-1ef25e6c5f00",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-21T15:57:05.619710+00:00",
+      "last_resumed": null
+    },
+    "20251215-here-when-run": {
+      "id": "3f34ac70-7baa-4b75-913f-67f0e168b1f4",
+      "provider": "claude",
+      "description": "/Users/nikiv/fork-i/jax-ml/jax/papercode\nin here when i run `f` it does now show tasks from the f...",
+      "saved_at": "2025-12-18T15:37:57.646801+00:00",
+      "last_resumed": null
+    },
+    "unknown-session-2": {
+      "id": "a362adf4-3d5f-48d2-8297-ca0e5d186cb4",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-18T15:37:57.646863+00:00",
+      "last_resumed": null
+    },
+    "unknown-session-9": {
+      "id": "43337f2d-e056-49f1-a7ed-4343c83ca475",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-21T09:49:16.998294+00:00",
+      "last_resumed": null
+    },
+    "20251204-normal-tasks-work": {
+      "id": "1d9e39e8-39b2-4224-b034-d1dc001e7cc0",
+      "provider": "claude",
+      "description": "normal tasks work\nbut with \ninteractive = true\n\ni get hanging as seen\n\nf db-query\nRunning task 'd...",
+      "saved_at": "2025-12-18T15:37:57.646857+00:00",
+      "last_resumed": null
+    },
+    "unknown-session-4": {
+      "id": "e1439102-3439-4ae5-b884-4affe66ed619",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-19T01:47:35.166295+00:00",
+      "last_resumed": null
+    },
+    "unknown-session-7": {
+      "id": "4f83c5b6-8e4b-4911-937a-d0efeaec637c",
+      "provider": "claude",
+      "description": null,
+      "saved_at": "2025-12-19T15:34:42.740033+00:00",
+      "last_resumed": null
+    }
+  }
+}
