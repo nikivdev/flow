@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    ai, auto_setup, cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
+    ai, cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     commit, daemon, doctor, env, fixup, history, hub, init, init_tracing, log_server, notify,
     palette, processes, projects, skills, task_match, tasks,
 };
@@ -93,7 +93,9 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::CommitWithCheck(opts)) => {
-            if opts.sync {
+            if opts.dry {
+                commit::dry_run_context()?;
+            } else if opts.sync {
                 commit::run_with_check_sync(!opts.no_push, !opts.no_context)?;
             } else {
                 commit::run_with_check(!opts.no_push, !opts.no_context)?;
@@ -116,9 +118,6 @@ fn main() -> Result<()> {
         }
         Some(Commands::Notify(cmd)) => {
             notify::run(cmd)?;
-        }
-        Some(Commands::AutoSetup) => {
-            auto_setup::run()?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

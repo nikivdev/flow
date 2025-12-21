@@ -1,5 +1,4 @@
 pub mod ai;
-pub mod auto_setup;
 pub mod cli;
 pub mod commit;
 pub mod config;
@@ -22,6 +21,7 @@ pub mod processes;
 pub mod projects;
 pub mod running;
 pub mod skills;
+pub mod sync;
 pub mod notify;
 pub mod task_match;
 pub mod tasks;

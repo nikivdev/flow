@@ -37,11 +37,6 @@ command = "cargo run -- hub start"
 description = "Ensure the hub daemon is running locally"
 
 [[tasks]]
-name = "deploy-cli-local"
-command = "./scripts/deploy.sh"
-description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
-
-[[tasks]]
 name = "deploy-cli-release"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh"
 description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"

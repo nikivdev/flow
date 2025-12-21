@@ -163,8 +163,8 @@ pub enum Commands {
     )]
     Ai(AiCommand),
     #[command(
-        about = "Manage environment variables via 1focus.",
-        long_about = "Fetch, set, and manage environment variables for your project via 1focus. Authenticate with `f env login`, then use `f env pull` to fetch envs."
+        about = "Sync project environment and manage env vars.",
+        long_about = "With no arguments, syncs project settings and sets up autonomous agent workflow (creates agents.md). With subcommands, manages environment variables via 1focus."
     )]
     Env(EnvCommand),
     #[command(
@@ -177,12 +177,6 @@ pub enum Commands {
         long_about = "Sends a proposal to the Lin app widget for user approval. Used for human-in-the-loop AI workflows."
     )]
     Notify(NotifyCommand),
-    #[command(
-        about = "Set up autonomous agent workflow for this project.",
-        long_about = "Validates Lin.app is running and creates agents.md with instructions for Claude Code/Codex to work autonomously with human-in-the-loop approval.",
-        alias = "auto"
-    )]
-    AutoSetup,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -560,6 +554,9 @@ pub struct CommitOpts {
     /// Skip AI session context in code review (commitWithCheck only).
     #[arg(long)]
     pub no_context: bool,
+    /// Dry run: show context that would be passed to Codex without committing.
+    #[arg(long)]
+    pub dry: bool,
 }
 
 #[derive(Args, Debug, Clone)]
