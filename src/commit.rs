@@ -39,6 +39,7 @@ struct ReviewResult {
     issues_found: bool,
     issues: Vec<String>,
     summary: Option<String>,
+    timed_out: bool,
 }
 
 #[derive(Debug)]
@@ -295,6 +296,29 @@ fn commit_with_check_async_enabled() -> bool {
     true
 }
 
+fn commit_with_check_timeout_secs() -> u64 {
+    let cwd = std::env::current_dir().ok();
+
+    if let Some(cwd) = cwd {
+        let local_config = cwd.join("flow.toml");
+        if local_config.exists() {
+            if let Ok(cfg) = config::load(&local_config) {
+                return cfg.options.commit_with_check_timeout_secs.unwrap_or(120);
+            }
+            return 120;
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            return cfg.options.commit_with_check_timeout_secs.unwrap_or(120);
+        }
+    }
+
+    120
+}
+
 /// Run commit with Codex code review synchronously (called directly or by hub).
 /// If `include_context` is true, AI session context is passed to Codex for better understanding.
 pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
@@ -359,6 +383,14 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
 
     println!("────────────────────────────────────────\n");
 
+    if review.timed_out {
+        println!(
+            "⚠ Codex review timed out after {}s; proceeding without review",
+            commit_with_check_timeout_secs()
+        );
+        println!();
+    }
+
     // Check if review indicates issues
     let has_issues = review.issues_found;
 
@@ -405,7 +437,7 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
 
         // Always continue with commit - never block
         println!("Proceeding with commit...");
-    } else {
+    } else if !review.timed_out {
         println!("✓ Codex review passed");
     }
 
@@ -580,6 +612,8 @@ Diff:\n```diff\n{}\n```",
 
     let mut output_lines = Vec::new();
     let mut last_progress = Instant::now();
+    let timeout = Duration::from_secs(commit_with_check_timeout_secs());
+    let mut timed_out = false;
     loop {
         match rx.recv_timeout(Duration::from_secs(2)) {
             Ok(ReviewEvent::Line(line)) => {
@@ -596,6 +630,11 @@ Diff:\n```diff\n{}\n```",
                     );
                     last_progress = Instant::now();
                 }
+                if start.elapsed() >= timeout {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -604,6 +643,21 @@ Diff:\n```diff\n{}\n```",
     let _ = reader_handle.join();
     let status = child.wait()?;
     let stderr_output = read_stderr(stderr);
+
+    if timed_out {
+        if !stderr_output.trim().is_empty() {
+            println!("{}", stderr_output.trim_end());
+        }
+        return Ok(ReviewResult {
+            issues_found: false,
+            issues: Vec::new(),
+            summary: Some(format!(
+                "Codex review timed out after {}s",
+                timeout.as_secs()
+            )),
+            timed_out: true,
+        });
+    }
 
     if !status.success() {
         if !stderr_output.trim().is_empty() {
@@ -640,6 +694,7 @@ Diff:\n```diff\n{}\n```",
         issues_found,
         issues,
         summary: review_json.and_then(|r| r.summary),
+        timed_out: false,
     })
 }
 
