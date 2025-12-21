@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tempfile::NamedTempFile;
 use tracing::{debug, info};
 
 use crate::ai;
@@ -20,6 +21,27 @@ const HUB_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 const HUB_PORT: u16 = 9050;
 
 const SYSTEM_PROMPT: &str = "You are an expert software engineer who writes clear, concise git commit messages. Use imperative mood, keep the subject line under 72 characters, and include an optional body with bullet points if helpful. Never wrap the message in quotes. Never include secrets, credentials, or file contents from .env files, environment variables, keys, or other sensitive data—even if they appear in the diff.";
+
+#[derive(Debug, Deserialize)]
+struct ReviewJson {
+    issues_found: bool,
+    #[serde(default)]
+    issues: Vec<String>,
+    #[serde(default)]
+    summary: Option<String>,
+}
+
+#[derive(Debug)]
+struct ReviewResult {
+    issues_found: bool,
+    issues: Vec<String>,
+    summary: Option<String>,
+}
+
+#[derive(Debug)]
+struct StagedSnapshot {
+    patch_path: Option<std::path::PathBuf>,
+}
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -173,6 +195,9 @@ pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
     // Ensure we're in a git repo
     ensure_git_repo()?;
 
+    // Capture current staged changes so we can restore if we cancel.
+    let staged_snapshot = capture_staged_snapshot()?;
+
     // Stage all changes
     print!("Staging changes... ");
     io::stdout().flush()?;
@@ -200,21 +225,33 @@ pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
     }
     println!("────────────────────────────────────────");
 
-    let review = run_codex_review(&diff, session_context.as_deref())?;
+    let review = match run_codex_review(&diff, session_context.as_deref()) {
+        Ok(review) => review,
+        Err(err) => {
+            restore_staged_snapshot(&staged_snapshot)?;
+            return Err(err);
+        }
+    };
 
     println!("────────────────────────────────────────\n");
 
     // Check if review indicates issues
-    let review_lower = review.to_lowercase();
-    let has_issues = review_lower.contains("bug")
-        || review_lower.contains("issue")
-        || review_lower.contains("problem")
-        || review_lower.contains("error")
-        || review_lower.contains("vulnerability")
-        || review_lower.contains("performance issue")
-        || review_lower.contains("memory leak");
+    let has_issues = review.issues_found;
 
     if has_issues {
+        if let Some(summary) = review.summary.as_ref() {
+            if !summary.trim().is_empty() {
+                println!("Summary: {}", summary.trim());
+                println!();
+            }
+        }
+        if !review.issues.is_empty() {
+            println!("Potential issues:");
+            for issue in &review.issues {
+                println!("- {}", issue);
+            }
+            println!();
+        }
         print!("Codex found potential issues. Continue with commit? [y/N] ");
         io::stdout().flush()?;
 
@@ -224,8 +261,8 @@ pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
 
         if input != "y" && input != "yes" {
             println!("Commit cancelled.");
-            // Unstage changes
-            let _ = git_try(&["reset", "HEAD"]);
+            // Restore staging state prior to this command.
+            restore_staged_snapshot(&staged_snapshot)?;
             println!("\nnotify: Codex found issues in code review - commit cancelled");
             return Ok(());
         }
@@ -304,38 +341,55 @@ pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
         }
     }
 
+    cleanup_staged_snapshot(&staged_snapshot);
     Ok(())
 }
 
 /// Run Codex to review staged changes for bugs and performance issues.
-fn run_codex_review(_diff: &str, session_context: Option<&str>) -> Result<String> {
+fn run_codex_review(diff: &str, session_context: Option<&str>) -> Result<ReviewResult> {
     use std::io::{BufRead, BufReader};
+
+    let (diff_for_prompt, _truncated) = truncate_diff(diff);
 
     // Build the review prompt with optional session context
     let prompt = if let Some(context) = session_context {
         format!(
-            "Review these uncommitted changes. Focus on bugs, security vulnerabilities, and performance issues. Be concise.\n\n\
-            The following is context from the AI session that created these changes - use it to understand the intent:\n\n{}\n\n\
-            Now review the code changes:",
-            context
+            "Review the following git diff. Focus on bugs, security vulnerabilities, and performance issues. Be concise.\n\
+Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\n\
+The following is context from the AI session that created these changes - use it to understand the intent:\n\n{}\n\n\
+Diff:\n```diff\n{}\n```",
+            context,
+            diff_for_prompt
         )
     } else {
-        "Focus on bugs, security vulnerabilities, and performance issues. Be concise.".to_string()
+        format!(
+            "Review the following git diff. Focus on bugs, security vulnerabilities, and performance issues. Be concise.\n\
+Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\n\
+Diff:\n```diff\n{}\n```",
+            diff_for_prompt
+        )
     };
 
-    // Use codex review --uncommitted which reviews staged/unstaged/untracked changes
+    // Use codex review with prompt via stdin to avoid argv limits.
     let mut child = Command::new("codex")
         .args([
             "review",
-            "--uncommitted",
-            &prompt,
+            "-",
         ])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .context("failed to run codex - is it installed?")?;
 
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .context("failed to write codex review prompt")?;
+    }
+
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     let reader = BufReader::new(stdout);
 
     let mut output_lines = Vec::new();
@@ -349,19 +403,44 @@ fn run_codex_review(_diff: &str, session_context: Option<&str>) -> Result<String
     }
 
     let status = child.wait()?;
+    let stderr_output = read_stderr(stderr);
 
     if !status.success() {
+        if !stderr_output.trim().is_empty() {
+            println!("{}", stderr_output.trim_end());
+        }
         println!("\nnotify: Codex review failed");
         bail!("Codex review failed");
     }
 
     let result = output_lines.join("\n");
 
-    if result.trim().is_empty() {
-        Ok("LGTM - no issues found".to_string())
+    let review_json = parse_review_json(&result);
+    let (issues_found, issues) = if let Some(ref parsed) = review_json {
+        if let Some(summary) = parsed.summary.as_ref() {
+            debug!(summary = summary.as_str(), "codex review summary");
+        }
+        (parsed.issues_found, parsed.issues.clone())
+    } else if result.trim().is_empty() {
+        (false, Vec::new())
     } else {
-        Ok(result)
-    }
+        debug!(review_output = result.as_str(), "codex review output");
+        let lowered = result.to_lowercase();
+        let has_issues = lowered.contains("bug")
+            || lowered.contains("issue")
+            || lowered.contains("problem")
+            || lowered.contains("error")
+            || lowered.contains("vulnerability")
+            || lowered.contains("performance issue")
+            || lowered.contains("memory leak");
+        (has_issues, Vec::new())
+    };
+
+    Ok(ReviewResult {
+        issues_found,
+        issues,
+        summary: review_json.and_then(|r| r.summary),
+    })
 }
 
 fn ensure_git_repo() -> Result<()> {
@@ -517,6 +596,69 @@ fn trim_quotes(s: &str) -> String {
         }
     }
     s.to_string()
+}
+
+fn capture_staged_snapshot() -> Result<StagedSnapshot> {
+    let staged_diff = git_capture(&["diff", "--cached"])?;
+    if staged_diff.trim().is_empty() {
+        return Ok(StagedSnapshot { patch_path: None });
+    }
+
+    let mut file = NamedTempFile::new().context("failed to create temp file for staged diff")?;
+    file.write_all(staged_diff.as_bytes())
+        .context("failed to write staged diff snapshot")?;
+    let path = file
+        .into_temp_path()
+        .keep()
+        .context("failed to persist staged diff snapshot")?;
+
+    Ok(StagedSnapshot {
+        patch_path: Some(path),
+    })
+}
+
+fn restore_staged_snapshot(snapshot: &StagedSnapshot) -> Result<()> {
+    let _ = git_try(&["reset", "HEAD"]);
+    if let Some(path) = &snapshot.patch_path {
+        let path_str = path
+            .to_str()
+            .context("failed to convert staged snapshot path to string")?;
+        let _ = git_try(&["apply", "--cached", path_str]);
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+fn cleanup_staged_snapshot(snapshot: &StagedSnapshot) {
+    if let Some(path) = &snapshot.patch_path {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn parse_review_json(output: &str) -> Option<ReviewJson> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<ReviewJson>(trimmed) {
+        return Some(parsed);
+    }
+
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let candidate = &trimmed[start..=end];
+    serde_json::from_str::<ReviewJson>(candidate).ok()
+}
+
+fn read_stderr(stderr: std::process::ChildStderr) -> String {
+    use std::io::Read;
+    let mut buf = String::new();
+    let _ = std::io::BufReader::new(stderr).read_to_string(&mut buf);
+    buf
 }
 
 fn split_paragraphs(message: &str) -> Vec<String> {

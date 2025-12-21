@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod auto_setup;
 pub mod cli;
 pub mod commit;
 pub mod config;
