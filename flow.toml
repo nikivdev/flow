@@ -1,6 +1,9 @@
 version = 1
 name = "flow"
 
+[flow]
+primary_task = "deploy-cli-release"
+
 [flox]
 [flox.install]
 cargo.pkg-path = "cargo"

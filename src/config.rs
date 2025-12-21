@@ -21,6 +21,9 @@ pub struct Config {
         alias = "project-name"
     )]
     pub project_name: Option<String>,
+    /// Flow-specific settings (primary_task, etc.)
+    #[serde(default)]
+    pub flow: FlowSettings,
     #[serde(default)]
     pub options: OptionsConfig,
     #[serde(default, alias = "server", alias = "server-local")]
@@ -55,6 +58,7 @@ impl Default for Config {
         Self {
             version: None,
             project_name: None,
+            flow: FlowSettings::default(),
             options: OptionsConfig::default(),
             servers: Vec::new(),
             remote_servers: Vec::new(),
@@ -70,6 +74,14 @@ impl Default for Config {
             daemons: Vec::new(),
         }
     }
+}
+
+/// Flow-specific settings for autonomous agent workflows.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FlowSettings {
+    /// The primary task to run after code changes (e.g., "release", "deploy").
+    #[serde(default, alias = "primary-task")]
+    pub primary_task: Option<String>,
 }
 
 /// Global feature toggles.
@@ -634,6 +646,9 @@ fn resolve_include_path(base: &Path, include: &str) -> PathBuf {
 fn merge_config(base: &mut Config, other: Config) {
     if base.project_name.is_none() {
         base.project_name = other.project_name;
+    }
+    if base.flow.primary_task.is_none() {
+        base.flow.primary_task = other.flow.primary_task;
     }
     base.options.merge(other.options);
     base.servers.extend(other.servers);
