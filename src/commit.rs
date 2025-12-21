@@ -785,6 +785,7 @@ fn delegate_to_hub(push: bool) -> Result<()> {
         if let Some(task_id) = body.get("task_id").and_then(|v| v.as_str()) {
             println!("Delegated commit to hub");
             println!("  View logs: f logs --task-id {}", task_id);
+            println!("  Stream logs: f logs --task-id {} --follow", task_id);
         } else {
             println!("Delegated commit to hub");
         }
@@ -841,6 +842,7 @@ fn delegate_to_hub_with_check(push: bool, include_context: bool) -> Result<()> {
         if let Some(task_id) = body.get("task_id").and_then(|v| v.as_str()) {
             println!("Delegated commitWithCheck to hub");
             println!("  View logs: f logs --task-id {}", task_id);
+            println!("  Stream logs: f logs --task-id {} --follow", task_id);
         } else {
             println!("Delegated commitWithCheck to hub");
         }
