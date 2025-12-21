@@ -81,6 +81,8 @@ struct AiSession {
     timestamp: Option<String>,
     /// First user message (as summary)
     first_message: Option<String>,
+    /// First error summary (for sessions that never produced a user message)
+    error_summary: Option<String>,
 }
 
 /// Entry from a session .jsonl file (we only parse what we need)
@@ -88,6 +90,21 @@ struct AiSession {
 struct JsonlEntry {
     timestamp: Option<String>,
     message: Option<SessionMessage>,
+    #[serde(rename = "type")]
+    entry_type: Option<String>,
+    subtype: Option<String>,
+    level: Option<String>,
+    error: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexEntry {
+    timestamp: Option<String>,
+    #[serde(rename = "type")]
+    entry_type: Option<String>,
+    payload: Option<serde_json::Value>,
+    role: Option<String>,
+    content: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +294,12 @@ fn get_session_last_timestamp(session_id: &str, provider: Provider, project_path
 
 /// Read context from session since a given timestamp.
 fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&str>, project_path: &PathBuf) -> Result<(String, Option<String>)> {
+    if provider == Provider::Codex {
+        let session_file = find_codex_session_file(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Session file not found for Codex session {}", session_id))?;
+        return read_codex_context_since(&session_file, since_ts);
+    }
+
     let path_str = project_path.to_string_lossy().to_string();
     let project_folder = path_to_project_name(&path_str);
 
@@ -393,6 +416,156 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
     Ok((context, last_ts))
 }
 
+fn read_codex_context_since(session_file: &PathBuf, since_ts: Option<&str>) -> Result<(String, Option<String>)> {
+    let (exchanges, last_ts) = read_codex_exchanges(session_file, since_ts)?;
+
+    if exchanges.is_empty() {
+        return Ok((String::new(), last_ts));
+    }
+
+    let mut context = String::new();
+    for (user_msg, assistant_msg, _ts) in &exchanges {
+        context.push_str("H: ");
+        context.push_str(user_msg);
+        context.push_str("\n\n");
+        context.push_str("A: ");
+        context.push_str(assistant_msg);
+        context.push_str("\n\n");
+    }
+
+    while context.ends_with('\n') {
+        context.pop();
+    }
+    context.push('\n');
+
+    Ok((context, last_ts))
+}
+
+fn read_codex_last_context(session_file: &PathBuf, count: usize) -> Result<String> {
+    let (exchanges, _last_ts) = read_codex_exchanges(session_file, None)?;
+
+    if exchanges.is_empty() {
+        bail!("No exchanges found in session");
+    }
+
+    let start = exchanges.len().saturating_sub(count);
+    let last_exchanges = &exchanges[start..];
+
+    let mut context = String::new();
+    for (user_msg, assistant_msg, _ts) in last_exchanges {
+        context.push_str("Human: ");
+        context.push_str(user_msg);
+        context.push_str("\n\n");
+        context.push_str("Assistant: ");
+        context.push_str(assistant_msg);
+        context.push_str("\n\n");
+    }
+
+    while context.ends_with('\n') {
+        context.pop();
+    }
+    context.push('\n');
+
+    Ok(context)
+}
+
+fn read_codex_exchanges(session_file: &PathBuf, since_ts: Option<&str>) -> Result<(Vec<(String, String, String)>, Option<String>)> {
+    let content = fs::read_to_string(session_file).context("failed to read session file")?;
+
+    let mut exchanges: Vec<(String, String, String)> = Vec::new();
+    let mut current_user: Option<String> = None;
+    let mut current_ts: Option<String> = None;
+    let mut last_ts: Option<String> = None;
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let entry: CodexEntry = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let entry_ts = entry.timestamp.clone();
+        if let Some(ts) = entry_ts.as_deref() {
+            if let Some(since) = since_ts {
+                if ts <= since {
+                    continue;
+                }
+            }
+        }
+
+        if let Some((role, text)) = extract_codex_message(&entry) {
+            if text.trim().is_empty() {
+                continue;
+            }
+
+            match role {
+                "user" => {
+                    current_user = Some(text);
+                    current_ts = entry_ts.clone();
+                }
+                "assistant" => {
+                    let clean_text = strip_thinking_blocks(&text);
+                    if clean_text.trim().is_empty() {
+                        continue;
+                    }
+                    if let Some(user_msg) = current_user.take() {
+                        let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
+                        exchanges.push((user_msg, clean_text, ts.clone()));
+                        last_ts = Some(ts);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if entry_ts.is_some() {
+            last_ts = entry_ts;
+        }
+    }
+
+    Ok((exchanges, last_ts))
+}
+
+fn extract_codex_message(entry: &CodexEntry) -> Option<(&'static str, String)> {
+    let entry_type = entry.entry_type.as_deref();
+
+    if entry_type == Some("response_item") {
+        let payload = entry.payload.as_ref()?;
+        if payload.get("type").and_then(|v| v.as_str()) != Some("message") {
+            return None;
+        }
+        let role = payload.get("role").and_then(|v| v.as_str())?;
+        let content = payload.get("content")?;
+        let text = extract_codex_content_text(content)?;
+        return Some((role, text));
+    }
+
+    if entry_type == Some("event_msg") {
+        let payload = entry.payload.as_ref()?;
+        let payload_type = payload.get("type").and_then(|v| v.as_str());
+        if payload_type == Some("user_message") {
+            let text = payload.get("message").and_then(|v| v.as_str())?.to_string();
+            return Some(("user", text));
+        }
+        if payload_type == Some("agent_message") {
+            let text = payload.get("message").and_then(|v| v.as_str())?.to_string();
+            return Some(("assistant", text));
+        }
+    }
+
+    if entry_type == Some("message") {
+        let role = entry.role.as_deref()?;
+        let content = entry.content.as_ref()?;
+        let text = extract_codex_content_text(content)?;
+        return Some((role, text));
+    }
+
+    None
+}
+
 /// Get recent AI session context for the current project.
 /// Used by commit workflow to provide context for code review.
 /// Returns the last N exchanges from the most recent sessions.
@@ -480,6 +653,11 @@ fn get_codex_projects_dir() -> PathBuf {
     home.join(".codex").join("projects")
 }
 
+fn get_codex_sessions_dir() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".codex").join("sessions")
+}
+
 /// Convert a path to project folder name (replaces / with -).
 fn path_to_project_name(path: &str) -> String {
     path.replace('/', "-")
@@ -531,6 +709,10 @@ fn read_sessions_for_path(provider: Provider, path: &PathBuf) -> Result<Vec<AiSe
 
 /// Read sessions for a specific provider at a given path.
 fn read_provider_sessions_for_path(provider: Provider, path: &PathBuf) -> Result<Vec<AiSession>> {
+    if provider == Provider::Codex {
+        return read_codex_sessions_for_path(path);
+    }
+
     let path_str = path.to_string_lossy().to_string();
     let project_name = path_to_project_name(&path_str);
 
@@ -575,6 +757,11 @@ fn read_provider_sessions_for_path(provider: Provider, path: &PathBuf) -> Result
 
 /// Read sessions for a specific provider.
 fn read_provider_sessions(provider: Provider) -> Result<Vec<AiSession>> {
+    if provider == Provider::Codex {
+        let cwd = std::env::current_dir().context("failed to get current directory")?;
+        return read_codex_sessions_for_path(&cwd);
+    }
+
     let cwd = std::env::current_dir()?;
     let cwd_str = cwd.to_string_lossy().to_string();
     let project_name = path_to_project_name(&cwd_str);
@@ -625,10 +812,16 @@ fn read_provider_sessions(provider: Provider) -> Result<Vec<AiSession>> {
 
 /// Parse a session .jsonl file to extract metadata.
 fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> Option<AiSession> {
+    if provider == Provider::Codex {
+        let (session, _cwd) = parse_codex_session_file(path, session_id)?;
+        return Some(session);
+    }
+
     let content = fs::read_to_string(path).ok()?;
 
     let mut timestamp = None;
     let mut first_message = None;
+    let mut error_summary = None;
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -662,6 +855,11 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
                 }
             }
 
+            // Capture first error summary (useful when no user message exists)
+            if error_summary.is_none() {
+                error_summary = extract_error_summary(&entry);
+            }
+
             // Once we have both, we can stop
             if timestamp.is_some() && first_message.is_some() {
                 break;
@@ -674,7 +872,123 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
         provider,
         timestamp,
         first_message,
+        error_summary,
     })
+}
+
+fn parse_codex_session_file(path: &PathBuf, fallback_id: &str) -> Option<(AiSession, Option<PathBuf>)> {
+    let content = fs::read_to_string(path).ok()?;
+
+    let mut timestamp = None;
+    let mut first_message = None;
+    let mut error_summary = None;
+    let mut session_id = None;
+    let mut cwd = None;
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let entry: CodexEntry = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if timestamp.is_none() {
+            timestamp = entry.timestamp.clone();
+        }
+
+        if entry.entry_type.as_deref() == Some("session_meta") {
+            if let Some(payload) = entry.payload.as_ref() {
+                if session_id.is_none() {
+                    session_id = payload.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                }
+                if cwd.is_none() {
+                    cwd = payload.get("cwd").and_then(|v| v.as_str()).map(|s| PathBuf::from(s));
+                }
+                if timestamp.is_none() {
+                    timestamp = payload.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string());
+                }
+            }
+        }
+
+        if first_message.is_none() {
+            if let Some(text) = extract_codex_user_message(&entry) {
+                first_message = Some(text);
+            }
+        }
+
+        if error_summary.is_none() {
+            if let Some(summary) = extract_codex_error_summary(&entry) {
+                error_summary = Some(summary);
+            }
+        }
+
+        if timestamp.is_some() && first_message.is_some() && session_id.is_some() && cwd.is_some() {
+            break;
+        }
+    }
+
+    let session = AiSession {
+        session_id: session_id.unwrap_or_else(|| fallback_id.to_string()),
+        provider: Provider::Codex,
+        timestamp,
+        first_message,
+        error_summary,
+    };
+
+    Some((session, cwd))
+}
+
+fn read_codex_sessions_for_path(path: &PathBuf) -> Result<Vec<AiSession>> {
+    let sessions_dir = get_codex_sessions_dir();
+    if !sessions_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut sessions = Vec::new();
+    let target = path.to_string_lossy();
+
+    for file_path in collect_codex_session_files(&sessions_dir) {
+        let filename = file_path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let Some((session, cwd)) = parse_codex_session_file(&file_path, filename) else {
+            continue;
+        };
+
+        if let Some(cwd_path) = cwd {
+            if cwd_path.to_string_lossy() == target {
+                sessions.push(session);
+            }
+        }
+    }
+
+    Ok(sessions)
+}
+
+fn collect_codex_session_files(root: &PathBuf) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                out.push(path);
+            }
+        }
+    }
+
+    out
 }
 
 /// Get the most recent session ID for this project.
@@ -716,7 +1030,7 @@ fn list_sessions(provider: Provider) -> Result<()> {
     // Process all sessions, enriching with saved names where available
     for session in &sessions {
         // Skip sessions without timestamps or content
-        if session.timestamp.is_none() && session.first_message.is_none() {
+        if session.timestamp.is_none() && session.first_message.is_none() && session.error_summary.is_none() {
             continue;
         }
 
@@ -730,7 +1044,9 @@ fn list_sessions(provider: Provider) -> Result<()> {
             .map(|(name, _)| name.as_str())
             .filter(|name| !is_auto_generated_name(name));
 
-        let summary = session.first_message.as_deref().unwrap_or("");
+        let summary = session.first_message.as_deref()
+            .or(session.error_summary.as_deref())
+            .unwrap_or("");
         let summary_clean = clean_summary(summary);
 
         // Add provider indicator when showing all
@@ -877,7 +1193,7 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
         let mut entries: Vec<FzfSessionEntry> = Vec::new();
 
         for session in &sessions {
-            if session.timestamp.is_none() && session.first_message.is_none() {
+            if session.timestamp.is_none() && session.first_message.is_none() && session.error_summary.is_none() {
                 continue;
             }
 
@@ -890,7 +1206,9 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
                 .map(|(name, _)| name.as_str())
                 .filter(|name| !is_auto_generated_name(name));
 
-            let summary = session.first_message.as_deref().unwrap_or("");
+            let summary = session.first_message.as_deref()
+                .or(session.error_summary.as_deref())
+                .unwrap_or("");
             let summary_clean = clean_summary(summary);
 
             // Add provider indicator when showing all
@@ -1064,7 +1382,7 @@ fn copy_context(session: Option<String>, provider: Provider, count: usize, path:
         let mut entries: Vec<FzfSessionEntry> = Vec::new();
 
         for session in &sessions {
-            if session.timestamp.is_none() && session.first_message.is_none() {
+            if session.timestamp.is_none() && session.first_message.is_none() && session.error_summary.is_none() {
                 continue;
             }
 
@@ -1077,7 +1395,9 @@ fn copy_context(session: Option<String>, provider: Provider, count: usize, path:
                 .map(|(name, _)| name.as_str())
                 .filter(|name| !is_auto_generated_name(name));
 
-            let summary = session.first_message.as_deref().unwrap_or("");
+            let summary = session.first_message.as_deref()
+                .or(session.error_summary.as_deref())
+                .unwrap_or("");
             let summary_clean = clean_summary(summary);
 
             let provider_tag = if provider == Provider::All {
@@ -1134,6 +1454,12 @@ fn copy_context(session: Option<String>, provider: Provider, count: usize, path:
 
 /// Read last N user prompts and assistant responses from a session.
 fn read_last_context(session_id: &str, provider: Provider, count: usize, project_path: &PathBuf) -> Result<String> {
+    if provider == Provider::Codex {
+        let session_file = find_codex_session_file(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Session file not found for Codex session {}", session_id))?;
+        return read_codex_last_context(&session_file, count);
+    }
+
     let path_str = project_path.to_string_lossy().to_string();
     let project_folder = path_to_project_name(&path_str);
 
@@ -1375,6 +1701,126 @@ fn is_auto_generated_name(name: &str) -> bool {
     // Auto-generated names start with date like "20251215-" or "unknown-session"
     name.starts_with("202") && name.chars().nth(8) == Some('-') ||
     name.starts_with("unknown-session")
+}
+
+fn extract_error_summary(entry: &JsonlEntry) -> Option<String> {
+    let entry_type = entry.entry_type.as_deref();
+    let subtype = entry.subtype.as_deref();
+    let level = entry.level.as_deref();
+
+    let is_error = level == Some("error")
+        || entry_type == Some("error")
+        || subtype.map(|s| s.contains("error")).unwrap_or(false)
+        || entry.error.is_some();
+
+    if !is_error {
+        return None;
+    }
+
+    let mut summary = if let Some(sub) = subtype {
+        format!("error: {}", sub)
+    } else if let Some(kind) = entry_type {
+        format!("error: {}", kind)
+    } else {
+        "error".to_string()
+    };
+
+    if let Some(err) = &entry.error {
+        let msg = err.get("message").and_then(|v| v.as_str())
+            .or_else(|| err.get("error").and_then(|v| v.as_str()));
+        if let Some(msg) = msg {
+            summary = format!("{}: {}", summary, msg);
+        }
+    }
+
+    Some(summary)
+}
+
+fn extract_codex_user_message(entry: &CodexEntry) -> Option<String> {
+    let entry_type = entry.entry_type.as_deref();
+
+    if entry_type == Some("response_item") {
+        let payload = entry.payload.as_ref()?;
+        if payload.get("type").and_then(|v| v.as_str()) != Some("message") {
+            return None;
+        }
+        if payload.get("role").and_then(|v| v.as_str()) != Some("user") {
+            return None;
+        }
+        return extract_codex_content_text(payload.get("content")?);
+    }
+
+    if entry_type == Some("event_msg") {
+        let payload = entry.payload.as_ref()?;
+        let payload_type = payload.get("type").and_then(|v| v.as_str());
+        if payload_type == Some("user_message") {
+            return payload.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
+        }
+    }
+
+    if entry_type == Some("message") && entry.role.as_deref() == Some("user") {
+        if let Some(content) = entry.content.as_ref() {
+            return extract_codex_content_text(content);
+        }
+    }
+
+    None
+}
+
+fn extract_codex_error_summary(entry: &CodexEntry) -> Option<String> {
+    let entry_type = entry.entry_type.as_deref();
+    let payload = entry.payload.as_ref();
+
+    let is_error = entry_type == Some("error")
+        || payload.and_then(|p| p.get("type").and_then(|v| v.as_str()))
+            .map(|t| t.contains("error")).unwrap_or(false);
+
+    if !is_error {
+        return None;
+    }
+
+    let mut summary = if let Some(t) = entry_type {
+        format!("error: {}", t)
+    } else {
+        "error".to_string()
+    };
+
+    if let Some(p) = payload {
+        if let Some(msg) = p.get("message").and_then(|v| v.as_str()) {
+            summary = format!("{}: {}", summary, msg);
+        }
+    }
+
+    Some(summary)
+}
+
+fn extract_codex_content_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(arr) => {
+            let mut parts = Vec::new();
+            for item in arr {
+                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                    parts.push(text.to_string());
+                    continue;
+                }
+                if let Some(text) = item.get("input_text").and_then(|v| v.as_str()) {
+                    parts.push(text.to_string());
+                    continue;
+                }
+                if let Some(text) = item.get("output_text").and_then(|v| v.as_str()) {
+                    parts.push(text.to_string());
+                    continue;
+                }
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Clean up a summary string - remove noise, paths, special chars.
@@ -1648,7 +2094,7 @@ fn auto_import_sessions() -> Result<()> {
         let saved = SavedSession {
             id: session.session_id.clone(),
             provider: provider_str.to_string(),
-            description: session.first_message.as_ref().map(|m| {
+            description: session.first_message.as_ref().or(session.error_summary.as_ref()).map(|m| {
                 if m.len() > 100 {
                     format!("{}...", &m[..97])
                 } else {
@@ -1705,7 +2151,7 @@ fn import_sessions() -> Result<()> {
         let saved = SavedSession {
             id: session.session_id.clone(),
             provider: provider_str.to_string(),
-            description: session.first_message.as_ref().map(|m| {
+            description: session.first_message.as_ref().or(session.error_summary.as_ref()).map(|m| {
                 if m.len() > 100 {
                     format!("{}...", &m[..97])
                 } else {
@@ -1739,6 +2185,7 @@ fn generate_session_name(session: &AiSession, index: &SessionIndex) -> String {
         .unwrap_or_else(|| "unknown".to_string());
 
     let words_part = session.first_message.as_deref()
+        .or(session.error_summary.as_deref())
         .map(|msg| {
             // Extract first few meaningful words
             let words: Vec<&str> = msg
@@ -1794,6 +2241,8 @@ struct CrossProjectSession {
     project_name: String,
     timestamp: Option<String>,
     first_message: Option<String>,
+    error_summary: Option<String>,
+    session_path: Option<PathBuf>,
 }
 
 /// Consumed checkpoint tracking - stored in target project's .ai folder.
@@ -1836,6 +2285,7 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
                 .map(format_relative_time)
                 .unwrap_or_else(|| "unknown".to_string());
             let summary = session.first_message.as_deref()
+                .or(session.error_summary.as_deref())
                 .map(|s| truncate_str(&clean_summary(s), 50))
                 .unwrap_or_default();
             let provider_tag = match session.provider {
@@ -1855,12 +2305,13 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
 
     // Build fzf entries
     let entries: Vec<(String, &CrossProjectSession)> = sessions.iter()
-        .filter(|s| s.timestamp.is_some() || s.first_message.is_some())
+        .filter(|s| s.timestamp.is_some() || s.first_message.is_some() || s.error_summary.is_some())
         .map(|session| {
             let relative_time = session.timestamp.as_deref()
                 .map(format_relative_time)
                 .unwrap_or_else(|| "".to_string());
             let summary = session.first_message.as_deref()
+                .or(session.error_summary.as_deref())
                 .map(|s| truncate_str(&clean_summary(s), 40))
                 .unwrap_or_default();
             let provider_tag = match session.provider {
@@ -1977,6 +2428,8 @@ fn scan_all_project_sessions(provider: Provider) -> Result<Vec<CrossProjectSessi
                                     project_name: project_name.clone(),
                                     timestamp: session.timestamp,
                                     first_message: session.first_message,
+                                    error_summary: session.error_summary,
+                                    session_path: None,
                                 });
                             }
                         }
@@ -1986,27 +2439,60 @@ fn scan_all_project_sessions(provider: Provider) -> Result<Vec<CrossProjectSessi
         }
     }
 
-    // Scan Codex projects
+    // Scan Codex sessions (new format)
     if provider == Provider::Codex || provider == Provider::All {
-        let codex_dir = get_codex_projects_dir();
+        let codex_dir = get_codex_sessions_dir();
         if codex_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&codex_dir) {
-                for entry in entries.flatten() {
-                    let project_folder = entry.path();
-                    if project_folder.is_dir() {
-                        let project_name = extract_project_name(&project_folder);
-                        let project_path = folder_to_path(&project_folder);
+            for file_path in collect_codex_session_files(&codex_dir) {
+                let filename = file_path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let Some((session, cwd)) = parse_codex_session_file(&file_path, filename) else {
+                    continue;
+                };
+                let Some(project_path) = cwd else {
+                    continue;
+                };
+                let project_name = project_path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
 
-                        if let Ok(sessions) = scan_project_sessions(&project_folder, Provider::Codex) {
-                            for session in sessions {
-                                all_sessions.push(CrossProjectSession {
-                                    session_id: session.session_id,
-                                    provider: Provider::Codex,
-                                    project_path: project_path.clone(),
-                                    project_name: project_name.clone(),
-                                    timestamp: session.timestamp,
-                                    first_message: session.first_message,
-                                });
+                all_sessions.push(CrossProjectSession {
+                    session_id: session.session_id,
+                    provider: Provider::Codex,
+                    project_path,
+                    project_name,
+                    timestamp: session.timestamp,
+                    first_message: session.first_message,
+                    error_summary: session.error_summary,
+                    session_path: Some(file_path),
+                });
+            }
+        } else {
+            // Fallback to legacy Codex projects layout
+            let codex_dir = get_codex_projects_dir();
+            if codex_dir.exists() {
+                if let Ok(entries) = fs::read_dir(&codex_dir) {
+                    for entry in entries.flatten() {
+                        let project_folder = entry.path();
+                        if project_folder.is_dir() {
+                            let project_name = extract_project_name(&project_folder);
+                            let project_path = folder_to_path(&project_folder);
+
+                            if let Ok(sessions) = scan_project_sessions(&project_folder, Provider::Codex) {
+                                for session in sessions {
+                                    all_sessions.push(CrossProjectSession {
+                                        session_id: session.session_id,
+                                        provider: Provider::Codex,
+                                        project_path: project_path.clone(),
+                                        project_name: project_name.clone(),
+                                        timestamp: session.timestamp,
+                                        first_message: session.first_message,
+                                        error_summary: session.error_summary,
+                                        session_path: None,
+                                    });
+                                }
                             }
                         }
                     }
@@ -2107,6 +2593,15 @@ fn read_cross_project_context(
     since_ts: Option<&str>,
     max_count: Option<usize>,
 ) -> Result<(String, Option<String>)> {
+    if session.provider == Provider::Codex {
+        let session_file = session.session_path.clone()
+            .or_else(|| find_codex_session_file(&session.session_id));
+        let Some(session_file) = session_file else {
+            bail!("Session file not found for Codex session {}", session.session_id);
+        };
+        return read_codex_cross_project_context(session, &session_file, since_ts, max_count);
+    }
+
     let projects_dir = match session.provider {
         Provider::Claude | Provider::All => get_claude_projects_dir(),
         Provider::Codex => get_codex_projects_dir(),
@@ -2210,6 +2705,66 @@ fn read_cross_project_context(
     };
 
     // Format the context with project info
+    let mut context = format!("=== Context from {} ({}) ===\n\n",
+        session.project_name,
+        match session.provider {
+            Provider::Claude => "Claude Code",
+            Provider::Codex => "Codex",
+            Provider::All => "AI",
+        }
+    );
+
+    for (user_msg, assistant_msg, _ts) in exchanges_to_use {
+        context.push_str("H: ");
+        context.push_str(user_msg);
+        context.push_str("\n\n");
+        context.push_str("A: ");
+        context.push_str(assistant_msg);
+        context.push_str("\n\n");
+    }
+
+    context.push_str("=== End Context ===\n");
+
+    Ok((context, last_ts))
+}
+
+fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
+    let root = get_codex_sessions_dir();
+    if !root.exists() {
+        return None;
+    }
+
+    for path in collect_codex_session_files(&root) {
+        let filename = path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if filename.contains(session_id) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn read_codex_cross_project_context(
+    session: &CrossProjectSession,
+    session_file: &PathBuf,
+    since_ts: Option<&str>,
+    max_count: Option<usize>,
+) -> Result<(String, Option<String>)> {
+    let (exchanges, last_ts) = read_codex_exchanges(session_file, since_ts)?;
+
+    if exchanges.is_empty() {
+        return Ok((String::new(), last_ts));
+    }
+
+    let exchanges_to_use = if let Some(count) = max_count {
+        let start = exchanges.len().saturating_sub(count);
+        &exchanges[start..]
+    } else {
+        &exchanges[..]
+    };
+
     let mut context = format!("=== Context from {} ({}) ===\n\n",
         session.project_name,
         match session.provider {
