@@ -93,7 +93,11 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::CommitWithCheck(opts)) => {
-            commit::run_with_check(!opts.no_push, !opts.no_context)?;
+            if opts.sync {
+                commit::run_with_check_sync(!opts.no_push, !opts.no_context)?;
+            } else {
+                commit::run_with_check(!opts.no_push, !opts.no_context)?;
+            }
         }
         Some(Commands::Fixup(opts)) => {
             fixup::run(opts)?;
