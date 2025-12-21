@@ -501,7 +501,7 @@ fn read_codex_exchanges(session_file: &PathBuf, since_ts: Option<&str>) -> Resul
                 continue;
             }
 
-            match role {
+            match role.as_str() {
                 "user" => {
                     current_user = Some(text);
                     current_ts = entry_ts.clone();
@@ -529,7 +529,7 @@ fn read_codex_exchanges(session_file: &PathBuf, since_ts: Option<&str>) -> Resul
     Ok((exchanges, last_ts))
 }
 
-fn extract_codex_message(entry: &CodexEntry) -> Option<(&'static str, String)> {
+fn extract_codex_message(entry: &CodexEntry) -> Option<(String, String)> {
     let entry_type = entry.entry_type.as_deref();
 
     if entry_type == Some("response_item") {
@@ -537,7 +537,7 @@ fn extract_codex_message(entry: &CodexEntry) -> Option<(&'static str, String)> {
         if payload.get("type").and_then(|v| v.as_str()) != Some("message") {
             return None;
         }
-        let role = payload.get("role").and_then(|v| v.as_str())?;
+        let role = payload.get("role").and_then(|v| v.as_str())?.to_string();
         let content = payload.get("content")?;
         let text = extract_codex_content_text(content)?;
         return Some((role, text));
@@ -548,16 +548,16 @@ fn extract_codex_message(entry: &CodexEntry) -> Option<(&'static str, String)> {
         let payload_type = payload.get("type").and_then(|v| v.as_str());
         if payload_type == Some("user_message") {
             let text = payload.get("message").and_then(|v| v.as_str())?.to_string();
-            return Some(("user", text));
+            return Some(("user".to_string(), text));
         }
         if payload_type == Some("agent_message") {
             let text = payload.get("message").and_then(|v| v.as_str())?.to_string();
-            return Some(("assistant", text));
+            return Some(("assistant".to_string(), text));
         }
     }
 
     if entry_type == Some("message") {
-        let role = entry.role.as_deref()?;
+        let role = entry.role.as_deref()?.to_string();
         let content = entry.content.as_ref()?;
         let text = extract_codex_content_text(content)?;
         return Some((role, text));
