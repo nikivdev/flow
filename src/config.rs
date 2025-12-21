@@ -95,6 +95,12 @@ pub struct OptionsConfig {
         alias = "commit-with-check-async"
     )]
     pub commit_with_check_async: Option<bool>,
+    #[serde(
+        default,
+        rename = "commit_with_check_timeout_secs",
+        alias = "commit-with-check-timeout-secs"
+    )]
+    pub commit_with_check_timeout_secs: Option<u64>,
 }
 
 impl OptionsConfig {
@@ -104,6 +110,9 @@ impl OptionsConfig {
         }
         if other.commit_with_check_async.is_some() {
             self.commit_with_check_async = other.commit_with_check_async;
+        }
+        if other.commit_with_check_timeout_secs.is_some() {
+            self.commit_with_check_timeout_secs = other.commit_with_check_timeout_secs;
         }
     }
 }
@@ -1005,6 +1014,7 @@ dev = "f run dev"
             toml::from_str("").expect("empty config should parse with default options");
         assert!(!cfg.options.trace_terminal_io);
         assert!(cfg.options.commit_with_check_async.is_none());
+        assert!(cfg.options.commit_with_check_timeout_secs.is_none());
     }
 
     #[test]
@@ -1025,5 +1035,15 @@ commit_with_check_async = false
 "#;
         let cfg: Config = toml::from_str(toml).expect("options table should parse");
         assert_eq!(cfg.options.commit_with_check_async, Some(false));
+    }
+
+    #[test]
+    fn options_commit_with_check_timeout_parses() {
+        let toml = r#"
+[options]
+commit_with_check_timeout_secs = 120
+"#;
+        let cfg: Config = toml::from_str(toml).expect("options table should parse");
+        assert_eq!(cfg.options.commit_with_check_timeout_secs, Some(120));
     }
 }
