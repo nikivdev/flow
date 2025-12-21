@@ -1747,3 +1747,527 @@ fn generate_session_name(session: &AiSession, index: &SessionIndex) -> String {
     // Fallback to UUID prefix
     format!("{}-{}", base_name, &session.session_id[..8])
 }
+
+// ============================================================================
+// Cross-project session search (f sessions)
+// ============================================================================
+
+use crate::cli::SessionsOpts;
+
+/// Session with project info for cross-project display.
+#[derive(Debug, Clone)]
+struct CrossProjectSession {
+    session_id: String,
+    provider: Provider,
+    project_path: PathBuf,
+    project_name: String,
+    timestamp: Option<String>,
+    first_message: Option<String>,
+}
+
+/// Consumed checkpoint tracking - stored in target project's .ai folder.
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct ConsumedCheckpoints {
+    /// Map of source project path -> last consumed timestamp
+    consumed: HashMap<String, ConsumedEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ConsumedEntry {
+    /// Last consumed timestamp from that project
+    last_timestamp: String,
+    /// When we consumed it
+    consumed_at: String,
+    /// Session ID we consumed from
+    session_id: String,
+}
+
+/// Run cross-project session search.
+pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
+    let provider = match opts.provider.to_lowercase().as_str() {
+        "claude" => Provider::Claude,
+        "codex" => Provider::Codex,
+        _ => Provider::All,
+    };
+
+    let sessions = scan_all_project_sessions(provider)?;
+
+    if sessions.is_empty() {
+        println!("No AI sessions found across projects.");
+        return Ok(());
+    }
+
+    if opts.list {
+        // Just list, don't fuzzy search
+        println!("AI Sessions across projects:\n");
+        for session in &sessions {
+            let relative_time = session.timestamp.as_deref()
+                .map(format_relative_time)
+                .unwrap_or_else(|| "unknown".to_string());
+            let summary = session.first_message.as_deref()
+                .map(|s| truncate_str(&clean_summary(s), 50))
+                .unwrap_or_default();
+            let provider_tag = match session.provider {
+                Provider::Claude => "claude",
+                Provider::Codex => "codex",
+                Provider::All => "ai",
+            };
+            println!("{} | {} | {} | {}",
+                session.project_name,
+                provider_tag,
+                relative_time,
+                summary
+            );
+        }
+        return Ok(());
+    }
+
+    // Build fzf entries
+    let entries: Vec<(String, &CrossProjectSession)> = sessions.iter()
+        .filter(|s| s.timestamp.is_some() || s.first_message.is_some())
+        .map(|session| {
+            let relative_time = session.timestamp.as_deref()
+                .map(format_relative_time)
+                .unwrap_or_else(|| "".to_string());
+            let summary = session.first_message.as_deref()
+                .map(|s| truncate_str(&clean_summary(s), 40))
+                .unwrap_or_default();
+            let provider_tag = match session.provider {
+                Provider::Claude => "claude",
+                Provider::Codex => "codex",
+                Provider::All => "",
+            };
+            let display = format!("{} | {} | {} | {}",
+                session.project_name,
+                provider_tag,
+                relative_time,
+                summary
+            );
+            (display, session)
+        })
+        .collect();
+
+    if entries.is_empty() {
+        println!("No sessions with content found.");
+        return Ok(());
+    }
+
+    // Check for fzf
+    if which::which("fzf").is_err() {
+        println!("fzf not found – install it for fuzzy selection.");
+        println!("\nSessions:");
+        for (display, _) in &entries {
+            println!("{}", display);
+        }
+        return Ok(());
+    }
+
+    // Run fzf
+    let mut child = Command::new("fzf")
+        .arg("--prompt")
+        .arg("sessions> ")
+        .arg("--ansi")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to spawn fzf")?;
+
+    {
+        let stdin = child.stdin.as_mut().context("failed to open fzf stdin")?;
+        for (display, _) in &entries {
+            writeln!(stdin, "{}", display)?;
+        }
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Ok(());
+    }
+
+    let selection = String::from_utf8(output.stdout)
+        .context("fzf output was not valid UTF-8")?;
+    let selection = selection.trim();
+
+    if selection.is_empty() {
+        return Ok(());
+    }
+
+    // Find selected session
+    let Some((_, session)) = entries.iter().find(|(d, _)| d == selection) else {
+        bail!("Session not found");
+    };
+
+    // Get context since last consumed checkpoint
+    let context = get_cross_project_context(session, opts.count)?;
+
+    if context.is_empty() {
+        println!("No new context since last consumption.");
+        return Ok(());
+    }
+
+    // Copy to clipboard
+    copy_to_clipboard(&context)?;
+
+    let line_count = context.lines().count();
+    println!("Copied context from {} ({} lines) to clipboard",
+        session.project_name, line_count);
+
+    // Save consumed checkpoint
+    save_consumed_checkpoint(session)?;
+
+    Ok(())
+}
+
+/// Scan all projects for AI sessions.
+fn scan_all_project_sessions(provider: Provider) -> Result<Vec<CrossProjectSession>> {
+    let mut all_sessions = Vec::new();
+
+    // Scan Claude projects
+    if provider == Provider::Claude || provider == Provider::All {
+        let claude_dir = get_claude_projects_dir();
+        if claude_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&claude_dir) {
+                for entry in entries.flatten() {
+                    let project_folder = entry.path();
+                    if project_folder.is_dir() {
+                        let project_name = extract_project_name(&project_folder);
+                        let project_path = folder_to_path(&project_folder);
+
+                        if let Ok(sessions) = scan_project_sessions(&project_folder, Provider::Claude) {
+                            for session in sessions {
+                                all_sessions.push(CrossProjectSession {
+                                    session_id: session.session_id,
+                                    provider: Provider::Claude,
+                                    project_path: project_path.clone(),
+                                    project_name: project_name.clone(),
+                                    timestamp: session.timestamp,
+                                    first_message: session.first_message,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Scan Codex projects
+    if provider == Provider::Codex || provider == Provider::All {
+        let codex_dir = get_codex_projects_dir();
+        if codex_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&codex_dir) {
+                for entry in entries.flatten() {
+                    let project_folder = entry.path();
+                    if project_folder.is_dir() {
+                        let project_name = extract_project_name(&project_folder);
+                        let project_path = folder_to_path(&project_folder);
+
+                        if let Ok(sessions) = scan_project_sessions(&project_folder, Provider::Codex) {
+                            for session in sessions {
+                                all_sessions.push(CrossProjectSession {
+                                    session_id: session.session_id,
+                                    provider: Provider::Codex,
+                                    project_path: project_path.clone(),
+                                    project_name: project_name.clone(),
+                                    timestamp: session.timestamp,
+                                    first_message: session.first_message,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by timestamp descending (most recent first)
+    all_sessions.sort_by(|a, b| {
+        let ts_a = a.timestamp.as_deref().unwrap_or("");
+        let ts_b = b.timestamp.as_deref().unwrap_or("");
+        ts_b.cmp(ts_a)
+    });
+
+    Ok(all_sessions)
+}
+
+/// Scan a project folder for sessions.
+fn scan_project_sessions(project_folder: &PathBuf, provider: Provider) -> Result<Vec<AiSession>> {
+    let mut sessions = Vec::new();
+
+    let entries = fs::read_dir(project_folder)
+        .with_context(|| format!("failed to read {}", project_folder.display()))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            let filename = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+
+            if filename.starts_with("agent-") {
+                continue;
+            }
+
+            if let Some(session) = parse_session_file(&path, filename, provider) {
+                sessions.push(session);
+            }
+        }
+    }
+
+    // Sort by timestamp descending
+    sessions.sort_by(|a, b| {
+        let ts_a = a.timestamp.as_deref().unwrap_or("");
+        let ts_b = b.timestamp.as_deref().unwrap_or("");
+        ts_b.cmp(ts_a)
+    });
+
+    Ok(sessions)
+}
+
+/// Extract a friendly project name from the folder name.
+fn extract_project_name(folder: &PathBuf) -> String {
+    folder.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            // The folder name is path with / replaced by -
+            // Extract just the last component as project name
+            s.rsplit('-').next().unwrap_or(s).to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Convert folder name back to approximate path.
+fn folder_to_path(folder: &PathBuf) -> PathBuf {
+    let name = folder.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    // Folder name is path with / replaced by -
+    // This is a heuristic - convert leading - to /
+    PathBuf::from(name.replacen('-', "/", name.matches('-').count()))
+}
+
+/// Get context from a cross-project session since last consumed checkpoint.
+fn get_cross_project_context(session: &CrossProjectSession, count: Option<usize>) -> Result<String> {
+    // Load consumed checkpoints for current project
+    let cwd = std::env::current_dir()?;
+    let consumed = load_consumed_checkpoints(&cwd)?;
+
+    let source_key = session.project_path.to_string_lossy().to_string();
+    let since_ts = consumed.consumed.get(&source_key)
+        .map(|e| e.last_timestamp.as_str());
+
+    // Read context since checkpoint
+    let (context, _last_ts) = read_cross_project_context(session, since_ts, count)?;
+
+    Ok(context)
+}
+
+/// Read context from a cross-project session.
+fn read_cross_project_context(
+    session: &CrossProjectSession,
+    since_ts: Option<&str>,
+    max_count: Option<usize>,
+) -> Result<(String, Option<String>)> {
+    let projects_dir = match session.provider {
+        Provider::Claude | Provider::All => get_claude_projects_dir(),
+        Provider::Codex => get_codex_projects_dir(),
+    };
+
+    let project_folder = session.project_path.to_string_lossy().replace('/', "-");
+    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session.session_id));
+
+    if !session_file.exists() {
+        bail!("Session file not found: {}", session_file.display());
+    }
+
+    let content = fs::read_to_string(&session_file)
+        .context("failed to read session file")?;
+
+    // Collect exchanges after the checkpoint timestamp
+    let mut exchanges: Vec<(String, String, String)> = Vec::new();
+    let mut current_user: Option<String> = None;
+    let mut current_ts: Option<String> = None;
+    let mut last_ts: Option<String> = None;
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+            let entry_ts = entry.timestamp.clone();
+
+            // Skip entries before checkpoint
+            if let (Some(since), Some(ts)) = (since_ts, &entry_ts) {
+                if ts.as_str() <= since {
+                    continue;
+                }
+            }
+
+            if let Some(ref msg) = entry.message {
+                let role = msg.role.as_deref().unwrap_or("unknown");
+
+                let content_text = if let Some(ref content) = msg.content {
+                    match content {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Array(arr) => {
+                            arr.iter()
+                                .filter_map(|v| {
+                                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                        Some(text.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    continue;
+                };
+
+                if content_text.is_empty() {
+                    continue;
+                }
+
+                match role {
+                    "user" => {
+                        current_user = Some(content_text);
+                        current_ts = entry_ts.clone();
+                    }
+                    "assistant" => {
+                        if let Some(user_msg) = current_user.take() {
+                            let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
+                            exchanges.push((user_msg, content_text, ts.clone()));
+                            last_ts = Some(ts);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if entry_ts.is_some() {
+                last_ts = entry_ts;
+            }
+        }
+    }
+
+    if exchanges.is_empty() {
+        return Ok((String::new(), last_ts));
+    }
+
+    // Limit exchanges if count specified
+    let exchanges_to_use = if let Some(count) = max_count {
+        let start = exchanges.len().saturating_sub(count);
+        &exchanges[start..]
+    } else {
+        &exchanges[..]
+    };
+
+    // Format the context with project info
+    let mut context = format!("=== Context from {} ({}) ===\n\n",
+        session.project_name,
+        match session.provider {
+            Provider::Claude => "Claude Code",
+            Provider::Codex => "Codex",
+            Provider::All => "AI",
+        }
+    );
+
+    for (user_msg, assistant_msg, _ts) in exchanges_to_use {
+        context.push_str("H: ");
+        context.push_str(user_msg);
+        context.push_str("\n\n");
+        context.push_str("A: ");
+        context.push_str(assistant_msg);
+        context.push_str("\n\n");
+    }
+
+    context.push_str("=== End Context ===\n");
+
+    Ok((context, last_ts))
+}
+
+/// Get consumed checkpoints file path.
+fn get_consumed_checkpoints_path(project_path: &PathBuf) -> PathBuf {
+    project_path.join(".ai").join("consumed-checkpoints.json")
+}
+
+/// Load consumed checkpoints for a project.
+fn load_consumed_checkpoints(project_path: &PathBuf) -> Result<ConsumedCheckpoints> {
+    let path = get_consumed_checkpoints_path(project_path);
+    if !path.exists() {
+        return Ok(ConsumedCheckpoints::default());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&content).context("failed to parse consumed-checkpoints.json")
+}
+
+/// Save consumed checkpoint after copying context.
+fn save_consumed_checkpoint(session: &CrossProjectSession) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let path = get_consumed_checkpoints_path(&cwd);
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut checkpoints = load_consumed_checkpoints(&cwd).unwrap_or_default();
+
+    // Get the last timestamp from this session
+    let last_ts = get_session_last_timestamp_for_path(
+        &session.session_id,
+        session.provider,
+        &session.project_path
+    )?.unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    let source_key = session.project_path.to_string_lossy().to_string();
+    checkpoints.consumed.insert(source_key, ConsumedEntry {
+        last_timestamp: last_ts,
+        consumed_at: chrono::Utc::now().to_rfc3339(),
+        session_id: session.session_id.clone(),
+    });
+
+    let content = serde_json::to_string_pretty(&checkpoints)?;
+    fs::write(&path, content)?;
+
+    Ok(())
+}
+
+/// Get the last timestamp from a session file (for a specific project path).
+fn get_session_last_timestamp_for_path(
+    session_id: &str,
+    provider: Provider,
+    project_path: &PathBuf
+) -> Result<Option<String>> {
+    let projects_dir = match provider {
+        Provider::Claude | Provider::All => get_claude_projects_dir(),
+        Provider::Codex => get_codex_projects_dir(),
+    };
+
+    let project_folder = project_path.to_string_lossy().replace('/', "-");
+    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+
+    if !session_file.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
+
+    let mut last_ts: Option<String> = None;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+            if let Some(ts) = entry.timestamp {
+                last_ts = Some(ts);
+            }
+        }
+    }
+
+    Ok(last_ts)
+}

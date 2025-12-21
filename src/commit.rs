@@ -478,7 +478,12 @@ fn run_codex_review(diff: &str, session_context: Option<&str>) -> Result<ReviewR
     // Build the review prompt with optional session context
     let prompt = if let Some(context) = session_context {
         format!(
-            "Deep review the following git diff for bugs, security vulnerabilities, performance issues, and code quality. Be thorough.\n\
+            "Deep review the following git diff. Be thorough and check for:\n\
+1. Bugs and logic errors\n\
+2. Security vulnerabilities\n\
+3. Performance issues\n\
+4. Code quality\n\
+5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
 Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\n\
 AI session context (intent behind changes):\n{}\n\n\
 Diff:\n```diff\n{}\n```",
@@ -487,7 +492,12 @@ Diff:\n```diff\n{}\n```",
         )
     } else {
         format!(
-            "Deep review the following git diff for bugs, security vulnerabilities, performance issues, and code quality. Be thorough.\n\
+            "Deep review the following git diff. Be thorough and check for:\n\
+1. Bugs and logic errors\n\
+2. Security vulnerabilities\n\
+3. Performance issues\n\
+4. Code quality\n\
+5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
 Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\n\
 Diff:\n```diff\n{}\n```",
             diff_for_prompt

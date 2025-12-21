@@ -71,6 +71,9 @@ fn main() -> Result<()> {
         Some(Commands::Projects) => {
             projects::show_projects()?;
         }
+        Some(Commands::Sessions(opts)) => {
+            ai::run_sessions(&opts)?;
+        }
         Some(Commands::Active(opts)) => {
             projects::handle_active(opts)?;
         }

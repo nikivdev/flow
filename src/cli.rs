@@ -118,6 +118,12 @@ pub enum Commands {
     )]
     Projects,
     #[command(
+        about = "Fuzzy search AI sessions across all projects and copy context.",
+        long_about = "Browse AI sessions (Claude, Codex) across all projects. On selection, copies the session context since last checkpoint to clipboard for passing to another session.",
+        alias = "ss"
+    )]
+    Sessions(SessionsOpts),
+    #[command(
         about = "Show or set the active project.",
         long_about = "The active project is used as a fallback for commands like `f logs` when not in a project directory."
     )]
@@ -387,6 +393,19 @@ pub struct ActiveOpts {
     /// Clear the active project.
     #[arg(long, short)]
     pub clear: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct SessionsOpts {
+    /// Filter by provider (claude, codex, or all).
+    #[arg(long, short, default_value = "all")]
+    pub provider: String,
+    /// Number of exchanges to copy (default: all since checkpoint).
+    #[arg(long, short)]
+    pub count: Option<usize>,
+    /// Show sessions but don't copy to clipboard.
+    #[arg(long, short)]
+    pub list: bool,
 }
 
 #[derive(Args, Debug, Clone)]
