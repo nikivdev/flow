@@ -264,11 +264,7 @@ pub fn run_sync(push: bool) -> Result<()> {
 /// Run commit with Codex code review: stage, review with Codex, generate message, commit, push.
 /// If hub is running, delegates to it for async execution.
 pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
-    // Check if hub is running - if so, delegate
-    if hub::hub_healthy(HUB_HOST, HUB_PORT) {
-        return delegate_to_hub_with_check(push, include_context);
-    }
-
+    // Force synchronous execution to avoid hub delegation while logs are unreliable.
     run_with_check_sync(push, include_context)
 }
 
