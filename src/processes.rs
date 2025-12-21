@@ -640,7 +640,8 @@ fn show_hub_task_logs(task_id: &str, follow: bool) -> Result<()> {
         let resp = client.get(&url).send().context("failed to fetch task logs")?;
 
         if resp.status().as_u16() == 404 {
-            bail!("Task '{}' not found. It may still be queued.", task_id);
+            println!("Task '{}' not found yet (queued). Streaming logs...", task_id);
+            return show_hub_task_logs(task_id, true);
         }
 
         if !resp.status().is_success() {
