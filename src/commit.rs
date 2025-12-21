@@ -13,6 +13,7 @@ use tempfile::NamedTempFile;
 use tracing::{debug, info};
 
 use crate::ai;
+use crate::config;
 use crate::hub;
 use crate::notify;
 
@@ -264,8 +265,34 @@ pub fn run_sync(push: bool) -> Result<()> {
 /// Run commit with Codex code review: stage, review with Codex, generate message, commit, push.
 /// If hub is running, delegates to it for async execution.
 pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
-    // Force synchronous execution to avoid hub delegation while logs are unreliable.
+    if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
+        return delegate_to_hub_with_check(push, include_context);
+    }
+
     run_with_check_sync(push, include_context)
+}
+
+fn commit_with_check_async_enabled() -> bool {
+    let cwd = std::env::current_dir().ok();
+
+    if let Some(cwd) = cwd {
+        let local_config = cwd.join("flow.toml");
+        if local_config.exists() {
+            if let Ok(cfg) = config::load(&local_config) {
+                return cfg.options.commit_with_check_async.unwrap_or(true);
+            }
+            return true;
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            return cfg.options.commit_with_check_async.unwrap_or(true);
+        }
+    }
+
+    true
 }
 
 /// Run commit with Codex code review synchronously (called directly or by hub).
