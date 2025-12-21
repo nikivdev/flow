@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tracing::debug;
 
 use crate::cli::{AiAction, ProviderAiAction};
@@ -261,6 +263,14 @@ pub fn get_last_entry_timestamp() -> Result<Option<(String, String)>> {
 
 /// Get the last timestamp from a session file.
 fn get_session_last_timestamp(session_id: &str, provider: Provider, project_path: &PathBuf) -> Result<Option<String>> {
+    if provider == Provider::Codex {
+        let session_file = find_codex_session_file(session_id);
+        let Some(session_file) = session_file else {
+            return Ok(None);
+        };
+        return get_codex_last_timestamp(&session_file);
+    }
+
     let path_str = project_path.to_string_lossy().to_string();
     let project_folder = path_to_project_name(&path_str);
 
@@ -527,6 +537,35 @@ fn read_codex_exchanges(session_file: &PathBuf, since_ts: Option<&str>) -> Resul
     }
 
     Ok((exchanges, last_ts))
+}
+
+fn get_codex_last_timestamp(session_file: &PathBuf) -> Result<Option<String>> {
+    let content = fs::read_to_string(session_file).context("failed to read session file")?;
+    let mut last_ts: Option<String> = None;
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let entry: CodexEntry = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if let Some(ts) = entry.timestamp {
+            last_ts = Some(ts);
+            continue;
+        }
+
+        if let Some(payload_ts) = entry.payload.as_ref()
+            .and_then(|p| p.get("timestamp"))
+            .and_then(|v| v.as_str()) {
+            last_ts = Some(payload_ts.to_string());
+        }
+    }
+
+    Ok(last_ts)
 }
 
 fn extract_codex_message(entry: &CodexEntry) -> Option<(String, String)> {
@@ -1836,7 +1875,9 @@ fn clean_summary(s: &str) -> String {
             !l.starts_with('❯') &&
             !l.starts_with('$') &&
             !l.starts_with('#') &&
-            !l.starts_with("Error:")
+            !l.starts_with("Error:") &&
+            !l.starts_with("<INSTRUCTIONS>") &&
+            !l.starts_with("## Skills")
         })
         .or_else(|| s.lines().find(|l| !l.trim().is_empty()))
         .unwrap_or(s);
@@ -1846,6 +1887,305 @@ fn clean_summary(s: &str) -> String {
         .trim()
         .replace('\t', " ")
         .replace("  ", " ")
+}
+
+const GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+const DEFAULT_GEMINI_MODEL: &str = "gemini-1.5-flash";
+const DEFAULT_SUMMARY_AGE_MINUTES: i64 = 45;
+const DEFAULT_SUMMARY_MAX_CHARS: usize = 12_000;
+
+fn get_session_summaries_path(project_path: &PathBuf) -> PathBuf {
+    project_path.join(".ai").join("session-summaries.json")
+}
+
+fn load_session_summaries(project_path: &PathBuf) -> Result<SessionSummaries> {
+    let path = get_session_summaries_path(project_path);
+    if !path.exists() {
+        return Ok(SessionSummaries::default());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&content).context("failed to parse session-summaries.json")
+}
+
+fn save_session_summaries(project_path: &PathBuf, summaries: &SessionSummaries) -> Result<()> {
+    let path = get_session_summaries_path(project_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(summaries)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+fn summary_key(session: &CrossProjectSession) -> String {
+    let provider = match session.provider {
+        Provider::Claude => "claude",
+        Provider::Codex => "codex",
+        Provider::All => "ai",
+    };
+    format!("{}:{}", provider, session.session_id)
+}
+
+fn get_summary_cache_entry<'a>(
+    cache: &'a mut HashMap<PathBuf, SummaryCacheEntry>,
+    project_path: &PathBuf,
+) -> Result<&'a mut SummaryCacheEntry> {
+    if !cache.contains_key(project_path) {
+        let store = load_session_summaries(project_path)?;
+        cache.insert(project_path.clone(), SummaryCacheEntry { store, dirty: false });
+    }
+    Ok(cache.get_mut(project_path).expect("cache entry must exist"))
+}
+
+fn summary_age_minutes() -> i64 {
+    std::env::var("FLOW_SESSIONS_SUMMARY_AGE_MINUTES")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(DEFAULT_SUMMARY_AGE_MINUTES)
+}
+
+fn summary_max_chars() -> usize {
+    std::env::var("FLOW_SESSIONS_SUMMARY_MAX_CHARS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_SUMMARY_MAX_CHARS)
+}
+
+fn gemini_model() -> String {
+    std::env::var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_GEMINI_MODEL.to_string())
+}
+
+fn get_gemini_api_key() -> Result<String> {
+    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        if !key.trim().is_empty() {
+            return Ok(key);
+        }
+    }
+    if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
+        if !key.trim().is_empty() {
+            return Ok(key);
+        }
+    }
+
+    if let Ok(Some(key)) = crate::env::get_personal_env_var("GEMINI_API_KEY") {
+        if !key.trim().is_empty() {
+            return Ok(key);
+        }
+    }
+    if let Ok(Some(key)) = crate::env::get_personal_env_var("GOOGLE_API_KEY") {
+        if !key.trim().is_empty() {
+            return Ok(key);
+        }
+    }
+
+    bail!("Missing GEMINI_API_KEY/GOOGLE_API_KEY (set env var or add to personal env)")
+}
+
+fn truncate_for_summary(context: &str) -> String {
+    let max_chars = summary_max_chars();
+    if context.chars().count() <= max_chars {
+        return context.to_string();
+    }
+    let start = context.chars().count().saturating_sub(max_chars);
+    context.chars().skip(start).collect()
+}
+
+fn should_summarize(last_ts: &str) -> bool {
+    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(last_ts) else {
+        return false;
+    };
+    let age = chrono::Utc::now().signed_duration_since(ts);
+    age.num_minutes() >= summary_age_minutes()
+}
+
+fn summarize_session_with_gemini(context: &str) -> Result<SessionSummary> {
+    let api_key = get_gemini_api_key()?;
+    let model = gemini_model();
+
+    let prompt = format!(
+        "Summarize this coding session. Return JSON only with fields:\n\
+summary: short 1-2 sentence summary (<= 220 chars), no boilerplate\n\
+chapters: array of 3-8 items, each with title (3-8 words) and summary (1-2 sentences)\n\
+\nSession:\n{}",
+        truncate_for_summary(context)
+    );
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("failed to create HTTP client")?;
+
+    let url = format!("{}/{}:generateContent?key={}", GEMINI_API_URL, model, api_key);
+    let payload = json!({
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    { "text": prompt }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 700,
+            "responseMimeType": "application/json"
+        }
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .context("failed to call Gemini API")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        bail!("Gemini API error {}: {}", status, text);
+    }
+
+    let parsed: GeminiResponse = resp.json().context("failed to parse Gemini response")?;
+    let content = parsed.candidates
+        .get(0)
+        .and_then(|c| c.content.parts.get(0))
+        .and_then(|p| p.text.as_deref())
+        .unwrap_or("")
+        .trim();
+
+    if content.is_empty() {
+        bail!("Gemini returned empty summary");
+    }
+
+    let summary_payload = parse_summary_response(content)?;
+
+    Ok(SessionSummary {
+        summary: summary_payload.summary,
+        chapters: summary_payload.chapters,
+        session_last_timestamp: None,
+        model,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+fn parse_summary_response(content: &str) -> Result<SessionSummaryResponse> {
+    if let Ok(parsed) = serde_json::from_str::<SessionSummaryResponse>(content) {
+        return Ok(parsed);
+    }
+
+    let json_blob = extract_json_object(content)
+        .ok_or_else(|| anyhow::anyhow!("summary response was not valid JSON"))?;
+    serde_json::from_str(&json_blob).context("failed to parse summary JSON")
+}
+
+fn extract_json_object(s: &str) -> Option<String> {
+    let start = s.find('{')?;
+    let end = s.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    Some(s[start..=end].to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiResponse {
+    candidates: Vec<GeminiCandidate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate {
+    content: GeminiContent,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiContent {
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiPart {
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionSummaryResponse {
+    summary: String,
+    chapters: Vec<SessionChapter>,
+}
+
+fn get_display_summary(
+    session: &CrossProjectSession,
+    cache: &mut HashMap<PathBuf, SummaryCacheEntry>,
+) -> Result<Option<String>> {
+    let key = summary_key(session);
+    let entry = get_summary_cache_entry(cache, &session.project_path)?;
+    if let Some(summary) = entry.store.summaries.get(&key) {
+        if !summary.summary.trim().is_empty() {
+            return Ok(Some(summary.summary.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn maybe_update_summary(
+    session: &CrossProjectSession,
+    cache: &mut HashMap<PathBuf, SummaryCacheEntry>,
+) -> Result<()> {
+    let Some(last_ts) = get_session_last_timestamp_for_session(session)? else {
+        return Ok(());
+    };
+
+    if !should_summarize(&last_ts) {
+        return Ok(());
+    }
+
+    let key = summary_key(session);
+    let entry = get_summary_cache_entry(cache, &session.project_path)?;
+    if let Some(existing) = entry.store.summaries.get(&key) {
+        if existing.session_last_timestamp.as_deref() == Some(last_ts.as_str()) {
+            return Ok(());
+        }
+    }
+
+    let (context, context_last_ts) = read_cross_project_context(session, None, None)?;
+    if context.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut summary = summarize_session_with_gemini(&context)?;
+    summary.session_last_timestamp = Some(context_last_ts.unwrap_or(last_ts));
+
+    entry.store.summaries.insert(key, summary);
+    entry.dirty = true;
+
+    Ok(())
+}
+
+fn save_summary_cache(cache: &mut HashMap<PathBuf, SummaryCacheEntry>) -> Result<()> {
+    for (project_path, entry) in cache.iter_mut() {
+        if entry.dirty {
+            save_session_summaries(project_path, &entry.store)?;
+            entry.dirty = false;
+        }
+    }
+    Ok(())
+}
+
+fn get_session_last_timestamp_for_session(session: &CrossProjectSession) -> Result<Option<String>> {
+    if session.provider == Provider::Codex {
+        let session_file = session.session_path.clone()
+            .or_else(|| find_codex_session_file(&session.session_id));
+        let Some(session_file) = session_file else {
+            return Ok(None);
+        };
+        return get_codex_last_timestamp(&session_file);
+    }
+
+    get_session_last_timestamp_for_path(
+        &session.session_id,
+        session.provider,
+        &session.project_path,
+    )
 }
 
 /// Resume a session by name or ID.
@@ -2245,6 +2585,31 @@ struct CrossProjectSession {
     session_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct SessionSummaries {
+    summaries: HashMap<String, SessionSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct SessionSummary {
+    summary: String,
+    chapters: Vec<SessionChapter>,
+    session_last_timestamp: Option<String>,
+    model: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct SessionChapter {
+    title: String,
+    summary: String,
+}
+
+struct SummaryCacheEntry {
+    store: SessionSummaries,
+    dirty: bool,
+}
+
 /// Consumed checkpoint tracking - stored in target project's .ai folder.
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct ConsumedCheckpoints {
@@ -2271,10 +2636,23 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
     };
 
     let sessions = scan_all_project_sessions(provider)?;
+    let mut summary_cache: HashMap<PathBuf, SummaryCacheEntry> = HashMap::new();
+    let summarize_enabled = opts.summarize && get_gemini_api_key().is_ok();
 
     if sessions.is_empty() {
         println!("No AI sessions found across projects.");
         return Ok(());
+    }
+
+    if opts.summarize && !summarize_enabled {
+        println!("GEMINI_API_KEY/GOOGLE_API_KEY not set; skipping session summaries.");
+    }
+
+    if summarize_enabled {
+        for session in &sessions {
+            let _ = maybe_update_summary(session, &mut summary_cache);
+        }
+        let _ = save_summary_cache(&mut summary_cache);
     }
 
     if opts.list {
@@ -2284,9 +2662,9 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
             let relative_time = session.timestamp.as_deref()
                 .map(format_relative_time)
                 .unwrap_or_else(|| "unknown".to_string());
-            let summary = session.first_message.as_deref()
-                .or(session.error_summary.as_deref())
-                .map(|s| truncate_str(&clean_summary(s), 50))
+            let summary = get_display_summary(session, &mut summary_cache)?
+                .or_else(|| session.first_message.as_deref().or(session.error_summary.as_deref()).map(|s| s.to_string()))
+                .map(|s| truncate_str(&clean_summary(&s), 50))
                 .unwrap_or_default();
             let provider_tag = match session.provider {
                 Provider::Claude => "claude",
@@ -2310,9 +2688,9 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
             let relative_time = session.timestamp.as_deref()
                 .map(format_relative_time)
                 .unwrap_or_else(|| "".to_string());
-            let summary = session.first_message.as_deref()
-                .or(session.error_summary.as_deref())
-                .map(|s| truncate_str(&clean_summary(s), 40))
+            let summary = get_display_summary(session, &mut summary_cache).unwrap_or(None)
+                .or_else(|| session.first_message.as_deref().or(session.error_summary.as_deref()).map(|s| s.to_string()))
+                .map(|s| truncate_str(&clean_summary(&s), 40))
                 .unwrap_or_default();
             let provider_tag = match session.provider {
                 Provider::Claude => "claude",
@@ -2841,6 +3219,14 @@ fn get_session_last_timestamp_for_path(
     provider: Provider,
     project_path: &PathBuf
 ) -> Result<Option<String>> {
+    if provider == Provider::Codex {
+        let session_file = find_codex_session_file(session_id);
+        let Some(session_file) = session_file else {
+            return Ok(None);
+        };
+        return get_codex_last_timestamp(&session_file);
+    }
+
     let projects_dir = match provider {
         Provider::Claude | Provider::All => get_claude_projects_dir(),
         Provider::Codex => get_codex_projects_dir(),
