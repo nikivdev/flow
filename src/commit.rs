@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{debug, info};
 
+use crate::ai;
 use crate::hub;
 
 const MODEL: &str = "gpt-4.1-nano";
@@ -165,8 +166,9 @@ pub fn run_sync(push: bool) -> Result<()> {
 }
 
 /// Run commit with Codex code review: stage, review with Codex, generate message, commit, push.
-pub fn run_with_check(push: bool) -> Result<()> {
-    info!(push = push, "starting commit with check workflow");
+/// If `include_context` is true, AI session context is passed to Codex for better understanding.
+pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
+    info!(push = push, include_context = include_context, "starting commit with check workflow");
 
     // Ensure we're in a git repo
     ensure_git_repo()?;
@@ -180,14 +182,25 @@ pub fn run_with_check(push: bool) -> Result<()> {
     // Get diff
     let diff = git_capture(&["diff", "--cached"])?;
     if diff.trim().is_empty() {
+        println!("\nnotify: No staged changes to commit");
         bail!("No staged changes to commit");
     }
 
+    // Get AI session context for better review (if enabled)
+    let session_context = if include_context {
+        ai::get_recent_session_context(3).ok().flatten()
+    } else {
+        None
+    };
+
     // Run Codex review
     println!("\nRunning Codex code review...");
+    if session_context.is_some() {
+        println!("(with AI session context)");
+    }
     println!("────────────────────────────────────────");
 
-    let review = run_codex_review(&diff)?;
+    let review = run_codex_review(&diff, session_context.as_deref())?;
 
     println!("────────────────────────────────────────\n");
 
@@ -213,6 +226,7 @@ pub fn run_with_check(push: bool) -> Result<()> {
             println!("Commit cancelled.");
             // Unstage changes
             let _ = git_try(&["reset", "HEAD"]);
+            println!("\nnotify: Codex found issues in code review - commit cancelled");
             return Ok(());
         }
     } else {
@@ -282,6 +296,7 @@ pub fn run_with_check(push: bool) -> Result<()> {
                         println!("  4. git push");
                         println!();
                         println!("Or abort with: git rebase --abort");
+                        println!("\nnotify: Rebase conflict - manual resolution required");
                         bail!("Rebase conflict - manual resolution required");
                     }
                 }
@@ -293,15 +308,27 @@ pub fn run_with_check(push: bool) -> Result<()> {
 }
 
 /// Run Codex to review staged changes for bugs and performance issues.
-fn run_codex_review(_diff: &str) -> Result<String> {
+fn run_codex_review(_diff: &str, session_context: Option<&str>) -> Result<String> {
     use std::io::{BufRead, BufReader};
+
+    // Build the review prompt with optional session context
+    let prompt = if let Some(context) = session_context {
+        format!(
+            "Review these uncommitted changes. Focus on bugs, security vulnerabilities, and performance issues. Be concise.\n\n\
+            The following is context from the AI session that created these changes - use it to understand the intent:\n\n{}\n\n\
+            Now review the code changes:",
+            context
+        )
+    } else {
+        "Focus on bugs, security vulnerabilities, and performance issues. Be concise.".to_string()
+    };
 
     // Use codex review --uncommitted which reviews staged/unstaged/untracked changes
     let mut child = Command::new("codex")
         .args([
             "review",
             "--uncommitted",
-            "Focus on bugs, security vulnerabilities, and performance issues. Be concise.",
+            &prompt,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -324,6 +351,7 @@ fn run_codex_review(_diff: &str) -> Result<String> {
     let status = child.wait()?;
 
     if !status.success() {
+        println!("\nnotify: Codex review failed");
         bail!("Codex review failed");
     }
 

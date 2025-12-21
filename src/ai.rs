@@ -114,6 +114,43 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
     Ok(())
 }
 
+/// Get recent AI session context for the current project.
+/// Used by commit workflow to provide context for code review.
+/// Returns the last N exchanges from the most recent sessions.
+pub fn get_recent_session_context(max_exchanges: usize) -> Result<Option<String>> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+
+    // Get sessions for both Claude and Codex
+    let sessions = read_sessions_for_path(Provider::All, &cwd)?;
+
+    if sessions.is_empty() {
+        return Ok(None);
+    }
+
+    // Get the most recent session
+    let recent_session = &sessions[0];
+
+    // Read context from the most recent session
+    match read_last_context(&recent_session.session_id, recent_session.provider, max_exchanges, &cwd) {
+        Ok(context) => {
+            if context.trim().is_empty() {
+                Ok(None)
+            } else {
+                let provider_name = match recent_session.provider {
+                    Provider::Claude => "Claude Code",
+                    Provider::Codex => "Codex",
+                    Provider::All => "AI",
+                };
+                Ok(Some(format!(
+                    "=== Recent {} Session Context ===\n\n{}\n\n=== End Session Context ===",
+                    provider_name, context
+                )))
+            }
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// Get the .ai/sessions/claude directory for the current project.
 fn get_ai_sessions_dir() -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;

@@ -167,6 +167,16 @@ pub enum Commands {
         long_about = "Fetch, set, and manage environment variables for your project via 1focus. Authenticate with `f env login`, then use `f env pull` to fetch envs."
     )]
     Env(EnvCommand),
+    #[command(
+        about = "Manage Codex skills (.ai/skills/).",
+        long_about = "Create, list, and manage Codex skills for this project. Skills are stored in .ai/skills/ and help Codex understand project-specific workflows."
+    )]
+    Skills(SkillsCommand),
+    #[command(
+        about = "Send a proposal notification to Lin for approval.",
+        long_about = "Sends a proposal to the Lin app widget for user approval. Used for human-in-the-loop AI workflows."
+    )]
+    Notify(NotifyCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -541,6 +551,9 @@ pub struct CommitOpts {
     /// Run synchronously (don't delegate to hub).
     #[arg(long)]
     pub sync: bool,
+    /// Skip AI session context in code review (commitWithCheck only).
+    #[arg(long)]
+    pub no_context: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -725,4 +738,70 @@ pub enum EnvAction {
     },
     /// Show current auth status.
     Status,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SkillsCommand {
+    #[command(subcommand)]
+    pub action: Option<SkillsAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SkillsAction {
+    /// List all skills for this project.
+    #[command(alias = "ls")]
+    List,
+    /// Create a new skill.
+    New {
+        /// Skill name (kebab-case recommended).
+        name: String,
+        /// Short description of what the skill does.
+        #[arg(short, long)]
+        description: Option<String>,
+    },
+    /// Show skill details.
+    Show {
+        /// Skill name.
+        name: String,
+    },
+    /// Edit a skill in your editor.
+    Edit {
+        /// Skill name.
+        name: String,
+    },
+    /// Remove a skill.
+    Remove {
+        /// Skill name.
+        name: String,
+    },
+    /// Install a curated skill from the registry.
+    Install {
+        /// Skill name to install.
+        name: String,
+    },
+    /// Search for skills in the remote registry.
+    Search {
+        /// Search query (optional).
+        query: Option<String>,
+    },
+    /// Sync flow.toml tasks as skills.
+    Sync,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct NotifyCommand {
+    /// Title of the proposal (shown in widget header).
+    #[arg(short, long)]
+    pub title: Option<String>,
+
+    /// The action/command to propose (e.g., "f deploy").
+    pub action: String,
+
+    /// Optional context or description.
+    #[arg(short, long)]
+    pub context: Option<String>,
+
+    /// Expiration time in seconds (default: 300 = 5 minutes).
+    #[arg(short, long, default_value = "300")]
+    pub expires: u64,
 }

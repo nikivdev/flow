@@ -20,6 +20,8 @@ pub mod palette;
 pub mod processes;
 pub mod projects;
 pub mod running;
+pub mod skills;
+pub mod notify;
 pub mod task_match;
 pub mod tasks;
 pub mod watchers;

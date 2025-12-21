@@ -36,6 +36,7 @@ portable-pty = "0.8"
 regex = "1.12.2"
 chrono = "0.4.42"
 dirs = "6.0.0"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 mockito = "1.7"

@@ -11,6 +11,7 @@ Flow is a CLI tool for managing project tasks, AI coding sessions, and developme
 | `f commit` | `f c` | AI-powered git commit |
 | `f commitWithCheck` | `f cc` | Commit with Codex code review |
 | `f ai` | - | Manage AI sessions (Claude/Codex) |
+| `f skills` | - | Manage Codex skills |
 | `f daemon` | `f d` | Manage background daemons |
 | `f env` | - | Manage environment variables |
 | `f match` | `f m` | Natural language task matching |
@@ -232,6 +233,77 @@ f env delete KEY1 KEY2
 
 ---
 
+## Codex Skills
+
+Manage Codex skills stored in `.ai/skills/`. Skills help Codex understand project-specific workflows.
+
+### Managing Skills
+
+```bash
+# List all skills
+f skills
+f skills ls
+
+# Create a new skill
+f skills new deploy-worker
+f skills new deploy-worker -d "Deploy to Cloudflare Workers"
+
+# Show skill details
+f skills show deploy-worker
+
+# Edit a skill in your editor
+f skills edit deploy-worker
+
+# Remove a skill
+f skills remove deploy-worker
+```
+
+### Installing Curated Skills
+
+```bash
+# Install from Codex skill registry
+f skills install linear
+f skills install github-pr
+```
+
+### Syncing from flow.toml
+
+```bash
+# Generate skills from flow.toml tasks
+f skills sync
+```
+
+This creates a skill for each task in `flow.toml`, so Codex automatically knows about your project's workflows.
+
+### Skill Structure
+
+```
+.ai/skills/
+└── deploy-worker/
+    └── skill.md
+```
+
+Each `skill.md` contains:
+
+```markdown
+---
+name: deploy-worker
+description: Deploy to Cloudflare Workers
+---
+
+# deploy-worker
+
+## Instructions
+
+Run this task with `f deploy-worker`
+
+## Examples
+
+...
+```
+
+---
+
 ## Natural Language Task Matching
 
 Match tasks using natural language via local LM Studio.
@@ -379,7 +451,10 @@ alias f="flow"
 <project>/
 ├── flow.toml          # Project tasks
 └── .ai/
-    └── sessions/
-        └── claude/
-            └── index.json
+    ├── sessions/
+    │   └── claude/
+    │       └── index.json
+    └── skills/            # Codex skills
+        └── <skill-name>/
+            └── skill.md
 ```
