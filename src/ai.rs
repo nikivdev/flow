@@ -34,6 +34,23 @@ struct SessionIndex {
     sessions: HashMap<String, SavedSession>,
 }
 
+/// Commit checkpoint stored in .ai/commit-checkpoints.json
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct CommitCheckpoints {
+    /// Last commit checkpoint
+    pub last_commit: Option<CommitCheckpoint>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CommitCheckpoint {
+    /// When this checkpoint was created
+    pub timestamp: String,
+    /// Session ID that was active
+    pub session_id: Option<String>,
+    /// Timestamp of the last entry included in that commit
+    pub last_entry_timestamp: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct SavedSession {
     /// Session ID (UUID)
@@ -112,6 +129,264 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Get checkpoint file path for a project.
+fn get_checkpoint_path(project_path: &PathBuf) -> PathBuf {
+    project_path.join(".ai").join("commit-checkpoints.json")
+}
+
+/// Load commit checkpoints.
+pub fn load_checkpoints(project_path: &PathBuf) -> Result<CommitCheckpoints> {
+    let path = get_checkpoint_path(project_path);
+    if !path.exists() {
+        return Ok(CommitCheckpoints::default());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&content).context("failed to parse commit-checkpoints.json")
+}
+
+/// Save commit checkpoints.
+pub fn save_checkpoint(project_path: &PathBuf, checkpoint: CommitCheckpoint) -> Result<()> {
+    let path = get_checkpoint_path(project_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let checkpoints = CommitCheckpoints {
+        last_commit: Some(checkpoint),
+    };
+    let content = serde_json::to_string_pretty(&checkpoints)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+/// Get AI session context since the last commit checkpoint.
+/// Returns all exchanges from the checkpoint timestamp to now.
+pub fn get_context_since_checkpoint() -> Result<Option<String>> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let checkpoints = load_checkpoints(&cwd).unwrap_or_default();
+
+    // Get sessions for both Claude and Codex
+    let sessions = read_sessions_for_path(Provider::All, &cwd)?;
+
+    if sessions.is_empty() {
+        return Ok(None);
+    }
+
+    // Read context since checkpoint
+    let since_ts = checkpoints.last_commit.as_ref().and_then(|c| c.last_entry_timestamp.clone());
+
+    let mut combined = String::new();
+    let since_info = if since_ts.is_some() {
+        " (since last commit)"
+    } else {
+        " (full session - no previous commit)"
+    };
+
+    for session in sessions {
+        let provider_name = match session.provider {
+            Provider::Claude => "Claude Code",
+            Provider::Codex => "Codex",
+            Provider::All => "AI",
+        };
+
+        if let Ok((context, last_ts)) = read_context_since(
+            &session.session_id,
+            session.provider,
+            since_ts.as_deref(),
+            &cwd,
+        ) {
+            if context.trim().is_empty() {
+                continue;
+            }
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
+            combined.push_str(&format!(
+                "=== {} Session Context{} ===\nLast entry: {}\n\n{}\n\n=== End Session Context ===",
+                provider_name,
+                since_info,
+                last_ts.unwrap_or_else(|| "unknown".to_string()),
+                context
+            ));
+        }
+    }
+
+    if combined.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(combined))
+    }
+}
+
+/// Get the last entry timestamp from the current session (for saving checkpoint).
+pub fn get_last_entry_timestamp() -> Result<Option<(String, String)>> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let sessions = read_sessions_for_path(Provider::All, &cwd)?;
+
+    if sessions.is_empty() {
+        return Ok(None);
+    }
+
+    let mut best: Option<(String, String)> = None;
+    for session in sessions {
+        if let Some(ts) = get_session_last_timestamp(&session.session_id, session.provider, &cwd)? {
+            let is_newer = best.as_ref().map_or(true, |(_, best_ts)| ts > *best_ts);
+            if is_newer {
+                best = Some((session.session_id.clone(), ts));
+            }
+        }
+    }
+
+    Ok(best)
+}
+
+/// Get the last timestamp from a session file.
+fn get_session_last_timestamp(session_id: &str, provider: Provider, project_path: &PathBuf) -> Result<Option<String>> {
+    let path_str = project_path.to_string_lossy().to_string();
+    let project_folder = path_to_project_name(&path_str);
+
+    let projects_dir = match provider {
+        Provider::Claude | Provider::All => get_claude_projects_dir(),
+        Provider::Codex => get_codex_projects_dir(),
+    };
+
+    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+
+    if !session_file.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
+
+    let mut last_ts: Option<String> = None;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+            if let Some(ts) = entry.timestamp {
+                last_ts = Some(ts);
+            }
+        }
+    }
+
+    Ok(last_ts)
+}
+
+/// Read context from session since a given timestamp.
+fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&str>, project_path: &PathBuf) -> Result<(String, Option<String>)> {
+    let path_str = project_path.to_string_lossy().to_string();
+    let project_folder = path_to_project_name(&path_str);
+
+    let projects_dir = match provider {
+        Provider::Claude | Provider::All => get_claude_projects_dir(),
+        Provider::Codex => get_codex_projects_dir(),
+    };
+
+    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+
+    if !session_file.exists() {
+        bail!("Session file not found: {}", session_file.display());
+    }
+
+    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
+
+    // Collect exchanges after the checkpoint timestamp
+    let mut exchanges: Vec<(String, String, String)> = Vec::new(); // (user_msg, assistant_msg, timestamp)
+    let mut current_user: Option<String> = None;
+    let mut current_ts: Option<String> = None;
+    let mut last_ts: Option<String> = None;
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+            let entry_ts = entry.timestamp.clone();
+
+            // Skip entries before checkpoint
+            if let (Some(since), Some(ts)) = (since_ts, &entry_ts) {
+                if ts.as_str() <= since {
+                    continue;
+                }
+            }
+
+            if let Some(ref msg) = entry.message {
+                let role = msg.role.as_deref().unwrap_or("unknown");
+
+                let content_text = if let Some(ref content) = msg.content {
+                    match content {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Array(arr) => {
+                            arr.iter()
+                                .filter_map(|v| {
+                                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                        Some(text.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    continue;
+                };
+
+                if content_text.is_empty() {
+                    continue;
+                }
+
+                match role {
+                    "user" => {
+                        current_user = Some(content_text);
+                        current_ts = entry_ts.clone();
+                    }
+                    "assistant" => {
+                        if let Some(user_msg) = current_user.take() {
+                            let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
+                            exchanges.push((user_msg, content_text, ts.clone()));
+                            last_ts = Some(ts);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if entry_ts.is_some() {
+                last_ts = entry_ts;
+            }
+        }
+    }
+
+    if exchanges.is_empty() {
+        return Ok((String::new(), last_ts));
+    }
+
+    // Format the context
+    let mut context = String::new();
+
+    for (user_msg, assistant_msg, _ts) in &exchanges {
+        context.push_str("H: ");
+        context.push_str(user_msg);
+        context.push_str("\n\n");
+        context.push_str("A: ");
+        context.push_str(assistant_msg);
+        context.push_str("\n\n");
+    }
+
+    // Remove trailing newlines
+    while context.ends_with('\n') {
+        context.pop();
+    }
+    context.push('\n');
+
+    Ok((context, last_ts))
 }
 
 /// Get recent AI session context for the current project.

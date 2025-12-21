@@ -17,6 +17,7 @@ use crate::hub;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
+const MAX_REVIEW_CONTEXT_CHARS: usize = 50_000;
 const HUB_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 const HUB_PORT: u16 = 9050;
 
@@ -69,6 +70,78 @@ struct Choice {
 #[derive(Debug, Deserialize)]
 struct ResponseMessage {
     content: String,
+}
+
+/// Dry run: show the context that would be passed to Codex without committing.
+pub fn dry_run_context() -> Result<()> {
+    println!("Dry run: showing context that would be passed to Codex\n");
+
+    // Ensure we're in a git repo
+    ensure_git_repo()?;
+
+    // Show checkpoint info
+    let cwd = std::env::current_dir()?;
+    let checkpoints = ai::load_checkpoints(&cwd).unwrap_or_default();
+    println!("────────────────────────────────────────");
+    println!("COMMIT CHECKPOINT");
+    println!("────────────────────────────────────────");
+    if let Some(ref checkpoint) = checkpoints.last_commit {
+        println!("Last commit: {}", checkpoint.timestamp);
+        if let Some(ref ts) = checkpoint.last_entry_timestamp {
+            println!("Last entry included: {}", ts);
+        }
+        if let Some(ref sid) = checkpoint.session_id {
+            println!("Session: {}...", &sid[..8.min(sid.len())]);
+        }
+    } else {
+        println!("No previous checkpoint (first commit with context)");
+    }
+
+    // Get diff
+    let diff = git_capture(&["diff", "--cached"])
+        .or_else(|_| git_capture(&["diff"]))?;
+
+    if diff.trim().is_empty() {
+        println!("\nNo changes to show (no staged or unstaged diff)");
+        println!("\nTrying to show what would be staged with 'git add .'...");
+        git_run(&["add", "--dry-run", "."])?;
+    }
+
+    // Get AI session context since checkpoint
+    println!("\n────────────────────────────────────────");
+    println!("AI SESSION CONTEXT (since checkpoint)");
+    println!("────────────────────────────────────────");
+
+    match ai::get_context_since_checkpoint() {
+        Ok(Some(context)) => {
+            println!("Context length: {} chars, {} lines\n", context.len(), context.lines().count());
+            println!("{}", context);
+        }
+        Ok(None) => {
+            println!("No new AI session context since last checkpoint.");
+            println!("\nThis could mean:");
+            println!("  - No exchanges since last commit");
+            println!("  - No Claude Code or Codex session in this project");
+        }
+        Err(e) => {
+            println!("Error getting context: {}", e);
+        }
+    }
+
+    println!("────────────────────────────────────────");
+    println!("\nDiff that would be reviewed:");
+    println!("────────────────────────────────────────");
+
+    let (diff_for_prompt, truncated) = truncate_diff(&diff);
+    println!("{}", diff_for_prompt);
+
+    if truncated {
+        println!("\n[Diff truncated to {} chars]", MAX_DIFF_CHARS);
+    }
+
+    println!("────────────────────────────────────────");
+
+    Ok(())
 }
 
 /// Run the commit workflow: stage, generate message, commit, push.
@@ -222,16 +295,19 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
         bail!("No staged changes to commit");
     }
 
-    // Get AI session context for better review (if enabled)
+    // Get AI session context since last checkpoint (if enabled)
     let session_context = if include_context {
-        ai::get_recent_session_context(3).ok().flatten()
+        ai::get_context_since_checkpoint()
+            .ok()
+            .flatten()
+            .map(|context| truncate_context(&context, MAX_REVIEW_CONTEXT_CHARS))
     } else {
         None
     };
     if let Some(context) = session_context.as_ref() {
         let line_count = context.lines().count();
         println!(
-            "Using AI session context ({} chars, {} lines)",
+            "Using AI session context ({} chars, {} lines) since last checkpoint",
             context.len(),
             line_count
         );
@@ -366,6 +442,28 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
     }
 
     cleanup_staged_snapshot(&staged_snapshot);
+
+    // Save checkpoint for next commit
+    if include_context {
+        let cwd = std::env::current_dir()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let (session_id, last_ts) = match ai::get_last_entry_timestamp() {
+            Ok(Some((session_id, last_ts))) => (Some(session_id), Some(last_ts)),
+            Ok(None) => (None, Some(now.clone())),
+            Err(_) => (None, Some(now.clone())),
+        };
+        let checkpoint = ai::CommitCheckpoint {
+            timestamp: now,
+            session_id,
+            last_entry_timestamp: last_ts,
+        };
+        if let Err(e) = ai::save_checkpoint(&cwd, checkpoint) {
+            debug!("failed to save commit checkpoint: {}", e);
+        } else {
+            debug!("saved commit checkpoint");
+        }
+    }
+
     Ok(())
 }
 
@@ -380,26 +478,28 @@ fn run_codex_review(diff: &str, session_context: Option<&str>) -> Result<ReviewR
     // Build the review prompt with optional session context
     let prompt = if let Some(context) = session_context {
         format!(
-            "Review the following git diff. Focus on bugs, security vulnerabilities, and performance issues. Be concise.\n\
+            "Deep review the following git diff for bugs, security vulnerabilities, performance issues, and code quality. Be thorough.\n\
 Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\n\
-The following is context from the AI session that created these changes - use it to understand the intent:\n\n{}\n\n\
+AI session context (intent behind changes):\n{}\n\n\
 Diff:\n```diff\n{}\n```",
             context,
             diff_for_prompt
         )
     } else {
         format!(
-            "Review the following git diff. Focus on bugs, security vulnerabilities, and performance issues. Be concise.\n\
+            "Deep review the following git diff for bugs, security vulnerabilities, performance issues, and code quality. Be thorough.\n\
 Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\n\
 Diff:\n```diff\n{}\n```",
             diff_for_prompt
         )
     };
 
-    // Use codex review with prompt via stdin to avoid argv limits.
+    // Use codex review with explicit model selection via stdin to avoid argv limits.
     let mut child = Command::new("codex")
         .args([
             "review",
+            "-c",
+            "model=\"gpt-5.1-codex-max\"",
             "-",
         ])
         .stdin(Stdio::piped())
@@ -563,6 +663,18 @@ fn truncate_diff(diff: &str) -> (String, bool) {
             MAX_DIFF_CHARS
         );
         (truncated, true)
+    }
+}
+
+fn truncate_context(context: &str, max_chars: usize) -> String {
+    if context.len() <= max_chars {
+        context.to_string()
+    } else {
+        format!(
+            "{}\n\n[Context truncated to first {} characters]",
+            &context[..max_chars],
+            max_chars
+        )
     }
 }
 

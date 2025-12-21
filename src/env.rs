@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::EnvAction;
 use crate::config;
+use crate::sync;
 
 const DEFAULT_API_URL: &str = "https://1f.nikiv.dev";
 
@@ -102,7 +103,10 @@ fn get_api_url(auth: &AuthConfig) -> String {
 
 /// Run the env subcommand.
 pub fn run(action: Option<EnvAction>) -> Result<()> {
-    let action = action.unwrap_or(EnvAction::Status);
+    // No action = run sync (base env + agents.md setup)
+    let Some(action) = action else {
+        return sync::run();
+    };
 
     match action {
         EnvAction::Login => login()?,
