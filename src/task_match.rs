@@ -113,8 +113,11 @@ pub fn run(opts: MatchOpts) -> Result<()> {
             // No task match, but matches a built-in command
             return run_builtin(builtin, opts.execute);
         } else if discovery.tasks.is_empty() {
-            // No tasks and no built-in match
-            bail!("No tasks found in {} or subdirectories", root.display());
+            // No tasks and no built-in match: behave like `f <args>`
+            return passthrough_to_cli(&opts.args);
+        } else if opts.args.len() == 1 {
+            // Single-token queries should behave like `f <arg>` if no direct match.
+            return passthrough_to_cli(&opts.args);
         } else {
             // No direct match, use LM Studio
             let prompt = build_matching_prompt(&query_display, &discovery.tasks);
