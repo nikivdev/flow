@@ -591,20 +591,22 @@ Diff:\n```diff\n{}\n```",
     let (tx, rx) = mpsc::channel();
     let start = Instant::now();
 
+    let tx_stdout = tx.clone();
     let reader_handle = std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines().flatten() {
-            let _ = tx.send(ReviewEvent::Line(line));
+            let _ = tx_stdout.send(ReviewEvent::Line(line));
         }
-        let _ = tx.send(ReviewEvent::StdoutDone);
+        let _ = tx_stdout.send(ReviewEvent::StdoutDone);
     });
 
+    let tx_stderr = tx.clone();
     let stderr_handle = std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().flatten() {
-            let _ = tx.send(ReviewEvent::StderrLine(line));
+            let _ = tx_stderr.send(ReviewEvent::StderrLine(line));
         }
-        let _ = tx.send(ReviewEvent::StderrDone);
+        let _ = tx_stderr.send(ReviewEvent::StderrDone);
     });
 
     let mut output_lines = Vec::new();
