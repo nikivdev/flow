@@ -596,14 +596,24 @@ Diff:\n```diff\n{}\n```",
         for line in reader.lines().flatten() {
             let _ = tx.send(ReviewEvent::Line(line));
         }
-        let _ = tx.send(ReviewEvent::Done);
+        let _ = tx.send(ReviewEvent::StdoutDone);
+    });
+
+    let stderr_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            let _ = tx.send(ReviewEvent::StderrLine(line));
+        }
+        let _ = tx.send(ReviewEvent::StderrDone);
     });
 
     let mut output_lines = Vec::new();
+    let mut stderr_lines = Vec::new();
     let mut last_progress = Instant::now();
     let timeout = Duration::from_secs(commit_with_check_timeout_secs());
     let mut deadline = Instant::now() + timeout;
     let mut timed_out = false;
+    let mut done_count = 0;
     loop {
         match rx.recv_timeout(Duration::from_secs(2)) {
             Ok(ReviewEvent::Line(line)) => {
@@ -611,11 +621,22 @@ Diff:\n```diff\n{}\n```",
                 output_lines.push(line);
                 last_progress = Instant::now();
             }
-            Ok(ReviewEvent::Done) => break,
+            Ok(ReviewEvent::StderrLine(line)) => {
+                if !line.trim().is_empty() {
+                    println!("codex: {}", line);
+                }
+                stderr_lines.push(line);
+            }
+            Ok(ReviewEvent::StdoutDone) | Ok(ReviewEvent::StderrDone) => {
+                done_count += 1;
+                if done_count >= 2 {
+                    break;
+                }
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if last_progress.elapsed() >= Duration::from_secs(10) {
                     println!(
-                        "Waiting on Codex review... ({}s elapsed)",
+                        "Waiting on Codex review... ({}s elapsed, no output yet)",
                         start.elapsed().as_secs()
                     );
                     last_progress = Instant::now();
@@ -635,8 +656,9 @@ Diff:\n```diff\n{}\n```",
     }
 
     let _ = reader_handle.join();
+    let _ = stderr_handle.join();
     let status = child.wait()?;
-    let stderr_output = read_stderr(stderr);
+    let stderr_output = stderr_lines.join("\n");
 
     if timed_out {
         if !stderr_output.trim().is_empty() {
@@ -948,16 +970,11 @@ fn parse_review_json(output: &str) -> Option<ReviewJson> {
     serde_json::from_str::<ReviewJson>(candidate).ok()
 }
 
-fn read_stderr(stderr: std::process::ChildStderr) -> String {
-    use std::io::Read;
-    let mut buf = String::new();
-    let _ = std::io::BufReader::new(stderr).read_to_string(&mut buf);
-    buf
-}
-
 enum ReviewEvent {
     Line(String),
-    Done,
+    StderrLine(String),
+    StdoutDone,
+    StderrDone,
 }
 
 fn should_show_review_context() -> bool {
