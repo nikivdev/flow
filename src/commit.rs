@@ -292,6 +292,15 @@ fn commit_with_check_timeout_secs() -> u64 {
     120
 }
 
+fn prompt_yes_no(message: &str) -> Result<bool> {
+    print!("{} [y/N]: ", message);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
 /// Run commit with Codex code review synchronously (called directly or by hub).
 /// If `include_context` is true, AI session context is passed to Codex for better understanding.
 pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
@@ -358,9 +367,13 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
 
     if review.timed_out {
         println!(
-            "⚠ Codex review timed out after {}s; proceeding without review",
+            "⚠ Codex review timed out after {}s",
             commit_with_check_timeout_secs()
         );
+        if !prompt_yes_no("Proceed without Codex review?")? {
+            restore_staged_snapshot(&staged_snapshot)?;
+            bail!("Commit cancelled - review unavailable");
+        }
         println!();
     }
 
@@ -408,7 +421,10 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
             }
         }
 
-        // Always continue with commit - never block
+        if !prompt_yes_no("Proceed with commit despite issues?")? {
+            restore_staged_snapshot(&staged_snapshot)?;
+            bail!("Commit cancelled - review issues found");
+        }
         println!("Proceeding with commit...");
     } else if !review.timed_out {
         println!("✓ Codex review passed");
@@ -586,6 +602,7 @@ Diff:\n```diff\n{}\n```",
     let mut output_lines = Vec::new();
     let mut last_progress = Instant::now();
     let timeout = Duration::from_secs(commit_with_check_timeout_secs());
+    let mut deadline = Instant::now() + timeout;
     let mut timed_out = false;
     loop {
         match rx.recv_timeout(Duration::from_secs(2)) {
@@ -603,10 +620,14 @@ Diff:\n```diff\n{}\n```",
                     );
                     last_progress = Instant::now();
                 }
-                if start.elapsed() >= timeout {
-                    timed_out = true;
-                    let _ = child.kill();
-                    break;
+                if Instant::now() >= deadline {
+                    if prompt_yes_no("Codex review is taking longer than expected. Keep waiting?")? {
+                        deadline = Instant::now() + timeout;
+                    } else {
+                        timed_out = true;
+                        let _ = child.kill();
+                        break;
+                    }
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
