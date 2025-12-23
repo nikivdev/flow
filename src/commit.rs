@@ -266,7 +266,34 @@ pub fn run_sync(push: bool) -> Result<()> {
 /// Run commit with Codex code review: stage, review with Codex, generate message, commit, push.
 /// If hub is running, delegates to it for async execution.
 pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
+    if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
+        return delegate_to_hub_with_check(push, include_context);
+    }
+
     run_with_check_sync(push, include_context)
+}
+
+fn commit_with_check_async_enabled() -> bool {
+    let cwd = std::env::current_dir().ok();
+
+    if let Some(cwd) = cwd {
+        let local_config = cwd.join("flow.toml");
+        if local_config.exists() {
+            if let Ok(cfg) = config::load(&local_config) {
+                return cfg.options.commit_with_check_async.unwrap_or(true);
+            }
+            return true;
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            return cfg.options.commit_with_check_async.unwrap_or(true);
+        }
+    }
+
+    true
 }
 
 fn commit_with_check_timeout_secs() -> u64 {
