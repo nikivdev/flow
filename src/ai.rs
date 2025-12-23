@@ -184,10 +184,15 @@ pub fn save_checkpoint(project_path: &PathBuf, checkpoint: CommitCheckpoint) -> 
 /// Returns all exchanges from the checkpoint timestamp to now.
 pub fn get_context_since_checkpoint() -> Result<Option<String>> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let checkpoints = load_checkpoints(&cwd).unwrap_or_default();
+    get_context_since_checkpoint_for_path(&cwd)
+}
+
+/// Get AI session context since the last commit checkpoint for a specific path.
+pub fn get_context_since_checkpoint_for_path(project_path: &PathBuf) -> Result<Option<String>> {
+    let checkpoints = load_checkpoints(project_path).unwrap_or_default();
 
     // Get sessions for both Claude and Codex
-    let sessions = read_sessions_for_path(Provider::All, &cwd)?;
+    let sessions = read_sessions_for_path(Provider::All, project_path)?;
 
     if sessions.is_empty() {
         return Ok(None);
@@ -214,7 +219,7 @@ pub fn get_context_since_checkpoint() -> Result<Option<String>> {
             &session.session_id,
             session.provider,
             since_ts.as_deref(),
-            &cwd,
+            project_path,
         ) {
             if context.trim().is_empty() {
                 continue;
@@ -242,7 +247,12 @@ pub fn get_context_since_checkpoint() -> Result<Option<String>> {
 /// Get the last entry timestamp from the current session (for saving checkpoint).
 pub fn get_last_entry_timestamp() -> Result<Option<(String, String)>> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let sessions = read_sessions_for_path(Provider::All, &cwd)?;
+    get_last_entry_timestamp_for_path(&cwd)
+}
+
+/// Get the last entry timestamp for sessions associated with a specific path.
+pub fn get_last_entry_timestamp_for_path(project_path: &PathBuf) -> Result<Option<(String, String)>> {
+    let sessions = read_sessions_for_path(Provider::All, project_path)?;
 
     if sessions.is_empty() {
         return Ok(None);
@@ -250,7 +260,7 @@ pub fn get_last_entry_timestamp() -> Result<Option<(String, String)>> {
 
     let mut best: Option<(String, String)> = None;
     for session in sessions {
-        if let Some(ts) = get_session_last_timestamp(&session.session_id, session.provider, &cwd)? {
+        if let Some(ts) = get_session_last_timestamp(&session.session_id, session.provider, project_path)? {
             let is_newer = best.as_ref().map_or(true, |(_, best_ts)| ts > *best_ts);
             if is_newer {
                 best = Some((session.session_id.clone(), ts));

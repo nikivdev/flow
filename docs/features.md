@@ -171,6 +171,7 @@ f cc
 # Optional config:
 # [options]
 # commit_with_check_async = false  # force local sync execution
+# commit_with_check_use_repo_root = false  # only stage/commit from current subdir
 # commit_with_check_timeout_secs = 120  # abort review if it hangs
 
 # If issues found, prompts for confirmation before proceeding

@@ -296,6 +296,51 @@ fn commit_with_check_async_enabled() -> bool {
     true
 }
 
+fn commit_with_check_use_repo_root() -> bool {
+    let cwd = std::env::current_dir().ok();
+
+    if let Some(cwd) = cwd {
+        let local_config = cwd.join("flow.toml");
+        if local_config.exists() {
+            if let Ok(cfg) = config::load(&local_config) {
+                return cfg.options.commit_with_check_use_repo_root.unwrap_or(true);
+            }
+            return true;
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            return cfg.options.commit_with_check_use_repo_root.unwrap_or(true);
+        }
+    }
+
+    true
+}
+
+fn resolve_commit_with_check_root() -> Result<std::path::PathBuf> {
+    if !commit_with_check_use_repo_root() {
+        return std::env::current_dir().context("failed to get current directory");
+    }
+
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("failed to run git rev-parse --show-toplevel")?;
+
+    if !output.status.success() {
+        bail!("failed to resolve git repo root");
+    }
+
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        bail!("git repo root was empty");
+    }
+
+    Ok(std::path::PathBuf::from(root))
+}
+
 fn commit_with_check_timeout_secs() -> u64 {
     let cwd = std::env::current_dir().ok();
 
@@ -336,17 +381,19 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
     // Ensure we're in a git repo
     ensure_git_repo()?;
 
+    let repo_root = resolve_commit_with_check_root()?;
+
     // Capture current staged changes so we can restore if we cancel.
-    let staged_snapshot = capture_staged_snapshot()?;
+    let staged_snapshot = capture_staged_snapshot_in(&repo_root)?;
 
     // Stage all changes
     print!("Staging changes... ");
     io::stdout().flush()?;
-    git_run(&["add", "."])?;
+    git_run_in(&repo_root, &["add", "."])?;
     println!("done");
 
     // Get diff
-    let diff = git_capture(&["diff", "--cached"])?;
+    let diff = git_capture_in(&repo_root, &["diff", "--cached"])?;
     if diff.trim().is_empty() {
         println!("\nnotify: No staged changes to commit");
         bail!("No staged changes to commit");
@@ -354,7 +401,7 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
 
     // Get AI session context since last checkpoint (if enabled)
     let session_context = if include_context {
-        ai::get_context_since_checkpoint()
+        ai::get_context_since_checkpoint_for_path(&repo_root)
             .ok()
             .flatten()
             .map(|context| truncate_context(&context, MAX_REVIEW_CONTEXT_CHARS))
@@ -382,10 +429,10 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
     }
     println!("────────────────────────────────────────");
 
-    let review = match run_codex_review(&diff, session_context.as_deref()) {
+    let review = match run_codex_review(&diff, session_context.as_deref(), &repo_root) {
         Ok(review) => review,
         Err(err) => {
-            restore_staged_snapshot(&staged_snapshot)?;
+            restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
             return Err(err);
         }
     };
@@ -398,7 +445,7 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
             commit_with_check_timeout_secs()
         );
         if !prompt_yes_no("Proceed without Codex review?")? {
-            restore_staged_snapshot(&staged_snapshot)?;
+            restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
             bail!("Commit cancelled - review unavailable");
         }
         println!();
@@ -429,11 +476,11 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
             review.issues.join("\n")
         );
 
-        match run_codex_fix(&fix_prompt) {
+        match run_codex_fix(&fix_prompt, &repo_root) {
             Ok(true) => {
                 println!("✓ Auto-fix applied");
                 // Re-stage any fixed files
-                let _ = git_run(&["add", "-u"]);
+                let _ = git_run_in(&repo_root, &["add", "-u"]);
             }
             Ok(false) => {
                 println!("⚠ Auto-fix had no changes");
@@ -449,7 +496,7 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
         }
 
         if !prompt_yes_no("Proceed with commit despite issues?")? {
-            restore_staged_snapshot(&staged_snapshot)?;
+            restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
             bail!("Commit cancelled - review issues found");
         }
         println!("Proceeding with commit...");
@@ -461,7 +508,7 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
     let api_key = get_openai_key()?;
 
     // Get status
-    let status = git_capture(&["status", "--short"]).unwrap_or_default();
+    let status = git_capture_in(&repo_root, &["status", "--short"]).unwrap_or_default();
 
     // Truncate diff if needed
     let (diff_for_prompt, truncated) = truncate_diff(&diff);
@@ -532,9 +579,8 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
 
     // Save checkpoint for next commit
     if include_context {
-        let cwd = std::env::current_dir()?;
         let now = chrono::Utc::now().to_rfc3339();
-        let (session_id, last_ts) = match ai::get_last_entry_timestamp() {
+        let (session_id, last_ts) = match ai::get_last_entry_timestamp_for_path(&repo_root) {
             Ok(Some((session_id, last_ts))) => (Some(session_id), Some(last_ts)),
             Ok(None) => (None, Some(now.clone())),
             Err(_) => (None, Some(now.clone())),
@@ -544,7 +590,7 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
             session_id,
             last_entry_timestamp: last_ts,
         };
-        if let Err(e) = ai::save_checkpoint(&cwd, checkpoint) {
+        if let Err(e) = ai::save_checkpoint(&repo_root, checkpoint) {
             debug!("failed to save commit checkpoint: {}", e);
         } else {
             debug!("saved commit checkpoint");
@@ -555,7 +601,7 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
 }
 
 /// Run Codex to review staged changes for bugs and performance issues.
-fn run_codex_review(diff: &str, session_context: Option<&str>) -> Result<ReviewResult> {
+fn run_codex_review(diff: &str, session_context: Option<&str>, workdir: &std::path::Path) -> Result<ReviewResult> {
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc;
     use std::time::Instant;
@@ -601,6 +647,7 @@ Diff:\n```diff\n{}\n```",
             "model=\"gpt-5.1-codex-max\"",
             "-",
         ])
+        .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -745,7 +792,7 @@ Diff:\n```diff\n{}\n```",
 
 /// Run Codex to auto-fix issues in staged changes.
 /// Returns true if fixes were applied.
-fn run_codex_fix(prompt: &str) -> Result<bool> {
+fn run_codex_fix(prompt: &str, workdir: &std::path::Path) -> Result<bool> {
     // Use codex exec to apply fixes
     let mut child = Command::new("codex")
         .args([
@@ -755,6 +802,7 @@ fn run_codex_fix(prompt: &str) -> Result<bool> {
             "-a",  // auto-edit mode
             prompt,
         ])
+        .current_dir(workdir)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -769,6 +817,7 @@ fn run_codex_fix(prompt: &str) -> Result<bool> {
     // Check if any files changed
     let diff_output = Command::new("git")
         .args(["diff", "--name-only"])
+        .current_dir(workdir)
         .output()
         .context("failed to check for changes")?;
 
@@ -809,6 +858,21 @@ fn git_run(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn git_run_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
+    let status = Command::new("git")
+        .current_dir(workdir)
+        .args(args)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+
+    if !status.success() {
+        bail!("git {} failed with status {}", args.join(" "), status);
+    }
+    Ok(())
+}
+
 /// Try to run a git command, returning Ok/Err without bailing.
 fn git_try(args: &[&str]) -> Result<()> {
     let status = Command::new("git")
@@ -824,8 +888,37 @@ fn git_try(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn git_try_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
+    let status = Command::new("git")
+        .current_dir(workdir)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+
+    if !status.success() {
+        bail!("git {} failed", args.join(" "));
+    }
+    Ok(())
+}
+
 fn git_capture(args: &[&str]) -> Result<String> {
     let output = Command::new("git")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+
+    if !output.status.success() {
+        bail!("git {} failed", args.join(" "));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn git_capture_in(workdir: &std::path::Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(workdir)
         .args(args)
         .output()
         .with_context(|| format!("failed to run git {}", args.join(" ")))?;
@@ -943,8 +1036,8 @@ fn trim_quotes(s: &str) -> String {
     s.to_string()
 }
 
-fn capture_staged_snapshot() -> Result<StagedSnapshot> {
-    let staged_diff = git_capture(&["diff", "--cached"])?;
+fn capture_staged_snapshot_in(workdir: &std::path::Path) -> Result<StagedSnapshot> {
+    let staged_diff = git_capture_in(workdir, &["diff", "--cached"])?;
     if staged_diff.trim().is_empty() {
         return Ok(StagedSnapshot { patch_path: None });
     }
@@ -962,13 +1055,13 @@ fn capture_staged_snapshot() -> Result<StagedSnapshot> {
     })
 }
 
-fn restore_staged_snapshot(snapshot: &StagedSnapshot) -> Result<()> {
-    let _ = git_try(&["reset", "HEAD"]);
+fn restore_staged_snapshot_in(workdir: &std::path::Path, snapshot: &StagedSnapshot) -> Result<()> {
+    let _ = git_try_in(workdir, &["reset", "HEAD"]);
     if let Some(path) = &snapshot.patch_path {
         let path_str = path
             .to_str()
             .context("failed to convert staged snapshot path to string")?;
-        let _ = git_try(&["apply", "--cached", path_str]);
+        let _ = git_try_in(workdir, &["apply", "--cached", path_str]);
         let _ = std::fs::remove_file(path);
     }
     Ok(())
