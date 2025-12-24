@@ -839,19 +839,24 @@ Diff:\n```diff\n{}\n```",
         )
     };
 
-    // Use claude CLI with print mode to get just the response
+    // Use claude CLI with print mode, piping prompt via stdin to avoid arg length limits
     let mut child = Command::new("claude")
         .args([
             "-p",  // print mode - output response only
             "--model", "claude-sonnet-4-20250514",
-            &prompt,
         ])
         .current_dir(workdir)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .context("failed to run claude - is Claude Code SDK installed?")?;
+
+    // Write prompt to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(prompt.as_bytes())
+            .context("failed to write prompt to claude stdin")?;
+    }
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -1168,7 +1173,7 @@ fn generate_commit_message(
     }
 
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .context("failed to create HTTP client")?;
 
