@@ -415,15 +415,34 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
         return Ok((String::new(), last_ts));
     }
 
+    // Optimization: only keep last N exchanges for efficiency
+    const MAX_EXCHANGES: usize = 8;
+    const MAX_MSG_CHARS: usize = 2000;
+
+    let total_exchanges = exchanges.len();
+    let exchanges_to_use: Vec<_> = if total_exchanges > MAX_EXCHANGES {
+        exchanges.into_iter().skip(total_exchanges - MAX_EXCHANGES).collect()
+    } else {
+        exchanges
+    };
+
     // Format the context
     let mut context = String::new();
 
-    for (user_msg, assistant_msg, _ts) in &exchanges {
+    // Add summary if we skipped older exchanges
+    if total_exchanges > MAX_EXCHANGES {
+        context.push_str(&format!(
+            "[{} earlier exchanges omitted for brevity]\n\n",
+            total_exchanges - MAX_EXCHANGES
+        ));
+    }
+
+    for (user_msg, assistant_msg, _ts) in &exchanges_to_use {
         context.push_str("H: ");
-        context.push_str(user_msg);
+        context.push_str(&truncate_message(user_msg, MAX_MSG_CHARS));
         context.push_str("\n\n");
         context.push_str("A: ");
-        context.push_str(assistant_msg);
+        context.push_str(&truncate_message(assistant_msg, MAX_MSG_CHARS));
         context.push_str("\n\n");
     }
 
@@ -436,6 +455,15 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
     Ok((context, last_ts))
 }
 
+/// Truncate a message to max chars, preserving meaningful content
+fn truncate_message(msg: &str, max_chars: usize) -> String {
+    if msg.len() <= max_chars {
+        return msg.to_string();
+    }
+    // Keep first part and indicate truncation
+    format!("{}...[truncated]", &msg[..max_chars])
+}
+
 fn read_codex_context_since(session_file: &PathBuf, since_ts: Option<&str>) -> Result<(String, Option<String>)> {
     let (exchanges, last_ts) = read_codex_exchanges(session_file, since_ts)?;
 
@@ -443,13 +471,33 @@ fn read_codex_context_since(session_file: &PathBuf, since_ts: Option<&str>) -> R
         return Ok((String::new(), last_ts));
     }
 
+    // Optimization: only keep last N exchanges for efficiency
+    const MAX_EXCHANGES: usize = 8;
+    const MAX_MSG_CHARS: usize = 2000;
+
+    let total_exchanges = exchanges.len();
+    let exchanges_to_use: Vec<_> = if total_exchanges > MAX_EXCHANGES {
+        exchanges.into_iter().skip(total_exchanges - MAX_EXCHANGES).collect()
+    } else {
+        exchanges
+    };
+
     let mut context = String::new();
-    for (user_msg, assistant_msg, _ts) in &exchanges {
+
+    // Add summary if we skipped older exchanges
+    if total_exchanges > MAX_EXCHANGES {
+        context.push_str(&format!(
+            "[{} earlier exchanges omitted for brevity]\n\n",
+            total_exchanges - MAX_EXCHANGES
+        ));
+    }
+
+    for (user_msg, assistant_msg, _ts) in &exchanges_to_use {
         context.push_str("H: ");
-        context.push_str(user_msg);
+        context.push_str(&truncate_message(user_msg, MAX_MSG_CHARS));
         context.push_str("\n\n");
         context.push_str("A: ");
-        context.push_str(assistant_msg);
+        context.push_str(&truncate_message(assistant_msg, MAX_MSG_CHARS));
         context.push_str("\n\n");
     }
 
