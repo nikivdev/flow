@@ -1104,10 +1104,21 @@ fn run_interactive_command(
     }
     cmd.current_dir(workdir);
 
-    // Inherit all stdio for full TTY passthrough
-    cmd.stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+    // Prefer /dev/tty so interactive tasks keep working even if stdio is redirected.
+    // Fall back to inherited stdio if /dev/tty is unavailable.
+    let tty_in = std::fs::File::open("/dev/tty").ok();
+    let tty_out = std::fs::OpenOptions::new().write(true).open("/dev/tty").ok();
+    let tty_err = std::fs::OpenOptions::new().write(true).open("/dev/tty").ok();
+
+    if let (Some(tty_in), Some(tty_out), Some(tty_err)) = (tty_in, tty_out, tty_err) {
+        cmd.stdin(Stdio::from(tty_in))
+            .stdout(Stdio::from(tty_out))
+            .stderr(Stdio::from(tty_err));
+    } else {
+        cmd.stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    }
 
     // NOTE: Do NOT create a new process group for interactive commands.
     // The child must remain in the foreground process group to read from the terminal.
