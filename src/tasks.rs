@@ -1332,14 +1332,9 @@ fn run_command_with_pipes(
 ) -> Result<(ExitStatus, String)> {
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
 
-    // Create new process group on Unix for reliable child process management
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-
     // Interactive mode: inherit all stdio for TTY passthrough
+    // NOTE: Do NOT create a new process group for interactive commands.
+    // The child must remain in the foreground process group to read from the terminal.
     if interactive {
         let mut child = cmd
             .stdin(Stdio::inherit())
@@ -1377,6 +1372,14 @@ fn run_command_with_pipes(
         }
 
         return Ok((status, String::new()));
+    }
+
+    // Create new process group on Unix for reliable child process management
+    // (only for non-interactive commands)
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
     }
 
     let mut child = cmd
