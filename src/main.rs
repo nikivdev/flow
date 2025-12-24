@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
     ai, cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    commit, daemon, doctor, env, fixup, history, hub, init, init_tracing, log_server, notify,
+    commit, commits, daemon, doctor, env, fixup, history, hub, init, init_tracing, log_server, notify,
     palette, processes, projects, skills, task_match, tasks,
 };
 
@@ -100,9 +100,9 @@ fn main() -> Result<()> {
             if opts.dry {
                 commit::dry_run_context()?;
             } else if opts.sync {
-                commit::run_with_check_sync(!opts.no_push, !opts.no_context)?;
+                commit::run_with_check_sync(!opts.no_push, !opts.no_context, opts.claude)?;
             } else {
-                commit::run_with_check(!opts.no_push, !opts.no_context)?;
+                commit::run_with_check(!opts.no_push, !opts.no_context, opts.claude)?;
             }
         }
         Some(Commands::Fixup(opts)) => {
@@ -122,6 +122,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Notify(cmd)) => {
             notify::run(cmd)?;
+        }
+        Some(Commands::Commits(opts)) => {
+            commits::run(opts)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

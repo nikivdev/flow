@@ -954,6 +954,7 @@ fn run_command_with_script(
     cmd: Command,
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
+    let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
     // Create a temp file for capturing output
     let temp_dir = std::env::temp_dir();
     let timestamp = std::time::SystemTime::now()
@@ -1010,15 +1011,26 @@ fn run_command_with_script(
         script_cmd.current_dir(dir);
     }
 
-    // Run with inherited stdio for full interactivity
-    script_cmd
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+    // Run with TTY stdio for interactivity, even if parent stdio is redirected.
+    let tty_in = std::fs::File::open("/dev/tty").ok();
+    let tty_out = std::fs::OpenOptions::new().write(true).open("/dev/tty").ok();
+    let tty_err = std::fs::OpenOptions::new().write(true).open("/dev/tty").ok();
 
-    // Create process group for proper signal handling
+    if let (Some(tty_in), Some(tty_out), Some(tty_err)) = (tty_in, tty_out, tty_err) {
+        script_cmd
+            .stdin(Stdio::from(tty_in))
+            .stdout(Stdio::from(tty_out))
+            .stderr(Stdio::from(tty_err));
+    } else {
+        script_cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    }
+
+    // Create process group for proper signal handling (non-interactive only)
     #[cfg(unix)]
-    {
+    if !interactive {
         use std::os::unix::process::CommandExt;
         script_cmd.process_group(0);
     }
