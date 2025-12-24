@@ -8,6 +8,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use shellexpand::tilde;
 
+use crate::fixup;
+
 /// Top-level configuration for flowd, currently focused on managed servers.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -742,8 +744,29 @@ fn load_with_includes(path: &Path, visited: &mut Vec<PathBuf>) -> Result<Config>
 
     let contents = fs::read_to_string(&canonical)
         .with_context(|| format!("failed to read flow config at {}", path.display()))?;
-    let mut cfg: Config = toml::from_str(&contents)
-        .with_context(|| format!("failed to parse flow config at {}", path.display()))?;
+    let mut cfg: Config = match toml::from_str(&contents) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            let fix = fixup::fix_toml_content(&contents);
+            if fix.fixes_applied.is_empty() {
+                return Err(err).with_context(|| {
+                    format!("failed to parse flow config at {}", path.display())
+                });
+            }
+            let fixed = fixup::apply_fixes_to_content(&contents, &fix.fixes_applied);
+            if let Err(write_err) = fs::write(&canonical, &fixed) {
+                return Err(err)
+                    .with_context(|| format!("failed to parse flow config at {}", path.display()))
+                    .with_context(|| format!("auto-fix write failed: {}", write_err));
+            }
+            toml::from_str(&fixed).with_context(|| {
+                format!(
+                    "failed to parse flow config at {} (after auto-fix)",
+                    path.display()
+                )
+            })?
+        }
+    };
 
     for include in cfg.command_files.clone() {
         let include_path = resolve_include_path(&canonical, &include.path);
