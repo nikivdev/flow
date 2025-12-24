@@ -134,6 +134,11 @@ pub fn fix_toml_content(content: &str) -> FixupResult {
     }
 }
 
+/// Apply fixes to TOML content and return the updated string.
+pub fn apply_fixes_to_content(content: &str, fixes: &[FixupAction]) -> String {
+    apply_fixes(content, fixes)
+}
+
 /// Check a line for invalid escape sequences in TOML basic strings.
 fn check_invalid_escapes(line: &str, line_num: usize) -> Option<FixupAction> {
     // Invalid escapes in TOML basic strings: \$ \: \@ \! etc.
