@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod cli;
 pub mod commit;
+pub mod commits;
 pub mod config;
 pub mod daemon;
 pub mod env;

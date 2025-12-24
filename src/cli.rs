@@ -183,6 +183,11 @@ pub enum Commands {
         long_about = "Sends a proposal to the Lin app widget for user approval. Used for human-in-the-loop AI workflows."
     )]
     Notify(NotifyCommand),
+    #[command(
+        about = "Browse and analyze git commits with AI session metadata.",
+        long_about = "Fuzzy search through git commits, showing attached AI sessions and review metadata. Allows jumping between commits to see the context and reasoning behind changes."
+    )]
+    Commits(CommitsOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -574,7 +579,7 @@ pub struct CommitOpts {
     #[arg(long, short = 'n')]
     pub no_push: bool,
     /// Run synchronously (don't delegate to hub).
-    #[arg(long)]
+    #[arg(long, visible_alias = "no-hub")]
     pub sync: bool,
     /// Skip AI session context in code review (commitWithCheck only).
     #[arg(long)]
@@ -582,6 +587,9 @@ pub struct CommitOpts {
     /// Dry run: show context that would be passed to Codex without committing.
     #[arg(long)]
     pub dry: bool,
+    /// Use Claude Code SDK instead of Codex for code review (commitWithCheck only).
+    #[arg(long)]
+    pub claude: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -832,4 +840,14 @@ pub struct NotifyCommand {
     /// Expiration time in seconds (default: 300 = 5 minutes).
     #[arg(short, long, default_value = "300")]
     pub expires: u64,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct CommitsOpts {
+    /// Number of commits to show (default: 100).
+    #[arg(long, short = 'n', default_value_t = 100)]
+    pub limit: usize,
+    /// Show commits across all branches.
+    #[arg(long)]
+    pub all: bool,
 }

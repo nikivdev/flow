@@ -263,14 +263,14 @@ pub fn run_sync(push: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run commit with Codex code review: stage, review with Codex, generate message, commit, push.
+/// Run commit with code review: stage, review with Codex or Claude, generate message, commit, push.
 /// If hub is running, delegates to it for async execution.
-pub fn run_with_check(push: bool, include_context: bool) -> Result<()> {
+pub fn run_with_check(push: bool, include_context: bool, use_claude: bool) -> Result<()> {
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
-        return delegate_to_hub_with_check(push, include_context);
+        return delegate_to_hub_with_check(push, include_context, use_claude);
     }
 
-    run_with_check_sync(push, include_context)
+    run_with_check_sync(push, include_context, use_claude)
 }
 
 fn commit_with_check_async_enabled() -> bool {
@@ -373,10 +373,11 @@ fn prompt_yes_no(message: &str) -> Result<bool> {
     Ok(answer == "y" || answer == "yes")
 }
 
-/// Run commit with Codex code review synchronously (called directly or by hub).
-/// If `include_context` is true, AI session context is passed to Codex for better understanding.
-pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
-    info!(push = push, include_context = include_context, "starting commit with check workflow");
+/// Run commit with code review synchronously (called directly or by hub).
+/// If `include_context` is true, AI session context is passed for better understanding.
+/// If `use_claude` is true, uses Claude Code SDK instead of Codex.
+pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool) -> Result<()> {
+    info!(push = push, include_context = include_context, use_claude = use_claude, "starting commit with check workflow");
 
     // Ensure we're in a git repo
     ensure_git_repo()?;
@@ -422,14 +423,23 @@ pub fn run_with_check_sync(push: bool, include_context: bool) -> Result<()> {
         }
     }
 
-    // Run Codex review
-    println!("\nRunning Codex code review...");
+    // Run code review (Codex or Claude)
+    if use_claude {
+        println!("\nRunning Claude code review...");
+    } else {
+        println!("\nRunning Codex code review...");
+    }
     if session_context.is_some() {
         println!("(with AI session context)");
     }
     println!("────────────────────────────────────────");
 
-    let review = match run_codex_review(&diff, session_context.as_deref(), &repo_root) {
+    let review = if use_claude {
+        run_claude_review(&diff, session_context.as_deref(), &repo_root)
+    } else {
+        run_codex_review(&diff, session_context.as_deref(), &repo_root)
+    };
+    let review = match review {
         Ok(review) => review,
         Err(err) => {
             restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
@@ -790,6 +800,189 @@ Diff:\n```diff\n{}\n```",
     })
 }
 
+/// Run Claude Code SDK to review staged changes for bugs and performance issues.
+fn run_claude_review(diff: &str, session_context: Option<&str>, workdir: &std::path::Path) -> Result<ReviewResult> {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    let (diff_for_prompt, _truncated) = truncate_diff(diff);
+
+    // Build the review prompt with optional session context
+    let prompt = if let Some(context) = session_context {
+        format!(
+            "Deep review the following git diff. Be thorough and check for:\n\
+1. Bugs and logic errors\n\
+2. Security vulnerabilities\n\
+3. Performance issues\n\
+4. Code quality\n\
+5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
+Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\
+Never include secrets, credentials, personal data, or other sensitive data in the response.\n\n\
+AI session context (intent behind changes):\n{}\n\n\
+Diff:\n```diff\n{}\n```",
+            context,
+            diff_for_prompt
+        )
+    } else {
+        format!(
+            "Deep review the following git diff. Be thorough and check for:\n\
+1. Bugs and logic errors\n\
+2. Security vulnerabilities\n\
+3. Performance issues\n\
+4. Code quality\n\
+5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
+Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\
+Never include secrets, credentials, personal data, or other sensitive data in the response.\n\n\
+Diff:\n```diff\n{}\n```",
+            diff_for_prompt
+        )
+    };
+
+    // Use claude CLI with print mode to get just the response
+    let mut child = Command::new("claude")
+        .args([
+            "-p",  // print mode - output response only
+            "--model", "claude-sonnet-4-20250514",
+            &prompt,
+        ])
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to run claude - is Claude Code SDK installed?")?;
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let start = Instant::now();
+
+    let tx_stdout = tx.clone();
+    let reader_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().flatten() {
+            let _ = tx_stdout.send(ReviewEvent::Line(line));
+        }
+        let _ = tx_stdout.send(ReviewEvent::StdoutDone);
+    });
+
+    let tx_stderr = tx.clone();
+    let stderr_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            let _ = tx_stderr.send(ReviewEvent::StderrLine(line));
+        }
+        let _ = tx_stderr.send(ReviewEvent::StderrDone);
+    });
+
+    let mut output_lines = Vec::new();
+    let mut stderr_lines = Vec::new();
+    let mut last_progress = Instant::now();
+    let timeout = Duration::from_secs(commit_with_check_timeout_secs());
+    let mut deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let mut done_count = 0;
+    loop {
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(ReviewEvent::Line(line)) => {
+                println!("{}", line);
+                output_lines.push(line);
+                last_progress = Instant::now();
+            }
+            Ok(ReviewEvent::StderrLine(line)) => {
+                if !line.trim().is_empty() {
+                    println!("claude: {}", line);
+                }
+                stderr_lines.push(line);
+            }
+            Ok(ReviewEvent::StdoutDone) | Ok(ReviewEvent::StderrDone) => {
+                done_count += 1;
+                if done_count >= 2 {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if last_progress.elapsed() >= Duration::from_secs(10) {
+                    println!(
+                        "Waiting on Claude review... ({}s elapsed, no output yet)",
+                        start.elapsed().as_secs()
+                    );
+                    last_progress = Instant::now();
+                }
+                if Instant::now() >= deadline {
+                    if prompt_yes_no("Claude review is taking longer than expected. Keep waiting?")? {
+                        deadline = Instant::now() + timeout;
+                    } else {
+                        timed_out = true;
+                        let _ = child.kill();
+                        break;
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let _ = reader_handle.join();
+    let _ = stderr_handle.join();
+    let status = child.wait()?;
+    let stderr_output = stderr_lines.join("\n");
+
+    if timed_out {
+        if !stderr_output.trim().is_empty() {
+            println!("{}", stderr_output.trim_end());
+        }
+        return Ok(ReviewResult {
+            issues_found: false,
+            issues: Vec::new(),
+            summary: Some(format!(
+                "Claude review timed out after {}s",
+                timeout.as_secs()
+            )),
+            timed_out: true,
+        });
+    }
+
+    if !status.success() {
+        if !stderr_output.trim().is_empty() {
+            println!("{}", stderr_output.trim_end());
+        }
+        println!("\nnotify: Claude review failed");
+        bail!("Claude review failed");
+    }
+
+    let result = output_lines.join("\n");
+
+    let review_json = parse_review_json(&result);
+    let (issues_found, issues) = if let Some(ref parsed) = review_json {
+        if let Some(summary) = parsed.summary.as_ref() {
+            debug!(summary = summary.as_str(), "claude review summary");
+        }
+        (parsed.issues_found, parsed.issues.clone())
+    } else if result.trim().is_empty() {
+        (false, Vec::new())
+    } else {
+        debug!(review_output = result.as_str(), "claude review output");
+        let lowered = result.to_lowercase();
+        let has_issues = lowered.contains("bug")
+            || lowered.contains("issue")
+            || lowered.contains("problem")
+            || lowered.contains("error")
+            || lowered.contains("vulnerability")
+            || lowered.contains("performance issue")
+            || lowered.contains("memory leak");
+        (has_issues, Vec::new())
+    };
+
+    Ok(ReviewResult {
+        issues_found,
+        issues,
+        summary: review_json.and_then(|r| r.summary),
+        timed_out: false,
+    })
+}
+
 /// Run Codex to auto-fix issues in staged changes.
 /// Returns true if fixes were applied.
 fn run_codex_fix(prompt: &str, workdir: &std::path::Path) -> Result<bool> {
@@ -994,34 +1187,61 @@ fn generate_commit_message(
         temperature: 0.3,
     };
 
-    let resp = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&body)
-        .send()
-        .context("failed to call OpenAI API")?;
+    // Retry logic for transient failures
+    const MAX_RETRIES: u32 = 3;
+    let mut last_error = None;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().unwrap_or_default();
-        bail!("OpenAI API error {}: {}", status, text);
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            let delay = Duration::from_secs(2u64.pow(attempt));
+            print!("Retrying in {}s... ", delay.as_secs());
+            io::stdout().flush().ok();
+            std::thread::sleep(delay);
+        }
+
+        match client
+            .post("https://api.openai.com/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .send()
+        {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().unwrap_or_default();
+                    // Don't retry client errors (4xx)
+                    if status.is_client_error() {
+                        bail!("OpenAI API error {}: {}", status, text);
+                    }
+                    last_error = Some(format!("OpenAI API error {}: {}", status, text));
+                    continue;
+                }
+
+                let parsed: ChatResponse = resp.json().context("failed to parse OpenAI response")?;
+
+                let message = parsed
+                    .choices
+                    .first()
+                    .and_then(|c| c.message.as_ref())
+                    .map(|m| m.content.trim().to_string())
+                    .unwrap_or_default();
+
+                if message.is_empty() {
+                    bail!("OpenAI returned empty commit message");
+                }
+
+                return Ok(trim_quotes(&message));
+            }
+            Err(e) => {
+                last_error = Some(format!("failed to call OpenAI API: {}", e));
+                if attempt < MAX_RETRIES - 1 {
+                    println!("API call failed, will retry...");
+                }
+            }
+        }
     }
 
-    let parsed: ChatResponse = resp.json().context("failed to parse OpenAI response")?;
-
-    let message = parsed
-        .choices
-        .first()
-        .and_then(|c| c.message.as_ref())
-        .map(|m| m.content.trim().to_string())
-        .unwrap_or_default();
-
-    if message.is_empty() {
-        bail!("OpenAI returned empty commit message");
-    }
-
-    // Trim quotes if wrapped
-    Ok(trim_quotes(&message))
+    bail!("{}", last_error.unwrap_or_else(|| "OpenAI API failed after retries".to_string()))
 }
 
 fn trim_quotes(s: &str) -> String {
@@ -1180,19 +1400,20 @@ fn delegate_to_hub(push: bool) -> Result<()> {
     }
 }
 
-fn delegate_to_hub_with_check(push: bool, include_context: bool) -> Result<()> {
+fn delegate_to_hub_with_check(push: bool, include_context: bool, use_claude: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
 
     // Build the command to run using the current executable path
     let push_flag = if push { "" } else { " --no-push" };
     let context_flag = if include_context { "" } else { " --no-context" };
+    let claude_flag = if use_claude { " --claude" } else { "" };
     let flow_bin = std::env::current_exe()
         .ok()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "flow".to_string());
     let command = format!(
-        "{} commitWithCheck --sync{}{}",
-        flow_bin, push_flag, context_flag
+        "{} commitWithCheck --sync{}{}{}",
+        flow_bin, push_flag, context_flag, claude_flag
     );
 
     let url = format!("http://{}:{}/tasks/run", HUB_HOST, HUB_PORT);
