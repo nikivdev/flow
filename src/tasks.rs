@@ -746,8 +746,14 @@ fn run_host_command(
     // For interactive tasks, run directly with inherited stdio
     // This ensures proper TTY handling for readline, prompts, etc.
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
+    let is_tty = std::io::stdin().is_terminal();
 
-    if interactive && std::io::stdin().is_terminal() {
+    eprintln!(
+        "[DEBUG] run_host_command: interactive={}, is_tty={}",
+        interactive, is_tty
+    );
+
+    if interactive && is_tty {
         return run_interactive_command(workdir, command, args, ctx);
     }
 
@@ -1331,6 +1337,12 @@ fn run_command_with_pipes(
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
+
+    eprintln!(
+        "[DEBUG] run_command_with_pipes: interactive={}, is_tty={}",
+        interactive,
+        std::io::stdin().is_terminal()
+    );
 
     // Interactive mode: inherit all stdio for TTY passthrough
     // NOTE: Do NOT create a new process group for interactive commands.
