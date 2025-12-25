@@ -16,7 +16,7 @@ use crate::cli::EnvAction;
 use crate::config;
 use crate::sync;
 
-const DEFAULT_API_URL: &str = "https://1f.nikiv.dev";
+const DEFAULT_API_URL: &str = "https://1focus.ai";
 
 /// Auth config stored in ~/.config/flow/auth.toml
 #[derive(Debug, Serialize, Deserialize, Default)]
