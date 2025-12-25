@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -23,6 +24,103 @@ const HUB_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 const HUB_PORT: u16 = 9050;
 
 const SYSTEM_PROMPT: &str = "You are an expert software engineer who writes clear, concise git commit messages. Use imperative mood, keep the subject line under 72 characters, and include an optional body with bullet points if helpful. Never wrap the message in quotes. Never include secrets, credentials, or file contents from .env files, environment variables, keys, or other sensitive data—even if they appear in the diff.";
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum ReviewModelArg {
+    /// Use Claude Opus 1 for review.
+    ClaudeOpus,
+    /// Use Codex high-capacity review (gpt-5.1-codex-max).
+    CodexHigh,
+    /// Use Codex mini review model (gpt-5.1-codex-mini).
+    CodexMini,
+}
+
+impl ReviewModelArg {
+    fn as_arg(&self) -> &'static str {
+        match self {
+            ReviewModelArg::ClaudeOpus => "claude-opus",
+            ReviewModelArg::CodexHigh => "codex-high",
+            ReviewModelArg::CodexMini => "codex-mini",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum CodexModel {
+    High,
+    Mini,
+}
+
+impl CodexModel {
+    fn as_codex_arg(&self) -> &'static str {
+        match self {
+            CodexModel::High => "gpt-5.1-codex-max",
+            CodexModel::Mini => "gpt-5.1-codex-mini",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum ClaudeModel {
+    Sonnet,
+    Opus,
+}
+
+impl ClaudeModel {
+    fn as_claude_arg(&self) -> &'static str {
+        match self {
+            ClaudeModel::Sonnet => "claude-sonnet-4-20250514",
+            ClaudeModel::Opus => "claude-opus-1",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum ReviewSelection {
+    Codex(CodexModel),
+    Claude(ClaudeModel),
+}
+
+impl ReviewSelection {
+    fn is_claude(&self) -> bool {
+        matches!(self, ReviewSelection::Claude(_))
+    }
+
+    fn review_model_arg(&self) -> Option<ReviewModelArg> {
+        match self {
+            ReviewSelection::Codex(CodexModel::High) => Some(ReviewModelArg::CodexHigh),
+            ReviewSelection::Codex(CodexModel::Mini) => Some(ReviewModelArg::CodexMini),
+            ReviewSelection::Claude(ClaudeModel::Opus) => Some(ReviewModelArg::ClaudeOpus),
+            ReviewSelection::Claude(ClaudeModel::Sonnet) => None,
+        }
+    }
+
+    fn model_label(&self) -> &'static str {
+        match self {
+            ReviewSelection::Codex(model) => model.as_codex_arg(),
+            ReviewSelection::Claude(model) => model.as_claude_arg(),
+        }
+    }
+}
+
+pub fn resolve_review_selection(
+    use_claude: bool,
+    override_model: Option<ReviewModelArg>,
+) -> ReviewSelection {
+    if let Some(model) = override_model {
+        return match model {
+            ReviewModelArg::ClaudeOpus => ReviewSelection::Claude(ClaudeModel::Opus),
+            ReviewModelArg::CodexHigh => ReviewSelection::Codex(CodexModel::High),
+            ReviewModelArg::CodexMini => ReviewSelection::Codex(CodexModel::Mini),
+        };
+    }
+
+    if use_claude {
+        ReviewSelection::Claude(ClaudeModel::Sonnet)
+    } else {
+        ReviewSelection::Codex(CodexModel::High)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct ReviewJson {
@@ -100,8 +198,7 @@ pub fn dry_run_context() -> Result<()> {
     }
 
     // Get diff
-    let diff = git_capture(&["diff", "--cached"])
-        .or_else(|_| git_capture(&["diff"]))?;
+    let diff = git_capture(&["diff", "--cached"]).or_else(|_| git_capture(&["diff"]))?;
 
     if diff.trim().is_empty() {
         println!("\nNo changes to show (no staged or unstaged diff)");
@@ -116,7 +213,11 @@ pub fn dry_run_context() -> Result<()> {
 
     match ai::get_context_since_checkpoint() {
         Ok(Some(context)) => {
-            println!("Context length: {} chars, {} lines\n", context.len(), context.lines().count());
+            println!(
+                "Context length: {} chars, {} lines\n",
+                context.len(),
+                context.lines().count()
+            );
             println!("{}", context);
         }
         Ok(None) => {
@@ -189,7 +290,11 @@ pub fn run_sync(push: bool) -> Result<()> {
 
     // Truncate diff if needed
     let (diff_for_prompt, truncated) = truncate_diff(&diff);
-    debug!(truncated = truncated, prompt_len = diff_for_prompt.len(), "prepared diff for prompt");
+    debug!(
+        truncated = truncated,
+        prompt_len = diff_for_prompt.len(),
+        "prepared diff for prompt"
+    );
 
     // Generate commit message
     print!("Generating commit message... ");
@@ -207,7 +312,10 @@ pub fn run_sync(push: bool) -> Result<()> {
 
     // Commit
     let paragraphs = split_paragraphs(&message);
-    debug!(paragraphs = paragraphs.len(), "split message into paragraphs");
+    debug!(
+        paragraphs = paragraphs.len(),
+        "split message into paragraphs"
+    );
     let mut args = vec!["commit"];
     for p in &paragraphs {
         args.push("-m");
@@ -264,12 +372,30 @@ pub fn run_sync(push: bool) -> Result<()> {
 
 /// Run commit with code review: stage, review with Codex or Claude, generate message, commit, push.
 /// If hub is running, delegates to it for async execution.
-pub fn run_with_check(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>, max_tokens: usize) -> Result<()> {
+pub fn run_with_check(
+    push: bool,
+    include_context: bool,
+    review_selection: ReviewSelection,
+    author_message: Option<&str>,
+    max_tokens: usize,
+) -> Result<()> {
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
-        return delegate_to_hub_with_check(push, include_context, use_claude, author_message, max_tokens);
+        return delegate_to_hub_with_check(
+            push,
+            include_context,
+            review_selection,
+            author_message,
+            max_tokens,
+        );
     }
 
-    run_with_check_sync(push, include_context, use_claude, author_message, max_tokens)
+    run_with_check_sync(
+        push,
+        include_context,
+        review_selection,
+        author_message,
+        max_tokens,
+    )
 }
 
 fn commit_with_check_async_enabled() -> bool {
@@ -374,12 +500,24 @@ fn prompt_yes_no(message: &str) -> Result<bool> {
 
 /// Run commit with code review synchronously (called directly or by hub).
 /// If `include_context` is true, AI session context is passed for better understanding.
-/// If `use_claude` is true, uses Claude Code SDK instead of Codex.
+/// `review_selection` determines whether Claude or Codex runs and which model is used.
 /// If `author_message` is provided, it's appended to the commit message.
-pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>, max_tokens: usize) -> Result<()> {
+pub fn run_with_check_sync(
+    push: bool,
+    include_context: bool,
+    review_selection: ReviewSelection,
+    author_message: Option<&str>,
+    max_tokens: usize,
+) -> Result<()> {
     // Convert tokens to chars (roughly 4 chars per token)
     let max_context = max_tokens * 4;
-    info!(push = push, include_context = include_context, use_claude = use_claude, max_tokens = max_tokens, "starting commit with check workflow");
+    info!(
+        push = push,
+        include_context = include_context,
+        review_model = review_selection.model_label(),
+        max_tokens = max_tokens,
+        "starting commit with check workflow"
+    );
 
     // Ensure we're in a git repo
     ensure_git_repo()?;
@@ -426,20 +564,24 @@ pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, 
     }
 
     // Run code review (Codex or Claude)
-    if use_claude {
+    if review_selection.is_claude() {
         println!("\nRunning Claude code review...");
     } else {
         println!("\nRunning Codex code review...");
     }
+    println!("Model: {}", review_selection.model_label());
     if session_context.is_some() {
         println!("(with AI session context)");
     }
     println!("────────────────────────────────────────");
 
-    let review = if use_claude {
-        run_claude_review(&diff, session_context.as_deref(), &repo_root)
-    } else {
-        run_codex_review(&diff, session_context.as_deref(), &repo_root)
+    let review = match review_selection {
+        ReviewSelection::Claude(model) => {
+            run_claude_review(&diff, session_context.as_deref(), &repo_root, model)
+        }
+        ReviewSelection::Codex(model) => {
+            run_codex_review(&diff, session_context.as_deref(), &repo_root, model)
+        }
     };
     let review = match review {
         Ok(review) => review,
@@ -484,20 +626,31 @@ pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, 
             println!();
 
             // Send notification for critical issues (secrets, security)
-            let critical_issues: Vec<_> = review.issues.iter()
+            let critical_issues: Vec<_> = review
+                .issues
+                .iter()
                 .filter(|i| {
                     let lower = i.to_lowercase();
-                    lower.contains("secret") || lower.contains(".env") ||
-                    lower.contains("credential") || lower.contains("api key") ||
-                    lower.contains("password") || lower.contains("token") ||
-                    lower.contains("security") || lower.contains("vulnerability")
+                    lower.contains("secret")
+                        || lower.contains(".env")
+                        || lower.contains("credential")
+                        || lower.contains("api key")
+                        || lower.contains("password")
+                        || lower.contains("token")
+                        || lower.contains("security")
+                        || lower.contains("vulnerability")
                 })
                 .collect();
 
             if !critical_issues.is_empty() {
-                let alert_msg = format!("⚠️ Review found {} critical issue(s): {}",
+                let alert_msg = format!(
+                    "⚠️ Review found {} critical issue(s): {}",
                     critical_issues.len(),
-                    critical_issues.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("; ")
+                    critical_issues
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
                 );
                 // Truncate if too long
                 let alert_msg = if alert_msg.len() > 200 {
@@ -619,7 +772,12 @@ pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, 
 }
 
 /// Run Codex to review staged changes for bugs and performance issues.
-fn run_codex_review(diff: &str, session_context: Option<&str>, workdir: &std::path::Path) -> Result<ReviewResult> {
+fn run_codex_review(
+    diff: &str,
+    session_context: Option<&str>,
+    workdir: &std::path::Path,
+    model: CodexModel,
+) -> Result<ReviewResult> {
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc;
     use std::time::Instant;
@@ -632,8 +790,7 @@ fn run_codex_review(diff: &str, session_context: Option<&str>, workdir: &std::pa
             "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
 Context:{}\n\
 ```diff\n{}\n```",
-            context,
-            diff_for_prompt
+            context, diff_for_prompt
         )
     } else {
         format!(
@@ -643,14 +800,11 @@ Context:{}\n\
         )
     };
 
+    let model_arg = format!("model=\"{}\"", model.as_codex_arg());
+
     // Use codex review with explicit model selection via stdin to avoid argv limits.
     let mut child = Command::new("codex")
-        .args([
-            "review",
-            "-c",
-            "model=\"gpt-5.1-codex-max\"",
-            "-",
-        ])
+        .args(["review", "-c", &model_arg, "-"])
         .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -722,7 +876,8 @@ Context:{}\n\
                     last_progress = Instant::now();
                 }
                 if Instant::now() >= deadline {
-                    if prompt_yes_no("Codex review is taking longer than expected. Keep waiting?")? {
+                    if prompt_yes_no("Codex review is taking longer than expected. Keep waiting?")?
+                    {
                         deadline = Instant::now() + timeout;
                     } else {
                         timed_out = true;
@@ -795,7 +950,12 @@ Context:{}\n\
 }
 
 /// Run Claude Code SDK to review staged changes for bugs and performance issues.
-fn run_claude_review(diff: &str, session_context: Option<&str>, workdir: &std::path::Path) -> Result<ReviewResult> {
+fn run_claude_review(
+    diff: &str,
+    session_context: Option<&str>,
+    workdir: &std::path::Path,
+    model: ClaudeModel,
+) -> Result<ReviewResult> {
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc;
     use std::time::Instant;
@@ -808,8 +968,7 @@ fn run_claude_review(diff: &str, session_context: Option<&str>, workdir: &std::p
             "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
 Context:{}\n\
 ```diff\n{}\n```",
-            context,
-            diff_for_prompt
+            context, diff_for_prompt
         )
     } else {
         format!(
@@ -820,11 +979,10 @@ Context:{}\n\
     };
 
     // Use claude CLI with print mode, piping prompt via stdin to avoid arg length limits
+    let model_arg = model.as_claude_arg();
+
     let mut child = Command::new("claude")
-        .args([
-            "-p",  // print mode - output response only
-            "--model", "claude-sonnet-4-20250514",
-        ])
+        .args(["-p", "--model", model_arg])
         .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -834,7 +992,8 @@ Context:{}\n\
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(prompt.as_bytes())
+        stdin
+            .write_all(prompt.as_bytes())
             .context("failed to write prompt to claude stdin")?;
     }
 
@@ -896,7 +1055,8 @@ Context:{}\n\
                     last_progress = Instant::now();
                 }
                 if Instant::now() >= deadline {
-                    if prompt_yes_no("Claude review is taking longer than expected. Keep waiting?")? {
+                    if prompt_yes_no("Claude review is taking longer than expected. Keep waiting?")?
+                    {
                         deadline = Instant::now() + timeout;
                     } else {
                         timed_out = true;
@@ -983,8 +1143,7 @@ fn ensure_git_repo() -> Result<()> {
 }
 
 fn get_openai_key() -> Result<String> {
-    std::env::var("OPENAI_API_KEY")
-        .context("OPENAI_API_KEY environment variable not set")
+    std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY environment variable not set")
 }
 
 fn git_run(args: &[&str]) -> Result<()> {
@@ -1115,7 +1274,8 @@ fn generate_commit_message(
     status: &str,
     truncated: bool,
 ) -> Result<String> {
-    let mut user_prompt = String::from("Write a git commit message for the staged changes.\n\nGit diff:\n");
+    let mut user_prompt =
+        String::from("Write a git commit message for the staged changes.\n\nGit diff:\n");
     user_prompt.push_str(diff);
 
     if truncated {
@@ -1178,7 +1338,8 @@ fn generate_commit_message(
                     continue;
                 }
 
-                let parsed: ChatResponse = resp.json().context("failed to parse OpenAI response")?;
+                let parsed: ChatResponse =
+                    resp.json().context("failed to parse OpenAI response")?;
 
                 let message = parsed
                     .choices
@@ -1202,7 +1363,10 @@ fn generate_commit_message(
         }
     }
 
-    bail!("{}", last_error.unwrap_or_else(|| "OpenAI API failed after retries".to_string()))
+    bail!(
+        "{}",
+        last_error.unwrap_or_else(|| "OpenAI API failed after retries".to_string())
+    )
 }
 
 fn trim_quotes(s: &str) -> String {
@@ -1278,7 +1442,7 @@ fn send_to_1focus(project_path: &std::path::Path, issues: &[String], summary: Op
     // Try production worker first, then local
     let endpoints = [
         "https://1f-worker.nikiv.workers.dev/api/v1/events", // Production worker
-        "http://localhost:8787/api/v1/events",                // Local dev
+        "http://localhost:8787/api/v1/events",               // Local dev
     ];
 
     let project_name = project_path
@@ -1395,23 +1559,37 @@ fn delegate_to_hub(push: bool) -> Result<()> {
     }
 }
 
-fn delegate_to_hub_with_check(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>, max_tokens: usize) -> Result<()> {
+fn delegate_to_hub_with_check(
+    push: bool,
+    include_context: bool,
+    review_selection: ReviewSelection,
+    author_message: Option<&str>,
+    max_tokens: usize,
+) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
 
     // Build the command to run using the current executable path
     let push_flag = if push { "" } else { " --no-push" };
     let context_flag = if include_context { "" } else { " --no-context" };
-    let claude_flag = if use_claude { " --claude" } else { "" };
+    let claude_flag = if review_selection.is_claude() {
+        " --claude"
+    } else {
+        ""
+    };
     let message_flag = author_message
         .map(|m| format!(" --message {:?}", m))
+        .unwrap_or_default();
+    let review_model_flag = review_selection
+        .review_model_arg()
+        .map(|arg| format!(" --review-model {}", arg.as_arg()))
         .unwrap_or_default();
     let flow_bin = std::env::current_exe()
         .ok()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "flow".to_string());
     let command = format!(
-        "{} commitWithCheck --sync{}{}{}{} --tokens {}",
-        flow_bin, push_flag, context_flag, claude_flag, message_flag, max_tokens
+        "{} commitWithCheck --sync{}{}{}{}{} --tokens {}",
+        flow_bin, push_flag, context_flag, claude_flag, review_model_flag, message_flag, max_tokens
     );
 
     let url = format!("http://{}:{}/tasks/run", HUB_HOST, HUB_PORT);

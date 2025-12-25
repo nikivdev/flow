@@ -98,5 +98,9 @@ pub fn is_available(port: Option<u16>) -> bool {
     };
 
     let url = format!("http://localhost:{port}/v1/models");
-    client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false)
+    client
+        .get(&url)
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }

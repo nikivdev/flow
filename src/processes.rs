@@ -250,7 +250,10 @@ fn get_log_path(project_root: &Path, project_name: Option<&str>, task_name: &str
         if clean.is_empty() {
             format!("proj-{}", short_hash(&project_root.display().to_string()))
         } else {
-            format!("{clean}-{}", short_hash(&project_root.display().to_string()))
+            format!(
+                "{clean}-{}",
+                short_hash(&project_root.display().to_string())
+            )
         }
     } else {
         format!("proj-{}", short_hash(&project_root.display().to_string()))
@@ -289,7 +292,10 @@ pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
         match projects::resolve_project(name)? {
             Some(entry) => (entry.project_root, entry.config_path, Some(entry.name)),
             None => {
-                bail!("Project '{}' not found. Use `f projects` to see registered projects.", name);
+                bail!(
+                    "Project '{}' not found. Use `f projects` to see registered projects.",
+                    name
+                );
             }
         }
     } else if opts.config.exists() {
@@ -307,11 +313,16 @@ pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
         match projects::resolve_project(&active)? {
             Some(entry) => (entry.project_root, entry.config_path, Some(entry.name)),
             None => {
-                bail!("Active project '{}' not found. Use `f projects` to see registered projects.", active);
+                bail!(
+                    "Active project '{}' not found. Use `f projects` to see registered projects.",
+                    active
+                );
             }
         }
     } else {
-        bail!("No flow.toml in current directory and no active project set.\nRun a task in a project first, or use: f logs -p <project>");
+        bail!(
+            "No flow.toml in current directory and no active project set.\nRun a task in a project first, or use: f logs -p <project>"
+        );
     };
 
     // If no task specified, try to find available logs - prefer running tasks
@@ -328,7 +339,8 @@ pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
             // Check for running tasks
             let running = running::get_project_processes(&config_path).unwrap_or_default();
             let running_tasks: Vec<_> = running.iter().map(|p| p.task_name.clone()).collect();
-            let running_logs: Vec<_> = logs.iter()
+            let running_logs: Vec<_> = logs
+                .iter()
                 .filter(|log| running_tasks.contains(log))
                 .cloned()
                 .collect();
@@ -360,7 +372,11 @@ pub fn show_task_logs(opts: TaskLogsOpts) -> Result<()> {
     let log_path = get_log_path(&project_root, project_name.as_deref(), &task_name);
 
     if !log_path.exists() {
-        bail!("No log file found for task '{}' at {}", task_name, log_path.display());
+        bail!(
+            "No log file found for task '{}' at {}",
+            task_name,
+            log_path.display()
+        );
     }
 
     if opts.follow {
@@ -432,7 +448,10 @@ fn list_available_logs(_all: bool) -> Result<()> {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            let project_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+            let project_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
             println!("\n{}:", project_name);
 
             for log_entry in fs::read_dir(&path)? {
@@ -487,7 +506,10 @@ fn get_project_log_files(project_root: &Path, project_name: Option<&str>) -> Vec
         if clean.is_empty() {
             format!("proj-{}", short_hash(&project_root.display().to_string()))
         } else {
-            format!("{clean}-{}", short_hash(&project_root.display().to_string()))
+            format!(
+                "{clean}-{}",
+                short_hash(&project_root.display().to_string())
+            )
         }
     } else {
         format!("proj-{}", short_hash(&project_root.display().to_string()))
@@ -637,10 +659,16 @@ fn show_hub_task_logs(task_id: &str, follow: bool) -> Result<()> {
         }
     } else {
         // One-shot fetch
-        let resp = client.get(&url).send().context("failed to fetch task logs")?;
+        let resp = client
+            .get(&url)
+            .send()
+            .context("failed to fetch task logs")?;
 
         if resp.status().as_u16() == 404 {
-            println!("Task '{}' not found yet (queued). Streaming logs...", task_id);
+            println!(
+                "Task '{}' not found yet (queued). Streaming logs...",
+                task_id
+            );
             return show_hub_task_logs(task_id, true);
         }
 

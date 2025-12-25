@@ -8,8 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::{
     cli::TaskRunOpts,
     discover::{self, DiscoveredTask},
-    lmstudio,
-    tasks,
+    lmstudio, tasks,
 };
 
 /// Options for the match command.
@@ -34,14 +33,26 @@ pub struct MatchResult {
 }
 
 // Built-in commands that can be run directly if no task matches
-const BUILTIN_COMMANDS: &[(&str, &[&str])] = &[
-    ("commit", &["commit", "c"]),
-];
+const BUILTIN_COMMANDS: &[(&str, &[&str])] = &[("commit", &["commit", "c"])];
 
 // CLI subcommands that should be passed through to the CLI parser, not matched as tasks
 const CLI_SUBCOMMANDS: &[&str] = &[
-    "logs", "hub", "ps", "kill", "projects", "active", "server", "init", "doctor",
-    "tasks", "search", "rerun", "last-cmd", "last-cmd-full", "match", "help",
+    "logs",
+    "hub",
+    "ps",
+    "kill",
+    "projects",
+    "active",
+    "server",
+    "init",
+    "doctor",
+    "tasks",
+    "search",
+    "rerun",
+    "last-cmd",
+    "last-cmd-full",
+    "match",
+    "help",
 ];
 
 fn run_builtin(name: &str, execute: bool) -> Result<()> {
@@ -70,7 +81,11 @@ fn find_builtin(query: &str) -> Option<&'static str> {
 /// Check if the first arg is a CLI subcommand that needs pass-through
 fn is_cli_subcommand(args: &[String]) -> bool {
     args.first()
-        .map(|first| CLI_SUBCOMMANDS.iter().any(|cmd| cmd.eq_ignore_ascii_case(first)))
+        .map(|first| {
+            CLI_SUBCOMMANDS
+                .iter()
+                .any(|cmd| cmd.eq_ignore_ascii_case(first))
+        })
         .unwrap_or(false)
 }
 
@@ -106,55 +121,68 @@ pub fn run(opts: MatchOpts) -> Result<()> {
     let discovery = discover::discover_tasks(&root)?;
 
     // Try direct match first (exact name, shortcut, or abbreviation) - no LLM needed
-    let (task_name, task_args, was_direct_match) =
-        if let Some(direct) = try_direct_match(&opts.args, &discovery.tasks) {
-            (direct.task_name, direct.args, true)
-        } else if let Some(builtin) = find_builtin(&query_display) {
-            // No task match, but matches a built-in command
-            return run_builtin(builtin, opts.execute);
-        } else if discovery.tasks.is_empty() {
-            // No tasks and no built-in match: behave like `f <args>`
-            return passthrough_to_cli(&opts.args);
-        } else if opts.args.len() == 1 {
-            // Single-token queries should behave like `f <arg>` if no direct match.
-            return passthrough_to_cli(&opts.args);
-        } else {
-            // No direct match, use LM Studio
-            let prompt = build_matching_prompt(&query_display, &discovery.tasks);
+    let (task_name, task_args, was_direct_match) = if let Some(direct) =
+        try_direct_match(&opts.args, &discovery.tasks)
+    {
+        (direct.task_name, direct.args, true)
+    } else if let Some(builtin) = find_builtin(&query_display) {
+        // No task match, but matches a built-in command
+        return run_builtin(builtin, opts.execute);
+    } else if discovery.tasks.is_empty() {
+        // No tasks and no built-in match: behave like `f <args>`
+        return passthrough_to_cli(&opts.args);
+    } else if opts.args.len() == 1 {
+        // Single-token queries should behave like `f <arg>` if no direct match.
+        return passthrough_to_cli(&opts.args);
+    } else {
+        // No direct match, use LM Studio
+        let prompt = build_matching_prompt(&query_display, &discovery.tasks);
 
-            // Query LM Studio (will fail with clear error if not running)
-            let response = match lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port) {
-                Ok(r) if !r.trim().is_empty() => r,
-                Ok(_) => {
-                    // Empty response - check for built-in before failing
-                    if let Some(builtin) = find_builtin(&query_display) {
-                        return run_builtin(builtin, opts.execute);
-                    }
-                    let task_list: Vec<_> = discovery.tasks.iter().map(|t| t.task.name.as_str()).collect();
-                    bail!(
-                        "No match for '{}'. LM Studio returned empty response.\n\nAvailable tasks:\n  {}",
-                        query_display,
-                        task_list.join("\n  ")
-                    );
+        // Query LM Studio (will fail with clear error if not running)
+        let response = match lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port) {
+            Ok(r) if !r.trim().is_empty() => r,
+            Ok(_) => {
+                // Empty response - check for built-in before failing
+                if let Some(builtin) = find_builtin(&query_display) {
+                    return run_builtin(builtin, opts.execute);
                 }
-                Err(e) => {
-                    // LM Studio error - fall back to built-in if available
-                    if let Some(builtin) = find_builtin(&query_display) {
-                        return run_builtin(builtin, opts.execute);
-                    }
-                    let task_list: Vec<_> = discovery.tasks.iter().map(|t| t.task.name.as_str()).collect();
-                    bail!(
-                        "No direct match for '{}'. LM Studio error: {}\n\nAvailable tasks:\n  {}",
-                        query_display,
-                        e,
-                        task_list.join("\n  ")
-                    );
+                let task_list: Vec<_> = discovery
+                    .tasks
+                    .iter()
+                    .map(|t| t.task.name.as_str())
+                    .collect();
+                bail!(
+                    "No match for '{}'. LM Studio returned empty response.\n\nAvailable tasks:\n  {}",
+                    query_display,
+                    task_list.join("\n  ")
+                );
+            }
+            Err(e) => {
+                // LM Studio error - fall back to built-in if available
+                if let Some(builtin) = find_builtin(&query_display) {
+                    return run_builtin(builtin, opts.execute);
                 }
-            };
-
-            // Parse the response to get the task name (no args for LLM matches)
-            (extract_task_name(&response, &discovery.tasks)?, Vec::new(), false)
+                let task_list: Vec<_> = discovery
+                    .tasks
+                    .iter()
+                    .map(|t| t.task.name.as_str())
+                    .collect();
+                bail!(
+                    "No direct match for '{}'. LM Studio error: {}\n\nAvailable tasks:\n  {}",
+                    query_display,
+                    e,
+                    task_list.join("\n  ")
+                );
+            }
         };
+
+        // Parse the response to get the task name (no args for LLM matches)
+        (
+            extract_task_name(&response, &discovery.tasks)?,
+            Vec::new(),
+            false,
+        )
+    };
 
     // Find the matched task
     let matched = discovery
@@ -341,7 +369,10 @@ fn extract_task_name(response: &str, tasks: &[DiscoveredTask]) -> Result<String>
 
     // Try to find a task name within the response
     for task in tasks {
-        if response.to_lowercase().contains(&task.task.name.to_lowercase()) {
+        if response
+            .to_lowercase()
+            .contains(&task.task.name.to_lowercase())
+        {
             return Ok(task.task.name.clone());
         }
     }

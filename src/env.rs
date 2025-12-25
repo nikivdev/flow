@@ -62,8 +62,8 @@ fn load_auth_config() -> Result<AuthConfig> {
     if !path.exists() {
         return Ok(AuthConfig::default());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     toml::from_str(&content).context("failed to parse auth.toml")
 }
 
@@ -206,7 +206,9 @@ fn login() -> Result<()> {
 /// Pull env vars from 1focus and write to .env.
 fn pull(environment: &str) -> Result<()> {
     let auth = load_auth_config()?;
-    let token = auth.token.as_ref()
+    let token = auth
+        .token
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
 
     let project = get_project_name()?;
@@ -218,7 +220,10 @@ fn pull(environment: &str) -> Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/env/{}?environment={}", api_url, project, environment);
+    let url = format!(
+        "{}/api/env/{}?environment={}",
+        api_url, project, environment
+    );
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", token))
@@ -230,7 +235,10 @@ fn pull(environment: &str) -> Result<()> {
     }
 
     if resp.status() == 404 {
-        bail!("Project '{}' not found. Create it with `f env push` first.", project);
+        bail!(
+            "Project '{}' not found. Create it with `f env push` first.",
+            project
+        );
     }
 
     if !resp.status().is_success() {
@@ -248,7 +256,10 @@ fn pull(environment: &str) -> Result<()> {
 
     // Write to .env
     let mut content = String::new();
-    content.push_str(&format!("# Environment: {} (pulled from 1focus)\n", environment));
+    content.push_str(&format!(
+        "# Environment: {} (pulled from 1focus)\n",
+        environment
+    ));
     content.push_str(&format!("# Project: {}\n", project));
     content.push_str("#\n");
 
@@ -273,7 +284,9 @@ fn pull(environment: &str) -> Result<()> {
 /// Push local .env to 1focus.
 fn push(environment: &str) -> Result<()> {
     let auth = load_auth_config()?;
-    let token = auth.token.as_ref()
+    let token = auth
+        .token
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
 
     let project = get_project_name()?;
@@ -292,7 +305,12 @@ fn push(environment: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("Pushing {} env vars to '{}' ({})...", vars.len(), project, environment);
+    println!(
+        "Pushing {} env vars to '{}' ({})...",
+        vars.len(),
+        project,
+        environment
+    );
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -331,7 +349,9 @@ fn push(environment: &str) -> Result<()> {
 /// List env vars for this project.
 fn list(environment: &str) -> Result<()> {
     let auth = load_auth_config()?;
-    let token = auth.token.as_ref()
+    let token = auth
+        .token
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
 
     let project = get_project_name()?;
@@ -341,7 +361,10 @@ fn list(environment: &str) -> Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/env/{}?environment={}", api_url, project, environment);
+    let url = format!(
+        "{}/api/env/{}?environment={}",
+        api_url, project, environment
+    );
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", token))
@@ -396,10 +419,13 @@ fn list(environment: &str) -> Result<()> {
 /// Set a single env var.
 fn set_var(pair: &str, environment: &str) -> Result<()> {
     let auth = load_auth_config()?;
-    let token = auth.token.as_ref()
+    let token = auth
+        .token
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
 
-    let (key, value) = pair.split_once('=')
+    let (key, value) = pair
+        .split_once('=')
         .ok_or_else(|| anyhow::anyhow!("Invalid format. Use KEY=VALUE"))?;
 
     let key = key.trim();
@@ -438,7 +464,16 @@ fn set_var(pair: &str, environment: &str) -> Result<()> {
         bail!("API error {}: {}", status, body);
     }
 
-    println!("✓ Set {}={} ({})", key, if value.len() > 8 { format!("{}...", &value[..4]) } else { "****".to_string() }, environment);
+    println!(
+        "✓ Set {}={} ({})",
+        key,
+        if value.len() > 8 {
+            format!("{}...", &value[..4])
+        } else {
+            "****".to_string()
+        },
+        environment
+    );
 
     Ok(())
 }
@@ -446,7 +481,9 @@ fn set_var(pair: &str, environment: &str) -> Result<()> {
 /// Delete env vars.
 fn delete_vars(keys: &[String], environment: &str) -> Result<()> {
     let auth = load_auth_config()?;
-    let token = auth.token.as_ref()
+    let token = auth
+        .token
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
 
     if keys.is_empty() {
@@ -534,7 +571,8 @@ fn parse_env_file(content: &str) -> HashMap<String, String> {
 
             // Remove surrounding quotes
             let value = value
-                .strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
                 .or_else(|| value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
                 .unwrap_or(value);
 

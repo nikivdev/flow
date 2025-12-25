@@ -58,7 +58,11 @@ fn ensure_symlinks() -> Result<()> {
 }
 
 /// Create a symlink if it doesn't exist or points elsewhere.
-fn create_symlink_if_needed(target: &PathBuf, parent_dir: &PathBuf, link_path: &PathBuf) -> Result<()> {
+fn create_symlink_if_needed(
+    target: &PathBuf,
+    parent_dir: &PathBuf,
+    link_path: &PathBuf,
+) -> Result<()> {
     // Create parent directory if needed
     if !parent_dir.exists() {
         fs::create_dir_all(parent_dir)?;
@@ -103,8 +107,7 @@ fn list_skills() -> Result<()> {
         return Ok(());
     }
 
-    let entries = fs::read_dir(&skills_dir)
-        .context("failed to read skills directory")?;
+    let entries = fs::read_dir(&skills_dir).context("failed to read skills directory")?;
 
     let mut skills: Vec<(String, Option<String>)> = Vec::new();
 
@@ -113,7 +116,8 @@ fn list_skills() -> Result<()> {
         let path = entry.path();
 
         if path.is_dir() {
-            let name = path.file_name()
+            let name = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
@@ -178,12 +182,12 @@ fn new_skill(name: &str, description: Option<&str>) -> Result<()> {
     }
 
     // Create skill directory
-    fs::create_dir_all(&skill_dir)
-        .context("failed to create skill directory")?;
+    fs::create_dir_all(&skill_dir).context("failed to create skill directory")?;
 
     // Create skill.md
     let desc = description.unwrap_or("TODO: Add description");
-    let content = format!(r#"---
+    let content = format!(
+        r#"---
 name: {}
 description: {}
 ---
@@ -199,11 +203,12 @@ TODO: Add instructions for this skill.
 ```bash
 # Example usage
 ```
-"#, name, desc, name);
+"#,
+        name, desc, name
+    );
 
     let skill_file = skill_dir.join("skill.md");
-    fs::write(&skill_file, content)
-        .context("failed to write skill.md")?;
+    fs::write(&skill_file, content).context("failed to write skill.md")?;
 
     // Ensure symlinks exist for Claude Code and Codex
     ensure_symlinks()?;
@@ -223,8 +228,7 @@ fn show_skill(name: &str) -> Result<()> {
         bail!("Skill '{}' not found", name);
     }
 
-    let content = fs::read_to_string(&skill_file)
-        .context("failed to read skill.md")?;
+    let content = fs::read_to_string(&skill_file).context("failed to read skill.md")?;
 
     println!("{}", content);
 
@@ -237,7 +241,11 @@ fn edit_skill(name: &str) -> Result<()> {
     let skill_file = skills_dir.join(name).join("skill.md");
 
     if !skill_file.exists() {
-        bail!("Skill '{}' not found. Create it with: f skills new {}", name, name);
+        bail!(
+            "Skill '{}' not found. Create it with: f skills new {}",
+            name,
+            name
+        );
     }
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
@@ -259,8 +267,7 @@ fn remove_skill(name: &str) -> Result<()> {
         bail!("Skill '{}' not found", name);
     }
 
-    fs::remove_dir_all(&skill_dir)
-        .context("failed to remove skill directory")?;
+    fs::remove_dir_all(&skill_dir).context("failed to remove skill directory")?;
 
     println!("Removed skill: {}", name);
 
@@ -275,8 +282,7 @@ fn install_skill(name: &str) -> Result<()> {
 
     // Fetch skill from API
     let url = format!("{}?name={}", SKILLS_API_URL, name);
-    let response = reqwest::blocking::get(&url)
-        .context("failed to fetch skill from registry")?;
+    let response = reqwest::blocking::get(&url).context("failed to fetch skill from registry")?;
 
     if response.status() == 404 {
         bail!("Skill '{}' not found in registry", name);
@@ -286,15 +292,18 @@ fn install_skill(name: &str) -> Result<()> {
         bail!("Failed to fetch skill: HTTP {}", response.status());
     }
 
-    let skill: SkillResponse = response.json()
-        .context("failed to parse skill response")?;
+    let skill: SkillResponse = response.json().context("failed to parse skill response")?;
 
     // Create skill directory
     let skills_dir = get_skills_dir()?;
     let skill_dir = skills_dir.join(name);
 
     if skill_dir.exists() {
-        bail!("Skill '{}' already exists locally. Remove it first with: f skills remove {}", name, name);
+        bail!(
+            "Skill '{}' already exists locally. Remove it first with: f skills remove {}",
+            name,
+            name
+        );
     }
 
     fs::create_dir_all(&skill_dir)?;
@@ -307,7 +316,10 @@ fn install_skill(name: &str) -> Result<()> {
     ensure_symlinks()?;
 
     println!("Installed skill: {}", name);
-    println!("  Source: {}", skill.source.unwrap_or_else(|| "unknown".to_string()));
+    println!(
+        "  Source: {}",
+        skill.source.unwrap_or_else(|| "unknown".to_string())
+    );
     if let Some(author) = skill.author {
         println!("  Author: {}", author);
     }
@@ -333,15 +345,13 @@ fn list_remote_skills(search: Option<&str>) -> Result<()> {
         SKILLS_API_URL.to_string()
     };
 
-    let response = reqwest::blocking::get(&url)
-        .context("failed to fetch skills from registry")?;
+    let response = reqwest::blocking::get(&url).context("failed to fetch skills from registry")?;
 
     if !response.status().is_success() {
         bail!("Failed to fetch skills: HTTP {}", response.status());
     }
 
-    let skills: Vec<SkillListItem> = response.json()
-        .context("failed to parse skills response")?;
+    let skills: Vec<SkillListItem> = response.json().context("failed to parse skills response")?;
 
     if skills.is_empty() {
         println!("No skills found in registry.");
@@ -395,7 +405,8 @@ fn sync_skills() -> Result<()> {
         fs::create_dir_all(&skill_dir)?;
 
         let desc = task.description.as_deref().unwrap_or("Flow task");
-        let content = format!(r#"---
+        let content = format!(
+            r#"---
 name: {}
 description: {}
 source: flow.toml

@@ -119,7 +119,10 @@ pub fn start_daemon(name: &str) -> Result<()> {
         if check_health(&url) {
             println!("✓ {} started successfully", name);
         } else {
-            println!("⚠ {} started but health check failed (may need more time)", name);
+            println!(
+                "⚠ {} started but health check failed (may need more time)",
+                name
+            );
         }
     } else {
         println!("✓ {} started (no health check configured)", name);
@@ -357,11 +360,7 @@ fn load_daemon_pid(name: &str) -> Result<Option<u32>> {
     let contents =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let pid: u32 = contents.trim().parse().ok().unwrap_or(0);
-    if pid == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(pid))
-    }
+    if pid == 0 { Ok(None) } else { Ok(Some(pid)) }
 }
 
 fn persist_daemon_pid(name: &str, pid: u32) -> Result<()> {
@@ -454,7 +453,9 @@ fn terminate_process(pid: u32) -> Result<()> {
 /// Extract port number from a URL like "http://127.0.0.1:7201/health"
 fn extract_port_from_url(url: &str) -> Option<u16> {
     // Simple extraction: find the port after the last colon before any path
-    let url = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let url = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
     let host_port = url.split('/').next()?;
     let port_str = host_port.rsplit(':').next()?;
     port_str.parse().ok()

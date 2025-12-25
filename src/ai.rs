@@ -121,22 +121,26 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
 
     match action {
         AiAction::List => list_sessions(Provider::All)?,
-        AiAction::Claude { action } => {
-            match action.unwrap_or(ProviderAiAction::List) {
-                ProviderAiAction::List => list_sessions(Provider::Claude)?,
-                ProviderAiAction::Resume { session } => resume_session(session, Provider::Claude)?,
-                ProviderAiAction::Copy { session } => copy_session(session, Provider::Claude)?,
-                ProviderAiAction::Context { session, count, path } => copy_context(session, Provider::Claude, count, path)?,
-            }
-        }
-        AiAction::Codex { action } => {
-            match action.unwrap_or(ProviderAiAction::List) {
-                ProviderAiAction::List => list_sessions(Provider::Codex)?,
-                ProviderAiAction::Resume { session } => resume_session(session, Provider::Codex)?,
-                ProviderAiAction::Copy { session } => copy_session(session, Provider::Codex)?,
-                ProviderAiAction::Context { session, count, path } => copy_context(session, Provider::Codex, count, path)?,
-            }
-        }
+        AiAction::Claude { action } => match action.unwrap_or(ProviderAiAction::List) {
+            ProviderAiAction::List => list_sessions(Provider::Claude)?,
+            ProviderAiAction::Resume { session } => resume_session(session, Provider::Claude)?,
+            ProviderAiAction::Copy { session } => copy_session(session, Provider::Claude)?,
+            ProviderAiAction::Context {
+                session,
+                count,
+                path,
+            } => copy_context(session, Provider::Claude, count, path)?,
+        },
+        AiAction::Codex { action } => match action.unwrap_or(ProviderAiAction::List) {
+            ProviderAiAction::List => list_sessions(Provider::Codex)?,
+            ProviderAiAction::Resume { session } => resume_session(session, Provider::Codex)?,
+            ProviderAiAction::Copy { session } => copy_session(session, Provider::Codex)?,
+            ProviderAiAction::Context {
+                session,
+                count,
+                path,
+            } => copy_context(session, Provider::Codex, count, path)?,
+        },
         AiAction::Resume { session } => resume_session(session, Provider::All)?,
         AiAction::Save { name, id } => save_session(&name, id)?,
         AiAction::Notes { session } => open_notes(&session)?,
@@ -144,7 +148,11 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Init => init_ai_folder()?,
         AiAction::Import => import_sessions()?,
         AiAction::Copy { session } => copy_session(session, Provider::All)?,
-        AiAction::Context { session, count, path } => copy_context(session, Provider::All, count, path)?,
+        AiAction::Context {
+            session,
+            count,
+            path,
+        } => copy_context(session, Provider::All, count, path)?,
     }
 
     Ok(())
@@ -161,8 +169,8 @@ pub fn load_checkpoints(project_path: &PathBuf) -> Result<CommitCheckpoints> {
     if !path.exists() {
         return Ok(CommitCheckpoints::default());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_str(&content).context("failed to parse commit-checkpoints.json")
 }
 
@@ -229,7 +237,10 @@ pub fn get_context_since_checkpoint_for_path(project_path: &PathBuf) -> Result<O
     }
 
     // Read context since checkpoint
-    let since_ts = checkpoints.last_commit.as_ref().and_then(|c| c.last_entry_timestamp.clone());
+    let since_ts = checkpoints
+        .last_commit
+        .as_ref()
+        .and_then(|c| c.last_entry_timestamp.clone());
 
     let mut combined = String::new();
     let since_info = if since_ts.is_some() {
@@ -281,7 +292,9 @@ pub fn get_last_entry_timestamp() -> Result<Option<(String, String)>> {
 }
 
 /// Get the last entry timestamp for sessions associated with a specific path.
-pub fn get_last_entry_timestamp_for_path(project_path: &PathBuf) -> Result<Option<(String, String)>> {
+pub fn get_last_entry_timestamp_for_path(
+    project_path: &PathBuf,
+) -> Result<Option<(String, String)>> {
     let sessions = read_sessions_for_path(Provider::All, project_path)?;
 
     if sessions.is_empty() {
@@ -290,7 +303,9 @@ pub fn get_last_entry_timestamp_for_path(project_path: &PathBuf) -> Result<Optio
 
     let mut best: Option<(String, String)> = None;
     for session in sessions {
-        if let Some(ts) = get_session_last_timestamp(&session.session_id, session.provider, project_path)? {
+        if let Some(ts) =
+            get_session_last_timestamp(&session.session_id, session.provider, project_path)?
+        {
             let is_newer = best.as_ref().map_or(true, |(_, best_ts)| ts > *best_ts);
             if is_newer {
                 best = Some((session.session_id.clone(), ts));
@@ -302,7 +317,11 @@ pub fn get_last_entry_timestamp_for_path(project_path: &PathBuf) -> Result<Optio
 }
 
 /// Get the last timestamp from a session file.
-fn get_session_last_timestamp(session_id: &str, provider: Provider, project_path: &PathBuf) -> Result<Option<String>> {
+fn get_session_last_timestamp(
+    session_id: &str,
+    provider: Provider,
+    project_path: &PathBuf,
+) -> Result<Option<String>> {
     if provider == Provider::Codex {
         let session_file = find_codex_session_file(session_id);
         let Some(session_file) = session_file else {
@@ -319,7 +338,9 @@ fn get_session_last_timestamp(session_id: &str, provider: Provider, project_path
         Provider::Codex => get_codex_projects_dir(),
     };
 
-    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+    let session_file = projects_dir
+        .join(&project_folder)
+        .join(format!("{}.jsonl", session_id));
 
     if !session_file.exists() {
         return Ok(None);
@@ -343,10 +364,16 @@ fn get_session_last_timestamp(session_id: &str, provider: Provider, project_path
 }
 
 /// Read context from session since a given timestamp.
-fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&str>, project_path: &PathBuf) -> Result<(String, Option<String>)> {
+fn read_context_since(
+    session_id: &str,
+    provider: Provider,
+    since_ts: Option<&str>,
+    project_path: &PathBuf,
+) -> Result<(String, Option<String>)> {
     if provider == Provider::Codex {
-        let session_file = find_codex_session_file(session_id)
-            .ok_or_else(|| anyhow::anyhow!("Session file not found for Codex session {}", session_id))?;
+        let session_file = find_codex_session_file(session_id).ok_or_else(|| {
+            anyhow::anyhow!("Session file not found for Codex session {}", session_id)
+        })?;
         return read_codex_context_since(&session_file, since_ts);
     }
 
@@ -358,7 +385,9 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
         Provider::Codex => get_codex_projects_dir(),
     };
 
-    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+    let session_file = projects_dir
+        .join(&project_folder)
+        .join(format!("{}.jsonl", session_id));
 
     if !session_file.exists() {
         bail!("Session file not found: {}", session_file.display());
@@ -393,18 +422,17 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
                 let content_text = if let Some(ref content) = msg.content {
                     match content {
                         serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Array(arr) => {
-                            arr.iter()
-                                .filter_map(|v| {
-                                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                                        Some(text.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
+                        serde_json::Value::Array(arr) => arr
+                            .iter()
+                            .filter_map(|v| {
+                                if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                    Some(text.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                         _ => continue,
                     }
                 } else {
@@ -448,12 +476,15 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
     // Optimization: prioritize recent exchanges, fit within reasonable budget
     // Keep it compact - extract intent, not full conversation
     const MAX_EXCHANGES: usize = 5;
-    const MAX_USER_CHARS: usize = 500;   // User requests are short
+    const MAX_USER_CHARS: usize = 500; // User requests are short
     const MAX_ASSIST_CHARS: usize = 300; // Just capture what was done, not full response
 
     let total_exchanges = exchanges.len();
     let exchanges_to_use: Vec<_> = if total_exchanges > MAX_EXCHANGES {
-        exchanges.into_iter().skip(total_exchanges - MAX_EXCHANGES).collect()
+        exchanges
+            .into_iter()
+            .skip(total_exchanges - MAX_EXCHANGES)
+            .collect()
     } else {
         exchanges
     };
@@ -525,7 +556,10 @@ fn extract_intent(msg: &str, max_chars: usize) -> String {
     truncate_message(first_part, max_chars)
 }
 
-fn read_codex_context_since(session_file: &PathBuf, since_ts: Option<&str>) -> Result<(String, Option<String>)> {
+fn read_codex_context_since(
+    session_file: &PathBuf,
+    since_ts: Option<&str>,
+) -> Result<(String, Option<String>)> {
     let (exchanges, last_ts) = read_codex_exchanges(session_file, since_ts)?;
 
     if exchanges.is_empty() {
@@ -538,7 +572,10 @@ fn read_codex_context_since(session_file: &PathBuf, since_ts: Option<&str>) -> R
 
     let total_exchanges = exchanges.len();
     let exchanges_to_use: Vec<_> = if total_exchanges > MAX_EXCHANGES {
-        exchanges.into_iter().skip(total_exchanges - MAX_EXCHANGES).collect()
+        exchanges
+            .into_iter()
+            .skip(total_exchanges - MAX_EXCHANGES)
+            .collect()
     } else {
         exchanges
     };
@@ -598,7 +635,10 @@ fn read_codex_last_context(session_file: &PathBuf, count: usize) -> Result<Strin
     Ok(context)
 }
 
-fn read_codex_exchanges(session_file: &PathBuf, since_ts: Option<&str>) -> Result<(Vec<(String, String, String)>, Option<String>)> {
+fn read_codex_exchanges(
+    session_file: &PathBuf,
+    since_ts: Option<&str>,
+) -> Result<(Vec<(String, String, String)>, Option<String>)> {
     let content = fs::read_to_string(session_file).context("failed to read session file")?;
 
     let mut exchanges: Vec<(String, String, String)> = Vec::new();
@@ -677,9 +717,12 @@ fn get_codex_last_timestamp(session_file: &PathBuf) -> Result<Option<String>> {
             continue;
         }
 
-        if let Some(payload_ts) = entry.payload.as_ref()
+        if let Some(payload_ts) = entry
+            .payload
+            .as_ref()
             .and_then(|p| p.get("timestamp"))
-            .and_then(|v| v.as_str()) {
+            .and_then(|v| v.as_str())
+        {
             last_ts = Some(payload_ts.to_string());
         }
     }
@@ -741,7 +784,12 @@ pub fn get_recent_session_context(max_exchanges: usize) -> Result<Option<String>
     let recent_session = &sessions[0];
 
     // Read context from the most recent session
-    match read_last_context(&recent_session.session_id, recent_session.provider, max_exchanges, &cwd) {
+    match read_last_context(
+        &recent_session.session_id,
+        recent_session.provider,
+        max_exchanges,
+        &cwd,
+    ) {
         Ok(context) => {
             if context.trim().is_empty() {
                 Ok(None)
@@ -783,8 +831,8 @@ fn load_index() -> Result<SessionIndex> {
     if !path.exists() {
         return Ok(SessionIndex::default());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_str(&content).context("failed to parse index.json")
 }
 
@@ -896,9 +944,7 @@ fn read_provider_sessions_for_path(provider: Provider, path: &PathBuf) -> Result
         let file_path = entry.path();
 
         if file_path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-            let filename = file_path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let filename = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
             if filename.starts_with("agent-") {
                 continue;
@@ -933,7 +979,11 @@ fn read_provider_sessions(provider: Provider) -> Result<Vec<AiSession>> {
     let project_dir = projects_dir.join(&project_name);
 
     if !project_dir.exists() {
-        debug!("{:?} project dir not found at {}", provider, project_dir.display());
+        debug!(
+            "{:?} project dir not found at {}",
+            provider,
+            project_dir.display()
+        );
         return Ok(vec![]);
     }
 
@@ -949,9 +999,7 @@ fn read_provider_sessions(provider: Provider) -> Result<Vec<AiSession>> {
 
         // Only process .jsonl files that look like session IDs (UUID format)
         if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-            let filename = path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
             // Skip agent- prefixed files (subagent sessions)
             if filename.starts_with("agent-") {
@@ -1034,7 +1082,10 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
     })
 }
 
-fn parse_codex_session_file(path: &PathBuf, fallback_id: &str) -> Option<(AiSession, Option<PathBuf>)> {
+fn parse_codex_session_file(
+    path: &PathBuf,
+    fallback_id: &str,
+) -> Option<(AiSession, Option<PathBuf>)> {
     let content = fs::read_to_string(path).ok()?;
 
     let mut timestamp = None;
@@ -1060,13 +1111,22 @@ fn parse_codex_session_file(path: &PathBuf, fallback_id: &str) -> Option<(AiSess
         if entry.entry_type.as_deref() == Some("session_meta") {
             if let Some(payload) = entry.payload.as_ref() {
                 if session_id.is_none() {
-                    session_id = payload.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    session_id = payload
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                 }
                 if cwd.is_none() {
-                    cwd = payload.get("cwd").and_then(|v| v.as_str()).map(|s| PathBuf::from(s));
+                    cwd = payload
+                        .get("cwd")
+                        .and_then(|v| v.as_str())
+                        .map(|s| PathBuf::from(s));
                 }
                 if timestamp.is_none() {
-                    timestamp = payload.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    timestamp = payload
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                 }
             }
         }
@@ -1109,9 +1169,7 @@ fn read_codex_sessions_for_path(path: &PathBuf) -> Result<Vec<AiSession>> {
     let target = path.to_string_lossy();
 
     for file_path in collect_codex_session_files(&sessions_dir) {
-        let filename = file_path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let filename = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let Some((session, cwd)) = parse_codex_session_file(&file_path, filename) else {
             continue;
         };
@@ -1188,21 +1246,30 @@ fn list_sessions(provider: Provider) -> Result<()> {
     // Process all sessions, enriching with saved names where available
     for session in &sessions {
         // Skip sessions without timestamps or content
-        if session.timestamp.is_none() && session.first_message.is_none() && session.error_summary.is_none() {
+        if session.timestamp.is_none()
+            && session.first_message.is_none()
+            && session.error_summary.is_none()
+        {
             continue;
         }
 
-        let relative_time = session.timestamp.as_deref()
+        let relative_time = session
+            .timestamp
+            .as_deref()
             .map(format_relative_time)
             .unwrap_or_else(|| "".to_string());
 
         // Check if this session has a human-assigned name (not auto-generated)
-        let saved_name = index.sessions.iter()
+        let saved_name = index
+            .sessions
+            .iter()
             .find(|(_, s)| s.id == session.session_id)
             .map(|(name, _)| name.as_str())
             .filter(|name| !is_auto_generated_name(name));
 
-        let summary = session.first_message.as_deref()
+        let summary = session
+            .first_message
+            .as_deref()
             .or(session.error_summary.as_deref())
             .unwrap_or("");
         let summary_clean = clean_summary(summary);
@@ -1220,10 +1287,21 @@ fn list_sessions(provider: Provider) -> Result<()> {
 
         let display = if let Some(name) = saved_name {
             // For named sessions, show: [provider] name | time | summary
-            format!("{}{} | {} | {}", provider_tag, name, relative_time, truncate_str(&summary_clean, 40))
+            format!(
+                "{}{} | {} | {}",
+                provider_tag,
+                name,
+                relative_time,
+                truncate_str(&summary_clean, 40)
+            )
         } else {
             // For other sessions, show: [provider] time | summary
-            format!("{}{} | {}", provider_tag, relative_time, truncate_str(&summary_clean, 60))
+            format!(
+                "{}{} | {}",
+                provider_tag,
+                relative_time,
+                truncate_str(&summary_clean, 60)
+            )
         };
 
         entries.push(FzfSessionEntry {
@@ -1250,7 +1328,10 @@ fn list_sessions(provider: Provider) -> Result<()> {
 
     // Run fzf
     if let Some(selected) = run_session_fzf(&entries)? {
-        println!("Resuming session {}...", &selected.session_id[..8.min(selected.session_id.len())]);
+        println!(
+            "Resuming session {}...",
+            &selected.session_id[..8.min(selected.session_id.len())]
+        );
         launch_session(&selected.session_id, selected.provider)?;
     }
 
@@ -1280,8 +1361,7 @@ fn run_session_fzf(entries: &[FzfSessionEntry]) -> Result<Option<&FzfSessionEntr
         return Ok(None);
     }
 
-    let selection = String::from_utf8(output.stdout)
-        .context("fzf output was not valid UTF-8")?;
+    let selection = String::from_utf8(output.stdout).context("fzf output was not valid UTF-8")?;
     let selection = selection.trim();
 
     if selection.is_empty() {
@@ -1347,14 +1427,22 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
     // Find the session ID and provider
     let (session_id, session_provider) = if let Some(ref query) = session {
         // Try to find by name or ID
-        if let Some((_, saved)) = index.sessions.iter().find(|(name, _)| name.as_str() == query) {
+        if let Some((_, saved)) = index
+            .sessions
+            .iter()
+            .find(|(name, _)| name.as_str() == query)
+        {
             // Find the provider for this session
-            let prov = sessions.iter()
+            let prov = sessions
+                .iter()
                 .find(|s| s.session_id == saved.id)
                 .map(|s| s.provider)
                 .unwrap_or(Provider::Claude);
             (saved.id.clone(), prov)
-        } else if let Some(s) = sessions.iter().find(|s| s.session_id == *query || s.session_id.starts_with(query)) {
+        } else if let Some(s) = sessions
+            .iter()
+            .find(|s| s.session_id == *query || s.session_id.starts_with(query))
+        {
             (s.session_id.clone(), s.provider)
         } else {
             bail!("Session not found: {}", query);
@@ -1364,20 +1452,29 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
         let mut entries: Vec<FzfSessionEntry> = Vec::new();
 
         for session in &sessions {
-            if session.timestamp.is_none() && session.first_message.is_none() && session.error_summary.is_none() {
+            if session.timestamp.is_none()
+                && session.first_message.is_none()
+                && session.error_summary.is_none()
+            {
                 continue;
             }
 
-            let relative_time = session.timestamp.as_deref()
+            let relative_time = session
+                .timestamp
+                .as_deref()
                 .map(format_relative_time)
                 .unwrap_or_else(|| "".to_string());
 
-            let saved_name = index.sessions.iter()
+            let saved_name = index
+                .sessions
+                .iter()
                 .find(|(_, s)| s.id == session.session_id)
                 .map(|(name, _)| name.as_str())
                 .filter(|name| !is_auto_generated_name(name));
 
-            let summary = session.first_message.as_deref()
+            let summary = session
+                .first_message
+                .as_deref()
                 .or(session.error_summary.as_deref())
                 .unwrap_or("");
             let summary_clean = clean_summary(summary);
@@ -1394,9 +1491,20 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
             };
 
             let display = if let Some(name) = saved_name {
-                format!("{}{} | {} | {}", provider_tag, name, relative_time, truncate_str(&summary_clean, 40))
+                format!(
+                    "{}{} | {} | {}",
+                    provider_tag,
+                    name,
+                    relative_time,
+                    truncate_str(&summary_clean, 40)
+                )
             } else {
-                format!("{}{} | {}", provider_tag, relative_time, truncate_str(&summary_clean, 60))
+                format!(
+                    "{}{} | {}",
+                    provider_tag,
+                    relative_time,
+                    truncate_str(&summary_clean, 60)
+                )
             };
 
             entries.push(FzfSessionEntry {
@@ -1445,14 +1553,15 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
         Provider::Codex => get_codex_projects_dir(),
     };
 
-    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+    let session_file = projects_dir
+        .join(&project_folder)
+        .join(format!("{}.jsonl", session_id));
 
     if !session_file.exists() {
         bail!("Session file not found: {}", session_file.display());
     }
 
-    let content = fs::read_to_string(&session_file)
-        .context("failed to read session file")?;
+    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
 
     let mut history = String::new();
 
@@ -1507,7 +1616,12 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
 }
 
 /// Copy last prompt and response from a session to clipboard.
-fn copy_context(session: Option<String>, provider: Provider, count: usize, path: Option<String>) -> Result<()> {
+fn copy_context(
+    session: Option<String>,
+    provider: Provider,
+    count: usize,
+    path: Option<String>,
+) -> Result<()> {
     // Auto-import any new sessions silently
     auto_import_sessions()?;
 
@@ -1549,13 +1663,21 @@ fn copy_context(session: Option<String>, provider: Provider, count: usize, path:
     // Find the session ID and provider
     let (session_id, session_provider) = if let Some(ref query) = session {
         // Try to find by name or ID
-        if let Some((_, saved)) = index.sessions.iter().find(|(name, _)| name.as_str() == query) {
-            let prov = sessions.iter()
+        if let Some((_, saved)) = index
+            .sessions
+            .iter()
+            .find(|(name, _)| name.as_str() == query)
+        {
+            let prov = sessions
+                .iter()
                 .find(|s| s.session_id == saved.id)
                 .map(|s| s.provider)
                 .unwrap_or(Provider::Claude);
             (saved.id.clone(), prov)
-        } else if let Some(s) = sessions.iter().find(|s| s.session_id == *query || s.session_id.starts_with(query)) {
+        } else if let Some(s) = sessions
+            .iter()
+            .find(|s| s.session_id == *query || s.session_id.starts_with(query))
+        {
             (s.session_id.clone(), s.provider)
         } else {
             bail!("Session not found: {}", query);
@@ -1565,20 +1687,29 @@ fn copy_context(session: Option<String>, provider: Provider, count: usize, path:
         let mut entries: Vec<FzfSessionEntry> = Vec::new();
 
         for session in &sessions {
-            if session.timestamp.is_none() && session.first_message.is_none() && session.error_summary.is_none() {
+            if session.timestamp.is_none()
+                && session.first_message.is_none()
+                && session.error_summary.is_none()
+            {
                 continue;
             }
 
-            let relative_time = session.timestamp.as_deref()
+            let relative_time = session
+                .timestamp
+                .as_deref()
                 .map(format_relative_time)
                 .unwrap_or_else(|| "".to_string());
 
-            let saved_name = index.sessions.iter()
+            let saved_name = index
+                .sessions
+                .iter()
                 .find(|(_, s)| s.id == session.session_id)
                 .map(|(name, _)| name.as_str())
                 .filter(|name| !is_auto_generated_name(name));
 
-            let summary = session.first_message.as_deref()
+            let summary = session
+                .first_message
+                .as_deref()
                 .or(session.error_summary.as_deref())
                 .unwrap_or("");
             let summary_clean = clean_summary(summary);
@@ -1594,9 +1725,20 @@ fn copy_context(session: Option<String>, provider: Provider, count: usize, path:
             };
 
             let display = if let Some(name) = saved_name {
-                format!("{}{} | {} | {}", provider_tag, name, relative_time, truncate_str(&summary_clean, 40))
+                format!(
+                    "{}{} | {} | {}",
+                    provider_tag,
+                    name,
+                    relative_time,
+                    truncate_str(&summary_clean, 40)
+                )
             } else {
-                format!("{}{} | {}", provider_tag, relative_time, truncate_str(&summary_clean, 60))
+                format!(
+                    "{}{} | {}",
+                    provider_tag,
+                    relative_time,
+                    truncate_str(&summary_clean, 60)
+                )
             };
 
             entries.push(FzfSessionEntry {
@@ -1630,16 +1772,25 @@ fn copy_context(session: Option<String>, provider: Provider, count: usize, path:
 
     let exchange_word = if count == 1 { "exchange" } else { "exchanges" };
     let line_count = context.lines().count();
-    println!("Copied last {} {} ({} lines) to clipboard", count, exchange_word, line_count);
+    println!(
+        "Copied last {} {} ({} lines) to clipboard",
+        count, exchange_word, line_count
+    );
 
     Ok(())
 }
 
 /// Read last N user prompts and assistant responses from a session.
-fn read_last_context(session_id: &str, provider: Provider, count: usize, project_path: &PathBuf) -> Result<String> {
+fn read_last_context(
+    session_id: &str,
+    provider: Provider,
+    count: usize,
+    project_path: &PathBuf,
+) -> Result<String> {
     if provider == Provider::Codex {
-        let session_file = find_codex_session_file(session_id)
-            .ok_or_else(|| anyhow::anyhow!("Session file not found for Codex session {}", session_id))?;
+        let session_file = find_codex_session_file(session_id).ok_or_else(|| {
+            anyhow::anyhow!("Session file not found for Codex session {}", session_id)
+        })?;
         return read_codex_last_context(&session_file, count);
     }
 
@@ -1651,14 +1802,15 @@ fn read_last_context(session_id: &str, provider: Provider, count: usize, project
         Provider::Codex => get_codex_projects_dir(),
     };
 
-    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+    let session_file = projects_dir
+        .join(&project_folder)
+        .join(format!("{}.jsonl", session_id));
 
     if !session_file.exists() {
         bail!("Session file not found: {}", session_file.display());
     }
 
-    let content = fs::read_to_string(&session_file)
-        .context("failed to read session file")?;
+    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
 
     // Collect all exchanges (user + assistant pairs)
     let mut exchanges: Vec<(String, String)> = Vec::new();
@@ -1676,18 +1828,17 @@ fn read_last_context(session_id: &str, provider: Provider, count: usize, project
                 let content_text = if let Some(ref content) = msg.content {
                     match content {
                         serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Array(arr) => {
-                            arr.iter()
-                                .filter_map(|v| {
-                                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                                        Some(text.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
+                        serde_json::Value::Array(arr) => arr
+                            .iter()
+                            .filter_map(|v| {
+                                if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                    Some(text.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                         _ => continue,
                     }
                 } else {
@@ -1773,14 +1924,12 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
 
         let mut child = match result {
             Ok(c) => c,
-            Err(_) => {
-                Command::new("xsel")
-                    .arg("--clipboard")
-                    .arg("--input")
-                    .stdin(Stdio::piped())
-                    .spawn()
-                    .context("failed to spawn xclip or xsel")?
-            }
+            Err(_) => Command::new("xsel")
+                .arg("--clipboard")
+                .arg("--input")
+                .stdin(Stdio::piped())
+                .spawn()
+                .context("failed to spawn xclip or xsel")?,
         };
 
         if let Some(stdin) = child.stdin.as_mut() {
@@ -1837,12 +1986,11 @@ fn truncate_str(s: &str, max: usize) -> String {
 /// Format timestamp as relative time (e.g., "3 days ago", "2 hours ago").
 fn format_relative_time(ts: &str) -> String {
     // Parse ISO 8601 timestamp: "2025-12-09T19:21:15.562Z"
-    let parsed = chrono::DateTime::parse_from_rfc3339(ts)
-        .or_else(|_| {
-            // Try without timezone
-            chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.fZ")
-                .map(|dt| dt.and_utc().fixed_offset())
-        });
+    let parsed = chrono::DateTime::parse_from_rfc3339(ts).or_else(|_| {
+        // Try without timezone
+        chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.fZ")
+            .map(|dt| dt.and_utc().fixed_offset())
+    });
 
     let Ok(dt) = parsed else {
         return "unknown".to_string();
@@ -1882,8 +2030,8 @@ fn format_relative_time(ts: &str) -> String {
 /// Check if a session name looks auto-generated (from import).
 fn is_auto_generated_name(name: &str) -> bool {
     // Auto-generated names start with date like "20251215-" or "unknown-session"
-    name.starts_with("202") && name.chars().nth(8) == Some('-') ||
-    name.starts_with("unknown-session")
+    name.starts_with("202") && name.chars().nth(8) == Some('-')
+        || name.starts_with("unknown-session")
 }
 
 fn extract_error_summary(entry: &JsonlEntry) -> Option<String> {
@@ -1909,7 +2057,9 @@ fn extract_error_summary(entry: &JsonlEntry) -> Option<String> {
     };
 
     if let Some(err) = &entry.error {
-        let msg = err.get("message").and_then(|v| v.as_str())
+        let msg = err
+            .get("message")
+            .and_then(|v| v.as_str())
             .or_else(|| err.get("error").and_then(|v| v.as_str()));
         if let Some(msg) = msg {
             summary = format!("{}: {}", summary, msg);
@@ -1937,7 +2087,10 @@ fn extract_codex_user_message(entry: &CodexEntry) -> Option<String> {
         let payload = entry.payload.as_ref()?;
         let payload_type = payload.get("type").and_then(|v| v.as_str());
         if payload_type == Some("user_message") {
-            return payload.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
+            return payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
         }
     }
 
@@ -1955,8 +2108,10 @@ fn extract_codex_error_summary(entry: &CodexEntry) -> Option<String> {
     let payload = entry.payload.as_ref();
 
     let is_error = entry_type == Some("error")
-        || payload.and_then(|p| p.get("type").and_then(|v| v.as_str()))
-            .map(|t| t.contains("error")).unwrap_or(false);
+        || payload
+            .and_then(|p| p.get("type").and_then(|v| v.as_str()))
+            .map(|t| t.contains("error"))
+            .unwrap_or(false);
 
     if !is_error {
         return None;
@@ -2009,28 +2164,26 @@ fn extract_codex_content_text(value: &serde_json::Value) -> Option<String> {
 /// Clean up a summary string - remove noise, paths, special chars.
 fn clean_summary(s: &str) -> String {
     // Take first meaningful line (skip empty lines and lines starting with special chars)
-    let meaningful_line = s.lines()
+    let meaningful_line = s
+        .lines()
         .map(|l| l.trim())
         .find(|l| {
-            !l.is_empty() &&
-            !l.starts_with('~') &&
-            !l.starts_with('/') &&
-            !l.starts_with('>') &&
-            !l.starts_with('❯') &&
-            !l.starts_with('$') &&
-            !l.starts_with('#') &&
-            !l.starts_with("Error:") &&
-            !l.starts_with("<INSTRUCTIONS>") &&
-            !l.starts_with("## Skills")
+            !l.is_empty()
+                && !l.starts_with('~')
+                && !l.starts_with('/')
+                && !l.starts_with('>')
+                && !l.starts_with('❯')
+                && !l.starts_with('$')
+                && !l.starts_with('#')
+                && !l.starts_with("Error:")
+                && !l.starts_with("<INSTRUCTIONS>")
+                && !l.starts_with("## Skills")
         })
         .or_else(|| s.lines().find(|l| !l.trim().is_empty()))
         .unwrap_or(s);
 
     // Clean up the line
-    meaningful_line
-        .trim()
-        .replace('\t', " ")
-        .replace("  ", " ")
+    meaningful_line.trim().replace('\t', " ").replace("  ", " ")
 }
 
 const GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -2047,8 +2200,8 @@ fn load_session_summaries(project_path: &PathBuf) -> Result<SessionSummaries> {
     if !path.exists() {
         return Ok(SessionSummaries::default());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_str(&content).context("failed to parse session-summaries.json")
 }
 
@@ -2077,7 +2230,13 @@ fn get_summary_cache_entry<'a>(
 ) -> Result<&'a mut SummaryCacheEntry> {
     if !cache.contains_key(project_path) {
         let store = load_session_summaries(project_path)?;
-        cache.insert(project_path.clone(), SummaryCacheEntry { store, dirty: false });
+        cache.insert(
+            project_path.clone(),
+            SummaryCacheEntry {
+                store,
+                dirty: false,
+            },
+        );
     }
     Ok(cache.get_mut(project_path).expect("cache entry must exist"))
 }
@@ -2160,7 +2319,10 @@ chapters: array of 3-8 items, each with title (3-8 words) and summary (1-2 sente
         .build()
         .context("failed to create HTTP client")?;
 
-    let url = format!("{}/{}:generateContent?key={}", GEMINI_API_URL, model, api_key);
+    let url = format!(
+        "{}/{}:generateContent?key={}",
+        GEMINI_API_URL, model, api_key
+    );
     let payload = json!({
         "contents": [
             {
@@ -2190,7 +2352,8 @@ chapters: array of 3-8 items, each with title (3-8 words) and summary (1-2 sente
     }
 
     let parsed: GeminiResponse = resp.json().context("failed to parse Gemini response")?;
-    let content = parsed.candidates
+    let content = parsed
+        .candidates
         .get(0)
         .and_then(|c| c.content.parts.get(0))
         .and_then(|p| p.text.as_deref())
@@ -2317,7 +2480,9 @@ fn save_summary_cache(cache: &mut HashMap<PathBuf, SummaryCacheEntry>) -> Result
 
 fn get_session_last_timestamp_for_session(session: &CrossProjectSession) -> Result<Option<String>> {
     if session.provider == Provider::Codex {
-        let session_file = session.session_path.clone()
+        let session_file = session
+            .session_path
+            .clone()
             .or_else(|| find_codex_session_file(&session.session_id));
         let Some(session_file) = session_file else {
             return Ok(None);
@@ -2342,7 +2507,8 @@ fn resume_session(session: Option<String>, provider: Provider) -> Result<()> {
             // Check if it's a saved name
             if let Some(saved) = index.sessions.get(&s) {
                 // Find the provider for this session
-                let prov = sessions.iter()
+                let prov = sessions
+                    .iter()
                     .find(|sess| sess.session_id == saved.id)
                     .map(|sess| sess.provider)
                     .unwrap_or(Provider::Claude);
@@ -2371,13 +2537,17 @@ fn resume_session(session: Option<String>, provider: Provider) -> Result<()> {
         }
         None => {
             // Resume most recent
-            let sess = sessions.first()
+            let sess = sessions
+                .first()
                 .ok_or_else(|| anyhow::anyhow!("No sessions found for this project"))?;
             (sess.session_id.clone(), sess.provider)
         }
     };
 
-    println!("Resuming session {}...", &session_id[..8.min(session_id.len())]);
+    println!(
+        "Resuming session {}...",
+        &session_id[..8.min(session_id.len())]
+    );
     launch_session(&session_id, session_provider)?;
 
     Ok(())
@@ -2395,7 +2565,10 @@ fn save_session(name: &str, id: Option<String>) -> Result<()> {
 
     // Check if name already exists
     if index.sessions.contains_key(name) {
-        bail!("Session name '{}' already exists. Use a different name or remove it first.", name);
+        bail!(
+            "Session name '{}' already exists. Use a different name or remove it first.",
+            name
+        );
     }
 
     let saved = SavedSession {
@@ -2498,7 +2671,10 @@ fn init_ai_folder() -> Result<()> {
     // Create .gitignore in .ai
     let gitignore_path = ai_dir.join(".gitignore");
     if !gitignore_path.exists() {
-        fs::write(&gitignore_path, "# Ignore session notes (personal)\nsessions/claude/notes/\n")?;
+        fs::write(
+            &gitignore_path,
+            "# Ignore session notes (personal)\nsessions/claude/notes/\n",
+        )?;
     }
 
     println!("Initialized .ai folder structure:");
@@ -2525,9 +2701,7 @@ fn ensure_gitignore() -> Result<()> {
 
         if !already_ignored {
             // Append .ai to gitignore
-            let mut file = fs::OpenOptions::new()
-                .append(true)
-                .open(&gitignore_path)?;
+            let mut file = fs::OpenOptions::new().append(true).open(&gitignore_path)?;
             // Add newline if file doesn't end with one
             if !content.ends_with('\n') && !content.is_empty() {
                 writeln!(file)?;
@@ -2578,14 +2752,18 @@ fn auto_import_sessions() -> Result<()> {
         let saved = SavedSession {
             id: session.session_id.clone(),
             provider: provider_str.to_string(),
-            description: session.first_message.as_ref().or(session.error_summary.as_ref()).map(|m| {
-                if m.len() > 100 {
-                    let end = floor_char_boundary(m, 97);
-                    format!("{}...", &m[..end])
-                } else {
-                    m.clone()
-                }
-            }),
+            description: session
+                .first_message
+                .as_ref()
+                .or(session.error_summary.as_ref())
+                .map(|m| {
+                    if m.len() > 100 {
+                        let end = floor_char_boundary(m, 97);
+                        format!("{}...", &m[..end])
+                    } else {
+                        m.clone()
+                    }
+                }),
             saved_at: chrono::Utc::now().to_rfc3339(),
             last_resumed: None,
         };
@@ -2636,14 +2814,18 @@ fn import_sessions() -> Result<()> {
         let saved = SavedSession {
             id: session.session_id.clone(),
             provider: provider_str.to_string(),
-            description: session.first_message.as_ref().or(session.error_summary.as_ref()).map(|m| {
-                if m.len() > 100 {
-                    let end = floor_char_boundary(m, 97);
-                    format!("{}...", &m[..end])
-                } else {
-                    m.clone()
-                }
-            }),
+            description: session
+                .first_message
+                .as_ref()
+                .or(session.error_summary.as_ref())
+                .map(|m| {
+                    if m.len() > 100 {
+                        let end = floor_char_boundary(m, 97);
+                        format!("{}...", &m[..end])
+                    } else {
+                        m.clone()
+                    }
+                }),
             saved_at: chrono::Utc::now().to_rfc3339(),
             last_resumed: None,
         };
@@ -2658,7 +2840,10 @@ fn import_sessions() -> Result<()> {
     save_index(&index)?;
 
     println!();
-    println!("Imported {} sessions, skipped {} (already exists)", imported, skipped);
+    println!(
+        "Imported {} sessions, skipped {} (already exists)",
+        imported, skipped
+    );
 
     Ok(())
 }
@@ -2666,11 +2851,15 @@ fn import_sessions() -> Result<()> {
 /// Generate a unique name for a session based on its content.
 fn generate_session_name(session: &AiSession, index: &SessionIndex) -> String {
     // Try to create a name from date + first words of message
-    let date_part = session.timestamp.as_deref()
-        .map(|ts| ts[..10].replace('-', ""))  // "20251209"
+    let date_part = session
+        .timestamp
+        .as_deref()
+        .map(|ts| ts[..10].replace('-', "")) // "20251209"
         .unwrap_or_else(|| "unknown".to_string());
 
-    let words_part = session.first_message.as_deref()
+    let words_part = session
+        .first_message
+        .as_deref()
         .or(session.error_summary.as_deref())
         .map(|msg| {
             // Extract first few meaningful words
@@ -2683,7 +2872,8 @@ fn generate_session_name(session: &AiSession, index: &SessionIndex) -> String {
             if words.is_empty() {
                 "session".to_string()
             } else {
-                words.join("-")
+                words
+                    .join("-")
                     .to_lowercase()
                     .chars()
                     .filter(|c| c.is_alphanumeric() || *c == '-')
@@ -2805,11 +2995,19 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
         // Just list, don't fuzzy search
         println!("AI Sessions across projects:\n");
         for session in &sessions {
-            let relative_time = session.timestamp.as_deref()
+            let relative_time = session
+                .timestamp
+                .as_deref()
                 .map(format_relative_time)
                 .unwrap_or_else(|| "unknown".to_string());
             let summary = get_display_summary(session, &mut summary_cache)?
-                .or_else(|| session.first_message.as_deref().or(session.error_summary.as_deref()).map(|s| s.to_string()))
+                .or_else(|| {
+                    session
+                        .first_message
+                        .as_deref()
+                        .or(session.error_summary.as_deref())
+                        .map(|s| s.to_string())
+                })
                 .map(|s| truncate_str(&clean_summary(&s), 50))
                 .unwrap_or_default();
             let provider_tag = match session.provider {
@@ -2817,25 +3015,33 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
                 Provider::Codex => "codex",
                 Provider::All => "ai",
             };
-            println!("{} | {} | {} | {}",
-                session.project_name,
-                provider_tag,
-                relative_time,
-                summary
+            println!(
+                "{} | {} | {} | {}",
+                session.project_name, provider_tag, relative_time, summary
             );
         }
         return Ok(());
     }
 
     // Build fzf entries
-    let entries: Vec<(String, &CrossProjectSession)> = sessions.iter()
+    let entries: Vec<(String, &CrossProjectSession)> = sessions
+        .iter()
         .filter(|s| s.timestamp.is_some() || s.first_message.is_some() || s.error_summary.is_some())
         .map(|session| {
-            let relative_time = session.timestamp.as_deref()
+            let relative_time = session
+                .timestamp
+                .as_deref()
                 .map(format_relative_time)
                 .unwrap_or_else(|| "".to_string());
-            let summary = get_display_summary(session, &mut summary_cache).unwrap_or(None)
-                .or_else(|| session.first_message.as_deref().or(session.error_summary.as_deref()).map(|s| s.to_string()))
+            let summary = get_display_summary(session, &mut summary_cache)
+                .unwrap_or(None)
+                .or_else(|| {
+                    session
+                        .first_message
+                        .as_deref()
+                        .or(session.error_summary.as_deref())
+                        .map(|s| s.to_string())
+                })
                 .map(|s| truncate_str(&clean_summary(&s), 40))
                 .unwrap_or_default();
             let provider_tag = match session.provider {
@@ -2843,11 +3049,9 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
                 Provider::Codex => "codex",
                 Provider::All => "",
             };
-            let display = format!("{} | {} | {} | {}",
-                session.project_name,
-                provider_tag,
-                relative_time,
-                summary
+            let display = format!(
+                "{} | {} | {} | {}",
+                session.project_name, provider_tag, relative_time, summary
             );
             (display, session)
         })
@@ -2890,8 +3094,7 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
         return Ok(());
     }
 
-    let selection = String::from_utf8(output.stdout)
-        .context("fzf output was not valid UTF-8")?;
+    let selection = String::from_utf8(output.stdout).context("fzf output was not valid UTF-8")?;
     let selection = selection.trim();
 
     if selection.is_empty() {
@@ -2919,8 +3122,10 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
     copy_to_clipboard(&context)?;
 
     let line_count = context.lines().count();
-    println!("Copied context from {} ({} lines) to clipboard",
-        session.project_name, line_count);
+    println!(
+        "Copied context from {} ({} lines) to clipboard",
+        session.project_name, line_count
+    );
 
     // Save consumed checkpoint
     save_consumed_checkpoint(session)?;
@@ -2943,7 +3148,9 @@ fn scan_all_project_sessions(provider: Provider) -> Result<Vec<CrossProjectSessi
                         let project_name = extract_project_name(&project_folder);
                         let project_path = folder_to_path(&project_folder);
 
-                        if let Ok(sessions) = scan_project_sessions(&project_folder, Provider::Claude) {
+                        if let Ok(sessions) =
+                            scan_project_sessions(&project_folder, Provider::Claude)
+                        {
                             for session in sessions {
                                 all_sessions.push(CrossProjectSession {
                                     session_id: session.session_id,
@@ -2968,16 +3175,15 @@ fn scan_all_project_sessions(provider: Provider) -> Result<Vec<CrossProjectSessi
         let codex_dir = get_codex_sessions_dir();
         if codex_dir.exists() {
             for file_path in collect_codex_session_files(&codex_dir) {
-                let filename = file_path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let filename = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let Some((session, cwd)) = parse_codex_session_file(&file_path, filename) else {
                     continue;
                 };
                 let Some(project_path) = cwd else {
                     continue;
                 };
-                let project_name = project_path.file_name()
+                let project_name = project_path
+                    .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("unknown")
                     .to_string();
@@ -3004,7 +3210,9 @@ fn scan_all_project_sessions(provider: Provider) -> Result<Vec<CrossProjectSessi
                             let project_name = extract_project_name(&project_folder);
                             let project_path = folder_to_path(&project_folder);
 
-                            if let Ok(sessions) = scan_project_sessions(&project_folder, Provider::Codex) {
+                            if let Ok(sessions) =
+                                scan_project_sessions(&project_folder, Provider::Codex)
+                            {
                                 for session in sessions {
                                     all_sessions.push(CrossProjectSession {
                                         session_id: session.session_id,
@@ -3045,9 +3253,7 @@ fn scan_project_sessions(project_folder: &PathBuf, provider: Provider) -> Result
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-            let filename = path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
             if filename.starts_with("agent-") {
                 continue;
@@ -3071,7 +3277,8 @@ fn scan_project_sessions(project_folder: &PathBuf, provider: Provider) -> Result
 
 /// Extract a friendly project name from the folder name.
 fn extract_project_name(folder: &PathBuf) -> String {
-    folder.file_name()
+    folder
+        .file_name()
         .and_then(|s| s.to_str())
         .map(|s| {
             // The folder name is path with / replaced by -
@@ -3083,16 +3290,18 @@ fn extract_project_name(folder: &PathBuf) -> String {
 
 /// Convert folder name back to approximate path.
 fn folder_to_path(folder: &PathBuf) -> PathBuf {
-    let name = folder.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let name = folder.file_name().and_then(|s| s.to_str()).unwrap_or("");
     // Folder name is path with / replaced by -
     // This is a heuristic - convert leading - to /
     PathBuf::from(name.replacen('-', "/", name.matches('-').count()))
 }
 
 /// Get context from a cross-project session since last consumed checkpoint.
-fn get_cross_project_context(session: &CrossProjectSession, count: Option<usize>, full: bool) -> Result<String> {
+fn get_cross_project_context(
+    session: &CrossProjectSession,
+    count: Option<usize>,
+    full: bool,
+) -> Result<String> {
     // If full mode, ignore checkpoints
     let since_ts = if full {
         None
@@ -3101,7 +3310,9 @@ fn get_cross_project_context(session: &CrossProjectSession, count: Option<usize>
         let cwd = std::env::current_dir()?;
         let consumed = load_consumed_checkpoints(&cwd)?;
         let source_key = session.project_path.to_string_lossy().to_string();
-        consumed.consumed.get(&source_key)
+        consumed
+            .consumed
+            .get(&source_key)
             .map(|e| e.last_timestamp.clone())
     };
 
@@ -3118,10 +3329,15 @@ fn read_cross_project_context(
     max_count: Option<usize>,
 ) -> Result<(String, Option<String>)> {
     if session.provider == Provider::Codex {
-        let session_file = session.session_path.clone()
+        let session_file = session
+            .session_path
+            .clone()
             .or_else(|| find_codex_session_file(&session.session_id));
         let Some(session_file) = session_file else {
-            bail!("Session file not found for Codex session {}", session.session_id);
+            bail!(
+                "Session file not found for Codex session {}",
+                session.session_id
+            );
         };
         return read_codex_cross_project_context(session, &session_file, since_ts, max_count);
     }
@@ -3132,14 +3348,15 @@ fn read_cross_project_context(
     };
 
     let project_folder = session.project_path.to_string_lossy().replace('/', "-");
-    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session.session_id));
+    let session_file = projects_dir
+        .join(&project_folder)
+        .join(format!("{}.jsonl", session.session_id));
 
     if !session_file.exists() {
         bail!("Session file not found: {}", session_file.display());
     }
 
-    let content = fs::read_to_string(&session_file)
-        .context("failed to read session file")?;
+    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
 
     // Collect exchanges after the checkpoint timestamp
     let mut exchanges: Vec<(String, String, String)> = Vec::new();
@@ -3168,18 +3385,17 @@ fn read_cross_project_context(
                 let content_text = if let Some(ref content) = msg.content {
                     match content {
                         serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Array(arr) => {
-                            arr.iter()
-                                .filter_map(|v| {
-                                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                                        Some(text.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
+                        serde_json::Value::Array(arr) => arr
+                            .iter()
+                            .filter_map(|v| {
+                                if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                    Some(text.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                         _ => continue,
                     }
                 } else {
@@ -3229,7 +3445,8 @@ fn read_cross_project_context(
     };
 
     // Format the context with project info
-    let mut context = format!("=== Context from {} ({}) ===\n\n",
+    let mut context = format!(
+        "=== Context from {} ({}) ===\n\n",
         session.project_name,
         match session.provider {
             Provider::Claude => "Claude Code",
@@ -3259,9 +3476,7 @@ fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
     }
 
     for path in collect_codex_session_files(&root) {
-        let filename = path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if filename.contains(session_id) {
             return Some(path);
         }
@@ -3289,7 +3504,8 @@ fn read_codex_cross_project_context(
         &exchanges[..]
     };
 
-    let mut context = format!("=== Context from {} ({}) ===\n\n",
+    let mut context = format!(
+        "=== Context from {} ({}) ===\n\n",
         session.project_name,
         match session.provider {
             Provider::Claude => "Claude Code",
@@ -3323,8 +3539,8 @@ fn load_consumed_checkpoints(project_path: &PathBuf) -> Result<ConsumedCheckpoin
     if !path.exists() {
         return Ok(ConsumedCheckpoints::default());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_str(&content).context("failed to parse consumed-checkpoints.json")
 }
 
@@ -3343,15 +3559,19 @@ fn save_consumed_checkpoint(session: &CrossProjectSession) -> Result<()> {
     let last_ts = get_session_last_timestamp_for_path(
         &session.session_id,
         session.provider,
-        &session.project_path
-    )?.unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        &session.project_path,
+    )?
+    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
     let source_key = session.project_path.to_string_lossy().to_string();
-    checkpoints.consumed.insert(source_key, ConsumedEntry {
-        last_timestamp: last_ts,
-        consumed_at: chrono::Utc::now().to_rfc3339(),
-        session_id: session.session_id.clone(),
-    });
+    checkpoints.consumed.insert(
+        source_key,
+        ConsumedEntry {
+            last_timestamp: last_ts,
+            consumed_at: chrono::Utc::now().to_rfc3339(),
+            session_id: session.session_id.clone(),
+        },
+    );
 
     let content = serde_json::to_string_pretty(&checkpoints)?;
     fs::write(&path, content)?;
@@ -3363,7 +3583,7 @@ fn save_consumed_checkpoint(session: &CrossProjectSession) -> Result<()> {
 fn get_session_last_timestamp_for_path(
     session_id: &str,
     provider: Provider,
-    project_path: &PathBuf
+    project_path: &PathBuf,
 ) -> Result<Option<String>> {
     if provider == Provider::Codex {
         let session_file = find_codex_session_file(session_id);
@@ -3379,7 +3599,9 @@ fn get_session_last_timestamp_for_path(
     };
 
     let project_folder = project_path.to_string_lossy().replace('/', "-");
-    let session_file = projects_dir.join(&project_folder).join(format!("{}.jsonl", session_id));
+    let session_file = projects_dir
+        .join(&project_folder)
+        .join(format!("{}.jsonl", session_id));
 
     if !session_file.exists() {
         return Ok(None);

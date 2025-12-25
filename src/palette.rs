@@ -186,7 +186,11 @@ impl PaletteEntry {
                 truncate(summary, 80)
             )
         } else {
-            format!("[task] {} – {}", discovered.task.name, truncate(summary, 96))
+            format!(
+                "[task] {} – {}",
+                discovered.task.name,
+                truncate(summary, 96)
+            )
         };
 
         let exec = vec![

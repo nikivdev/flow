@@ -211,7 +211,10 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
                 args: vec![],
             };
             if let Err(err) = run(dep_opts) {
-                record_failure(&format!("dependency task '{}' failed: {}", dep_task_name, err));
+                record_failure(&format!(
+                    "dependency task '{}' failed: {}",
+                    dep_task_name, err
+                ));
                 bail!("dependency task '{}' failed: {}", dep_task_name, err);
             }
             println!();
@@ -530,7 +533,8 @@ fn execute_task(
         );
         match flox_health_check(workdir, flox_pkgs) {
             Ok(true) => {
-                match run_flox_with_reset(flox_pkgs, workdir, command, args, Some(task_ctx.clone())) {
+                match run_flox_with_reset(flox_pkgs, workdir, command, args, Some(task_ctx.clone()))
+                {
                     Ok(Some((st, out))) => {
                         combined_output.push_str(&out);
                         if st.success() {
@@ -593,7 +597,8 @@ fn execute_task(
                     &format!("flox health check failed ({err}); using host PATH"),
                 );
                 combined_output.push_str("[flox health check failed; using host PATH]\n");
-                let (host_status, host_out) = run_host_command(workdir, command, args, Some(task_ctx))?;
+                let (host_status, host_out) =
+                    run_host_command(workdir, command, args, Some(task_ctx))?;
                 combined_output.push_str(&host_out);
                 status = host_status;
             }
@@ -920,7 +925,9 @@ fn run_flox_interactive_command(
         }
     }
 
-    let status = child.wait().with_context(|| "failed to wait on interactive flox command")?;
+    let status = child
+        .wait()
+        .with_context(|| "failed to wait on interactive flox command")?;
 
     if ctx.is_some() {
         if let Err(err) = running::unregister_process(pid) {
@@ -932,10 +939,7 @@ fn run_flox_interactive_command(
     Ok((status, String::new()))
 }
 
-fn run_command_with_tee(
-    cmd: Command,
-    ctx: Option<TaskContext>,
-) -> Result<(ExitStatus, String)> {
+fn run_command_with_tee(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitStatus, String)> {
     // Only use `script` for tasks explicitly marked as interactive
     // This avoids issues with non-interactive tasks hanging
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
@@ -950,10 +954,7 @@ fn run_command_with_tee(
 
 /// Use the `script` command to run a command interactively while capturing output.
 /// This is more reliable than manual PTY handling for diverse programs.
-fn run_command_with_script(
-    cmd: Command,
-    ctx: Option<TaskContext>,
-) -> Result<(ExitStatus, String)> {
+fn run_command_with_script(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitStatus, String)> {
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
     // Create a temp file for capturing output
     let temp_dir = std::env::temp_dir();
@@ -965,7 +966,10 @@ fn run_command_with_script(
 
     // Build the inner command string
     let program = cmd.get_program().to_string_lossy().to_string();
-    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
     let cwd = cmd.get_current_dir().map(|p| p.to_path_buf());
 
     // Construct the command to pass to script
@@ -1013,8 +1017,14 @@ fn run_command_with_script(
 
     // Run with TTY stdio for interactivity, even if parent stdio is redirected.
     let tty_in = std::fs::File::open("/dev/tty").ok();
-    let tty_out = std::fs::OpenOptions::new().write(true).open("/dev/tty").ok();
-    let tty_err = std::fs::OpenOptions::new().write(true).open("/dev/tty").ok();
+    let tty_out = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .ok();
+    let tty_err = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .ok();
 
     if let (Some(tty_in), Some(tty_out), Some(tty_err)) = (tty_in, tty_out, tty_err) {
         script_cmd
@@ -1060,7 +1070,9 @@ fn run_command_with_script(
         }
     }
 
-    let status = child.wait().with_context(|| "failed to wait on script command")?;
+    let status = child
+        .wait()
+        .with_context(|| "failed to wait on script command")?;
 
     // Unregister the process
     if ctx.is_some() {
@@ -1119,8 +1131,14 @@ fn run_interactive_command(
     // Prefer /dev/tty so interactive tasks keep working even if stdio is redirected.
     // Fall back to inherited stdio if /dev/tty is unavailable.
     let tty_in = std::fs::File::open("/dev/tty").ok();
-    let tty_out = std::fs::OpenOptions::new().write(true).open("/dev/tty").ok();
-    let tty_err = std::fs::OpenOptions::new().write(true).open("/dev/tty").ok();
+    let tty_out = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .ok();
+    let tty_err = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .ok();
 
     if let (Some(tty_in), Some(tty_out), Some(tty_err)) = (tty_in, tty_out, tty_err) {
         cmd.stdin(Stdio::from(tty_in))
@@ -1160,7 +1178,9 @@ fn run_interactive_command(
         }
     }
 
-    let status = child.wait().with_context(|| "failed to wait on interactive command")?;
+    let status = child
+        .wait()
+        .with_context(|| "failed to wait on interactive command")?;
 
     // Unregister the process
     if ctx.is_some() {
@@ -1174,10 +1194,7 @@ fn run_interactive_command(
 }
 
 #[allow(dead_code)]
-fn run_command_with_pty(
-    cmd: Command,
-    ctx: Option<TaskContext>,
-) -> Result<(ExitStatus, String)> {
+fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitStatus, String)> {
     let pty_system = NativePtySystem::default();
 
     // Get terminal size or use defaults
@@ -1202,7 +1219,10 @@ fn run_command_with_pty(
     // Build command for PTY - extract info from the std::process::Command
     // We need to reconstruct the command since portable-pty uses its own CommandBuilder
     let program = cmd.get_program().to_string_lossy().to_string();
-    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
     let cwd = cmd.get_current_dir().map(|p| p.to_path_buf());
 
     let mut pty_cmd = CommandBuilder::new(&program);
