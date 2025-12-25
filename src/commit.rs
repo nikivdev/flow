@@ -588,33 +588,19 @@ fn run_codex_review(diff: &str, session_context: Option<&str>, workdir: &std::pa
 
     let (diff_for_prompt, _truncated) = truncate_diff(diff);
 
-    // Build the review prompt with optional session context
+    // Build compact review prompt optimized for speed/cost
     let prompt = if let Some(context) = session_context {
         format!(
-            "Deep review the following git diff. Be thorough and check for:\n\
-1. Bugs and logic errors\n\
-2. Security vulnerabilities\n\
-3. Performance issues\n\
-4. Code quality\n\
-5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
-Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\
-Never include secrets, credentials, personal data, or other sensitive data in the response.\n\n\
-AI session context (intent behind changes):\n{}\n\n\
-Diff:\n```diff\n{}\n```",
+            "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
+Context:{}\n\
+```diff\n{}\n```",
             context,
             diff_for_prompt
         )
     } else {
         format!(
-            "Deep review the following git diff. Be thorough and check for:\n\
-1. Bugs and logic errors\n\
-2. Security vulnerabilities\n\
-3. Performance issues\n\
-4. Code quality\n\
-5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
-Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\
-Never include secrets, credentials, personal data, or other sensitive data in the response.\n\n\
-Diff:\n```diff\n{}\n```",
+            "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
+```diff\n{}\n```",
             diff_for_prompt
         )
     };
@@ -778,33 +764,19 @@ fn run_claude_review(diff: &str, session_context: Option<&str>, workdir: &std::p
 
     let (diff_for_prompt, _truncated) = truncate_diff(diff);
 
-    // Build the review prompt with optional session context
+    // Build compact review prompt optimized for speed/cost
     let prompt = if let Some(context) = session_context {
         format!(
-            "Deep review the following git diff. Be thorough and check for:\n\
-1. Bugs and logic errors\n\
-2. Security vulnerabilities\n\
-3. Performance issues\n\
-4. Code quality\n\
-5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
-Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\
-Never include secrets, credentials, personal data, or other sensitive data in the response.\n\n\
-AI session context (intent behind changes):\n{}\n\n\
-Diff:\n```diff\n{}\n```",
+            "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
+Context:{}\n\
+```diff\n{}\n```",
             context,
             diff_for_prompt
         )
     } else {
         format!(
-            "Deep review the following git diff. Be thorough and check for:\n\
-1. Bugs and logic errors\n\
-2. Security vulnerabilities\n\
-3. Performance issues\n\
-4. Code quality\n\
-5. Documentation: Are docs up to date? Do new public APIs have docstrings? Does README need updates?\n\n\
-Return ONLY a JSON object with fields: issues_found (bool), issues (array of short strings), summary (string).\n\
-Never include secrets, credentials, personal data, or other sensitive data in the response.\n\n\
-Diff:\n```diff\n{}\n```",
+            "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
+```diff\n{}\n```",
             diff_for_prompt
         )
     };
