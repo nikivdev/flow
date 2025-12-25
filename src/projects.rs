@@ -170,7 +170,10 @@ pub fn set_active_project(name: &str) -> Result<()> {
 /// Get the current active project name, if set.
 pub fn get_active_project() -> Option<String> {
     let path = active_project_path();
-    fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Clear the active project.
@@ -193,7 +196,10 @@ pub fn handle_active(opts: ActiveOpts) -> Result<()> {
     if let Some(name) = opts.project {
         // Verify project exists
         if resolve_project(&name)?.is_none() {
-            anyhow::bail!("Project '{}' not found. Use `f projects` to see registered projects.", name);
+            anyhow::bail!(
+                "Project '{}' not found. Use `f projects` to see registered projects.",
+                name
+            );
         }
         set_active_project(&name)?;
         println!("Active project set to: {}", name);

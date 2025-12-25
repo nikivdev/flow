@@ -2,8 +2,8 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -12,8 +12,8 @@ use axum::{
     extract::Query,
     http::{Method, StatusCode},
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse, Json,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
 };
@@ -78,7 +78,10 @@ fn ensure_server(host: &str, port: u16) -> Result<()> {
         }
     }
 
-    println!("Flow server starting at http://{}:{} (may take a moment)", host, port);
+    println!(
+        "Flow server starting at http://{}:{} (may take a moment)",
+        host, port
+    );
     Ok(())
 }
 
@@ -282,11 +285,14 @@ async fn logs_errors_stream() -> Sse<impl Stream<Item = Result<Event, std::conve
 
     // Get current max ID to start from
     if let Ok(conn) = log_store::open_log_db() {
-        if let Ok(entries) = log_store::query_logs(&conn, &LogQuery {
-            log_type: Some("error".to_string()),
-            limit: 1,
-            ..Default::default()
-        }) {
+        if let Ok(entries) = log_store::query_logs(
+            &conn,
+            &LogQuery {
+                log_type: Some("error".to_string()),
+                limit: 1,
+                ..Default::default()
+            },
+        ) {
             if let Some(entry) = entries.first() {
                 last_id.store(entry.id, Ordering::SeqCst);
             }
@@ -303,11 +309,14 @@ async fn logs_errors_stream() -> Sse<impl Stream<Item = Result<Event, std::conve
                 Err(_) => return Vec::new(),
             };
 
-            log_store::query_logs(&conn, &LogQuery {
-                log_type: Some("error".to_string()),
-                limit: 100,
-                ..Default::default()
-            })
+            log_store::query_logs(
+                &conn,
+                &LogQuery {
+                    log_type: Some("error".to_string()),
+                    limit: 100,
+                    ..Default::default()
+                },
+            )
             .unwrap_or_default()
             .into_iter()
             .filter(|e| e.id > current_last)
@@ -319,7 +328,10 @@ async fn logs_errors_stream() -> Sse<impl Stream<Item = Result<Event, std::conve
         let events: Vec<Result<Event, std::convert::Infallible>> = new_errors
             .into_iter()
             .map(|entry| {
-                last_id.store(entry.id.max(last_id.load(Ordering::SeqCst)), Ordering::SeqCst);
+                last_id.store(
+                    entry.id.max(last_id.load(Ordering::SeqCst)),
+                    Ordering::SeqCst,
+                );
                 let data = serde_json::to_string(&entry).unwrap_or_default();
                 Ok(Event::default().data(data))
             })

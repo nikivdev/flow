@@ -12,7 +12,7 @@ pub struct LogEntry {
     pub timestamp: i64, // unix ms
     #[serde(rename = "type")]
     pub log_type: String, // "log" | "error"
-    pub service: String,  // task name or custom service
+    pub service: String, // task name or custom service
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
     #[serde(default = "default_format")]
@@ -38,8 +38,8 @@ pub struct LogQuery {
     pub service: Option<String>,
     #[serde(rename = "type")]
     pub log_type: Option<String>,
-    pub since: Option<i64>,   // timestamp ms
-    pub until: Option<i64>,   // timestamp ms
+    pub since: Option<i64>, // timestamp ms
+    pub until: Option<i64>, // timestamp ms
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(default)]
@@ -127,7 +127,7 @@ pub fn insert_logs(conn: &mut Connection, entries: &[LogEntry]) -> Result<Vec<i6
 /// Query logs with filters.
 pub fn query_logs(conn: &Connection, query: &LogQuery) -> Result<Vec<StoredLogEntry>> {
     let mut sql = String::from(
-        "SELECT id, project, content, timestamp, log_type, service, stack, format FROM logs WHERE 1=1"
+        "SELECT id, project, content, timestamp, log_type, service, stack, format FROM logs WHERE 1=1",
     );
     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -183,12 +183,15 @@ pub fn query_logs(conn: &Connection, query: &LogQuery) -> Result<Vec<StoredLogEn
 
 /// Get error logs for a project (convenience function).
 pub fn get_errors(conn: &Connection, project: &str, limit: usize) -> Result<Vec<StoredLogEntry>> {
-    query_logs(conn, &LogQuery {
-        project: Some(project.to_string()),
-        log_type: Some("error".to_string()),
-        limit,
-        ..Default::default()
-    })
+    query_logs(
+        conn,
+        &LogQuery {
+            project: Some(project.to_string()),
+            log_type: Some("error".to_string()),
+            limit,
+            ..Default::default()
+        },
+    )
 }
 
 /// Open database and ensure schema exists.
@@ -220,10 +223,14 @@ mod tests {
         let id = insert_log(&conn, &entry).unwrap();
         assert!(id > 0);
 
-        let results = query_logs(&conn, &LogQuery {
-            project: Some("test-project".to_string()),
-            ..Default::default()
-        }).unwrap();
+        let results = query_logs(
+            &conn,
+            &LogQuery {
+                project: Some("test-project".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entry.content, "Test log message");

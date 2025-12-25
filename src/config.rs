@@ -749,9 +749,8 @@ fn load_with_includes(path: &Path, visited: &mut Vec<PathBuf>) -> Result<Config>
         Err(err) => {
             let fix = fixup::fix_toml_content(&contents);
             if fix.fixes_applied.is_empty() {
-                return Err(err).with_context(|| {
-                    format!("failed to parse flow config at {}", path.display())
-                });
+                return Err(err)
+                    .with_context(|| format!("failed to parse flow config at {}", path.display()));
             }
             let fixed = fixup::apply_fixes_to_content(&contents, &fix.fixes_applied);
             if let Err(write_err) = fs::write(&canonical, &fixed) {

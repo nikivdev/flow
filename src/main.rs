@@ -4,9 +4,10 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    ai, cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    commit, commits, daemon, doctor, env, fixup, history, hub, init, init_tracing, log_server, notify,
-    palette, processes, projects, skills, task_match, tasks,
+    ai,
+    cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
+    commit, commits, daemon, doctor, env, fixup, history, hub, init, init_tracing, log_server,
+    notify, palette, processes, projects, skills, task_match, tasks,
 };
 
 fn main() -> Result<()> {
@@ -97,12 +98,26 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::CommitWithCheck(opts)) => {
+            let review_selection =
+                commit::resolve_review_selection(opts.claude, opts.review_model.clone());
             if opts.dry {
                 commit::dry_run_context()?;
             } else if opts.sync {
-                commit::run_with_check_sync(!opts.no_push, !opts.no_context, opts.claude, opts.message.as_deref(), opts.tokens)?;
+                commit::run_with_check_sync(
+                    !opts.no_push,
+                    !opts.no_context,
+                    review_selection,
+                    opts.message.as_deref(),
+                    opts.tokens,
+                )?;
             } else {
-                commit::run_with_check(!opts.no_push, !opts.no_context, opts.claude, opts.message.as_deref(), opts.tokens)?;
+                commit::run_with_check(
+                    !opts.no_push,
+                    !opts.no_context,
+                    review_selection,
+                    opts.message.as_deref(),
+                    opts.tokens,
+                )?;
             }
         }
         Some(Commands::Fixup(opts)) => {
@@ -142,10 +157,7 @@ fn main() -> Result<()> {
 
 fn rerun(opts: RerunOpts) -> Result<()> {
     let project_root = if opts.config.is_absolute() {
-        opts.config
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf()
+        opts.config.parent().unwrap_or(Path::new(".")).to_path_buf()
     } else {
         std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
     };

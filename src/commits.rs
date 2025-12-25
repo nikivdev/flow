@@ -58,11 +58,7 @@ pub fn run(opts: CommitsOpts) -> Result<()> {
 
 /// List recent commits with metadata.
 fn list_commits(limit: usize, all_branches: bool) -> Result<Vec<CommitEntry>> {
-    let mut args = vec![
-        "log",
-        "--pretty=format:%h|%H|%s|%ar|%an",
-        "-n",
-    ];
+    let mut args = vec!["log", "--pretty=format:%h|%H|%s|%ar|%an", "-n"];
     let limit_str = limit.to_string();
     args.push(&limit_str);
 
@@ -186,8 +182,7 @@ fn run_commits_fzf(commits: &[CommitEntry]) -> Result<Option<&CommitEntry>> {
         return Ok(None);
     }
 
-    let selection = String::from_utf8(output.stdout)
-        .context("fzf output was not valid UTF-8")?;
+    let selection = String::from_utf8(output.stdout).context("fzf output was not valid UTF-8")?;
     let selection = selection.trim();
 
     if selection.is_empty() {

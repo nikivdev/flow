@@ -9,7 +9,8 @@ use crate::config;
 
 /// Generate agents.md content with project-specific settings.
 fn generate_agents_md(project_name: &str, _primary_task: &str) -> String {
-    format!(r#"# Autonomous Agent Instructions
+    format!(
+        r#"# Autonomous Agent Instructions
 
 Project: {project_name}
 
@@ -83,7 +84,8 @@ Attempted to run tests but encountered issues.
 
 error: Test suite requires DATABASE_URL environment variable
 ```
-"#)
+"#
+    )
 }
 
 /// Run the auto-setup command.
@@ -115,13 +117,18 @@ pub fn run() -> Result<()> {
     let flow_toml = cwd.join("flow.toml");
     let (project_name, primary_task) = if flow_toml.exists() {
         let cfg = config::load(&flow_toml).unwrap_or_default();
-        let name = cfg.project_name
+        let name = cfg
+            .project_name
             .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "project".to_string());
-        let task = cfg.flow.primary_task.unwrap_or_else(|| "deploy".to_string());
+        let task = cfg
+            .flow
+            .primary_task
+            .unwrap_or_else(|| "deploy".to_string());
         (name, task)
     } else {
-        let name = cwd.file_name()
+        let name = cwd
+            .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "project".to_string());
         (name, "deploy".to_string())
@@ -141,8 +148,7 @@ pub fn run() -> Result<()> {
     let agents_path = claude_dir.join("agents.md");
     let existed = agents_path.exists();
 
-    fs::write(&agents_path, &agents_content)
-        .context("failed to write agents.md")?;
+    fs::write(&agents_path, &agents_content).context("failed to write agents.md")?;
 
     if existed {
         println!("Updated .claude/agents.md ✓");
@@ -157,8 +163,7 @@ pub fn run() -> Result<()> {
     let codex_agents_path = codex_dir.join("agents.md");
     let codex_existed = codex_agents_path.exists();
 
-    fs::write(&codex_agents_path, &agents_content)
-        .context("failed to write .codex/agents.md")?;
+    fs::write(&codex_agents_path, &agents_content).context("failed to write .codex/agents.md")?;
 
     if codex_existed {
         println!("Updated .codex/agents.md ✓");
@@ -182,9 +187,7 @@ pub fn run() -> Result<()> {
 
 /// Check if Lin.app is running.
 fn is_lin_running() -> bool {
-    let output = Command::new("pgrep")
-        .args(["-x", "Lin"])
-        .output();
+    let output = Command::new("pgrep").args(["-x", "Lin"]).output();
 
     match output {
         Ok(out) => out.status.success(),

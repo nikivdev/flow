@@ -1,6 +1,8 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{net::IpAddr, path::PathBuf};
 
+use crate::commit::ReviewModelArg;
+
 /// Command line interface for the flow daemon / CLI hybrid.
 #[derive(Parser, Debug)]
 #[command(
@@ -21,7 +23,8 @@ fn version_with_build_time() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
 
     // Include the generated timestamp file to force recompilation when it changes
-    const BUILD_TIMESTAMP_STR: &str = include_str!(concat!(env!("OUT_DIR"), "/build_timestamp.txt"));
+    const BUILD_TIMESTAMP_STR: &str =
+        include_str!(concat!(env!("OUT_DIR"), "/build_timestamp.txt"));
 
     VERSION.get_or_init(|| {
         let version = env!("CARGO_PKG_VERSION");
@@ -590,6 +593,9 @@ pub struct CommitOpts {
     /// Use Claude Code SDK instead of Codex for code review (commitWithCheck only).
     #[arg(long)]
     pub claude: bool,
+    /// Choose a specific review model (claude-opus, codex-high, codex-mini).
+    #[arg(long, value_enum)]
+    pub review_model: Option<ReviewModelArg>,
     /// Optional custom message to include in commit (appended after author line).
     #[arg(long, short = 'm')]
     pub message: Option<String>,
