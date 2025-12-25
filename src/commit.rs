@@ -15,11 +15,10 @@ use tracing::{debug, info};
 use crate::ai;
 use crate::config;
 use crate::hub;
-use crate::notify;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
-const MAX_REVIEW_CONTEXT_CHARS: usize = 50_000;
+const MAX_REVIEW_CONTEXT_CHARS: usize = 15_000;
 const HUB_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 const HUB_PORT: u16 = 9050;
 
@@ -265,12 +264,12 @@ pub fn run_sync(push: bool) -> Result<()> {
 
 /// Run commit with code review: stage, review with Codex or Claude, generate message, commit, push.
 /// If hub is running, delegates to it for async execution.
-pub fn run_with_check(push: bool, include_context: bool, use_claude: bool) -> Result<()> {
+pub fn run_with_check(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>) -> Result<()> {
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
-        return delegate_to_hub_with_check(push, include_context, use_claude);
+        return delegate_to_hub_with_check(push, include_context, use_claude, author_message);
     }
 
-    run_with_check_sync(push, include_context, use_claude)
+    run_with_check_sync(push, include_context, use_claude, author_message)
 }
 
 fn commit_with_check_async_enabled() -> bool {
@@ -376,7 +375,8 @@ fn prompt_yes_no(message: &str) -> Result<bool> {
 /// Run commit with code review synchronously (called directly or by hub).
 /// If `include_context` is true, AI session context is passed for better understanding.
 /// If `use_claude` is true, uses Claude Code SDK instead of Codex.
-pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool) -> Result<()> {
+/// If `author_message` is provided, it's appended to the commit message.
+pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>) -> Result<()> {
     info!(push = push, include_context = include_context, use_claude = use_claude, "starting commit with check workflow");
 
     // Ensure we're in a git repo
@@ -451,20 +451,13 @@ pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool) 
 
     if review.timed_out {
         println!(
-            "⚠ Codex review timed out after {}s",
+            "⚠ Review timed out after {}s, proceeding anyway",
             commit_with_check_timeout_secs()
         );
-        if !prompt_yes_no("Proceed without Codex review?")? {
-            restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
-            bail!("Commit cancelled - review unavailable");
-        }
-        println!();
     }
 
-    // Check if review indicates issues
-    let has_issues = review.issues_found;
-
-    if has_issues {
+    // Show review results (informational only, never blocks)
+    if review.issues_found {
         if let Some(summary) = review.summary.as_ref() {
             if !summary.trim().is_empty() {
                 println!("Summary: {}", summary.trim());
@@ -478,40 +471,9 @@ pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool) 
             }
             println!();
         }
-
-        // Attempt auto-fix via codex
-        println!("Attempting auto-fix...");
-        let fix_prompt = format!(
-            "Fix these issues in the staged changes:\n{}\n\nApply minimal fixes, don't refactor.",
-            review.issues.join("\n")
-        );
-
-        match run_codex_fix(&fix_prompt, &repo_root) {
-            Ok(true) => {
-                println!("✓ Auto-fix applied");
-                // Re-stage any fixed files
-                let _ = git_run_in(&repo_root, &["add", "-u"]);
-            }
-            Ok(false) => {
-                println!("⚠ Auto-fix had no changes");
-            }
-            Err(e) => {
-                println!("⚠ Auto-fix failed: {}", e);
-                // Send warning alert to Lin
-                let alert_msg = format!("⚠️ Auto-fix failed: {} - committing anyway", e);
-                if let Err(e) = notify::send_warning(&alert_msg) {
-                    debug!("Failed to send alert to Lin: {}", e);
-                }
-            }
-        }
-
-        if !prompt_yes_no("Proceed with commit despite issues?")? {
-            restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
-            bail!("Commit cancelled - review issues found");
-        }
         println!("Proceeding with commit...");
     } else if !review.timed_out {
-        println!("✓ Codex review passed");
+        println!("✓ Review passed");
     }
 
     // Continue with normal commit flow
@@ -529,14 +491,21 @@ pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool) 
     let message = generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?;
     println!("done\n");
 
+    // Append author note if provided
+    let full_message = if let Some(note) = author_message {
+        format!("{}\n\nauthor: {}", message, note)
+    } else {
+        message
+    };
+
     // Show the message
     println!("Commit message:");
     println!("────────────────────────────────────────");
-    println!("{}", message);
+    println!("{}", full_message);
     println!("────────────────────────────────────────\n");
 
     // Commit
-    let paragraphs = split_paragraphs(&message);
+    let paragraphs = split_paragraphs(&full_message);
     let mut args = vec!["commit"];
     for p in &paragraphs {
         args.push("-m");
@@ -988,41 +957,6 @@ Diff:\n```diff\n{}\n```",
     })
 }
 
-/// Run Codex to auto-fix issues in staged changes.
-/// Returns true if fixes were applied.
-fn run_codex_fix(prompt: &str, workdir: &std::path::Path) -> Result<bool> {
-    // Use codex exec to apply fixes
-    let mut child = Command::new("codex")
-        .args([
-            "exec",
-            "--model",
-            "gpt-5.1-codex-max",
-            "-a",  // auto-edit mode
-            prompt,
-        ])
-        .current_dir(workdir)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("failed to run codex - is it installed?")?;
-
-    let status = child.wait()?;
-
-    if !status.success() {
-        bail!("codex exited with status {}", status);
-    }
-
-    // Check if any files changed
-    let diff_output = Command::new("git")
-        .args(["diff", "--name-only"])
-        .current_dir(workdir)
-        .output()
-        .context("failed to check for changes")?;
-
-    let has_changes = !diff_output.stdout.is_empty();
-    Ok(has_changes)
-}
-
 fn ensure_git_repo() -> Result<()> {
     let output = Command::new("git")
         .args(["rev-parse", "--git-dir"])
@@ -1128,14 +1062,24 @@ fn git_capture_in(workdir: &std::path::Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Find the largest valid UTF-8 char boundary at or before `pos`.
+fn floor_char_boundary(s: &str, pos: usize) -> usize {
+    let mut end = pos.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 fn truncate_diff(diff: &str) -> (String, bool) {
     if diff.len() <= MAX_DIFF_CHARS {
         (diff.to_string(), false)
     } else {
+        let end = floor_char_boundary(diff, MAX_DIFF_CHARS);
         let truncated = format!(
             "{}\n\n[Diff truncated to first {} characters]",
-            &diff[..MAX_DIFF_CHARS],
-            MAX_DIFF_CHARS
+            &diff[..end],
+            end
         );
         (truncated, true)
     }
@@ -1145,10 +1089,11 @@ fn truncate_context(context: &str, max_chars: usize) -> String {
     if context.len() <= max_chars {
         context.to_string()
     } else {
+        let end = floor_char_boundary(context, max_chars);
         format!(
             "{}\n\n[Context truncated to first {} characters]",
-            &context[..max_chars],
-            max_chars
+            &context[..end],
+            end
         )
     }
 }
@@ -1405,20 +1350,23 @@ fn delegate_to_hub(push: bool) -> Result<()> {
     }
 }
 
-fn delegate_to_hub_with_check(push: bool, include_context: bool, use_claude: bool) -> Result<()> {
+fn delegate_to_hub_with_check(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
 
     // Build the command to run using the current executable path
     let push_flag = if push { "" } else { " --no-push" };
     let context_flag = if include_context { "" } else { " --no-context" };
     let claude_flag = if use_claude { " --claude" } else { "" };
+    let message_flag = author_message
+        .map(|m| format!(" --message {:?}", m))
+        .unwrap_or_default();
     let flow_bin = std::env::current_exe()
         .ok()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "flow".to_string());
     let command = format!(
-        "{} commitWithCheck --sync{}{}{}",
-        flow_bin, push_flag, context_flag, claude_flag
+        "{} commitWithCheck --sync{}{}{}{}",
+        flow_bin, push_flag, context_flag, claude_flag, message_flag
     );
 
     let url = format!("http://{}:{}/tasks/run", HUB_HOST, HUB_PORT);

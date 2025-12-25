@@ -455,13 +455,22 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
     Ok((context, last_ts))
 }
 
+/// Find the largest valid UTF-8 char boundary at or before `pos`.
+fn floor_char_boundary(s: &str, pos: usize) -> usize {
+    let mut end = pos.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 /// Truncate a message to max chars, preserving meaningful content
 fn truncate_message(msg: &str, max_chars: usize) -> String {
     if msg.len() <= max_chars {
         return msg.to_string();
     }
-    // Keep first part and indicate truncation
-    format!("{}...[truncated]", &msg[..max_chars])
+    let end = floor_char_boundary(msg, max_chars);
+    format!("{}...[truncated]", &msg[..end])
 }
 
 fn read_codex_context_since(session_file: &PathBuf, since_ts: Option<&str>) -> Result<(String, Option<String>)> {
@@ -2519,7 +2528,8 @@ fn auto_import_sessions() -> Result<()> {
             provider: provider_str.to_string(),
             description: session.first_message.as_ref().or(session.error_summary.as_ref()).map(|m| {
                 if m.len() > 100 {
-                    format!("{}...", &m[..97])
+                    let end = floor_char_boundary(m, 97);
+                    format!("{}...", &m[..end])
                 } else {
                     m.clone()
                 }
@@ -2576,7 +2586,8 @@ fn import_sessions() -> Result<()> {
             provider: provider_str.to_string(),
             description: session.first_message.as_ref().or(session.error_summary.as_ref()).map(|m| {
                 if m.len() > 100 {
-                    format!("{}...", &m[..97])
+                    let end = floor_char_boundary(m, 97);
+                    format!("{}...", &m[..end])
                 } else {
                     m.clone()
                 }
