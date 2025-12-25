@@ -180,6 +180,36 @@ pub fn save_checkpoint(project_path: &PathBuf, checkpoint: CommitCheckpoint) -> 
     Ok(())
 }
 
+/// Log review result for tracking async commits.
+pub fn log_review_result(
+    project_path: &PathBuf,
+    issues_found: bool,
+    issues: &[String],
+    context_chars: usize,
+    review_time_secs: u64,
+) {
+    let log_path = project_path.join(".ai").join("review-log.jsonl");
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let entry = json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "issues_found": issues_found,
+        "issue_count": issues.len(),
+        "context_chars": context_chars,
+        "review_time_secs": review_time_secs,
+    });
+
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(file, "{}", entry);
+    }
+}
+
 /// Get AI session context since the last commit checkpoint.
 /// Returns all exchanges from the checkpoint timestamp to now.
 pub fn get_context_since_checkpoint() -> Result<Option<String>> {
@@ -415,9 +445,11 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
         return Ok((String::new(), last_ts));
     }
 
-    // Optimization: only keep last N exchanges for efficiency
-    const MAX_EXCHANGES: usize = 8;
-    const MAX_MSG_CHARS: usize = 2000;
+    // Optimization: prioritize recent exchanges, fit within reasonable budget
+    // Keep it compact - extract intent, not full conversation
+    const MAX_EXCHANGES: usize = 5;
+    const MAX_USER_CHARS: usize = 500;   // User requests are short
+    const MAX_ASSIST_CHARS: usize = 300; // Just capture what was done, not full response
 
     let total_exchanges = exchanges.len();
     let exchanges_to_use: Vec<_> = if total_exchanges > MAX_EXCHANGES {
@@ -426,31 +458,26 @@ fn read_context_since(session_id: &str, provider: Provider, since_ts: Option<&st
         exchanges
     };
 
-    // Format the context
+    // Format compact context - focus on intent
     let mut context = String::new();
 
-    // Add summary if we skipped older exchanges
     if total_exchanges > MAX_EXCHANGES {
-        context.push_str(&format!(
-            "[{} earlier exchanges omitted for brevity]\n\n",
-            total_exchanges - MAX_EXCHANGES
-        ));
+        context.push_str(&format!("[+{} earlier]\n", total_exchanges - MAX_EXCHANGES));
     }
 
     for (user_msg, assistant_msg, _ts) in &exchanges_to_use {
-        context.push_str("H: ");
-        context.push_str(&truncate_message(user_msg, MAX_MSG_CHARS));
-        context.push_str("\n\n");
-        context.push_str("A: ");
-        context.push_str(&truncate_message(assistant_msg, MAX_MSG_CHARS));
+        // Extract first line/sentence of user msg as intent
+        let user_intent = extract_intent(user_msg, MAX_USER_CHARS);
+        let assist_summary = extract_intent(assistant_msg, MAX_ASSIST_CHARS);
+
+        context.push_str(">");
+        context.push_str(&user_intent);
+        context.push('\n');
+        context.push_str(&assist_summary);
         context.push_str("\n\n");
     }
 
-    // Remove trailing newlines
-    while context.ends_with('\n') {
-        context.pop();
-    }
-    context.push('\n');
+    context = context.trim().to_string();
 
     Ok((context, last_ts))
 }
@@ -470,7 +497,32 @@ fn truncate_message(msg: &str, max_chars: usize) -> String {
         return msg.to_string();
     }
     let end = floor_char_boundary(msg, max_chars);
-    format!("{}...[truncated]", &msg[..end])
+    format!("{}...", &msg[..end])
+}
+
+/// Extract intent from a message - first meaningful content, truncated
+fn extract_intent(msg: &str, max_chars: usize) -> String {
+    // Skip common prefixes and get to the meat
+    let clean = msg
+        .trim()
+        .trim_start_matches("I'll ")
+        .trim_start_matches("I will ")
+        .trim_start_matches("Let me ")
+        .trim_start_matches("Sure, ")
+        .trim_start_matches("Okay, ")
+        .trim_start_matches("I'm going to ")
+        .trim();
+
+    // Take first line or sentence
+    let first_part = clean
+        .lines()
+        .next()
+        .unwrap_or(clean)
+        .split(". ")
+        .next()
+        .unwrap_or(clean);
+
+    truncate_message(first_part, max_chars)
 }
 
 fn read_codex_context_since(session_file: &PathBuf, since_ts: Option<&str>) -> Result<(String, Option<String>)> {

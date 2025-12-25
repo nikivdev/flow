@@ -450,6 +450,16 @@ pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, 
 
     println!("────────────────────────────────────────\n");
 
+    // Log review result for async tracking
+    let context_chars = session_context.as_ref().map(|c| c.len()).unwrap_or(0);
+    ai::log_review_result(
+        &repo_root,
+        review.issues_found,
+        &review.issues,
+        context_chars,
+        0, // TODO: track actual review time
+    );
+
     if review.timed_out {
         println!(
             "⚠ Review timed out after {}s, proceeding anyway",
