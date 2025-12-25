@@ -593,6 +593,9 @@ pub struct CommitOpts {
     /// Optional custom message to include in commit (appended after author line).
     #[arg(long, short = 'm')]
     pub message: Option<String>,
+    /// Max tokens for AI session context (default: 4000, ~16000 chars).
+    #[arg(long, short = 't', default_value = "4000")]
+    pub tokens: usize,
 }
 
 #[derive(Args, Debug, Clone)]
