@@ -590,6 +590,9 @@ pub struct CommitOpts {
     /// Use Claude Code SDK instead of Codex for code review (commitWithCheck only).
     #[arg(long)]
     pub claude: bool,
+    /// Optional custom message to include in commit (appended after author line).
+    #[arg(long, short = 'm')]
+    pub message: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
