@@ -15,6 +15,7 @@ use tracing::{debug, info};
 use crate::ai;
 use crate::config;
 use crate::hub;
+use crate::notify;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
@@ -481,6 +482,33 @@ pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, 
                 println!("- {}", issue);
             }
             println!();
+
+            // Send notification for critical issues (secrets, security)
+            let critical_issues: Vec<_> = review.issues.iter()
+                .filter(|i| {
+                    let lower = i.to_lowercase();
+                    lower.contains("secret") || lower.contains(".env") ||
+                    lower.contains("credential") || lower.contains("api key") ||
+                    lower.contains("password") || lower.contains("token") ||
+                    lower.contains("security") || lower.contains("vulnerability")
+                })
+                .collect();
+
+            if !critical_issues.is_empty() {
+                let alert_msg = format!("⚠️ Review found {} critical issue(s): {}",
+                    critical_issues.len(),
+                    critical_issues.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("; ")
+                );
+                // Truncate if too long
+                let alert_msg = if alert_msg.len() > 200 {
+                    format!("{}...", &alert_msg[..200])
+                } else {
+                    alert_msg
+                };
+                let _ = notify::send_warning(&alert_msg);
+                // Also try to POST to 1focus
+                send_to_1focus(&repo_root, &review.issues, review.summary.as_deref());
+            }
         }
         println!("Proceeding with commit...");
     } else if !review.timed_out {
@@ -1243,6 +1271,40 @@ fn parse_review_json(output: &str) -> Option<ReviewJson> {
     }
     let candidate = &trimmed[start..=end];
     serde_json::from_str::<ReviewJson>(candidate).ok()
+}
+
+/// Send critical review issues to 1focus for reactive display.
+fn send_to_1focus(project_path: &std::path::Path, issues: &[String], summary: Option<&str>) {
+    // Try production worker first, then local
+    let endpoints = [
+        "https://1f-worker.nikiv.workers.dev/api/v1/events", // Production worker
+        "http://localhost:8787/api/v1/events",                // Local dev
+    ];
+
+    let project_name = project_path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let payload = json!({
+        "type": "review_issue",
+        "project": project_name,
+        "issues": issues,
+        "summary": summary,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let client = match Client::builder().timeout(Duration::from_secs(2)).build() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    for endpoint in &endpoints {
+        if client.post(*endpoint).json(&payload).send().is_ok() {
+            debug!("Sent review issues to {}", endpoint);
+            return;
+        }
+    }
 }
 
 enum ReviewEvent {
