@@ -100,9 +100,9 @@ fn main() -> Result<()> {
             if opts.dry {
                 commit::dry_run_context()?;
             } else if opts.sync {
-                commit::run_with_check_sync(!opts.no_push, !opts.no_context, opts.claude, opts.message.as_deref())?;
+                commit::run_with_check_sync(!opts.no_push, !opts.no_context, opts.claude, opts.message.as_deref(), opts.tokens)?;
             } else {
-                commit::run_with_check(!opts.no_push, !opts.no_context, opts.claude, opts.message.as_deref())?;
+                commit::run_with_check(!opts.no_push, !opts.no_context, opts.claude, opts.message.as_deref(), opts.tokens)?;
             }
         }
         Some(Commands::Fixup(opts)) => {

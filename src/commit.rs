@@ -18,7 +18,6 @@ use crate::hub;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
-const MAX_REVIEW_CONTEXT_CHARS: usize = 15_000;
 const HUB_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 const HUB_PORT: u16 = 9050;
 
@@ -264,12 +263,12 @@ pub fn run_sync(push: bool) -> Result<()> {
 
 /// Run commit with code review: stage, review with Codex or Claude, generate message, commit, push.
 /// If hub is running, delegates to it for async execution.
-pub fn run_with_check(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>) -> Result<()> {
+pub fn run_with_check(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>, max_tokens: usize) -> Result<()> {
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
-        return delegate_to_hub_with_check(push, include_context, use_claude, author_message);
+        return delegate_to_hub_with_check(push, include_context, use_claude, author_message, max_tokens);
     }
 
-    run_with_check_sync(push, include_context, use_claude, author_message)
+    run_with_check_sync(push, include_context, use_claude, author_message, max_tokens)
 }
 
 fn commit_with_check_async_enabled() -> bool {
@@ -376,8 +375,10 @@ fn prompt_yes_no(message: &str) -> Result<bool> {
 /// If `include_context` is true, AI session context is passed for better understanding.
 /// If `use_claude` is true, uses Claude Code SDK instead of Codex.
 /// If `author_message` is provided, it's appended to the commit message.
-pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>) -> Result<()> {
-    info!(push = push, include_context = include_context, use_claude = use_claude, "starting commit with check workflow");
+pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>, max_tokens: usize) -> Result<()> {
+    // Convert tokens to chars (roughly 4 chars per token)
+    let max_context = max_tokens * 4;
+    info!(push = push, include_context = include_context, use_claude = use_claude, max_tokens = max_tokens, "starting commit with check workflow");
 
     // Ensure we're in a git repo
     ensure_git_repo()?;
@@ -405,7 +406,7 @@ pub fn run_with_check_sync(push: bool, include_context: bool, use_claude: bool, 
         ai::get_context_since_checkpoint_for_path(&repo_root)
             .ok()
             .flatten()
-            .map(|context| truncate_context(&context, MAX_REVIEW_CONTEXT_CHARS))
+            .map(|context| truncate_context(&context, max_context))
     } else {
         None
     };
@@ -1350,7 +1351,7 @@ fn delegate_to_hub(push: bool) -> Result<()> {
     }
 }
 
-fn delegate_to_hub_with_check(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>) -> Result<()> {
+fn delegate_to_hub_with_check(push: bool, include_context: bool, use_claude: bool, author_message: Option<&str>, max_tokens: usize) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
 
     // Build the command to run using the current executable path
@@ -1365,8 +1366,8 @@ fn delegate_to_hub_with_check(push: bool, include_context: bool, use_claude: boo
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "flow".to_string());
     let command = format!(
-        "{} commitWithCheck --sync{}{}{}{}",
-        flow_bin, push_flag, context_flag, claude_flag, message_flag
+        "{} commitWithCheck --sync{}{}{}{} --tokens {}",
+        flow_bin, push_flag, context_flag, claude_flag, message_flag, max_tokens
     );
 
     let url = format!("http://{}:{}/tasks/run", HUB_HOST, HUB_PORT);
