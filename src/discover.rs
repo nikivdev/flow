@@ -62,17 +62,26 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
     // Check if root itself has a flow.toml
     let root_flow_toml = root.join("flow.toml");
     if root_flow_toml.exists() {
-        if let Ok(cfg) = config::load(&root_flow_toml) {
-            root_config = Some(root_flow_toml.clone());
-            for task in &cfg.tasks {
-                discovered.push(DiscoveredTask {
-                    task: task.clone(),
-                    config_path: root_flow_toml.clone(),
-                    relative_dir: String::new(),
-                    depth: 0,
-                });
+        match config::load(&root_flow_toml) {
+            Ok(cfg) => {
+                root_config = Some(root_flow_toml.clone());
+                for task in &cfg.tasks {
+                    discovered.push(DiscoveredTask {
+                        task: task.clone(),
+                        config_path: root_flow_toml.clone(),
+                        relative_dir: String::new(),
+                        depth: 0,
+                    });
+                }
+                root_cfg = Some(cfg);
             }
-            root_cfg = Some(cfg);
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to parse {}: {:#}",
+                    root_flow_toml.display(),
+                    e
+                );
+            }
         }
     }
 
