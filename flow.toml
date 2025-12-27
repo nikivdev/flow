@@ -4,6 +4,10 @@ name = "flow"
 [flow]
 primary_task = "deploy-cli-release"
 
+[options]
+# Enable gitedit.dev mirroring for commits
+gitedit_mirror = true
+
 [flox]
 [flox.install]
 cargo.pkg-path = "cargo"

@@ -42,6 +42,58 @@ pub struct TaskContext {
     pub interactive: bool,
 }
 
+/// Check if a command needs interactive mode (TTY passthrough).
+/// Auto-detects commands that typically require user input.
+fn needs_interactive_mode(command: &str) -> bool {
+    let cmd = command.trim();
+
+    // Commands that start with these need interactive mode
+    let interactive_prefixes = [
+        "sudo ",
+        "su ",
+        "ssh ",
+        "docker run -it",
+        "docker exec -it",
+        "kubectl exec -it",
+    ];
+
+    for prefix in &interactive_prefixes {
+        if cmd.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Commands that contain these patterns anywhere
+    let interactive_patterns = [
+        " sudo ",
+        " | sudo ",
+        "&& sudo ",
+        "; sudo ",
+    ];
+
+    for pattern in &interactive_patterns {
+        if cmd.contains(pattern) {
+            return true;
+        }
+    }
+
+    // Standalone interactive commands
+    let interactive_commands = [
+        "vim", "nvim", "nano", "emacs",
+        "htop", "top", "btop",
+        "less", "more",
+        "psql", "mysql", "sqlite3",
+        "node", "python", "python3", "irb", "ghci",
+        "lazygit", "lazydocker",
+    ];
+
+    // Check if command starts with or is exactly one of these
+    let first_word = cmd.split_whitespace().next().unwrap_or("");
+    let base_cmd = first_word.rsplit('/').next().unwrap_or(first_word);
+
+    interactive_commands.contains(&base_cmd)
+}
+
 pub fn list(opts: TasksOpts) -> Result<()> {
     // Determine root directory for discovery
     let root = if opts.config.is_absolute() {
@@ -483,6 +535,10 @@ fn execute_task(
     let canonical_workdir = workdir
         .canonicalize()
         .unwrap_or_else(|_| workdir.to_path_buf());
+
+    // Auto-detect interactive mode if not explicitly set
+    let interactive = task.interactive || needs_interactive_mode(command);
+
     let task_ctx = TaskContext {
         task_name: task.name.clone(),
         command: command.to_string(),
@@ -491,7 +547,7 @@ fn execute_task(
         used_flox: flox_enabled && !flox_pkgs.is_empty(),
         project_name: project_name.map(|s| s.to_string()),
         log_path: None,
-        interactive: task.interactive,
+        interactive,
     };
 
     let mut record = InvocationRecord::new(
