@@ -182,6 +182,12 @@ pub enum Commands {
     )]
     Skills(SkillsCommand),
     #[command(
+        about = "Manage AI tools (.ai/tools/*.ts).",
+        long_about = "Create, list, and run TypeScript tools via Bun. Tools are fast, reusable scripts stored in .ai/tools/. Use 'codify' to generate tools from natural language.",
+        alias = "t"
+    )]
+    Tools(ToolsCommand),
+    #[command(
         about = "Send a proposal notification to Lin for approval.",
         long_about = "Sends a proposal to the Lin app widget for user approval. Used for human-in-the-loop AI workflows."
     )]
@@ -196,6 +202,12 @@ pub enum Commands {
         long_about = "Creates .ai/ folder structure, adds .ai/ to .gitignore, and sets up checkpoints to track completed initialization steps. Safe to run multiple times."
     )]
     Start,
+    #[command(
+        about = "Invoke a kode AI subagent.",
+        long_about = "Run a kode subagent with a prompt. Available agents: codify (convert to code), explore (search codebase), general (multi-step tasks).",
+        alias = "a"
+    )]
+    Agent(AgentCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -839,6 +851,69 @@ pub enum SkillsAction {
     },
     /// Sync flow.toml tasks as skills.
     Sync,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ToolsCommand {
+    #[command(subcommand)]
+    pub action: Option<ToolsAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ToolsAction {
+    /// List all tools for this project.
+    #[command(alias = "ls")]
+    List,
+    /// Run a tool.
+    Run {
+        /// Tool name (without .ts extension).
+        name: String,
+        /// Arguments to pass to the tool.
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Create a new tool.
+    New {
+        /// Tool name (kebab-case recommended).
+        name: String,
+        /// Short description of what the tool does.
+        #[arg(short, long)]
+        description: Option<String>,
+        /// Use AI (localcode) to generate the tool implementation.
+        #[arg(long)]
+        ai: bool,
+    },
+    /// Edit a tool in your editor.
+    Edit {
+        /// Tool name.
+        name: String,
+    },
+    /// Remove a tool.
+    Remove {
+        /// Tool name.
+        name: String,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AgentCommand {
+    #[command(subcommand)]
+    pub action: Option<AgentAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AgentAction {
+    /// List available agents.
+    #[command(alias = "ls")]
+    List,
+    /// Run an agent with a prompt.
+    Run {
+        /// Agent name (codify, explore, general).
+        agent: String,
+        /// Prompt for the agent.
+        #[arg(trailing_var_arg = true)]
+        prompt: Vec<String>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]

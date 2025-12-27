@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 pub mod checkpoints {
     pub const AI_FOLDER_CREATED: &str = "ai_folder_created";
     pub const GITIGNORE_UPDATED: &str = "gitignore_updated";
+    pub const DB_SCHEMA_CREATED: &str = "db_schema_created";
 }
 
 /// Run the start command to bootstrap the project.
@@ -22,17 +23,30 @@ pub fn run() -> Result<()> {
     if !has_checkpoint(&project_root, checkpoints::AI_FOLDER_CREATED) {
         create_ai_folder(&project_root)?;
         set_checkpoint(&project_root, checkpoints::AI_FOLDER_CREATED)?;
-        println!("✓ Created .ai/ folder");
+        println!("✓ Created .ai/ folder structure");
     }
 
     // Add .ai/ to .gitignore
     if !has_checkpoint(&project_root, checkpoints::GITIGNORE_UPDATED) {
         update_gitignore(&project_root)?;
         set_checkpoint(&project_root, checkpoints::GITIGNORE_UPDATED)?;
-        println!("✓ Added .ai/ to .gitignore");
+        println!("✓ Updated .gitignore");
     }
 
-    println!("✓ Project ready");
+    // Create database schema
+    if !has_checkpoint(&project_root, checkpoints::DB_SCHEMA_CREATED) {
+        create_db_schema(&project_root)?;
+        set_checkpoint(&project_root, checkpoints::DB_SCHEMA_CREATED)?;
+        println!("✓ Created .ai/db/ with schema");
+    }
+
+    println!("\n✓ Project ready");
+    println!("\nStructure:");
+    println!("  .ai/");
+    println!("  ├── db/           # SQLite database & schema");
+    println!("  ├── sessions/     # AI conversation history");
+    println!("  ├── skills/       # Custom skills/tools");
+    println!("  └── checkpoints/  # Init state tracking");
     Ok(())
 }
 
@@ -76,6 +90,7 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
         ai_dir.join("checkpoints"),
         ai_dir.join("sessions"),
         ai_dir.join("skills"),
+        ai_dir.join("db"),
     ];
 
     for dir in &dirs {
@@ -84,6 +99,125 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
 
     Ok(())
 }
+
+/// Create the database schema files.
+fn create_db_schema(project_root: &Path) -> Result<()> {
+    let db_dir = project_root.join(".ai/db");
+    fs::create_dir_all(&db_dir)?;
+
+    // Create schema.ts with drizzle-orm schema
+    let schema_path = db_dir.join("schema.ts");
+    if !schema_path.exists() {
+        fs::write(&schema_path, SCHEMA_TEMPLATE)?;
+    }
+
+    // Create index.ts for database connection
+    let index_path = db_dir.join("index.ts");
+    if !index_path.exists() {
+        fs::write(&index_path, DB_INDEX_TEMPLATE)?;
+    }
+
+    // Create package.json for dependencies
+    let package_path = db_dir.join("package.json");
+    if !package_path.exists() {
+        fs::write(&package_path, DB_PACKAGE_TEMPLATE)?;
+    }
+
+    Ok(())
+}
+
+const SCHEMA_TEMPLATE: &str = r#"// .ai/db/schema.ts
+// Database schema for AI project data using drizzle-orm
+import { sqliteTable, text, integer, blob } from "drizzle-orm/sqlite-core"
+
+// Research notes and findings
+export const research = sqliteTable("research", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  content: text("content").notNull(),
+  source: text("source"), // URL, file path, or reference
+  tags: text("tags"), // JSON array of tags
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }),
+})
+
+// Tasks and todos tracked by agents
+export const tasks = sqliteTable("tasks", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  description: text("description"),
+  status: text("status").notNull().default("pending"), // pending, in_progress, completed, blocked
+  priority: integer("priority").default(0),
+  parentId: text("parent_id"), // for subtasks
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  completedAt: integer("completed_at", { mode: "timestamp" }),
+})
+
+// Files being tracked or generated
+export const files = sqliteTable("files", {
+  id: text("id").primaryKey(),
+  path: text("path").notNull().unique(),
+  contentHash: text("content_hash"),
+  description: text("description"),
+  generatedBy: text("generated_by"), // agent/tool that created it
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }),
+})
+
+// Key-value store for agent memory/state
+export const memory = sqliteTable("memory", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(), // JSON serialized
+  expiresAt: integer("expires_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+})
+
+// External service connections and context
+export const connections = sqliteTable("connections", {
+  id: text("id").primaryKey(),
+  service: text("service").notNull(), // github, x, linear, etc.
+  accountId: text("account_id"),
+  metadata: text("metadata"), // JSON with service-specific data
+  syncedAt: integer("synced_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+})
+"#;
+
+const DB_INDEX_TEMPLATE: &str = r#"// .ai/db/index.ts
+// Database connection and utilities
+import { drizzle } from "drizzle-orm/bun-sqlite"
+import { Database } from "bun:sqlite"
+import * as schema from "./schema"
+
+const sqlite = new Database(".ai/db/db.sqlite")
+export const db = drizzle(sqlite, { schema })
+
+// Re-export schema for convenience
+export * from "./schema"
+
+// Helper to generate IDs
+export const genId = () => crypto.randomUUID()
+
+// Helper to get current timestamp
+export const now = () => new Date()
+"#;
+
+const DB_PACKAGE_TEMPLATE: &str = r#"{
+  "name": "@ai/db",
+  "type": "module",
+  "dependencies": {
+    "drizzle-orm": "^0.38.0"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.30.0"
+  },
+  "scripts": {
+    "generate": "drizzle-kit generate",
+    "migrate": "drizzle-kit migrate",
+    "studio": "drizzle-kit studio"
+  }
+}
+"#;
 
 /// Add .ai/ to .gitignore if not already present.
 fn update_gitignore(project_root: &Path) -> Result<()> {

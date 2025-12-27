@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod ai;
 pub mod cli;
 pub mod commit;
@@ -24,6 +25,7 @@ pub mod projects;
 pub mod running;
 pub mod skills;
 pub mod start;
+pub mod tools;
 pub mod sync;
 pub mod task_match;
 pub mod tasks;

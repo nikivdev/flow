@@ -37,22 +37,44 @@ const BUILTIN_COMMANDS: &[(&str, &[&str])] = &[("commit", &["commit", "c"])];
 
 // CLI subcommands that should be passed through to the CLI parser, not matched as tasks
 const CLI_SUBCOMMANDS: &[&str] = &[
-    "logs",
+    // Core commands
     "hub",
+    "init",
+    "doctor",
+    "tasks",
+    "run",
+    "search",
+    "match",
+    "help",
+    // Process management
+    "logs",
     "ps",
     "kill",
     "projects",
     "active",
     "server",
-    "init",
-    "doctor",
-    "tasks",
-    "search",
+    // History
     "rerun",
     "last-cmd",
     "last-cmd-full",
-    "match",
-    "help",
+    // Git/commit
+    "commit",
+    "commitwithcheck",
+    "fixup",
+    "commits",
+    // AI/sessions
+    "sessions",
+    "ai",
+    "agent",
+    // Environment
+    "env",
+    "skills",
+    "tools",
+    "notify",
+    "start",
+    // Aliases
+    "s", // search
+    "a", // agent
 ];
 
 fn run_builtin(name: &str, execute: bool) -> Result<()> {
