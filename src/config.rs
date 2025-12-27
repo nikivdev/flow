@@ -263,6 +263,9 @@ pub struct TaskConfig {
     /// Require confirmation when matched via LM Studio (for destructive tasks).
     #[serde(default, alias = "confirm-on-match")]
     pub confirm_on_match: bool,
+    /// Command to run when the task is cancelled (Ctrl+C).
+    #[serde(default, alias = "on-cancel")]
+    pub on_cancel: Option<String>,
 }
 
 /// Definition of a dependency that can be referenced by automation tasks.

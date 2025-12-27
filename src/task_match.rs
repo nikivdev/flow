@@ -439,6 +439,7 @@ mod tests {
                 shortcuts: Vec::new(),
                 interactive: false,
                 confirm_on_match: false,
+                on_cancel: None,
             },
             config_path: PathBuf::from("flow.toml"),
             relative_dir: String::new(),
