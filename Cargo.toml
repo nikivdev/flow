@@ -38,6 +38,7 @@ chrono = "0.4.42"
 dirs = "6.0.0"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
+ctrlc = "3.4"
 
 [dev-dependencies]
 mockito = "1.7"

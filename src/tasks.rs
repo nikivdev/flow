@@ -6,7 +6,10 @@ use std::{
     net::IpAddr,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -28,6 +31,79 @@ use crate::{
     hub, projects,
     running::{self, RunningProcess},
 };
+
+/// Global state for cancel cleanup handler.
+static CANCEL_HANDLER_SET: AtomicBool = AtomicBool::new(false);
+
+/// Cleanup state shared with the signal handler.
+struct CleanupState {
+    command: Option<String>,
+    workdir: PathBuf,
+}
+
+static CLEANUP_STATE: std::sync::OnceLock<Mutex<CleanupState>> = std::sync::OnceLock::new();
+
+/// Run the cleanup command if one is set.
+fn run_cleanup() {
+    let state = CLEANUP_STATE.get_or_init(|| {
+        Mutex::new(CleanupState {
+            command: None,
+            workdir: PathBuf::from("."),
+        })
+    });
+
+    if let Ok(guard) = state.lock() {
+        if let Some(ref cmd) = guard.command {
+            eprintln!("\nRunning cleanup: {}", cmd);
+            let _ = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(&guard.workdir)
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status();
+        }
+    }
+}
+
+/// Set up the cleanup handler for Ctrl+C.
+fn setup_cancel_handler(on_cancel: Option<&str>, workdir: &Path) {
+    let state = CLEANUP_STATE.get_or_init(|| {
+        Mutex::new(CleanupState {
+            command: None,
+            workdir: PathBuf::from("."),
+        })
+    });
+
+    // Update the cleanup state
+    if let Ok(mut guard) = state.lock() {
+        guard.command = on_cancel.map(|s| s.to_string());
+        guard.workdir = workdir.to_path_buf();
+    }
+
+    // Only set up the handler once
+    if !CANCEL_HANDLER_SET.swap(true, Ordering::SeqCst) {
+        let _ = ctrlc::set_handler(move || {
+            run_cleanup();
+            std::process::exit(130); // 128 + SIGINT (2)
+        });
+    }
+}
+
+/// Clear the cleanup handler (called after task completes normally).
+fn clear_cancel_handler() {
+    let state = CLEANUP_STATE.get_or_init(|| {
+        Mutex::new(CleanupState {
+            command: None,
+            workdir: PathBuf::from("."),
+        })
+    });
+
+    if let Ok(mut guard) = state.lock() {
+        guard.command = None;
+    }
+}
 
 /// Context for registering a running task process
 #[derive(Debug, Clone)]
@@ -558,6 +634,9 @@ fn execute_task(
         interactive,
     };
 
+    // Set up cancel handler if on_cancel is defined
+    setup_cancel_handler(task.on_cancel.as_deref(), workdir);
+
     let mut record = InvocationRecord::new(
         workdir.display().to_string(),
         config_path.display().to_string(),
@@ -677,6 +756,9 @@ fn execute_task(
     if let Err(err) = history::record(record) {
         tracing::warn!(?err, "failed to write task history");
     }
+
+    // Clear cancel handler since task completed normally
+    clear_cancel_handler();
 
     if status.success() {
         Ok(())
@@ -1871,6 +1953,7 @@ mod tests {
                 shortcuts: Vec::new(),
                 interactive: false,
                 confirm_on_match: false,
+                on_cancel: None,
             },
             TaskConfig {
                 name: "test".to_string(),
@@ -1882,6 +1965,7 @@ mod tests {
                 shortcuts: Vec::new(),
                 interactive: false,
                 confirm_on_match: false,
+                on_cancel: None,
             },
         ];
 
@@ -2087,6 +2171,7 @@ mod tests {
                 shortcuts: vec!["dcr-alias".into()],
                 interactive: false,
                 confirm_on_match: false,
+                on_cancel: None,
             },
             TaskConfig {
                 name: "dev-hub".into(),
@@ -2098,6 +2183,7 @@ mod tests {
                 shortcuts: Vec::new(),
                 interactive: false,
                 confirm_on_match: false,
+                on_cancel: None,
             },
         ];
 
@@ -2128,6 +2214,7 @@ mod tests {
                 shortcuts: Vec::new(),
                 interactive: false,
                 confirm_on_match: false,
+                on_cancel: None,
             },
             TaskConfig {
                 name: "deploy-core-runner".into(),
@@ -2139,6 +2226,7 @@ mod tests {
                 shortcuts: Vec::new(),
                 interactive: false,
                 confirm_on_match: false,
+                on_cancel: None,
             },
         ];
 
