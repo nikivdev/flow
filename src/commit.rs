@@ -367,6 +367,12 @@ pub fn run_sync(push: bool) -> Result<()> {
         }
     }
 
+    // Sync to gitedit if enabled
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if gitedit_mirror_enabled() {
+        sync_to_gitedit(&cwd);
+    }
+
     Ok(())
 }
 
@@ -766,6 +772,11 @@ pub fn run_with_check_sync(
         } else {
             debug!("saved commit checkpoint");
         }
+    }
+
+    // Sync to gitedit if enabled
+    if gitedit_mirror_enabled() {
+        sync_to_gitedit(&repo_root);
     }
 
     Ok(())
@@ -1482,6 +1493,132 @@ fn should_show_review_context() -> bool {
     std::env::var("FLOW_SHOW_REVIEW_CONTEXT")
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+/// Check if gitedit mirroring is enabled in flow.toml.
+fn gitedit_mirror_enabled() -> bool {
+    let cwd = std::env::current_dir().ok();
+
+    if let Some(cwd) = cwd {
+        let local_config = cwd.join("flow.toml");
+        if local_config.exists() {
+            if let Ok(cfg) = config::load(&local_config) {
+                return cfg.options.gitedit_mirror.unwrap_or(false);
+            }
+        }
+    }
+
+    false
+}
+
+/// Get the gitedit API URL from config or use default.
+fn gitedit_api_url() -> String {
+    let cwd = std::env::current_dir().ok();
+
+    if let Some(cwd) = cwd {
+        let local_config = cwd.join("flow.toml");
+        if local_config.exists() {
+            if let Ok(cfg) = config::load(&local_config) {
+                if let Some(url) = cfg.options.gitedit_url {
+                    return url;
+                }
+            }
+        }
+    }
+
+    "https://gitedit.dev".to_string()
+}
+
+/// Sync commit to gitedit.dev for mirroring.
+fn sync_to_gitedit(repo_root: &std::path::Path) {
+    // Get remote origin URL to extract owner/repo
+    let remote_url = match git_capture_in(repo_root, &["remote", "get-url", "origin"]) {
+        Ok(url) => url.trim().to_string(),
+        Err(_) => {
+            debug!("No git remote found, skipping gitedit sync");
+            return;
+        }
+    };
+
+    // Parse owner/repo from remote URL
+    // Supports: git@github.com:owner/repo.git, https://github.com/owner/repo.git
+    let (owner, repo) = match parse_github_remote(&remote_url) {
+        Some((o, r)) => (o, r),
+        None => {
+            debug!("Could not parse GitHub remote URL: {}", remote_url);
+            return;
+        }
+    };
+
+    // Get current commit SHA
+    let commit_sha = match git_capture_in(repo_root, &["rev-parse", "HEAD"]) {
+        Ok(sha) => sha.trim().to_string(),
+        Err(_) => {
+            debug!("Could not get commit SHA");
+            return;
+        }
+    };
+
+    // Get current branch
+    let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .map(|b| b.trim().to_string());
+
+    let api_url = format!("{}/api/mirrors/sync", gitedit_api_url());
+
+    let payload = json!({
+        "owner": owner,
+        "repo": repo,
+        "commit_sha": commit_sha,
+        "branch": branch,
+        "source": "flow-cli",
+    });
+
+    let client = match Client::builder().timeout(Duration::from_secs(5)).build() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    match client.post(&api_url).json(&payload).send() {
+        Ok(resp) if resp.status().is_success() => {
+            println!("✓ Synced to gitedit.dev/gh/{}/{}", owner, repo);
+            debug!("Gitedit sync successful");
+        }
+        Ok(resp) => {
+            debug!("Gitedit sync failed: HTTP {}", resp.status());
+        }
+        Err(e) => {
+            debug!("Gitedit sync error: {}", e);
+        }
+    }
+}
+
+/// Parse owner and repo from a GitHub remote URL.
+fn parse_github_remote(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+
+    // SSH format: git@github.com:owner/repo.git
+    if url.starts_with("git@github.com:") {
+        let path = url.strip_prefix("git@github.com:")?;
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 2 {
+            return Some((parts[0].to_string(), parts[1].to_string()));
+        }
+    }
+
+    // HTTPS format: https://github.com/owner/repo.git
+    if url.contains("github.com/") {
+        let idx = url.find("github.com/")?;
+        let path = &url[idx + 11..];
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 2 {
+            return Some((parts[0].to_string(), parts[1].to_string()));
+        }
+    }
+
+    None
 }
 
 fn split_paragraphs(message: &str) -> Vec<String> {

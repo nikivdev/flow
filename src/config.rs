@@ -109,6 +109,12 @@ pub struct OptionsConfig {
         alias = "commit-with-check-timeout-secs"
     )]
     pub commit_with_check_timeout_secs: Option<u64>,
+    /// Enable mirroring commits to gitedit.dev (opt-in per project).
+    #[serde(default, rename = "gitedit_mirror", alias = "gitedit-mirror")]
+    pub gitedit_mirror: Option<bool>,
+    /// Custom gitedit API URL (defaults to https://gitedit.dev).
+    #[serde(default, rename = "gitedit_url", alias = "gitedit-url")]
+    pub gitedit_url: Option<String>,
 }
 
 impl OptionsConfig {
@@ -124,6 +130,12 @@ impl OptionsConfig {
         }
         if other.commit_with_check_timeout_secs.is_some() {
             self.commit_with_check_timeout_secs = other.commit_with_check_timeout_secs;
+        }
+        if other.gitedit_mirror.is_some() {
+            self.gitedit_mirror = other.gitedit_mirror;
+        }
+        if other.gitedit_url.is_some() {
+            self.gitedit_url = other.gitedit_url;
         }
     }
 }

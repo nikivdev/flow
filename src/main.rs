@@ -7,7 +7,7 @@ use flowd::{
     ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     commit, commits, daemon, doctor, env, fixup, history, hub, init, init_tracing, log_server,
-    notify, palette, processes, projects, skills, task_match, tasks,
+    notify, palette, processes, projects, skills, start, task_match, tasks,
 };
 
 fn main() -> Result<()> {
@@ -140,6 +140,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Commits(opts)) => {
             commits::run(opts)?;
+        }
+        Some(Commands::Start) => {
+            start::run()?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

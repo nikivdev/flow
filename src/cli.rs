@@ -191,6 +191,11 @@ pub enum Commands {
         long_about = "Fuzzy search through git commits, showing attached AI sessions and review metadata. Allows jumping between commits to see the context and reasoning behind changes."
     )]
     Commits(CommitsOpts),
+    #[command(
+        about = "Bootstrap project with .ai/ folder and checkpoints.",
+        long_about = "Creates .ai/ folder structure, adds .ai/ to .gitignore, and sets up checkpoints to track completed initialization steps. Safe to run multiple times."
+    )]
+    Start,
 }
 
 #[derive(Args, Debug, Clone)]

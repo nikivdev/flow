@@ -23,6 +23,7 @@ pub mod processes;
 pub mod projects;
 pub mod running;
 pub mod skills;
+pub mod start;
 pub mod sync;
 pub mod task_match;
 pub mod tasks;
