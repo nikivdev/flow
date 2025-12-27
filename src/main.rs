@@ -4,10 +4,10 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    ai,
+    agent, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     commit, commits, daemon, doctor, env, fixup, history, hub, init, init_tracing, log_server,
-    notify, palette, processes, projects, skills, start, task_match, tasks,
+    notify, palette, processes, projects, skills, start, task_match, tasks, tools,
 };
 
 fn main() -> Result<()> {
@@ -135,6 +135,9 @@ fn main() -> Result<()> {
         Some(Commands::Skills(cmd)) => {
             skills::run(cmd)?;
         }
+        Some(Commands::Tools(cmd)) => {
+            tools::run(cmd)?;
+        }
         Some(Commands::Notify(cmd)) => {
             notify::run(cmd)?;
         }
@@ -143,6 +146,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Start) => {
             start::run()?;
+        }
+        Some(Commands::Agent(cmd)) => {
+            agent::run(cmd)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
