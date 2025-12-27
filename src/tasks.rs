@@ -45,39 +45,47 @@ pub struct TaskContext {
 /// Check if a command needs interactive mode (TTY passthrough).
 /// Auto-detects commands that typically require user input.
 fn needs_interactive_mode(command: &str) -> bool {
-    let cmd = command.trim();
+    // Check each line of the command (for multi-line scripts)
+    for line in command.lines() {
+        let line = line.trim();
 
-    // Commands that start with these need interactive mode
-    let interactive_prefixes = [
-        "sudo ",
-        "su ",
-        "ssh ",
-        "docker run -it",
-        "docker exec -it",
-        "kubectl exec -it",
-    ];
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
 
-    for prefix in &interactive_prefixes {
-        if cmd.starts_with(prefix) {
+        // Commands that need interactive mode when they start a line
+        let interactive_prefixes = [
+            "sudo ",
+            "sudo\t",
+            "su ",
+            "ssh ",
+            "docker run -it",
+            "docker run -ti",
+            "docker exec -it",
+            "docker exec -ti",
+            "kubectl exec -it",
+            "kubectl exec -ti",
+        ];
+
+        for prefix in &interactive_prefixes {
+            if line.starts_with(prefix) {
+                return true;
+            }
+        }
+
+        // Also check if line is exactly "sudo" followed by something
+        if line == "sudo" || line.starts_with("sudo ") {
             return true;
         }
     }
 
-    // Commands that contain these patterns anywhere
-    let interactive_patterns = [
-        " sudo ",
-        " | sudo ",
-        "&& sudo ",
-        "; sudo ",
-    ];
-
-    for pattern in &interactive_patterns {
-        if cmd.contains(pattern) {
-            return true;
-        }
+    // Check for sudo anywhere in piped/chained commands
+    if command.contains("| sudo") || command.contains("&& sudo") || command.contains("; sudo") {
+        return true;
     }
 
-    // Standalone interactive commands
+    // Standalone interactive commands (check first line's first word)
     let interactive_commands = [
         "vim", "nvim", "nano", "emacs",
         "htop", "top", "btop",
@@ -87,8 +95,8 @@ fn needs_interactive_mode(command: &str) -> bool {
         "lazygit", "lazydocker",
     ];
 
-    // Check if command starts with or is exactly one of these
-    let first_word = cmd.split_whitespace().next().unwrap_or("");
+    let first_line = command.lines().next().unwrap_or("").trim();
+    let first_word = first_line.split_whitespace().next().unwrap_or("");
     let base_cmd = first_word.rsplit('/').next().unwrap_or(first_word);
 
     interactive_commands.contains(&base_cmd)
@@ -809,11 +817,6 @@ fn run_host_command(
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
     let is_tty = std::io::stdin().is_terminal();
 
-    eprintln!(
-        "[DEBUG] run_host_command: interactive={}, is_tty={}",
-        interactive, is_tty
-    );
-
     if interactive && is_tty {
         return run_interactive_command(workdir, command, args, ctx);
     }
@@ -1436,12 +1439,6 @@ fn run_command_with_pipes(
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
-
-    eprintln!(
-        "[DEBUG] run_command_with_pipes: interactive={}, is_tty={}",
-        interactive,
-        std::io::stdin().is_terminal()
-    );
 
     // Interactive mode: inherit all stdio for TTY passthrough
     // NOTE: Do NOT create a new process group for interactive commands.
