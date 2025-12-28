@@ -1,5 +1,7 @@
 //! AI-powered git commit command using OpenAI.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
@@ -370,7 +372,7 @@ pub fn run_sync(push: bool) -> Result<()> {
     // Sync to gitedit if enabled
     let cwd = std::env::current_dir().unwrap_or_default();
     if gitedit_mirror_enabled() {
-        sync_to_gitedit(&cwd);
+        sync_to_gitedit(&cwd, "commit", &[], None);
     }
 
     Ok(())
@@ -689,12 +691,33 @@ pub fn run_with_check_sync(
     let message = generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?;
     println!("done\n");
 
+    let mut gitedit_sessions: Vec<ai::GitEditSessionData> = Vec::new();
+    let mut gitedit_session_hash: Option<String> = None;
+
+    if gitedit_mirror_enabled_for_commit_with_check(&repo_root) {
+        match ai::get_sessions_for_gitedit(&repo_root) {
+            Ok(sessions) => {
+                if !sessions.is_empty() {
+                    gitedit_session_hash = gitedit_sessions_hash(&sessions);
+                    gitedit_sessions = sessions;
+                }
+            }
+            Err(err) => {
+                debug!("failed to collect AI sessions for gitedit: {}", err);
+            }
+        }
+    }
+
     // Append author note if provided
-    let full_message = if let Some(note) = author_message {
+    let mut full_message = if let Some(note) = author_message {
         format!("{}\n\nauthor: {}", message, note)
     } else {
         message
     };
+
+    if let Some(hash) = gitedit_session_hash.as_deref() {
+        full_message = format!("{}\n\nGitEdit-AI-Hash: {}", full_message, hash);
+    }
 
     // Show the message
     println!("Commit message:");
@@ -775,8 +798,13 @@ pub fn run_with_check_sync(
     }
 
     // Sync to gitedit if enabled
-    if gitedit_mirror_enabled() {
-        sync_to_gitedit(&repo_root);
+    if push && gitedit_mirror_enabled_for_commit_with_check(&repo_root) {
+        sync_to_gitedit(
+            &repo_root,
+            "commit_with_check",
+            &gitedit_sessions,
+            gitedit_session_hash.as_deref(),
+        );
     }
 
     Ok(())
@@ -1511,6 +1539,21 @@ fn gitedit_mirror_enabled() -> bool {
     false
 }
 
+/// Check if gitedit mirroring is enabled for commitWithCheck in flow.toml.
+fn gitedit_mirror_enabled_for_commit_with_check(repo_root: &std::path::Path) -> bool {
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            if let Some(value) = cfg.options.commit_with_check_gitedit_mirror {
+                return value;
+            }
+            return cfg.options.gitedit_mirror.unwrap_or(false);
+        }
+    }
+
+    false
+}
+
 /// Get the gitedit API URL from config or use default.
 fn gitedit_api_url() -> String {
     let cwd = std::env::current_dir().ok();
@@ -1530,7 +1573,12 @@ fn gitedit_api_url() -> String {
 }
 
 /// Sync commit to gitedit.dev for mirroring.
-fn sync_to_gitedit(repo_root: &std::path::Path) {
+fn sync_to_gitedit(
+    repo_root: &std::path::Path,
+    event: &str,
+    ai_sessions: &[ai::GitEditSessionData],
+    session_hash: Option<&str>,
+) {
     // Get remote origin URL to extract owner/repo
     let remote_url = match git_capture_in(repo_root, &["remote", "get-url", "origin"]) {
         Ok(url) => url.trim().to_string(),
@@ -1563,6 +1611,42 @@ fn sync_to_gitedit(repo_root: &std::path::Path) {
     let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .map(|b| b.trim().to_string());
+    let ref_name = branch
+        .as_ref()
+        .map(|name| format!("refs/heads/{}", name));
+
+    // Get commit message
+    let commit_message = git_capture_in(repo_root, &["log", "-1", "--format=%B"])
+        .ok()
+        .map(|m| m.trim().to_string());
+
+    // Get author info
+    let author_name = git_capture_in(repo_root, &["log", "-1", "--format=%an"])
+        .ok()
+        .map(|n| n.trim().to_string());
+    let author_email = git_capture_in(repo_root, &["log", "-1", "--format=%ae"])
+        .ok()
+        .map(|e| e.trim().to_string());
+
+    let session_count = ai_sessions.len();
+    let ai_sessions_json: Vec<serde_json::Value> = ai_sessions
+        .iter()
+        .map(|s| {
+            json!({
+                "session_id": s.session_id,
+                "provider": s.provider,
+                "started_at": s.started_at,
+                "last_activity_at": s.last_activity_at,
+                "exchange_count": s.exchanges.len(),
+                "context_summary": s.context_summary,
+                "exchanges": s.exchanges.iter().map(|e| json!({
+                    "user_message": e.user_message,
+                    "assistant_message": e.assistant_message,
+                    "timestamp": e.timestamp,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
 
     let api_url = format!("{}/api/mirrors/sync", gitedit_api_url());
 
@@ -1571,17 +1655,34 @@ fn sync_to_gitedit(repo_root: &std::path::Path) {
         "repo": repo,
         "commit_sha": commit_sha,
         "branch": branch,
+        "ref": ref_name,
+        "event": event,
         "source": "flow-cli",
+        "commit_message": commit_message,
+        "author_name": author_name,
+        "author_email": author_email,
+        "session_hash": session_hash,
+        "ai_sessions": ai_sessions_json,
     });
 
-    let client = match Client::builder().timeout(Duration::from_secs(5)).build() {
+    let client = match Client::builder().timeout(Duration::from_secs(10)).build() {
         Ok(c) => c,
         Err(_) => return,
     };
 
     match client.post(&api_url).json(&payload).send() {
         Ok(resp) if resp.status().is_success() => {
-            println!("✓ Synced to gitedit.dev/gh/{}/{}", owner, repo);
+            if session_count > 0 {
+                println!(
+                    "✓ Synced to gitedit.dev/gh/{}/{} ({} AI session{})",
+                    owner,
+                    repo,
+                    session_count,
+                    if session_count == 1 { "" } else { "s" }
+                );
+            } else {
+                println!("✓ Synced to gitedit.dev/gh/{}/{}", owner, repo);
+            }
             debug!("Gitedit sync successful");
         }
         Ok(resp) => {
@@ -1591,6 +1692,17 @@ fn sync_to_gitedit(repo_root: &std::path::Path) {
             debug!("Gitedit sync error: {}", e);
         }
     }
+}
+
+fn gitedit_sessions_hash(sessions: &[ai::GitEditSessionData]) -> Option<String> {
+    if sessions.is_empty() {
+        return None;
+    }
+
+    let serialized = serde_json::to_string(sessions).ok()?;
+    let mut hasher = DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    Some(format!("{:016x}", hasher.finish()))
 }
 
 /// Parse owner and repo from a GitHub remote URL.

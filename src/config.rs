@@ -109,6 +109,13 @@ pub struct OptionsConfig {
         alias = "commit-with-check-timeout-secs"
     )]
     pub commit_with_check_timeout_secs: Option<u64>,
+    /// Enable mirroring commits to gitedit.dev for commitWithCheck.
+    #[serde(
+        default,
+        rename = "commit_with_check_gitedit_mirror",
+        alias = "commit-with-check-gitedit-mirror"
+    )]
+    pub commit_with_check_gitedit_mirror: Option<bool>,
     /// Enable mirroring commits to gitedit.dev (opt-in per project).
     #[serde(default, rename = "gitedit_mirror", alias = "gitedit-mirror")]
     pub gitedit_mirror: Option<bool>,
@@ -130,6 +137,9 @@ impl OptionsConfig {
         }
         if other.commit_with_check_timeout_secs.is_some() {
             self.commit_with_check_timeout_secs = other.commit_with_check_timeout_secs;
+        }
+        if other.commit_with_check_gitedit_mirror.is_some() {
+            self.commit_with_check_gitedit_mirror = other.commit_with_check_gitedit_mirror;
         }
         if other.gitedit_mirror.is_some() {
             self.gitedit_mirror = other.gitedit_mirror;
@@ -1166,6 +1176,7 @@ dev = "f run dev"
         assert!(cfg.options.commit_with_check_async.is_none());
         assert!(cfg.options.commit_with_check_use_repo_root.is_none());
         assert!(cfg.options.commit_with_check_timeout_secs.is_none());
+        assert!(cfg.options.commit_with_check_gitedit_mirror.is_none());
     }
 
     #[test]
@@ -1207,5 +1218,15 @@ commit_with_check_use_repo_root = false
 "#;
         let cfg: Config = toml::from_str(toml).expect("options table should parse");
         assert_eq!(cfg.options.commit_with_check_use_repo_root, Some(false));
+    }
+
+    #[test]
+    fn options_commit_with_check_gitedit_mirror_parses() {
+        let toml = r#"
+[options]
+commit_with_check_gitedit_mirror = true
+"#;
+        let cfg: Config = toml::from_str(toml).expect("options table should parse");
+        assert_eq!(cfg.options.commit_with_check_gitedit_mirror, Some(true));
     }
 }

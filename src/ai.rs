@@ -285,6 +285,195 @@ pub fn get_context_since_checkpoint_for_path(project_path: &PathBuf) -> Result<O
     }
 }
 
+/// Structured AI session data for GitEdit sync.
+#[derive(Debug, Serialize, Clone)]
+pub struct GitEditSessionData {
+    pub session_id: String,
+    pub provider: String,
+    pub started_at: Option<String>,
+    pub last_activity_at: Option<String>,
+    pub exchanges: Vec<GitEditExchange>,
+    pub context_summary: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GitEditExchange {
+    pub user_message: String,
+    pub assistant_message: String,
+    pub timestamp: String,
+}
+
+/// Get structured AI session data for GitEdit sync.
+/// Returns sessions with full exchange history since the last checkpoint.
+pub fn get_sessions_for_gitedit(project_path: &PathBuf) -> Result<Vec<GitEditSessionData>> {
+    let checkpoints = load_checkpoints(project_path).unwrap_or_default();
+    let sessions = read_sessions_for_path(Provider::All, project_path)?;
+
+    if sessions.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let since_ts = checkpoints
+        .last_commit
+        .as_ref()
+        .and_then(|c| c.last_entry_timestamp.clone());
+
+    let mut result = Vec::new();
+
+    for session in sessions {
+        let provider_name = match session.provider {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+            Provider::All => "unknown",
+        };
+
+        // Get full exchanges (not summarized)
+        let exchanges = get_session_exchanges_since(
+            &session.session_id,
+            session.provider,
+            since_ts.as_deref(),
+            project_path,
+        )?;
+
+        if exchanges.is_empty() {
+            continue;
+        }
+
+        // Get last timestamp from exchanges
+        let last_activity = exchanges.last().map(|e| e.timestamp.clone());
+
+        // Create context summary (first few words of first user message)
+        let context_summary = exchanges.first().map(|e| {
+            let msg = &e.user_message;
+            let words: Vec<&str> = msg.split_whitespace().take(10).collect();
+            let summary = words.join(" ");
+            if msg.split_whitespace().count() > 10 {
+                format!("{}...", summary)
+            } else {
+                summary
+            }
+        });
+
+        result.push(GitEditSessionData {
+            session_id: session.session_id.clone(),
+            provider: provider_name.to_string(),
+            started_at: session.timestamp.clone(),
+            last_activity_at: last_activity,
+            exchanges,
+            context_summary,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Get full exchanges from a session since a timestamp.
+fn get_session_exchanges_since(
+    session_id: &str,
+    provider: Provider,
+    since_ts: Option<&str>,
+    project_path: &PathBuf,
+) -> Result<Vec<GitEditExchange>> {
+    if provider == Provider::Codex {
+        let session_file = find_codex_session_file(session_id);
+        if let Some(session_file) = session_file {
+            let (exchanges, _) = read_codex_exchanges(&session_file, since_ts)?;
+            return Ok(exchanges
+                .into_iter()
+                .map(|(user, assistant, ts)| GitEditExchange {
+                    user_message: user,
+                    assistant_message: assistant,
+                    timestamp: ts,
+                })
+                .collect());
+        }
+        return Ok(vec![]);
+    }
+
+    let path_str = project_path.to_string_lossy().to_string();
+    let project_folder = path_to_project_name(&path_str);
+
+    let projects_dir = get_claude_projects_dir();
+    let session_file = projects_dir
+        .join(&project_folder)
+        .join(format!("{}.jsonl", session_id));
+
+    if !session_file.exists() {
+        return Ok(vec![]);
+    }
+
+    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
+
+    let mut exchanges: Vec<GitEditExchange> = Vec::new();
+    let mut current_user: Option<String> = None;
+    let mut current_ts: Option<String> = None;
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+            let entry_ts = entry.timestamp.clone();
+
+            // Skip entries before checkpoint
+            if let (Some(since), Some(ts)) = (since_ts, &entry_ts) {
+                if ts.as_str() <= since {
+                    continue;
+                }
+            }
+
+            if let Some(ref msg) = entry.message {
+                let role = msg.role.as_deref().unwrap_or("unknown");
+
+                let content_text = if let Some(ref content) = msg.content {
+                    match content {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Array(arr) => arr
+                            .iter()
+                            .filter_map(|v| {
+                                v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => continue,
+                    }
+                } else {
+                    continue;
+                };
+
+                if content_text.is_empty() {
+                    continue;
+                }
+
+                match role {
+                    "user" => {
+                        current_user = Some(content_text);
+                        current_ts = entry_ts.clone();
+                    }
+                    "assistant" => {
+                        let clean_text = strip_thinking_blocks(&content_text);
+                        if clean_text.trim().is_empty() {
+                            continue;
+                        }
+                        if let Some(user_msg) = current_user.take() {
+                            let ts = current_ts.take().or(entry_ts).unwrap_or_default();
+                            exchanges.push(GitEditExchange {
+                                user_message: user_msg,
+                                assistant_message: clean_text,
+                                timestamp: ts,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(exchanges)
+}
+
 /// Get the last entry timestamp from the current session (for saving checkpoint).
 pub fn get_last_entry_timestamp() -> Result<Option<(String, String)>> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
