@@ -109,9 +109,34 @@ fn main() -> Result<()> {
                     review_selection,
                     opts.message.as_deref(),
                     opts.tokens,
+                    false,
                 )?;
             } else {
                 commit::run_with_check(
+                    !opts.no_push,
+                    !opts.no_context,
+                    review_selection,
+                    opts.message.as_deref(),
+                    opts.tokens,
+                )?;
+            }
+        }
+        Some(Commands::CommitWithCheckWithGitedit(opts)) => {
+            let review_selection =
+                commit::resolve_review_selection(opts.claude, opts.review_model.clone());
+            if opts.dry {
+                commit::dry_run_context()?;
+            } else if opts.sync {
+                commit::run_with_check_sync(
+                    !opts.no_push,
+                    !opts.no_context,
+                    review_selection,
+                    opts.message.as_deref(),
+                    opts.tokens,
+                    true,
+                )?;
+            } else {
+                commit::run_with_check_with_gitedit(
                     !opts.no_push,
                     !opts.no_context,
                     review_selection,

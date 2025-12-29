@@ -389,6 +389,7 @@ pub fn run_with_check(
 ) -> Result<()> {
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
         return delegate_to_hub_with_check(
+            "commitWithCheck",
             push,
             include_context,
             review_selection,
@@ -403,6 +404,36 @@ pub fn run_with_check(
         review_selection,
         author_message,
         max_tokens,
+        false,
+    )
+}
+
+/// Run commitWithCheck and always sync AI sessions to GitEdit (ignores config).
+pub fn run_with_check_with_gitedit(
+    push: bool,
+    include_context: bool,
+    review_selection: ReviewSelection,
+    author_message: Option<&str>,
+    max_tokens: usize,
+) -> Result<()> {
+    if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
+        return delegate_to_hub_with_check(
+            "commitWithCheckWithGitedit",
+            push,
+            include_context,
+            review_selection,
+            author_message,
+            max_tokens,
+        );
+    }
+
+    run_with_check_sync(
+        push,
+        include_context,
+        review_selection,
+        author_message,
+        max_tokens,
+        true,
     )
 }
 
@@ -516,6 +547,7 @@ pub fn run_with_check_sync(
     review_selection: ReviewSelection,
     author_message: Option<&str>,
     max_tokens: usize,
+    force_gitedit: bool,
 ) -> Result<()> {
     // Convert tokens to chars (roughly 4 chars per token)
     let max_context = max_tokens * 4;
@@ -694,7 +726,10 @@ pub fn run_with_check_sync(
     let mut gitedit_sessions: Vec<ai::GitEditSessionData> = Vec::new();
     let mut gitedit_session_hash: Option<String> = None;
 
-    if gitedit_mirror_enabled_for_commit_with_check(&repo_root) {
+    let gitedit_enabled =
+        force_gitedit || gitedit_mirror_enabled_for_commit_with_check(&repo_root);
+
+    if gitedit_enabled {
         match ai::get_sessions_for_gitedit(&repo_root) {
             Ok(sessions) => {
                 if !sessions.is_empty() {
@@ -798,7 +833,13 @@ pub fn run_with_check_sync(
     }
 
     // Sync to gitedit if enabled
-    if push && gitedit_mirror_enabled_for_commit_with_check(&repo_root) {
+    let should_sync = if force_gitedit {
+        true
+    } else {
+        push && gitedit_enabled
+    };
+
+    if should_sync {
         sync_to_gitedit(
             &repo_root,
             "commit_with_check",
@@ -1555,21 +1596,43 @@ fn gitedit_mirror_enabled_for_commit_with_check(repo_root: &std::path::Path) -> 
 }
 
 /// Get the gitedit API URL from config or use default.
-fn gitedit_api_url() -> String {
-    let cwd = std::env::current_dir().ok();
-
-    if let Some(cwd) = cwd {
-        let local_config = cwd.join("flow.toml");
-        if local_config.exists() {
-            if let Ok(cfg) = config::load(&local_config) {
-                if let Some(url) = cfg.options.gitedit_url {
-                    return url;
-                }
+fn gitedit_api_url(repo_root: &std::path::Path) -> String {
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            if let Some(url) = cfg.options.gitedit_url {
+                return url;
             }
         }
     }
 
     "https://gitedit.dev".to_string()
+}
+
+fn gitedit_repo_override(repo_root: &std::path::Path) -> Option<(String, String)> {
+    let local_config = repo_root.join("flow.toml");
+    if !local_config.exists() {
+        return None;
+    }
+
+    let cfg = config::load(&local_config).ok()?;
+    let raw = cfg.options.gitedit_repo_full_name?;
+    let mut value = raw.trim();
+
+    if let Some(rest) = value.strip_prefix("gh/") {
+        value = rest;
+    }
+    if let Some(idx) = value.find("github.com/") {
+        value = &value[idx + "github.com/".len()..];
+    }
+    if let Some(rest) = value.strip_suffix(".git") {
+        value = rest;
+    }
+
+    let mut parts = value.split('/').filter(|s| !s.is_empty());
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.to_string();
+    Some((owner, repo))
 }
 
 /// Sync commit to gitedit.dev for mirroring.
@@ -1579,22 +1642,26 @@ fn sync_to_gitedit(
     ai_sessions: &[ai::GitEditSessionData],
     session_hash: Option<&str>,
 ) {
-    // Get remote origin URL to extract owner/repo
-    let remote_url = match git_capture_in(repo_root, &["remote", "get-url", "origin"]) {
-        Ok(url) => url.trim().to_string(),
-        Err(_) => {
-            debug!("No git remote found, skipping gitedit sync");
-            return;
-        }
-    };
+    let (owner, repo) = if let Some((owner, repo)) = gitedit_repo_override(repo_root) {
+        (owner, repo)
+    } else {
+        // Get remote origin URL to extract owner/repo
+        let remote_url = match git_capture_in(repo_root, &["remote", "get-url", "origin"]) {
+            Ok(url) => url.trim().to_string(),
+            Err(_) => {
+                debug!("No git remote found, skipping gitedit sync");
+                return;
+            }
+        };
 
-    // Parse owner/repo from remote URL
-    // Supports: git@github.com:owner/repo.git, https://github.com/owner/repo.git
-    let (owner, repo) = match parse_github_remote(&remote_url) {
-        Some((o, r)) => (o, r),
-        None => {
-            debug!("Could not parse GitHub remote URL: {}", remote_url);
-            return;
+        // Parse owner/repo from remote URL
+        // Supports: git@github.com:owner/repo.git, https://github.com/owner/repo.git
+        match parse_github_remote(&remote_url) {
+            Some((o, r)) => (o, r),
+            None => {
+                debug!("Could not parse GitHub remote URL: {}", remote_url);
+                return;
+            }
         }
     };
 
@@ -1648,7 +1715,7 @@ fn sync_to_gitedit(
         })
         .collect();
 
-    let api_url = format!("{}/api/mirrors/sync", gitedit_api_url());
+    let api_url = format!("{}/api/mirrors/sync", gitedit_api_url(repo_root));
 
     let payload = json!({
         "owner": owner,
@@ -1674,14 +1741,14 @@ fn sync_to_gitedit(
         Ok(resp) if resp.status().is_success() => {
             if session_count > 0 {
                 println!(
-                    "✓ Synced to gitedit.dev/gh/{}/{} ({} AI session{})",
+                    "✓ Synced to gitedit.dev/{}/{} ({} AI session{})",
                     owner,
                     repo,
                     session_count,
                     if session_count == 1 { "" } else { "s" }
                 );
             } else {
-                println!("✓ Synced to gitedit.dev/gh/{}/{}", owner, repo);
+                println!("✓ Synced to gitedit.dev/{}/{}", owner, repo);
             }
             debug!("Gitedit sync successful");
         }
@@ -1809,6 +1876,7 @@ fn delegate_to_hub(push: bool) -> Result<()> {
 }
 
 fn delegate_to_hub_with_check(
+    command_name: &str,
     push: bool,
     include_context: bool,
     review_selection: ReviewSelection,
@@ -1837,8 +1905,15 @@ fn delegate_to_hub_with_check(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "flow".to_string());
     let command = format!(
-        "{} commitWithCheck --sync{}{}{}{}{} --tokens {}",
-        flow_bin, push_flag, context_flag, claude_flag, review_model_flag, message_flag, max_tokens
+        "{} {} --sync{}{}{}{}{} --tokens {}",
+        flow_bin,
+        command_name,
+        push_flag,
+        context_flag,
+        claude_flag,
+        review_model_flag,
+        message_flag,
+        max_tokens
     );
 
     let url = format!("http://{}:{}/tasks/run", HUB_HOST, HUB_PORT);
@@ -1849,7 +1924,7 @@ fn delegate_to_hub_with_check(
 
     let payload = json!({
         "task": {
-            "name": "commitWithCheck",
+            "name": command_name,
             "command": command,
             "dependencies": {
                 "commands": [],
@@ -1870,11 +1945,11 @@ fn delegate_to_hub_with_check(
         // Parse response to get task_id
         let body: serde_json::Value = resp.json().unwrap_or_default();
         if let Some(task_id) = body.get("task_id").and_then(|v| v.as_str()) {
-            println!("Delegated commitWithCheck to hub");
+            println!("Delegated {} to hub", command_name);
             println!("  View logs: f logs --task-id {}", task_id);
             println!("  Stream logs: f logs --task-id {} --follow", task_id);
         } else {
-            println!("Delegated commitWithCheck to hub");
+            println!("Delegated {} to hub", command_name);
         }
         Ok(())
     } else {

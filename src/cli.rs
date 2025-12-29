@@ -156,6 +156,13 @@ pub enum Commands {
     )]
     CommitWithCheck(CommitOpts),
     #[command(
+        about = "commitWithCheck plus GitEdit sync for agent sessions.",
+        long_about = "Runs commitWithCheck and always syncs local .ai sessions to gitedit.dev for browsing alongside GitHub history.",
+        alias = "ccg",
+        visible_alias = "commitWithCheckWithGitedit"
+    )]
+    CommitWithCheckWithGitedit(CommitOpts),
+    #[command(
         about = "Fix common TOML syntax errors in flow.toml.",
         long_about = "Automatically fixes common issues in flow.toml that can break parsing, such as invalid escape sequences (\\$, \\n in basic strings), unclosed quotes, and other TOML syntax errors."
     )]
