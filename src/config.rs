@@ -122,6 +122,13 @@ pub struct OptionsConfig {
     /// Custom gitedit API URL (defaults to https://gitedit.dev).
     #[serde(default, rename = "gitedit_url", alias = "gitedit-url")]
     pub gitedit_url: Option<String>,
+    /// Override repo full name for gitedit sync (e.g., "giteditdev/gitedit").
+    #[serde(
+        default,
+        rename = "gitedit_repo_full_name",
+        alias = "gitedit-repo-full-name"
+    )]
+    pub gitedit_repo_full_name: Option<String>,
 }
 
 impl OptionsConfig {
@@ -146,6 +153,9 @@ impl OptionsConfig {
         }
         if other.gitedit_url.is_some() {
             self.gitedit_url = other.gitedit_url;
+        }
+        if other.gitedit_repo_full_name.is_some() {
+            self.gitedit_repo_full_name = other.gitedit_repo_full_name;
         }
     }
 }
