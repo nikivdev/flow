@@ -330,14 +330,28 @@ fn sync_upstream(push: bool) -> Result<()> {
     // Push if requested
     if push {
         println!("==> Pushing to origin...");
-        if has_dev {
-            git_run(&["push", "origin", "dev"])?;
-        }
-        if has_main {
-            git_run(&["push", "origin", "main"])?;
-        }
-        if !has_dev && !has_main {
-            git_run(&["push", "origin", &current])?;
+
+        // Try push, auto-create repo if it doesn't exist
+        let branches_to_push: Vec<&str> = if has_dev && has_main {
+            vec!["dev", "main"]
+        } else if has_main {
+            vec!["main"]
+        } else if has_dev {
+            vec!["dev"]
+        } else {
+            vec![current.as_str()]
+        };
+
+        for branch in &branches_to_push {
+            if let Err(e) = git_run(&["push", "origin", branch]) {
+                // Check if it's a repo-not-found error
+                if try_create_origin_repo()? {
+                    // Repo created, retry push
+                    git_run(&["push", "-u", "origin", branch])?;
+                } else {
+                    return Err(e);
+                }
+            }
         }
     }
 
@@ -410,4 +424,62 @@ fn git_run(args: &[&str]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Try to create the origin repo on GitHub if it doesn't exist.
+/// Returns true if repo was created, false if it already exists or creation failed.
+fn try_create_origin_repo() -> Result<bool> {
+    // Get origin URL to extract repo name
+    let origin_url = match git_capture(&["remote", "get-url", "origin"]) {
+        Ok(url) => url.trim().to_string(),
+        Err(_) => return Ok(false),
+    };
+
+    // Extract repo name from URL (supports both SSH and HTTPS formats)
+    // SSH: git@github.com:user/repo.git
+    // HTTPS: https://github.com/user/repo.git
+    let repo_path = if origin_url.starts_with("git@github.com:") {
+        origin_url
+            .strip_prefix("git@github.com:")
+            .and_then(|s| s.strip_suffix(".git").or(Some(s)))
+    } else if origin_url.contains("github.com/") {
+        origin_url
+            .split("github.com/")
+            .nth(1)
+            .and_then(|s| s.strip_suffix(".git").or(Some(s)))
+    } else {
+        None
+    };
+
+    let Some(repo_path) = repo_path else {
+        println!("Cannot parse origin URL for auto-creation: {}", origin_url);
+        return Ok(false);
+    };
+
+    println!("\nOrigin repo doesn't exist. Creating: {}", repo_path);
+
+    // Use gh CLI to create the repo
+    let status = Command::new("gh")
+        .args(["repo", "create", repo_path, "--private", "--source=."])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("✓ Created GitHub repo: {}", repo_path);
+            Ok(true)
+        }
+        Ok(_) => {
+            println!("Failed to create repo. Is `gh` installed and authenticated?");
+            println!("  Run: gh auth login");
+            Ok(false)
+        }
+        Err(e) => {
+            println!("Failed to run gh CLI: {}", e);
+            println!("  Install with: brew install gh");
+            Ok(false)
+        }
+    }
 }
