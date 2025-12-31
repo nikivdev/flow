@@ -77,6 +77,8 @@ const CLI_SUBCOMMANDS: &[&str] = &[
     "s",  // search
     "a",  // agent
     "up", // upstream
+    // Deploy
+    "deploy",
 ];
 
 fn run_builtin(name: &str, execute: bool) -> Result<()> {

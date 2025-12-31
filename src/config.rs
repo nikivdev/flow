@@ -53,6 +53,15 @@ pub struct Config {
     /// Background daemons that flow can manage (start/stop/status).
     #[serde(default, alias = "daemon")]
     pub daemons: Vec<DaemonConfig>,
+    /// Host deployment config for Linux servers.
+    #[serde(default)]
+    pub host: Option<crate::deploy::HostConfig>,
+    /// Cloudflare Workers deployment config.
+    #[serde(default)]
+    pub cloudflare: Option<crate::deploy::CloudflareConfig>,
+    /// Railway deployment config.
+    #[serde(default)]
+    pub railway: Option<crate::deploy::RailwayConfig>,
 }
 
 impl Default for Config {
@@ -74,6 +83,9 @@ impl Default for Config {
             stream: None,
             server_hub: None,
             daemons: Vec::new(),
+            host: None,
+            cloudflare: None,
+            railway: None,
         }
     }
 }
@@ -109,6 +121,20 @@ pub struct OptionsConfig {
         alias = "commit-with-check-timeout-secs"
     )]
     pub commit_with_check_timeout_secs: Option<u64>,
+    /// Remote Claude review URL for commitWithCheck.
+    #[serde(
+        default,
+        rename = "commit_with_check_review_url",
+        alias = "commit-with-check-review-url"
+    )]
+    pub commit_with_check_review_url: Option<String>,
+    /// Optional auth token for remote review.
+    #[serde(
+        default,
+        rename = "commit_with_check_review_token",
+        alias = "commit-with-check-review-token"
+    )]
+    pub commit_with_check_review_token: Option<String>,
     /// Enable mirroring commits to gitedit.dev for commitWithCheck.
     #[serde(
         default,
@@ -144,6 +170,12 @@ impl OptionsConfig {
         }
         if other.commit_with_check_timeout_secs.is_some() {
             self.commit_with_check_timeout_secs = other.commit_with_check_timeout_secs;
+        }
+        if other.commit_with_check_review_url.is_some() {
+            self.commit_with_check_review_url = other.commit_with_check_review_url;
+        }
+        if other.commit_with_check_review_token.is_some() {
+            self.commit_with_check_review_token = other.commit_with_check_review_token;
         }
         if other.commit_with_check_gitedit_mirror.is_some() {
             self.commit_with_check_gitedit_mirror = other.commit_with_check_gitedit_mirror;

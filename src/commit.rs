@@ -4,6 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::net::IpAddr;
+use std::env;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -131,6 +132,20 @@ struct ReviewJson {
     issues: Vec<String>,
     #[serde(default)]
     summary: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteReviewRequest {
+    diff: String,
+    context: Option<String>,
+    model: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteReviewResponse {
+    output: String,
+    #[serde(default)]
+    stderr: String,
 }
 
 #[derive(Debug)]
@@ -526,6 +541,82 @@ fn commit_with_check_timeout_secs() -> u64 {
     }
 
     120
+}
+
+fn commit_with_check_review_url() -> Option<String> {
+    if let Ok(url) = env::var("FLOW_REVIEW_URL") {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let cwd = std::env::current_dir().ok();
+    if let Some(cwd) = cwd {
+        let local_config = cwd.join("flow.toml");
+        if local_config.exists() {
+            if let Ok(cfg) = config::load(&local_config) {
+                if let Some(url) = cfg.options.commit_with_check_review_url {
+                    let trimmed = url.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            if let Some(url) = cfg.options.commit_with_check_review_url {
+                let trimmed = url.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn commit_with_check_review_token() -> Option<String> {
+    if let Ok(token) = env::var("FLOW_REVIEW_TOKEN") {
+        let trimmed = token.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+
+    let cwd = std::env::current_dir().ok();
+    if let Some(cwd) = cwd {
+        let local_config = cwd.join("flow.toml");
+        if local_config.exists() {
+            if let Ok(cfg) = config::load(&local_config) {
+                if let Some(token) = cfg.options.commit_with_check_review_token {
+                    let trimmed = token.trim().to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            if let Some(token) = cfg.options.commit_with_check_review_token {
+                let trimmed = token.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn prompt_yes_no(message: &str) -> Result<bool> {
@@ -1029,6 +1120,88 @@ Context:{}\n\
     })
 }
 
+fn normalize_review_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/review") {
+        trimmed.to_string()
+    } else {
+        format!("{}/review", trimmed)
+    }
+}
+
+fn run_remote_claude_review(
+    diff: &str,
+    session_context: Option<&str>,
+    model: ClaudeModel,
+) -> Result<ReviewResult> {
+    let url = match commit_with_check_review_url() {
+        Some(url) => url,
+        None => bail!("remote review URL not configured"),
+    };
+
+    let review_url = normalize_review_url(&url);
+    let payload = RemoteReviewRequest {
+        diff: diff.to_string(),
+        context: session_context.map(|value| value.to_string()),
+        model: model.as_claude_arg().to_string(),
+    };
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(commit_with_check_timeout_secs()))
+        .build()
+        .context("failed to create HTTP client for remote review")?;
+
+    let mut request = client.post(&review_url).json(&payload);
+    if let Some(token) = commit_with_check_review_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .send()
+        .context("failed to send remote review request")?;
+
+    if !response.status().is_success() {
+        bail!("remote review failed: HTTP {}", response.status());
+    }
+
+    let payload: RemoteReviewResponse = response
+        .json()
+        .context("failed to parse remote review response")?;
+
+    if !payload.stderr.trim().is_empty() {
+        debug!(stderr = payload.stderr.as_str(), "remote claude stderr");
+    }
+
+    let result = payload.output;
+    let review_json = parse_review_json(&result);
+    let (issues_found, issues) = if let Some(ref parsed) = review_json {
+        if let Some(summary) = parsed.summary.as_ref() {
+            debug!(summary = summary.as_str(), "remote claude review summary");
+        }
+        (parsed.issues_found, parsed.issues.clone())
+    } else if result.trim().is_empty() {
+        (false, Vec::new())
+    } else {
+        debug!(review_output = result.as_str(), "remote claude review output");
+        let lowered = result.to_lowercase();
+        let has_issues = lowered.contains("bug")
+            || lowered.contains("issue")
+            || lowered.contains("problem")
+            || lowered.contains("error")
+            || lowered.contains("vulnerability")
+            || lowered.contains("performance issue")
+            || lowered.contains("memory leak");
+        (has_issues, Vec::new())
+    };
+
+    Ok(ReviewResult {
+        issues_found,
+        issues,
+        summary: review_json.and_then(|r| r.summary),
+        timed_out: false,
+    })
+}
+
 /// Run Claude Code SDK to review staged changes for bugs and performance issues.
 fn run_claude_review(
     diff: &str,
@@ -1036,6 +1209,10 @@ fn run_claude_review(
     workdir: &std::path::Path,
     model: ClaudeModel,
 ) -> Result<ReviewResult> {
+    if commit_with_check_review_url().is_some() {
+        return run_remote_claude_review(diff, session_context, model);
+    }
+
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc;
     use std::time::Instant;

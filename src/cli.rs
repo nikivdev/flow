@@ -221,6 +221,11 @@ pub enum Commands {
         alias = "up"
     )]
     Upstream(UpstreamCommand),
+    #[command(
+        about = "Deploy project to host or cloud platform.",
+        long_about = "Deploy your project to a Linux host (via SSH), Cloudflare Workers, or Railway. Automatically detects platform from flow.toml [host], [cloudflare], or [railway] sections."
+    )]
+    Deploy(DeployCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -988,4 +993,61 @@ pub struct CommitsOpts {
     /// Show commits across all branches.
     #[arg(long)]
     pub all: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DeployCommand {
+    #[command(subcommand)]
+    pub action: Option<DeployAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DeployAction {
+    /// Deploy to Linux host via SSH.
+    #[command(alias = "h")]
+    Host {
+        /// Build remotely instead of syncing local build artifacts.
+        #[arg(long)]
+        remote_build: bool,
+        /// Run setup script even if already deployed.
+        #[arg(long)]
+        setup: bool,
+    },
+    /// Deploy to Cloudflare Workers.
+    #[command(alias = "cf")]
+    Cloudflare {
+        /// Also set secrets from env_file.
+        #[arg(long)]
+        secrets: bool,
+        /// Run in dev mode instead of deploying.
+        #[arg(long)]
+        dev: bool,
+    },
+    /// Deploy to Railway.
+    Railway,
+    /// Show deployment status.
+    Status,
+    /// View deployment logs.
+    Logs {
+        /// Follow logs in real-time.
+        #[arg(long, short)]
+        follow: bool,
+        /// Number of lines to show.
+        #[arg(long, short = 'n', default_value_t = 100)]
+        lines: usize,
+    },
+    /// Restart the deployed service.
+    Restart,
+    /// Stop the deployed service.
+    Stop,
+    /// SSH into the host (for host deployments).
+    Shell,
+    /// Configure host for deployment.
+    #[command(alias = "set")]
+    SetHost {
+        /// SSH connection string (user@host:port or user@host).
+        connection: String,
+    },
+    /// Show current host configuration.
+    ShowHost,
 }
