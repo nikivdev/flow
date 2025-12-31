@@ -824,7 +824,10 @@ pub fn run_with_check_sync(
         match ai::get_sessions_for_gitedit(&repo_root) {
             Ok(sessions) => {
                 if !sessions.is_empty() {
-                    gitedit_session_hash = gitedit_sessions_hash(&sessions);
+                    // Get owner/repo for the hash
+                    if let Some((owner, repo)) = get_gitedit_project(&repo_root) {
+                        gitedit_session_hash = gitedit_sessions_hash(&owner, &repo, &sessions);
+                    }
                     gitedit_sessions = sessions;
                 }
             }
@@ -842,7 +845,7 @@ pub fn run_with_check_sync(
     };
 
     if let Some(hash) = gitedit_session_hash.as_deref() {
-        full_message = format!("{}\n\nGitEdit-AI-Hash: {}", full_message, hash);
+        full_message = format!("{}\n\ngitedit.dev/{}", full_message, hash);
     }
 
     // Show the message
@@ -1940,15 +1943,34 @@ fn sync_to_gitedit(
     }
 }
 
-fn gitedit_sessions_hash(sessions: &[ai::GitEditSessionData]) -> Option<String> {
+fn gitedit_sessions_hash(
+    owner: &str,
+    repo: &str,
+    sessions: &[ai::GitEditSessionData],
+) -> Option<String> {
     if sessions.is_empty() {
         return None;
     }
 
+    // Hash includes owner/repo so the URL uniquely identifies the project
     let serialized = serde_json::to_string(sessions).ok()?;
     let mut hasher = DefaultHasher::new();
+    owner.hash(&mut hasher);
+    repo.hash(&mut hasher);
     serialized.hash(&mut hasher);
     Some(format!("{:016x}", hasher.finish()))
+}
+
+/// Get owner/repo from git remote or gitedit override.
+fn get_gitedit_project(repo_root: &std::path::Path) -> Option<(String, String)> {
+    // Check for override first
+    if let Some((owner, repo)) = gitedit_repo_override(repo_root) {
+        return Some((owner, repo));
+    }
+
+    // Get from git remote
+    let remote_url = git_capture_in(repo_root, &["remote", "get-url", "origin"]).ok()?;
+    parse_github_remote(remote_url.trim())
 }
 
 /// Parse owner and repo from a GitHub remote URL.
