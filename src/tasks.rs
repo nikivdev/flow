@@ -888,6 +888,29 @@ fn generate_abbreviation(name: &str) -> Option<String> {
     if abbr.len() >= 2 { Some(abbr) } else { None }
 }
 
+/// Check if command already references shell positional args ($@, $*, $1, etc.)
+fn command_references_args(command: &str) -> bool {
+    // Look for $@, $*, $1-$9, ${1}, ${@}, etc.
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' {
+            match chars.peek() {
+                Some('@') | Some('*') | Some('1'..='9') => return true,
+                Some('{') => {
+                    // Check for ${1}, ${@}, ${*}, etc.
+                    chars.next();
+                    match chars.peek() {
+                        Some('@') | Some('*') | Some('1'..='9') => return true,
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 fn run_host_command(
     workdir: &Path,
     command: &str,
@@ -904,9 +927,21 @@ fn run_host_command(
     }
 
     let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(command).arg("--");
-    for arg in args {
-        cmd.arg(arg);
+
+    // If args are provided and command doesn't already reference them ($@ or $1, $2, etc.),
+    // append "$@" to pass them through properly
+    let full_command = if args.is_empty() || command_references_args(command) {
+        command.to_string()
+    } else {
+        format!("{} \"$@\"", command)
+    };
+
+    cmd.arg("-c").arg(&full_command);
+    if !args.is_empty() {
+        cmd.arg("sh"); // $0 placeholder
+        for arg in args {
+            cmd.arg(arg);
+        }
     }
     cmd.current_dir(workdir);
     run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn command without managed env")
@@ -994,6 +1029,15 @@ fn run_flox_command(
     }
 
     let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
+
+    // If args are provided and command doesn't already reference them,
+    // append "$@" to pass them through properly
+    let full_command = if args.is_empty() || command_references_args(command) {
+        command.to_string()
+    } else {
+        format!("{} \"$@\"", command)
+    };
+
     let mut cmd = Command::new(flox_bin);
     cmd.arg("activate")
         .arg("-d")
@@ -1001,10 +1045,12 @@ fn run_flox_command(
         .arg("--")
         .arg("/bin/sh")
         .arg("-c")
-        .arg(command)
-        .arg("--");
-    for arg in args {
-        cmd.arg(arg);
+        .arg(&full_command);
+    if !args.is_empty() {
+        cmd.arg("sh"); // $0 placeholder
+        for arg in args {
+            cmd.arg(arg);
+        }
     }
     cmd.current_dir(workdir);
     run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn flox activate for task")
@@ -1020,6 +1066,14 @@ fn run_flox_interactive_command(
 ) -> Result<(ExitStatus, String)> {
     let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
 
+    // If args are provided and command doesn't already reference them,
+    // append "$@" to pass them through properly
+    let full_command = if args.is_empty() || command_references_args(command) {
+        command.to_string()
+    } else {
+        format!("{} \"$@\"", command)
+    };
+
     let mut cmd = Command::new(flox_bin);
     cmd.arg("activate")
         .arg("-d")
@@ -1027,10 +1081,12 @@ fn run_flox_interactive_command(
         .arg("--")
         .arg("/bin/sh")
         .arg("-c")
-        .arg(command)
-        .arg("--");
-    for arg in args {
-        cmd.arg(arg);
+        .arg(&full_command);
+    if !args.is_empty() {
+        cmd.arg("sh"); // $0 placeholder
+        for arg in args {
+            cmd.arg(arg);
+        }
     }
     cmd.current_dir(workdir);
 
@@ -1263,9 +1319,21 @@ fn run_interactive_command(
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
     let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(command).arg("--");
-    for arg in args {
-        cmd.arg(arg);
+
+    // If args are provided and command doesn't already reference them,
+    // append "$@" to pass them through properly
+    let full_command = if args.is_empty() || command_references_args(command) {
+        command.to_string()
+    } else {
+        format!("{} \"$@\"", command)
+    };
+
+    cmd.arg("-c").arg(&full_command);
+    if !args.is_empty() {
+        cmd.arg("sh"); // $0 placeholder
+        for arg in args {
+            cmd.arg(arg);
+        }
     }
     cmd.current_dir(workdir);
 
@@ -1992,6 +2060,7 @@ mod tests {
             shortcuts: Vec::new(),
             interactive: false,
             confirm_on_match: false,
+            on_cancel: None,
         };
         let empty_args: Vec<String> = Vec::new();
         let err = execute_task(
@@ -2033,6 +2102,7 @@ mod tests {
             shortcuts: Vec::new(),
             interactive: false,
             confirm_on_match: false,
+            on_cancel: None,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -2067,6 +2137,7 @@ mod tests {
             shortcuts: Vec::new(),
             interactive: false,
             confirm_on_match: false,
+            on_cancel: None,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -2102,6 +2173,7 @@ mod tests {
             shortcuts: Vec::new(),
             interactive: false,
             confirm_on_match: false,
+            on_cancel: None,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -2124,6 +2196,7 @@ mod tests {
             shortcuts: Vec::new(),
             interactive: false,
             confirm_on_match: false,
+            on_cancel: None,
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
@@ -2148,6 +2221,7 @@ mod tests {
             shortcuts: Vec::new(),
             interactive: false,
             confirm_on_match: false,
+            on_cancel: None,
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
@@ -2234,5 +2308,26 @@ mod tests {
             find_task(&cfg, "dcr").is_none(),
             "abbreviation should be ambiguous"
         );
+    }
+
+    #[test]
+    fn detects_command_arg_references() {
+        // Should detect $@, $*, $1, $2, etc.
+        assert!(command_references_args("echo $@"));
+        assert!(command_references_args("echo $*"));
+        assert!(command_references_args("echo $1"));
+        assert!(command_references_args("echo $9"));
+        assert!(command_references_args("bash -c 'echo $@' --"));
+        assert!(command_references_args("script.sh \"$1\" \"$2\""));
+        assert!(command_references_args("echo ${1}"));
+        assert!(command_references_args("echo ${@}"));
+
+        // Should not detect other $ variables
+        assert!(!command_references_args("echo $HOME"));
+        assert!(!command_references_args("echo $0")); // $0 is script name, not arg
+        assert!(!command_references_args("echo ${HOME}"));
+        assert!(!command_references_args("echo $$")); // PID
+        assert!(!command_references_args("echo $?")); // exit code
+        assert!(!command_references_args("source .env && bun script.ts --delete"));
     }
 }
