@@ -62,6 +62,25 @@ pub struct Config {
     /// Railway deployment config.
     #[serde(default)]
     pub railway: Option<crate::deploy::RailwayConfig>,
+    /// Commit workflow config (fixers, review instructions).
+    #[serde(default)]
+    pub commit: Option<CommitConfig>,
+}
+
+/// Configuration for commit workflow.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CommitConfig {
+    /// Pre-commit fixers to run before staging.
+    /// Built-in: "mdx-comments", "trailing-whitespace", "end-of-file"
+    /// Custom: "cmd:prettier --write"
+    #[serde(default)]
+    pub fixers: Vec<String>,
+    /// Custom instructions passed to AI code review.
+    #[serde(default)]
+    pub review_instructions: Option<String>,
+    /// File path to load review instructions from.
+    #[serde(default)]
+    pub review_instructions_file: Option<String>,
 }
 
 impl Default for Config {
@@ -86,6 +105,7 @@ impl Default for Config {
             host: None,
             cloudflare: None,
             railway: None,
+            commit: None,
         }
     }
 }

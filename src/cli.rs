@@ -206,7 +206,7 @@ pub enum Commands {
     Commits(CommitsOpts),
     #[command(
         about = "Bootstrap project with .ai/ folder and checkpoints.",
-        long_about = "Creates .ai/ folder structure, adds .ai/ to .gitignore, and sets up checkpoints to track completed initialization steps. Safe to run multiple times."
+        long_about = "Creates .ai/ folder structure with public (actions, skills, tools) and internal (sessions, db) folders. Adds .ai/internal/ to .gitignore. Safe to run multiple times."
     )]
     Start,
     #[command(

@@ -1,7 +1,18 @@
 //! Project bootstrap and initialization.
 //!
-//! Creates `.ai/` folder structure and manages checkpoints to avoid
-//! re-running the same initialization steps.
+//! Creates `.ai/` folder structure with public (tracked) and internal (gitignored) sections.
+//!
+//! Structure:
+//!   .ai/
+//!   ├── actions/        # TRACKED - fixer/action scripts
+//!   ├── skills/         # TRACKED - shared skills
+//!   ├── tools/          # TRACKED - shared tools
+//!   ├── review.md       # TRACKED - review instructions
+//!   └── internal/       # GITIGNORED - private data
+//!       ├── sessions/   # AI session data
+//!       ├── checkpoints/
+//!       ├── db/
+//!       └── *.json      # Various state files
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,7 +37,7 @@ pub fn run() -> Result<()> {
         println!("✓ Created .ai/ folder structure");
     }
 
-    // Add .ai/ to .gitignore
+    // Add .ai/internal/ to .gitignore
     if !has_checkpoint(&project_root, checkpoints::GITIGNORE_UPDATED) {
         update_gitignore(&project_root)?;
         set_checkpoint(&project_root, checkpoints::GITIGNORE_UPDATED)?;
@@ -37,16 +48,19 @@ pub fn run() -> Result<()> {
     if !has_checkpoint(&project_root, checkpoints::DB_SCHEMA_CREATED) {
         create_db_schema(&project_root)?;
         set_checkpoint(&project_root, checkpoints::DB_SCHEMA_CREATED)?;
-        println!("✓ Created .ai/db/ with schema");
+        println!("✓ Created .ai/internal/db/ with schema");
     }
 
     println!("\n✓ Project ready");
     println!("\nStructure:");
     println!("  .ai/");
-    println!("  ├── db/           # SQLite database & schema");
-    println!("  ├── sessions/     # AI conversation history");
-    println!("  ├── skills/       # Custom skills/tools");
-    println!("  └── checkpoints/  # Init state tracking");
+    println!("  ├── actions/      # Tracked - fixer scripts");
+    println!("  ├── skills/       # Tracked - shared skills");
+    println!("  ├── tools/        # Tracked - shared tools");
+    println!("  └── internal/     # Gitignored - private data");
+    println!("      ├── sessions/ # AI conversation history");
+    println!("      ├── db/       # SQLite database");
+    println!("      └── ...       # Checkpoints, logs, etc.");
     Ok(())
 }
 
@@ -77,23 +91,35 @@ pub fn clear_checkpoint(project_root: &Path, name: &str) -> Result<()> {
 
 /// Get the path to a checkpoint file.
 fn checkpoint_path(project_root: &Path, name: &str) -> PathBuf {
-    project_root.join(".ai").join("checkpoints").join(name)
+    project_root
+        .join(".ai")
+        .join("internal")
+        .join("checkpoints")
+        .join(name)
 }
 
 /// Create the .ai/ folder structure.
 fn create_ai_folder(project_root: &Path) -> Result<()> {
     let ai_dir = project_root.join(".ai");
+    let internal_dir = ai_dir.join("internal");
 
-    // Create main .ai/ folder and subdirectories
-    let dirs = [
+    // Public folders (tracked in git)
+    let public_dirs = [
         ai_dir.clone(),
-        ai_dir.join("checkpoints"),
-        ai_dir.join("sessions"),
+        ai_dir.join("actions"),
         ai_dir.join("skills"),
-        ai_dir.join("db"),
+        ai_dir.join("tools"),
     ];
 
-    for dir in &dirs {
+    // Private folders (gitignored)
+    let internal_dirs = [
+        internal_dir.clone(),
+        internal_dir.join("checkpoints"),
+        internal_dir.join("sessions"),
+        internal_dir.join("db"),
+    ];
+
+    for dir in public_dirs.iter().chain(internal_dirs.iter()) {
         fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     }
 
@@ -102,7 +128,7 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
 
 /// Create the database schema files.
 fn create_db_schema(project_root: &Path) -> Result<()> {
-    let db_dir = project_root.join(".ai/db");
+    let db_dir = project_root.join(".ai/internal/db");
     fs::create_dir_all(&db_dir)?;
 
     // Create schema.ts with drizzle-orm schema
@@ -126,7 +152,7 @@ fn create_db_schema(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-const SCHEMA_TEMPLATE: &str = r#"// .ai/db/schema.ts
+const SCHEMA_TEMPLATE: &str = r#"// .ai/internal/db/schema.ts
 // Database schema for AI project data using drizzle-orm
 import { sqliteTable, text, integer, blob } from "drizzle-orm/sqlite-core"
 
@@ -183,13 +209,13 @@ export const connections = sqliteTable("connections", {
 })
 "#;
 
-const DB_INDEX_TEMPLATE: &str = r#"// .ai/db/index.ts
+const DB_INDEX_TEMPLATE: &str = r#"// .ai/internal/db/index.ts
 // Database connection and utilities
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { Database } from "bun:sqlite"
 import * as schema from "./schema"
 
-const sqlite = new Database(".ai/db/db.sqlite")
+const sqlite = new Database(".ai/internal/db/db.sqlite")
 export const db = drizzle(sqlite, { schema })
 
 // Re-export schema for convenience
@@ -219,7 +245,8 @@ const DB_PACKAGE_TEMPLATE: &str = r#"{
 }
 "#;
 
-/// Add .ai/ to .gitignore if not already present.
+/// Add .ai/internal/ to .gitignore if not already present.
+/// Only the internal folder is gitignored - actions, skills, tools are tracked.
 fn update_gitignore(project_root: &Path) -> Result<()> {
     let gitignore_path = project_root.join(".gitignore");
 
@@ -229,18 +256,18 @@ fn update_gitignore(project_root: &Path) -> Result<()> {
         String::new()
     };
 
-    // Check if .ai/ is already in .gitignore
-    let ai_patterns = [".ai/", ".ai", "/.ai/", "/.ai"];
+    // Check if .ai/internal/ is already in .gitignore
+    let internal_patterns = [".ai/internal/", ".ai/internal", "/.ai/internal/", "/.ai/internal"];
     let already_ignored = content
         .lines()
-        .any(|line| ai_patterns.iter().any(|p| line.trim() == *p));
+        .any(|line| internal_patterns.iter().any(|p| line.trim() == *p));
 
     if !already_ignored {
         let mut new_content = content;
         if !new_content.is_empty() && !new_content.ends_with('\n') {
             new_content.push('\n');
         }
-        new_content.push_str(".ai/\n");
+        new_content.push_str(".ai/internal/\n");
         fs::write(&gitignore_path, new_content)?;
     }
 
@@ -273,10 +300,16 @@ mod tests {
 
         create_ai_folder(root).unwrap();
 
+        // Public folders
         assert!(root.join(".ai").exists());
-        assert!(root.join(".ai/checkpoints").exists());
-        assert!(root.join(".ai/sessions").exists());
+        assert!(root.join(".ai/actions").exists());
         assert!(root.join(".ai/skills").exists());
+        assert!(root.join(".ai/tools").exists());
+        // Internal folders
+        assert!(root.join(".ai/internal").exists());
+        assert!(root.join(".ai/internal/checkpoints").exists());
+        assert!(root.join(".ai/internal/sessions").exists());
+        assert!(root.join(".ai/internal/db").exists());
     }
 
     #[test]
@@ -287,7 +320,7 @@ mod tests {
         update_gitignore(root).unwrap();
 
         let content = fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(content.contains(".ai/"));
+        assert!(content.contains(".ai/internal/"));
     }
 
     #[test]
@@ -301,7 +334,7 @@ mod tests {
 
         let content = fs::read_to_string(root.join(".gitignore")).unwrap();
         assert!(content.contains("node_modules/"));
-        assert!(content.contains(".ai/"));
+        assert!(content.contains(".ai/internal/"));
     }
 
     #[test]
@@ -309,12 +342,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
-        fs::write(root.join(".gitignore"), ".ai/\nnode_modules/\n").unwrap();
+        fs::write(root.join(".gitignore"), ".ai/internal/\nnode_modules/\n").unwrap();
 
         update_gitignore(root).unwrap();
 
         let content = fs::read_to_string(root.join(".gitignore")).unwrap();
         // Should not duplicate
-        assert_eq!(content.matches(".ai/").count(), 1);
+        assert_eq!(content.matches(".ai/internal/").count(), 1);
     }
 }

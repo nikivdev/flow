@@ -160,7 +160,10 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
 
 /// Get checkpoint file path for a project.
 fn get_checkpoint_path(project_path: &PathBuf) -> PathBuf {
-    project_path.join(".ai").join("commit-checkpoints.json")
+    project_path
+        .join(".ai")
+        .join("internal")
+        .join("commit-checkpoints.json")
 }
 
 /// Load commit checkpoints.
@@ -196,7 +199,7 @@ pub fn log_review_result(
     context_chars: usize,
     review_time_secs: u64,
 ) {
-    let log_path = project_path.join(".ai").join("review-log.jsonl");
+    let log_path = project_path.join(".ai").join("internal").join("review-log.jsonl");
     if let Some(parent) = log_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -998,10 +1001,10 @@ pub fn get_recent_session_context(max_exchanges: usize) -> Result<Option<String>
     }
 }
 
-/// Get the .ai/sessions/claude directory for the current project.
+/// Get the .ai/internal/sessions/claude directory for the current project.
 fn get_ai_sessions_dir() -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    Ok(cwd.join(".ai").join("sessions").join("claude"))
+    Ok(cwd.join(".ai").join("internal").join("sessions").join("claude"))
 }
 
 /// Get the index.json path.
@@ -2381,7 +2384,10 @@ const DEFAULT_SUMMARY_AGE_MINUTES: i64 = 45;
 const DEFAULT_SUMMARY_MAX_CHARS: usize = 12_000;
 
 fn get_session_summaries_path(project_path: &PathBuf) -> PathBuf {
-    project_path.join(".ai").join("session-summaries.json")
+    project_path
+        .join(".ai")
+        .join("internal")
+        .join("session-summaries.json")
 }
 
 fn load_session_summaries(project_path: &PathBuf) -> Result<SessionSummaries> {
@@ -2844,7 +2850,8 @@ fn remove_session(session: &str) -> Result<()> {
 /// Initialize the .ai folder structure.
 fn init_ai_folder() -> Result<()> {
     let ai_dir = std::env::current_dir()?.join(".ai");
-    let sessions_dir = ai_dir.join("sessions").join("claude");
+    let internal_dir = ai_dir.join("internal");
+    let sessions_dir = internal_dir.join("sessions").join("claude");
     let notes_dir = sessions_dir.join("notes");
 
     fs::create_dir_all(&notes_dir)?;
@@ -2857,49 +2864,41 @@ fn init_ai_folder() -> Result<()> {
         fs::write(&index_path, content)?;
     }
 
-    // Create .gitignore in .ai
-    let gitignore_path = ai_dir.join(".gitignore");
-    if !gitignore_path.exists() {
-        fs::write(
-            &gitignore_path,
-            "# Ignore session notes (personal)\nsessions/claude/notes/\n",
-        )?;
-    }
-
     println!("Initialized .ai folder structure:");
-    println!("  .ai/");
-    println!("  .ai/sessions/claude/index.json");
-    println!("  .ai/sessions/claude/notes/");
-    println!("  .ai/.gitignore");
+    println!("  .ai/internal/sessions/claude/index.json");
+    println!("  .ai/internal/sessions/claude/notes/");
 
     Ok(())
 }
 
-/// Ensure .ai is in the project's .gitignore to prevent session leaks.
+/// Ensure .ai/internal is in the project's .gitignore to prevent session leaks.
 fn ensure_gitignore() -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     let gitignore_path = cwd.join(".gitignore");
 
     if gitignore_path.exists() {
         let content = fs::read_to_string(&gitignore_path).unwrap_or_default();
-        // Check if .ai is already ignored (as a line by itself or with trailing slash)
+        // Check if .ai/internal is already ignored
         let already_ignored = content.lines().any(|line| {
             let trimmed = line.trim();
-            trimmed == ".ai" || trimmed == ".ai/" || trimmed == "/.ai" || trimmed == "/.ai/"
+            trimmed == ".ai/internal"
+                || trimmed == ".ai/internal/"
+                || trimmed == "/.ai/internal"
+                || trimmed == "/.ai/internal/"
         });
 
         if !already_ignored {
-            // Append .ai to gitignore
+            // Append .ai/internal to gitignore
             let mut file = fs::OpenOptions::new().append(true).open(&gitignore_path)?;
             // Add newline if file doesn't end with one
             if !content.ends_with('\n') && !content.is_empty() {
                 writeln!(file)?;
             }
-            writeln!(file, ".ai/")?;
+            writeln!(file, ".ai/internal/")?;
         }
     } else {
-        // Create .gitignore with .ai
-        fs::write(&gitignore_path, ".ai/\n")?;
+        // Create .gitignore with .ai/internal
+        fs::write(&gitignore_path, ".ai/internal/\n")?;
     }
 
     Ok(())
@@ -3719,7 +3718,10 @@ fn read_codex_cross_project_context(
 
 /// Get consumed checkpoints file path.
 fn get_consumed_checkpoints_path(project_path: &PathBuf) -> PathBuf {
-    project_path.join(".ai").join("consumed-checkpoints.json")
+    project_path
+        .join(".ai")
+        .join("internal")
+        .join("consumed-checkpoints.json")
 }
 
 /// Load consumed checkpoints for a project.
