@@ -215,6 +215,12 @@ pub enum Commands {
         alias = "a"
     )]
     Agent(AgentCommand),
+    #[command(
+        about = "Manage upstream fork workflow.",
+        long_about = "Set up and manage upstream forks. Creates a local 'upstream' branch to cleanly track the original repo, making merges easier.",
+        alias = "up"
+    )]
+    Upstream(UpstreamCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -920,6 +926,39 @@ pub enum AgentAction {
         /// Prompt for the agent.
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UpstreamCommand {
+    #[command(subcommand)]
+    pub action: Option<UpstreamAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum UpstreamAction {
+    /// Show current upstream configuration.
+    Status,
+    /// Set up upstream remote and local tracking branch.
+    Setup {
+        /// URL of the upstream repository.
+        #[arg(short, long)]
+        upstream_url: Option<String>,
+        /// Branch name on upstream (default: main).
+        #[arg(short, long)]
+        upstream_branch: Option<String>,
+    },
+    /// Pull changes from upstream into local 'upstream' branch.
+    Pull {
+        /// Also merge into this branch after pulling.
+        #[arg(short, long)]
+        branch: Option<String>,
+    },
+    /// Full sync: pull upstream, merge to dev/main, push to origin.
+    Sync {
+        /// Skip pushing to origin.
+        #[arg(long)]
+        no_push: bool,
     },
 }
 

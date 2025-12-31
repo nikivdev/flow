@@ -26,6 +26,7 @@ pub mod running;
 pub mod skills;
 pub mod start;
 pub mod tools;
+pub mod upstream;
 pub mod sync;
 pub mod task_match;
 pub mod tasks;
