@@ -1715,7 +1715,10 @@ fn sync_to_gitedit(
         })
         .collect();
 
-    let api_url = format!("{}/api/mirrors/sync", gitedit_api_url(repo_root));
+    let base_url = gitedit_api_url(repo_root);
+    let base_url = base_url.trim_end_matches('/').to_string();
+    let api_url = format!("{}/api/mirrors/sync", base_url);
+    let view_url = format!("{}/{}/{}", base_url, owner, repo);
 
     let payload = json!({
         "owner": owner,
@@ -1741,14 +1744,13 @@ fn sync_to_gitedit(
         Ok(resp) if resp.status().is_success() => {
             if session_count > 0 {
                 println!(
-                    "✓ Synced to gitedit.dev/{}/{} ({} AI session{})",
-                    owner,
-                    repo,
+                    "✓ Synced to {} ({} AI session{})",
+                    view_url,
                     session_count,
                     if session_count == 1 { "" } else { "s" }
                 );
             } else {
-                println!("✓ Synced to gitedit.dev/{}/{}", owner, repo);
+                println!("✓ Synced to {}", view_url);
             }
             debug!("Gitedit sync successful");
         }
