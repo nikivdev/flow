@@ -6,6 +6,7 @@ pub mod commits;
 pub mod config;
 pub mod daemon;
 pub mod db;
+pub mod deploy;
 pub mod discover;
 pub mod doctor;
 pub mod env;
