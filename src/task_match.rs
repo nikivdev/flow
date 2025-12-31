@@ -72,9 +72,11 @@ const CLI_SUBCOMMANDS: &[&str] = &[
     "tools",
     "notify",
     "start",
+    "upstream",
     // Aliases
-    "s", // search
-    "a", // agent
+    "s",  // search
+    "a",  // agent
+    "up", // upstream
 ];
 
 fn run_builtin(name: &str, execute: bool) -> Result<()> {
