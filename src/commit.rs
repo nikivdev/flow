@@ -1,10 +1,12 @@
 //! AI-powered git commit command using OpenAI.
 
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::env;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -139,6 +141,8 @@ struct RemoteReviewRequest {
     diff: String,
     context: Option<String>,
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_instructions: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -658,6 +662,13 @@ pub fn run_with_check_sync(
     // Capture current staged changes so we can restore if we cancel.
     let staged_snapshot = capture_staged_snapshot_in(&repo_root)?;
 
+    // Run pre-commit fixers if configured
+    if let Ok(fixed) = run_fixers(&repo_root) {
+        if fixed {
+            println!();
+        }
+    }
+
     // Stage all changes
     print!("Staging changes... ");
     io::stdout().flush()?;
@@ -694,6 +705,9 @@ pub fn run_with_check_sync(
         }
     }
 
+    // Get custom review instructions from [commit] config
+    let review_instructions = get_review_instructions(&repo_root);
+
     // Run code review (Codex or Claude)
     if review_selection.is_claude() {
         println!("\nRunning Claude code review...");
@@ -704,14 +718,17 @@ pub fn run_with_check_sync(
     if session_context.is_some() {
         println!("(with AI session context)");
     }
+    if review_instructions.is_some() {
+        println!("(with custom review instructions)");
+    }
     println!("────────────────────────────────────────");
 
     let review = match review_selection {
         ReviewSelection::Claude(model) => {
-            run_claude_review(&diff, session_context.as_deref(), &repo_root, model)
+            run_claude_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, model)
         }
         ReviewSelection::Codex(model) => {
-            run_codex_review(&diff, session_context.as_deref(), &repo_root, model)
+            run_codex_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, model)
         }
     };
     let review = match review {
@@ -949,6 +966,7 @@ pub fn run_with_check_sync(
 fn run_codex_review(
     diff: &str,
     session_context: Option<&str>,
+    review_instructions: Option<&str>,
     workdir: &std::path::Path,
     model: CodexModel,
 ) -> Result<ReviewResult> {
@@ -959,20 +977,19 @@ fn run_codex_review(
     let (diff_for_prompt, _truncated) = truncate_diff(diff);
 
     // Build compact review prompt optimized for speed/cost
-    let prompt = if let Some(context) = session_context {
-        format!(
-            "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
-Context:{}\n\
-```diff\n{}\n```",
-            context, diff_for_prompt
-        )
-    } else {
-        format!(
-            "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
-```diff\n{}\n```",
-            diff_for_prompt
-        )
-    };
+    let mut prompt = String::from("Review diff for bugs, security, perf issues. Return JSON: {\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}\n");
+
+    // Add custom review instructions if provided
+    if let Some(instructions) = review_instructions {
+        prompt.push_str(&format!("\nAdditional review instructions:\n{}\n", instructions));
+    }
+
+    // Add session context if provided
+    if let Some(context) = session_context {
+        prompt.push_str(&format!("\nContext:\n{}\n", context));
+    }
+
+    prompt.push_str(&format!("```diff\n{}\n```", diff_for_prompt));
 
     let model_arg = format!("model=\"{}\"", model.as_codex_arg());
 
@@ -1135,6 +1152,7 @@ fn normalize_review_url(url: &str) -> String {
 fn run_remote_claude_review(
     diff: &str,
     session_context: Option<&str>,
+    review_instructions: Option<&str>,
     model: ClaudeModel,
 ) -> Result<ReviewResult> {
     let url = match commit_with_check_review_url() {
@@ -1147,6 +1165,7 @@ fn run_remote_claude_review(
         diff: diff.to_string(),
         context: session_context.map(|value| value.to_string()),
         model: model.as_claude_arg().to_string(),
+        review_instructions: review_instructions.map(|v| v.to_string()),
     };
 
     let client = Client::builder()
@@ -1209,11 +1228,12 @@ fn run_remote_claude_review(
 fn run_claude_review(
     diff: &str,
     session_context: Option<&str>,
+    review_instructions: Option<&str>,
     workdir: &std::path::Path,
     model: ClaudeModel,
 ) -> Result<ReviewResult> {
     if commit_with_check_review_url().is_some() {
-        return run_remote_claude_review(diff, session_context, model);
+        return run_remote_claude_review(diff, session_context, review_instructions, model);
     }
 
     use std::io::{BufRead, BufReader};
@@ -1223,20 +1243,19 @@ fn run_claude_review(
     let (diff_for_prompt, _truncated) = truncate_diff(diff);
 
     // Build compact review prompt optimized for speed/cost
-    let prompt = if let Some(context) = session_context {
-        format!(
-            "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
-Context:{}\n\
-```diff\n{}\n```",
-            context, diff_for_prompt
-        )
-    } else {
-        format!(
-            "Review diff for bugs, security, perf issues. Return JSON: {{\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}}\n\
-```diff\n{}\n```",
-            diff_for_prompt
-        )
-    };
+    let mut prompt = String::from("Review diff for bugs, security, perf issues. Return JSON: {\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}\n");
+
+    // Add custom review instructions if provided
+    if let Some(instructions) = review_instructions {
+        prompt.push_str(&format!("\nAdditional review instructions:\n{}\n", instructions));
+    }
+
+    // Add session context if provided
+    if let Some(context) = session_context {
+        prompt.push_str(&format!("\nContext:\n{}\n", context));
+    }
+
+    prompt.push_str(&format!("```diff\n{}\n```", diff_for_prompt));
 
     // Use claude CLI with print mode, piping prompt via stdin to avoid arg length limits
     let model_arg = model.as_claude_arg();
@@ -2157,4 +2176,336 @@ fn delegate_to_hub_with_check(
         let body = resp.text().unwrap_or_default();
         bail!("hub returned error: {}", body);
     }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pre-commit fixers
+// ─────────────────────────────────────────────────────────────
+
+/// Run pre-commit fixers from [commit] config.
+pub fn run_fixers(repo_root: &Path) -> Result<bool> {
+    let config_path = repo_root.join("flow.toml");
+    let config = if config_path.exists() {
+        config::load(&config_path)?
+    } else {
+        return Ok(false);
+    };
+
+    let commit_cfg = match &config.commit {
+        Some(c) if !c.fixers.is_empty() => c,
+        _ => return Ok(false),
+    };
+
+    let mut any_fixed = false;
+
+    for fixer in &commit_cfg.fixers {
+        match run_fixer(repo_root, fixer) {
+            Ok(fixed) => {
+                if fixed {
+                    any_fixed = true;
+                }
+            }
+            Err(e) => {
+                eprintln!("Fixer '{}' failed: {}", fixer, e);
+            }
+        }
+    }
+
+    Ok(any_fixed)
+}
+
+/// Run a single fixer. Returns true if any files were modified.
+fn run_fixer(repo_root: &Path, fixer: &str) -> Result<bool> {
+    // Custom command: "cmd:prettier --write"
+    if let Some(cmd) = fixer.strip_prefix("cmd:") {
+        return run_action_script(repo_root, cmd);
+    }
+
+    // Check for script in .ai/actions/
+    let action_path = repo_root.join(".ai/actions").join(fixer);
+    if action_path.exists() {
+        return run_action_script(repo_root, action_path.to_str().unwrap_or(fixer));
+    }
+
+    // Fallback to built-in fixers
+    match fixer {
+        "mdx-comments" => fix_mdx_comments(repo_root),
+        "trailing-whitespace" => fix_trailing_whitespace(repo_root),
+        "end-of-file" => fix_end_of_file(repo_root),
+        _ => {
+            debug!("Unknown fixer and no .ai/actions/{} script found", fixer);
+            Ok(false)
+        }
+    }
+}
+
+/// Run an action script from .ai/actions/ or a custom command.
+fn run_action_script(repo_root: &Path, cmd: &str) -> Result<bool> {
+    let display_name = cmd.strip_prefix(".ai/actions/").unwrap_or(cmd);
+    println!("Running: {}", display_name);
+
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(repo_root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+
+    Ok(status.success())
+}
+
+/// Fix MDX comments: convert <!-- --> to {/* */}
+fn fix_mdx_comments(repo_root: &Path) -> Result<bool> {
+    // Quick check: any HTML comments in MDX files?
+    let check = Command::new("git")
+        .args(["grep", "-l", "<!--", "--", "*.mdx", "**/*.mdx"])
+        .current_dir(repo_root)
+        .output()?;
+
+    let files_with_issues: Vec<_> = String::from_utf8_lossy(&check.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| repo_root.join(l))
+        .collect();
+
+    if files_with_issues.is_empty() {
+        return Ok(false);
+    }
+
+    let mut fixed_any = false;
+    for file in files_with_issues {
+        if let Ok(content) = fs::read_to_string(&file) {
+            let fixed = fix_html_comments_to_jsx(&content);
+            if fixed != content {
+                fs::write(&file, &fixed)?;
+                println!("  Fixed MDX comments: {}", file.display());
+                fixed_any = true;
+            }
+        }
+    }
+
+    if fixed_any {
+        println!("✓ Fixed MDX comments");
+    }
+
+    Ok(fixed_any)
+}
+
+/// Convert HTML comments to JSX comments in MDX content.
+fn fix_html_comments_to_jsx(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '<' && chars.peek() == Some(&'!') {
+            // Potential HTML comment
+            let mut buf = String::from("<");
+            buf.push(chars.next().unwrap()); // !
+
+            // Check for --
+            if chars.peek() == Some(&'-') {
+                buf.push(chars.next().unwrap()); // first -
+                if chars.peek() == Some(&'-') {
+                    buf.push(chars.next().unwrap()); // second -
+
+                    // Found <!--, now collect until -->
+                    let mut comment_content = String::new();
+                    loop {
+                        match chars.next() {
+                            Some('-') => {
+                                if chars.peek() == Some(&'-') {
+                                    chars.next(); // consume second -
+                                    if chars.peek() == Some(&'>') {
+                                        chars.next(); // consume >
+                                        // Found -->, convert to JSX comment
+                                        result.push_str("{/* ");
+                                        result.push_str(comment_content.trim());
+                                        result.push_str(" */}");
+                                        break;
+                                    } else {
+                                        comment_content.push_str("--");
+                                    }
+                                } else {
+                                    comment_content.push('-');
+                                }
+                            }
+                            Some(ch) => comment_content.push(ch),
+                            None => {
+                                // Unclosed comment, keep original
+                                result.push_str(&buf);
+                                result.push_str(&comment_content);
+                                break;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+            result.push_str(&buf);
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Fix trailing whitespace in text files.
+fn fix_trailing_whitespace(repo_root: &Path) -> Result<bool> {
+    // Quick check: any trailing whitespace in working directory changes?
+    let check = Command::new("git")
+        .args(["diff", "--check"])
+        .current_dir(repo_root)
+        .output()?;
+
+    // --check exits non-zero and outputs lines if there's trailing whitespace
+    if check.stdout.is_empty() {
+        return Ok(false);
+    }
+
+    let mut fixed_any = false;
+
+    // Get modified/new text files (unstaged)
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "--diff-filter=ACMR"])
+        .current_dir(repo_root)
+        .output()?;
+
+    let files: Vec<_> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| repo_root.join(l))
+        .collect();
+
+    for file in files {
+        if !file.exists() || is_binary(&file) {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(&file) {
+            let fixed: String = content
+                .lines()
+                .map(|line| line.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // Preserve original line ending
+            let fixed = if content.ends_with('\n') && !fixed.ends_with('\n') {
+                format!("{}\n", fixed)
+            } else {
+                fixed
+            };
+
+            if fixed != content {
+                fs::write(&file, &fixed)?;
+                println!("  Trimmed whitespace: {}", file.display());
+                fixed_any = true;
+            }
+        }
+    }
+
+    if fixed_any {
+        println!("✓ Fixed trailing whitespace");
+    }
+
+    Ok(fixed_any)
+}
+
+/// Ensure files end with a newline.
+fn fix_end_of_file(repo_root: &Path) -> Result<bool> {
+    // Quick check: any files missing final newline in working directory?
+    let check = Command::new("git")
+        .args(["diff"])
+        .current_dir(repo_root)
+        .output()?;
+
+    let diff_output = String::from_utf8_lossy(&check.stdout);
+    if !diff_output.contains("\\ No newline at end of file") {
+        return Ok(false);
+    }
+
+    let mut fixed_any = false;
+
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "--diff-filter=ACMR"])
+        .current_dir(repo_root)
+        .output()?;
+
+    let files: Vec<_> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| repo_root.join(l))
+        .collect();
+
+    for file in files {
+        if !file.exists() || is_binary(&file) {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(&file) {
+            if !content.is_empty() && !content.ends_with('\n') {
+                fs::write(&file, format!("{}\n", content))?;
+                println!("  Added newline: {}", file.display());
+                fixed_any = true;
+            }
+        }
+    }
+
+    if fixed_any {
+        println!("✓ Fixed end of file newlines");
+    }
+
+    Ok(fixed_any)
+}
+
+/// Simple binary file detection.
+fn is_binary(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    matches!(
+        ext,
+        "png" | "jpg" | "jpeg" | "gif" | "ico" | "webp" | "svg"
+            | "woff" | "woff2" | "ttf" | "otf" | "eot"
+            | "zip" | "tar" | "gz" | "rar" | "7z"
+            | "pdf" | "doc" | "docx" | "xls" | "xlsx"
+            | "exe" | "dll" | "so" | "dylib"
+            | "mp3" | "mp4" | "wav" | "avi" | "mov"
+    )
+}
+
+/// Get review instructions from [commit] config or .ai/ folder.
+pub fn get_review_instructions(repo_root: &Path) -> Option<String> {
+    // Check config first
+    let config_path = repo_root.join("flow.toml");
+    if let Ok(config) = config::load(&config_path) {
+        if let Some(commit_cfg) = config.commit.as_ref() {
+            // Try inline instructions
+            if let Some(instructions) = &commit_cfg.review_instructions {
+                return Some(instructions.clone());
+            }
+
+            // Try loading from configured file
+            if let Some(file_path) = &commit_cfg.review_instructions_file {
+                let full_path = repo_root.join(file_path);
+                if let Ok(content) = fs::read_to_string(full_path) {
+                    return Some(content);
+                }
+            }
+        }
+    }
+
+    // Auto-discover from .ai/ folder (no config needed)
+    let candidates = [
+        ".ai/review.md",
+        ".ai/commit-review.md",
+        ".ai/instructions.md",
+    ];
+
+    for candidate in candidates {
+        let path = repo_root.join(candidate);
+        if let Ok(content) = fs::read_to_string(&path) {
+            return Some(content);
+        }
+    }
+
+    None
 }

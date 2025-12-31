@@ -29,5 +29,5 @@ private
 
 /target
 /test-data
-.ai/
 testing/
+.ai/internal/
