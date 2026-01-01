@@ -143,25 +143,26 @@ pub enum Commands {
     )]
     Match(MatchOpts),
     #[command(
-        about = "AI-powered git commit: stage, generate message, commit, and push.",
-        long_about = "Stages all changes, uses OpenAI to generate a commit message from the diff, commits, and pushes. Requires OPENAI_API_KEY environment variable.",
+        about = "AI-powered commit with code review and GitEdit sync.",
+        long_about = "Stages all changes, runs code review for bugs/security, generates commit message, commits, pushes, and syncs AI sessions to gitedit.dev.",
         alias = "c"
     )]
     Commit(CommitOpts),
     #[command(
-        about = "AI-powered commit with Codex code review for bugs and performance.",
-        long_about = "Like 'commit' but first runs staged changes through Codex to check for bugs and performance issues. Shows any concerns before committing.",
+        about = "Simple AI commit without code review.",
+        long_about = "Stages all changes, uses OpenAI to generate a commit message from the diff, commits, and pushes. No code review.",
+        visible_alias = "commitSimple",
+        hide = true
+    )]
+    CommitSimple(CommitOpts),
+    #[command(
+        about = "AI commit with code review (no GitEdit sync).",
+        long_about = "Like 'commit' but without syncing to gitedit.dev.",
         alias = "cc",
-        visible_alias = "commitWithCheck"
+        visible_alias = "commitWithCheck",
+        hide = true
     )]
     CommitWithCheck(CommitOpts),
-    #[command(
-        about = "commitWithCheck plus GitEdit sync for agent sessions.",
-        long_about = "Runs commitWithCheck and always syncs local .ai sessions to gitedit.dev for browsing alongside GitHub history.",
-        alias = "ccg",
-        visible_alias = "commitWithCheckWithGitedit"
-    )]
-    CommitWithCheckWithGitedit(CommitOpts),
     #[command(
         about = "Fix common TOML syntax errors in flow.toml.",
         long_about = "Automatically fixes common issues in flow.toml that can break parsing, such as invalid escape sequences (\\$, \\n in basic strings), unclosed quotes, and other TOML syntax errors."

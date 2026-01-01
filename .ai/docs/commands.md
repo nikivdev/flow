@@ -63,18 +63,11 @@ Features:
 ## Git & Commits
 
 ### `f commit` (alias: `f c`)
-AI-powered git commit: stages all changes, generates commit message from diff, commits, and pushes.
+The default flow commit: stages changes, runs code review, generates commit message, commits, pushes, and syncs AI sessions to gitedit.dev.
 
 Options:
 - `-n, --no-push` - Skip pushing after commit
 - `--sync` - Run synchronously (don't delegate to hub)
-
-### `f commit-with-check` (alias: `f cc`, `f commitWithCheck`)
-Like `commit` but first runs code review for bugs and performance issues.
-
-Options:
-- `-n, --no-push` - Skip pushing
-- `--sync` - Run synchronously
 - `--no-context` - Skip AI session context in review
 - `--dry` - Show context without committing
 - `--claude` - Use Claude instead of Codex for review
@@ -82,8 +75,11 @@ Options:
 - `-m, --message <msg>` - Custom message to include
 - `-t, --tokens <n>` - Max tokens for context (default: 4000)
 
-### `f commit-with-check-with-gitedit` (alias: `f ccg`)
-Like `commit-with-check` but also syncs to gitedit.dev for browsing alongside GitHub history.
+### `f commit-simple` (hidden)
+Simple AI commit without code review. Just generates commit message and commits.
+
+### `f commit-with-check` (alias: `f cc`, hidden)
+Like `commit` but without syncing to gitedit.dev.
 
 ### `f commits`
 Browse git commits with AI session metadata using fuzzy search.

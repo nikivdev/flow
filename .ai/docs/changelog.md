@@ -10,6 +10,8 @@ Auto-maintained changelog tracking flow features and changes.
 - **Docs update reminder**: Commit flow now detects when docs may need updating and shows a reminder.
 
 ### Changed
+- **`f commit` is now the default**: Full commit with code review + GitEdit sync. Old `commitWithCheckWithGitedit` behavior is now just `f commit`.
+- **Hidden legacy commands**: `f commit-simple` (no review) and `f commit-with-check` (no gitedit) are hidden but still available.
 - **`.flox/` materialization**: Flox environment now gitignored and materialized from `.ai/flox/manifest.toml` via `f start`. Source of truth moved to `.ai/flox/`.
 - **Gitignore section**: `f start` now adds `.flox/` to the `# flow` gitignore section.
 
