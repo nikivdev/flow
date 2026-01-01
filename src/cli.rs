@@ -631,23 +631,23 @@ pub struct CommitOpts {
     /// Run synchronously (don't delegate to hub).
     #[arg(long, visible_alias = "no-hub")]
     pub sync: bool,
-    /// Skip AI session context in code review (commitWithCheck only).
+    /// Include AI session context in code review (default: off).
     #[arg(long)]
-    pub no_context: bool,
-    /// Dry run: show context that would be passed to Codex without committing.
+    pub context: bool,
+    /// Dry run: show context that would be passed to review without committing.
     #[arg(long)]
     pub dry: bool,
-    /// Use Claude Code SDK instead of Codex for code review (commitWithCheck only).
+    /// Use Codex instead of Claude for code review (default: Claude).
     #[arg(long)]
-    pub claude: bool,
+    pub codex: bool,
     /// Choose a specific review model (claude-opus, codex-high, codex-mini).
     #[arg(long, value_enum)]
     pub review_model: Option<ReviewModelArg>,
-    /// Optional custom message to include in commit (appended after author line).
+    /// Custom message to include in commit (appended after author line).
     #[arg(long, short = 'm')]
     pub message: Option<String>,
-    /// Max tokens for AI session context (default: 4000, ~16000 chars).
-    #[arg(long, short = 't', default_value = "4000")]
+    /// Max tokens for AI session context (default: 1000).
+    #[arg(long, short = 't', default_value = "1000")]
     pub tokens: usize,
 }
 

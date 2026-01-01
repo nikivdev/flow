@@ -63,17 +63,22 @@ Features:
 ## Git & Commits
 
 ### `f commit` (alias: `f c`)
-The default flow commit: stages changes, runs code review, generates commit message, commits, pushes, and syncs AI sessions to gitedit.dev.
+The default flow commit: stages changes, runs Claude code review, generates commit message, commits, pushes, and syncs AI sessions to gitedit.dev.
+
+```bash
+f commit              # Just commit with Claude review
+f commit -m "note"    # Add author note to commit message
+```
 
 Options:
 - `-n, --no-push` - Skip pushing after commit
 - `--sync` - Run synchronously (don't delegate to hub)
-- `--no-context` - Skip AI session context in review
+- `--context` - Include AI session context in review (default: off)
 - `--dry` - Show context without committing
-- `--claude` - Use Claude instead of Codex for review
+- `--codex` - Use Codex instead of Claude for review
 - `--review-model <model>` - Choose model (claude-opus, codex-high, codex-mini)
 - `-m, --message <msg>` - Custom message to include
-- `-t, --tokens <n>` - Max tokens for context (default: 4000)
+- `-t, --tokens <n>` - Max tokens for context (default: 1000)
 
 ### `f commit-simple` (hidden)
 Simple AI commit without code review. Just generates commit message and commits.
