@@ -92,15 +92,15 @@ fn main() -> Result<()> {
             })?;
         }
         Some(Commands::Commit(opts)) => {
-            // Default: full commit with review and gitedit sync
+            // Default: Claude review, no context, gitedit sync
             let review_selection =
-                commit::resolve_review_selection(opts.claude, opts.review_model.clone());
+                commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
             if opts.dry {
                 commit::dry_run_context()?;
             } else if opts.sync {
                 commit::run_with_check_sync(
                     !opts.no_push,
-                    !opts.no_context,
+                    opts.context,
                     review_selection,
                     opts.message.as_deref(),
                     opts.tokens,
@@ -109,7 +109,7 @@ fn main() -> Result<()> {
             } else {
                 commit::run_with_check_with_gitedit(
                     !opts.no_push,
-                    !opts.no_context,
+                    opts.context,
                     review_selection,
                     opts.message.as_deref(),
                     opts.tokens,
@@ -127,13 +127,13 @@ fn main() -> Result<()> {
         Some(Commands::CommitWithCheck(opts)) => {
             // Review but no gitedit sync
             let review_selection =
-                commit::resolve_review_selection(opts.claude, opts.review_model.clone());
+                commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
             if opts.dry {
                 commit::dry_run_context()?;
             } else if opts.sync {
                 commit::run_with_check_sync(
                     !opts.no_push,
-                    !opts.no_context,
+                    opts.context,
                     review_selection,
                     opts.message.as_deref(),
                     opts.tokens,
@@ -142,7 +142,7 @@ fn main() -> Result<()> {
             } else {
                 commit::run_with_check(
                     !opts.no_push,
-                    !opts.no_context,
+                    opts.context,
                     review_selection,
                     opts.message.as_deref(),
                     opts.tokens,

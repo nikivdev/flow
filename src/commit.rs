@@ -127,6 +127,27 @@ pub fn resolve_review_selection(
     }
 }
 
+/// New default: Claude is default, --codex flag to use Codex
+pub fn resolve_review_selection_v2(
+    use_codex: bool,
+    override_model: Option<ReviewModelArg>,
+) -> ReviewSelection {
+    if let Some(model) = override_model {
+        return match model {
+            ReviewModelArg::ClaudeOpus => ReviewSelection::Claude(ClaudeModel::Opus),
+            ReviewModelArg::CodexHigh => ReviewSelection::Codex(CodexModel::High),
+            ReviewModelArg::CodexMini => ReviewSelection::Codex(CodexModel::Mini),
+        };
+    }
+
+    if use_codex {
+        ReviewSelection::Codex(CodexModel::High)
+    } else {
+        // Default: Claude Sonnet
+        ReviewSelection::Claude(ClaudeModel::Sonnet)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ReviewJson {
     issues_found: bool,
