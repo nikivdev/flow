@@ -6,7 +6,7 @@ use clap::{Parser, error::ErrorKind};
 use flowd::{
     agent, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    commit, commits, daemon, deploy, doctor, env, fixup, history, hub, init, init_tracing,
+    commit, commits, daemon, deploy, docs, doctor, env, fixup, history, hub, init, init_tracing,
     log_server, notify, palette, parallel, processes, projects, skills, start, task_match, tasks,
     tools, upstream,
 };
@@ -184,6 +184,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Parallel(cmd)) => {
             parallel::run(cmd)?;
+        }
+        Some(Commands::Docs(cmd)) => {
+            docs::run(cmd)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

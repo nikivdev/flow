@@ -61,6 +61,7 @@ pub fn run() -> Result<()> {
     println!("  ├── skills/       # Tracked - shared skills");
     println!("  ├── tools/        # Tracked - shared tools");
     println!("  ├── flox/         # Tracked - flox manifest");
+    println!("  ├── docs/         # Tracked - auto-generated docs");
     println!("  ├── agents.md     # Tracked - agent instructions");
     println!("  └── internal/     # Gitignored - private data");
     println!("  .claude/          # Gitignored - symlinks to .ai/");
@@ -115,6 +116,7 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
         ai_dir.join("skills"),
         ai_dir.join("tools"),
         ai_dir.join("flox"),
+        ai_dir.join("docs"),
     ];
 
     // Private folders (gitignored)
