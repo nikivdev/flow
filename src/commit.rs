@@ -391,7 +391,7 @@ pub fn run_sync(push: bool) -> Result<()> {
     // Sync to gitedit if enabled
     let cwd = std::env::current_dir().unwrap_or_default();
     if gitedit_mirror_enabled() {
-        sync_to_gitedit(&cwd, "commit", &[], None);
+        sync_to_gitedit(&cwd, "commit", &[], None, None);
     }
 
     Ok(())
@@ -951,11 +951,27 @@ pub fn run_with_check_sync(
     };
 
     if should_sync {
+        // Build review data for gitedit
+        let review_data = GitEditReviewData {
+            diff: Some(diff.clone()),
+            issues_found: review.issues_found,
+            issues: review.issues.clone(),
+            summary: review.summary.clone(),
+            reviewer: Some(
+                if review_selection.is_claude() {
+                    "claude".to_string()
+                } else {
+                    "codex".to_string()
+                },
+            ),
+        };
+
         sync_to_gitedit(
             &repo_root,
             "commit_with_check",
             &gitedit_sessions,
             gitedit_session_hash.as_deref(),
+            Some(&review_data),
         );
     }
 
@@ -1834,12 +1850,23 @@ fn gitedit_repo_override(repo_root: &std::path::Path) -> Option<(String, String)
     Some((owner, repo))
 }
 
+/// Data from AI code review to sync to gitedit.
+#[derive(Debug, Clone, Default)]
+pub struct GitEditReviewData {
+    pub diff: Option<String>,
+    pub issues_found: bool,
+    pub issues: Vec<String>,
+    pub summary: Option<String>,
+    pub reviewer: Option<String>, // "claude" or "codex"
+}
+
 /// Sync commit to gitedit.dev for mirroring.
 fn sync_to_gitedit(
     repo_root: &std::path::Path,
     event: &str,
     ai_sessions: &[ai::GitEditSessionData],
     session_hash: Option<&str>,
+    review_data: Option<&GitEditReviewData>,
 ) {
     let (owner, repo) = if let Some((owner, repo)) = gitedit_repo_override(repo_root) {
         (owner, repo)
@@ -1919,6 +1946,17 @@ fn sync_to_gitedit(
     let api_url = format!("{}/api/mirrors/sync", base_url);
     let view_url = format!("{}/{}/{}", base_url, owner, repo);
 
+    // Build review data if present
+    let review_json = review_data.map(|r| {
+        json!({
+            "diff": r.diff,
+            "issues_found": r.issues_found,
+            "issues": r.issues,
+            "summary": r.summary,
+            "reviewer": r.reviewer,
+        })
+    });
+
     let payload = json!({
         "owner": owner,
         "repo": repo,
@@ -1932,6 +1970,7 @@ fn sync_to_gitedit(
         "author_email": author_email,
         "session_hash": session_hash,
         "ai_sessions": ai_sessions_json,
+        "review": review_json,
     });
 
     let client = match Client::builder().timeout(Duration::from_secs(10)).build() {

@@ -5,6 +5,7 @@
 //! - Cloudflare Workers
 //! - Railway
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::{DeployAction, DeployCommand};
 use crate::config::Config;
+use crate::deploy_setup::{CloudflareSetupDefaults, CloudflareSetupResult, run_cloudflare_setup};
+use crate::env::parse_env_file;
 
 /// Host configuration stored globally at ~/.config/flow/deploy.json
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -85,6 +88,9 @@ pub struct CloudflareConfig {
     pub path: Option<String>,
     /// Path to .env file for secrets.
     pub env_file: Option<String>,
+    /// Wrangler environment name (e.g., staging).
+    #[serde(default, alias = "env")]
+    pub environment: Option<String>,
     /// Custom deploy command.
     pub deploy: Option<String>,
     /// Custom dev command.
@@ -157,6 +163,7 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
         Some(DeployAction::Cloudflare { secrets, dev }) => {
             deploy_cloudflare(&project_root, flow_config.as_ref(), secrets, dev)
         }
+        Some(DeployAction::Setup) => setup_cloudflare(&project_root, flow_config.as_ref()),
         Some(DeployAction::Railway) => deploy_railway(&project_root, flow_config.as_ref()),
         Some(DeployAction::Status) => show_status(&project_root, flow_config.as_ref()),
         Some(DeployAction::Logs { follow, lines }) => {
@@ -167,6 +174,9 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
         Some(DeployAction::Shell) => open_shell(),
         Some(DeployAction::SetHost { connection }) => set_host(&connection),
         Some(DeployAction::ShowHost) => show_host(),
+        Some(DeployAction::Health { url, status }) => {
+            check_health(&project_root, flow_config.as_ref(), url, status)
+        }
     }
 }
 
@@ -199,7 +209,9 @@ fn auto_deploy(project_root: &Path, config: Option<&Config>) -> Result<()> {
         [cloudflare]\n\
         path = \"worker\"\n\n\
         [railway]\n\
-        project = \"my-project\""
+        project = \"my-project\"\n\n\
+        Or run:\n\
+        f deploy setup"
     );
 }
 
@@ -308,13 +320,15 @@ fn deploy_cloudflare(
         );
     }
 
+    let env_name = cf_cfg.environment.as_deref();
+
     // Set secrets if requested
     if set_secrets {
         if let Some(env_file) = &cf_cfg.env_file {
             let env_path = project_root.join(env_file);
             if env_path.exists() {
                 println!("==> Setting secrets from {}...", env_file);
-                set_wrangler_secrets(&worker_path, &env_path)?;
+                set_wrangler_secrets(&worker_path, &env_path, env_name, None)?;
             }
         }
     }
@@ -325,6 +339,7 @@ fn deploy_cloudflare(
     } else {
         cf_cfg.deploy.as_deref().unwrap_or("wrangler deploy")
     };
+    let cmd = append_env_arg(cmd, env_name);
 
     println!("==> Running: {}", cmd);
     let status = Command::new("sh")
@@ -341,6 +356,52 @@ fn deploy_cloudflare(
     }
 
     println!("\n✓ Deployed to Cloudflare!");
+    Ok(())
+}
+
+fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> {
+    let default_cf = CloudflareConfig::default();
+    let cf_cfg = config
+        .and_then(|c| c.cloudflare.as_ref())
+        .unwrap_or(&default_cf);
+
+    let defaults = CloudflareSetupDefaults {
+        worker_path: cf_cfg
+            .path
+            .as_ref()
+            .map(|p| project_root.join(p)),
+        env_file: cf_cfg
+            .env_file
+            .as_ref()
+            .map(|p| project_root.join(p)),
+        environment: cf_cfg.environment.clone(),
+    };
+
+    let result = run_cloudflare_setup(project_root, defaults)?;
+    let Some(result) = result else {
+        return Ok(());
+    };
+
+    let flow_path = project_root.join("flow.toml");
+    if !flow_path.exists() {
+        bail!("flow.toml not found. Run `f init` first.");
+    }
+
+    update_flow_toml_cloudflare(&flow_path, project_root, &result)?;
+
+    if result.apply_secrets {
+        if let Some(env_file) = result.env_file.as_ref() {
+            let env_name = result.environment.as_deref();
+            set_wrangler_secrets(
+                &result.worker_path,
+                env_file,
+                env_name,
+                Some(&result.selected_keys),
+            )?;
+        }
+    }
+
+    println!("\n✓ Cloudflare deploy setup complete.");
     Ok(())
 }
 
@@ -704,31 +765,167 @@ fn setup_nginx(conn: &HostConnection, domain: &str, port: u16, ssl: bool) -> Res
 }
 
 /// Set Cloudflare Worker secrets from env file.
-fn set_wrangler_secrets(worker_path: &Path, env_file: &Path) -> Result<()> {
+fn set_wrangler_secrets(
+    worker_path: &Path,
+    env_file: &Path,
+    env_name: Option<&str>,
+    selected_keys: Option<&[String]>,
+) -> Result<()> {
     let content = fs::read_to_string(env_file)?;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            let value = value.trim_matches('"').trim_matches('\'');
-            println!("  Setting {}...", key);
-            let mut child = Command::new("wrangler")
-                .args(["secret", "put", key])
-                .current_dir(worker_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
+    let vars = parse_env_file(&content);
+    let allowlist = selected_keys
+        .map(|keys| keys.iter().cloned().collect::<HashSet<String>>());
 
-            if let Some(mut stdin) = child.stdin.take() {
-                writeln!(stdin, "{}", value)?;
+    for (key, value) in vars {
+        if let Some(allowlist) = &allowlist {
+            if !allowlist.contains(&key) {
+                continue;
             }
-            child.wait()?;
         }
+        println!("  Setting {}...", key);
+        let mut cmd = Command::new("wrangler");
+        cmd.args(["secret", "put", &key]);
+        if let Some(env) = env_name {
+            cmd.args(["--env", env]);
+        }
+        let mut child = cmd
+            .current_dir(worker_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            writeln!(stdin, "{}", value)?;
+        }
+        child.wait()?;
     }
     Ok(())
+}
+
+fn append_env_arg(cmd: &str, env_name: Option<&str>) -> String {
+    if let Some(env) = env_name {
+        if cmd.contains("--env") {
+            cmd.to_string()
+        } else {
+            format!("{cmd} --env {env}")
+        }
+    } else {
+        cmd.to_string()
+    }
+}
+
+fn update_flow_toml_cloudflare(
+    flow_path: &Path,
+    project_root: &Path,
+    setup: &CloudflareSetupResult,
+) -> Result<()> {
+    let contents = fs::read_to_string(flow_path)?;
+    let mut lines: Vec<String> = contents.lines().map(|line| line.to_string()).collect();
+    let had_trailing_newline = contents.ends_with('\n');
+
+    let worker_path = relative_dir(project_root, &setup.worker_path);
+    let env_file = setup
+        .env_file
+        .as_ref()
+        .map(|path| relative_path(project_root, path));
+    let environment = setup.environment.clone();
+
+    if let Some(start) = lines.iter().position(|line| line.trim() == "[cloudflare]") {
+        let end = find_section_end(&lines, start + 1);
+        let mut section_lines = Vec::new();
+        for line in &lines[start + 1..end] {
+            if !is_cloudflare_key_line(line) {
+                section_lines.push(line.clone());
+            }
+        }
+
+        let mut updates = Vec::new();
+        if let Some(path) = worker_path {
+            updates.push(format!("path = \"{}\"", path));
+        }
+        if let Some(env_file) = env_file {
+            updates.push(format!("env_file = \"{}\"", env_file));
+        }
+        if let Some(environment) = environment {
+            updates.push(format!("environment = \"{}\"", environment));
+        }
+
+        if !updates.is_empty() {
+            let needs_blank = section_lines
+                .last()
+                .map(|line| !line.trim().is_empty())
+                .unwrap_or(false);
+            if needs_blank {
+                section_lines.push(String::new());
+            }
+            section_lines.extend(updates);
+        }
+
+        let mut updated = Vec::new();
+        updated.extend_from_slice(&lines[..start + 1]);
+        updated.extend(section_lines);
+        updated.extend_from_slice(&lines[end..]);
+        lines = updated;
+    } else {
+        if !lines.is_empty() && !lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+            lines.push(String::new());
+        }
+        lines.push("[cloudflare]".to_string());
+        if let Some(path) = worker_path {
+            lines.push(format!("path = \"{}\"", path));
+        }
+        if let Some(env_file) = env_file {
+            lines.push(format!("env_file = \"{}\"", env_file));
+        }
+        if let Some(environment) = environment {
+            lines.push(format!("environment = \"{}\"", environment));
+        }
+    }
+
+    let mut updated = lines.join("\n");
+    if had_trailing_newline {
+        updated.push('\n');
+    }
+    fs::write(flow_path, updated)?;
+    Ok(())
+}
+
+fn find_section_end(lines: &[String], start: usize) -> usize {
+    for (idx, line) in lines.iter().enumerate().skip(start) {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            return idx;
+        }
+    }
+    lines.len()
+}
+
+fn is_cloudflare_key_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.starts_with('#') || trimmed.starts_with(';') {
+        return false;
+    }
+    let Some((key, _)) = trimmed.split_once('=') else {
+        return false;
+    };
+    matches!(key.trim(), "path" | "env_file" | "environment" | "env")
+}
+
+fn relative_path(project_root: &Path, path: &Path) -> String {
+    path.strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn relative_dir(project_root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(project_root).unwrap_or(path);
+    if rel.as_os_str().is_empty() || rel == Path::new(".") {
+        None
+    } else {
+        Some(rel.to_string_lossy().to_string())
+    }
 }
 
 /// Set Railway environment variables from env file.
@@ -749,4 +946,88 @@ fn set_railway_env(env_file: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Check if deployment is healthy via HTTP.
+fn check_health(
+    _project_root: &Path,
+    config: Option<&Config>,
+    custom_url: Option<String>,
+    expected_status: u16,
+) -> Result<()> {
+    use std::time::Instant;
+
+    // Determine URL to check
+    let url = if let Some(url) = custom_url {
+        url
+    } else if let Some(config) = config {
+        // Try host domain first
+        if let Some(host) = &config.host {
+            if let Some(domain) = &host.domain {
+                let scheme = if host.ssl { "https" } else { "http" };
+                format!("{}://{}", scheme, domain)
+            } else {
+                bail!("No domain configured. Use --url to specify a URL to check.");
+            }
+        } else if let Some(cf) = &config.cloudflare {
+            // For cloudflare, try to get the worker URL from wrangler
+            let path = cf.path.as_deref().unwrap_or(".");
+            let output = Command::new("wrangler")
+                .args(["whoami"])
+                .current_dir(_project_root.join(path))
+                .output();
+
+            if output.is_ok() {
+                // Could parse wrangler.toml for the worker name
+                bail!("Cloudflare Workers don't have a default URL. Use --url to specify.");
+            } else {
+                bail!("No URL configured. Use --url to specify a URL to check.");
+            }
+        } else {
+            bail!("No deployment config found. Use --url to specify a URL to check.");
+        }
+    } else {
+        bail!("No flow.toml found. Use --url to specify a URL to check.");
+    };
+
+    println!("Checking health: {}", url);
+    let start = Instant::now();
+
+    // Use curl for simplicity (available everywhere)
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "10",
+            &url,
+        ])
+        .output()
+        .context("Failed to run curl")?;
+
+    let elapsed = start.elapsed();
+    let status_str = String::from_utf8_lossy(&output.stdout);
+    let actual_status: u16 = status_str.trim().parse().unwrap_or(0);
+
+    if actual_status == expected_status {
+        println!(
+            "✓ Healthy (HTTP {} in {:.2}s)",
+            actual_status,
+            elapsed.as_secs_f64()
+        );
+        Ok(())
+    } else if actual_status == 0 {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("✗ Unreachable: {}", stderr.trim());
+    } else {
+        bail!(
+            "✗ Unhealthy: expected HTTP {}, got {} ({:.2}s)",
+            expected_status,
+            actual_status,
+            elapsed.as_secs_f64()
+        );
+    }
 }

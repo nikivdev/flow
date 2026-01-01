@@ -553,7 +553,7 @@ fn status() -> Result<()> {
 }
 
 /// Parse a .env file into key-value pairs.
-fn parse_env_file(content: &str) -> HashMap<String, String> {
+pub(crate) fn parse_env_file(content: &str) -> HashMap<String, String> {
     let mut vars = HashMap::new();
 
     for line in content.lines() {

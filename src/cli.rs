@@ -1023,6 +1023,8 @@ pub enum DeployAction {
         #[arg(long)]
         dev: bool,
     },
+    /// Interactive deploy setup (Cloudflare Workers for now).
+    Setup,
     /// Deploy to Railway.
     Railway,
     /// Show deployment status.
@@ -1050,4 +1052,13 @@ pub enum DeployAction {
     },
     /// Show current host configuration.
     ShowHost,
+    /// Check if deployment is healthy (HTTP health check).
+    Health {
+        /// Custom URL to check (defaults to domain from config).
+        #[arg(long)]
+        url: Option<String>,
+        /// Expected HTTP status code.
+        #[arg(long, default_value_t = 200)]
+        status: u16,
+    },
 }
