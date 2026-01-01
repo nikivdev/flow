@@ -1,3 +1,8 @@
+# flow
+.ai/internal/
+.claude/
+.codex/
+
 # core
 .DS_Store
 .env
@@ -26,8 +31,5 @@ past/
 private
 .blade
 .npm-cache
-
-/target
 /test-data
 testing/
-.ai/internal/
