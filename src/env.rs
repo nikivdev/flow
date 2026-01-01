@@ -25,10 +25,20 @@ struct AuthConfig {
     api_url: Option<String>,
 }
 
+/// An env var with optional description.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EnvVar {
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// Response from /api/env/:projectName
 #[derive(Debug, Deserialize)]
 struct EnvResponse {
     env: HashMap<String, String>,
+    #[serde(default)]
+    descriptions: HashMap<String, String>,
     project: String,
     environment: String,
 }
@@ -153,9 +163,15 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
         EnvAction::Pull { environment } => pull(&environment)?,
         EnvAction::Push { environment } => push(&environment)?,
         EnvAction::List { environment } => list(&environment)?,
-        EnvAction::Set { pair, environment } => set_var(&pair, &environment)?,
+        EnvAction::Set { pair, environment, description } => set_var(&pair, &environment, description.as_deref())?,
         EnvAction::Delete { keys, environment } => delete_vars(&keys, &environment)?,
         EnvAction::Status => status()?,
+        EnvAction::Get { keys, personal, environment, format } => {
+            get_vars(&keys, personal, &environment, &format)?
+        }
+        EnvAction::Run { personal, environment, keys, command } => {
+            run_with_env(personal, &environment, &keys, &command)?
+        }
     }
 
     Ok(())
@@ -407,7 +423,13 @@ fn list(environment: &str) -> Result<()> {
         } else {
             "****".to_string()
         };
-        println!("  {} = {}", key, masked);
+
+        // Show description if available
+        if let Some(desc) = data.descriptions.get(key) {
+            println!("  {} = {}  # {}", key, masked, desc);
+        } else {
+            println!("  {} = {}", key, masked);
+        }
     }
 
     println!();
@@ -417,19 +439,37 @@ fn list(environment: &str) -> Result<()> {
 }
 
 /// Set a single env var.
-fn set_var(pair: &str, environment: &str) -> Result<()> {
-    let auth = load_auth_config()?;
-    let token = auth
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
-
+fn set_var(pair: &str, environment: &str, description: Option<&str>) -> Result<()> {
     let (key, value) = pair
         .split_once('=')
         .ok_or_else(|| anyhow::anyhow!("Invalid format. Use KEY=VALUE"))?;
 
     let key = key.trim();
     let value = value.trim();
+
+    set_project_env_var_internal(key, value, environment, description)
+}
+
+pub fn set_project_env_var(
+    key: &str,
+    value: &str,
+    environment: &str,
+    description: Option<&str>,
+) -> Result<()> {
+    set_project_env_var_internal(key, value, environment, description)
+}
+
+fn set_project_env_var_internal(
+    key: &str,
+    value: &str,
+    environment: &str,
+    description: Option<&str>,
+) -> Result<()> {
+    let auth = load_auth_config()?;
+    let token = auth
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
 
     if key.is_empty() {
         bail!("Key cannot be empty");
@@ -446,10 +486,17 @@ fn set_var(pair: &str, environment: &str) -> Result<()> {
     let mut vars = HashMap::new();
     vars.insert(key.to_string(), value.to_string());
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "vars": vars,
         "environment": environment,
     });
+
+    // Add description if provided
+    if let Some(desc) = description {
+        let mut descriptions = HashMap::new();
+        descriptions.insert(key.to_string(), desc.to_string());
+        body["descriptions"] = serde_json::json!(descriptions);
+    }
 
     let resp = client
         .post(&url)
@@ -464,16 +511,17 @@ fn set_var(pair: &str, environment: &str) -> Result<()> {
         bail!("API error {}: {}", status, body);
     }
 
-    println!(
-        "✓ Set {}={} ({})",
-        key,
-        if value.len() > 8 {
-            format!("{}...", &value[..4])
-        } else {
-            "****".to_string()
-        },
-        environment
-    );
+    let masked = if value.len() > 8 {
+        format!("{}...", &value[..4])
+    } else {
+        "****".to_string()
+    };
+
+    if let Some(desc) = description {
+        println!("✓ Set {}={} ({}) - {}", key, masked, environment, desc);
+    } else {
+        println!("✓ Set {}={} ({})", key, masked, environment);
+    }
 
     Ok(())
 }
@@ -583,4 +631,140 @@ pub(crate) fn parse_env_file(content: &str) -> HashMap<String, String> {
     }
 
     vars
+}
+
+/// Fetch env vars from 1focus (personal or project).
+fn fetch_env_vars(
+    personal: bool,
+    environment: &str,
+    keys: &[String],
+) -> Result<HashMap<String, String>> {
+    let auth = load_auth_config()?;
+    let token = auth
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+
+    let api_url = get_api_url(&auth);
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let url = if personal {
+        if keys.is_empty() {
+            format!("{}/api/env/personal", api_url)
+        } else {
+            format!("{}/api/env/personal?keys={}", api_url, keys.join(","))
+        }
+    } else {
+        let project = get_project_name()?;
+        let base = format!("{}/api/env/{}?environment={}", api_url, project, environment);
+        if keys.is_empty() {
+            base
+        } else {
+            format!("{}&keys={}", base, keys.join(","))
+        }
+    };
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .context("failed to connect to 1focus")?;
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if resp.status() == 404 {
+        if personal {
+            bail!("Personal env vars not found.");
+        } else {
+            bail!("Project not found. Create it with `f env push` first.");
+        }
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    if personal {
+        let data: PersonalEnvResponse = resp.json().context("failed to parse response")?;
+        Ok(data.env)
+    } else {
+        let data: EnvResponse = resp.json().context("failed to parse response")?;
+        Ok(data.env)
+    }
+}
+
+/// Get specific env vars and print to stdout.
+fn get_vars(keys: &[String], personal: bool, environment: &str, format: &str) -> Result<()> {
+    let vars = fetch_env_vars(personal, environment, keys)?;
+
+    if vars.is_empty() {
+        bail!("No env vars found");
+    }
+
+    match format {
+        "json" => {
+            let json = serde_json::to_string_pretty(&vars)?;
+            println!("{}", json);
+        }
+        "value" => {
+            if keys.len() != 1 {
+                bail!("'value' format requires exactly one key");
+            }
+            let key = &keys[0];
+            if let Some(value) = vars.get(key) {
+                print!("{}", value); // No newline for piping
+            } else {
+                bail!("Key '{}' not found", key);
+            }
+        }
+        "env" | _ => {
+            // Default: KEY=VALUE format
+            let mut sorted_keys: Vec<_> = vars.keys().collect();
+            sorted_keys.sort();
+            for key in sorted_keys {
+                let value = &vars[key];
+                // Escape for shell
+                let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+                println!("{}=\"{}\"", key, escaped);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run a command with env vars injected from 1focus.
+fn run_with_env(
+    personal: bool,
+    environment: &str,
+    keys: &[String],
+    command: &[String],
+) -> Result<()> {
+    use std::process::Command;
+
+    if command.is_empty() {
+        bail!("No command specified");
+    }
+
+    let vars = fetch_env_vars(personal, environment, keys)?;
+
+    let (cmd, args) = command.split_first().unwrap();
+
+    let mut child = Command::new(cmd);
+    child.args(args);
+
+    // Inject env vars
+    for (key, value) in &vars {
+        child.env(key, value);
+    }
+
+    let status = child.status().with_context(|| format!("failed to run '{}'", cmd))?;
+
+    std::process::exit(status.code().unwrap_or(1));
 }

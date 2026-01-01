@@ -306,6 +306,25 @@ pub struct GitEditExchange {
     pub timestamp: String,
 }
 
+/// Get session IDs quickly for early hash generation.
+/// Returns (session_ids, checkpoint_timestamp) for hashing before full data load.
+pub fn get_session_ids_for_hash(project_path: &PathBuf) -> Result<(Vec<String>, Option<String>)> {
+    let checkpoints = load_checkpoints(project_path).unwrap_or_default();
+    let sessions = read_sessions_for_path(Provider::All, project_path)?;
+
+    let checkpoint_ts = checkpoints
+        .last_commit
+        .as_ref()
+        .and_then(|c| c.last_entry_timestamp.clone());
+
+    let session_ids: Vec<String> = sessions
+        .iter()
+        .map(|s| s.session_id.clone())
+        .collect();
+
+    Ok((session_ids, checkpoint_ts))
+}
+
 /// Get structured AI session data for GitEdit sync.
 /// Returns sessions with full exchange history since the last checkpoint.
 pub fn get_sessions_for_gitedit(project_path: &PathBuf) -> Result<Vec<GitEditSessionData>> {

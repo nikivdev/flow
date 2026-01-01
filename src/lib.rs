@@ -28,6 +28,7 @@ pub mod processes;
 pub mod projects;
 pub mod running;
 pub mod skills;
+pub mod storage;
 pub mod start;
 pub mod tools;
 pub mod upstream;

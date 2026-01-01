@@ -190,6 +190,11 @@ pub enum Commands {
     )]
     Skills(SkillsCommand),
     #[command(
+        about = "Manage storage providers (e.g., Jazz).",
+        long_about = "Provision storage backends and populate environment variables for services like Jazz."
+    )]
+    Storage(StorageCommand),
+    #[command(
         about = "Manage AI tools (.ai/tools/*.ts).",
         long_about = "Create, list, and run TypeScript tools via Bun. Tools are fast, reusable scripts stored in .ai/tools/. Use 'codify' to generate tools from natural language.",
         alias = "t"
@@ -576,6 +581,43 @@ pub struct SecretsPullOpts {
     pub format: SecretsFormat,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct StorageCommand {
+    #[command(subcommand)]
+    pub action: StorageAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum StorageAction {
+    /// Jazz worker accounts and env wiring.
+    Jazz(JazzStorageCommand),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct JazzStorageCommand {
+    #[command(subcommand)]
+    pub action: JazzStorageAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum JazzStorageAction {
+    /// Create a new Jazz worker account and store env vars.
+    New {
+        /// Optional name for the worker account.
+        #[arg(long)]
+        name: Option<String>,
+        /// Optional sync server (peer) URL.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Optional Jazz API key (used when constructing the default peer).
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Environment to store in (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum SecretsFormat {
     Shell,
@@ -822,6 +864,9 @@ pub enum EnvAction {
         /// Environment to set in (dev, staging, production).
         #[arg(short, long, default_value = "production")]
         environment: String,
+        /// Optional description for this env var.
+        #[arg(short, long)]
+        description: Option<String>,
     },
     /// Delete env var(s).
     Delete {
@@ -833,6 +878,35 @@ pub enum EnvAction {
     },
     /// Show current auth status.
     Status,
+    /// Get specific env var(s) and print to stdout.
+    Get {
+        /// Key(s) to fetch.
+        keys: Vec<String>,
+        /// Fetch from personal env vars instead of project.
+        #[arg(long)]
+        personal: bool,
+        /// Environment to fetch from (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+        /// Output format: env (KEY=VALUE), json, or value (just the value, single key only).
+        #[arg(short, long, default_value = "env")]
+        format: String,
+    },
+    /// Run a command with env vars injected from 1focus.
+    Run {
+        /// Fetch from personal env vars instead of project.
+        #[arg(long)]
+        personal: bool,
+        /// Environment to fetch from (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+        /// Specific keys to inject (if empty, injects all).
+        #[arg(long, short = 'k')]
+        keys: Vec<String>,
+        /// Command and arguments to run.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
