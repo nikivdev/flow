@@ -91,6 +91,10 @@ impl ReviewSelection {
         matches!(self, ReviewSelection::Claude(_))
     }
 
+    fn is_codex(&self) -> bool {
+        matches!(self, ReviewSelection::Codex(_))
+    }
+
     fn review_model_arg(&self) -> Option<ReviewModelArg> {
         match self {
             ReviewSelection::Codex(CodexModel::High) => Some(ReviewModelArg::CodexHigh),
@@ -2186,9 +2190,9 @@ fn delegate_to_hub_with_check(
 
     // Build the command to run using the current executable path
     let push_flag = if push { "" } else { " --no-push" };
-    let context_flag = if include_context { "" } else { " --no-context" };
-    let claude_flag = if review_selection.is_claude() {
-        " --claude"
+    let context_flag = if include_context { " --context" } else { "" };
+    let codex_flag = if review_selection.is_codex() {
+        " --codex"
     } else {
         ""
     };
@@ -2209,7 +2213,7 @@ fn delegate_to_hub_with_check(
         command_name,
         push_flag,
         context_flag,
-        claude_flag,
+        codex_flag,
         review_model_flag,
         message_flag,
         max_tokens

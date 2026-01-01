@@ -850,6 +850,15 @@ pub enum EnvAction {
         #[arg(short, long, default_value = "production")]
         environment: String,
     },
+    /// Interactive wizard to push env vars to 1focus.
+    Setup {
+        /// Optional .env file path to preselect.
+        #[arg(short = 'f', long)]
+        env_file: Option<PathBuf>,
+        /// Optional environment to preselect.
+        #[arg(short, long)]
+        environment: Option<String>,
+    },
     /// List env vars for this project.
     #[command(alias = "ls")]
     List {

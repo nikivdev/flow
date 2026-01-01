@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::EnvAction;
 use crate::config;
+use crate::env_setup::{EnvSetupDefaults, run_env_setup};
 use crate::sync;
 
 const DEFAULT_API_URL: &str = "https://1focus.ai";
@@ -162,6 +163,7 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
         EnvAction::Login => login()?,
         EnvAction::Pull { environment } => pull(&environment)?,
         EnvAction::Push { environment } => push(&environment)?,
+        EnvAction::Setup { env_file, environment } => setup(env_file, environment)?,
         EnvAction::List { environment } => list(&environment)?,
         EnvAction::Set { pair, environment, description } => set_var(&pair, &environment, description.as_deref())?,
         EnvAction::Delete { keys, environment } => delete_vars(&keys, &environment)?,
@@ -299,15 +301,6 @@ fn pull(environment: &str) -> Result<()> {
 
 /// Push local .env to 1focus.
 fn push(environment: &str) -> Result<()> {
-    let auth = load_auth_config()?;
-    let token = auth
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
-
-    let project = get_project_name()?;
-    let api_url = get_api_url(&auth);
-
     let env_path = std::env::current_dir()?.join(".env");
     if !env_path.exists() {
         bail!(".env file not found");
@@ -320,6 +313,23 @@ fn push(environment: &str) -> Result<()> {
         println!("No env vars found in .env");
         return Ok(());
     }
+
+    push_vars(environment, vars)
+}
+
+fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
+    if vars.is_empty() {
+        println!("No env vars selected.");
+        return Ok(());
+    }
+
+    let auth = load_auth_config()?;
+    let token = auth
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+    let project = get_project_name()?;
+    let api_url = get_api_url(&auth);
 
     println!(
         "Pushing {} env vars to '{}' ({})...",
@@ -360,6 +370,56 @@ fn push(environment: &str) -> Result<()> {
     println!("✓ Pushed {} env vars to 1focus", vars.len());
 
     Ok(())
+}
+
+fn setup(env_file: Option<PathBuf>, environment: Option<String>) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let defaults = EnvSetupDefaults {
+        env_file,
+        environment,
+    };
+
+    let Some(result) = run_env_setup(&project_root, defaults)? else {
+        return Ok(());
+    };
+
+    if !result.apply {
+        println!("Env setup canceled.");
+        return Ok(());
+    }
+
+    let Some(env_file) = result.env_file else {
+        println!("No env file selected; nothing to push.");
+        return Ok(());
+    };
+
+    let content = fs::read_to_string(&env_file)
+        .with_context(|| format!("failed to read {}", env_file.display()))?;
+    let vars = parse_env_file(&content);
+
+    if vars.is_empty() {
+        println!("No env vars found in {}", env_file.display());
+        return Ok(());
+    }
+
+    if result.selected_keys.is_empty() {
+        println!("No keys selected; nothing to push.");
+        return Ok(());
+    }
+
+    let mut selected = HashMap::new();
+    for key in result.selected_keys {
+        if let Some(value) = vars.get(&key) {
+            selected.insert(key, value.clone());
+        }
+    }
+
+    if selected.is_empty() {
+        println!("No matching keys found in {}", env_file.display());
+        return Ok(());
+    }
+
+    push_vars(&result.environment, selected)
 }
 
 /// List env vars for this project.
@@ -589,6 +649,7 @@ fn status() -> Result<()> {
         println!("Commands:");
         println!("  f env pull    - Fetch env vars");
         println!("  f env push    - Push .env to 1focus");
+        println!("  f env setup   - Interactive env setup");
         println!("  f env list    - List env vars");
         println!("  f env set K=V - Set env var");
     } else {
