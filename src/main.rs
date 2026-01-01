@@ -7,8 +7,8 @@ use flowd::{
     agent, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     commit, commits, daemon, deploy, docs, doctor, env, fixup, history, hub, init, init_tracing,
-    log_server, notify, palette, parallel, processes, projects, skills, start, storage, task_match,
-    tasks, tools, upstream,
+    log_server, notify, palette, parallel, processes, projects, publish, skills, start, storage,
+    task_match, tasks, tools, upstream,
 };
 
 fn main() -> Result<()> {
@@ -187,6 +187,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Deploy(cmd)) => {
             deploy::run(cmd)?;
+        }
+        Some(Commands::Publish(opts)) => {
+            publish::run(opts)?;
         }
         Some(Commands::Parallel(cmd)) => {
             parallel::run(cmd)?;

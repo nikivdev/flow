@@ -233,6 +233,11 @@ pub enum Commands {
     )]
     Deploy(DeployCommand),
     #[command(
+        about = "Publish project to GitHub.",
+        long_about = "Create a new GitHub repository and push the current project. Infers repo name from folder, asks for public/private visibility."
+    )]
+    Publish(PublishOpts),
+    #[command(
         about = "Run tasks in parallel with pretty status display.",
         long_about = "Execute multiple shell commands in parallel with a real-time status display showing spinners, progress, and output. Useful for running independent tasks concurrently.",
         alias = "p"
@@ -1029,6 +1034,25 @@ pub enum AgentAction {
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PublishOpts {
+    /// Repository name (defaults to current folder name).
+    #[arg(short, long)]
+    pub name: Option<String>,
+    /// Make the repository public.
+    #[arg(long)]
+    pub public: bool,
+    /// Make the repository private.
+    #[arg(long)]
+    pub private: bool,
+    /// Description for the repository.
+    #[arg(short, long)]
+    pub description: Option<String>,
+    /// Skip confirmation prompts.
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug, Clone)]
