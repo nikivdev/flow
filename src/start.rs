@@ -51,16 +51,19 @@ pub fn run() -> Result<()> {
         println!("✓ Created .ai/internal/db/ with schema");
     }
 
+    // Materialize .claude/ and .codex/ from .ai/
+    materialize_tool_folders(&project_root)?;
+
     println!("\n✓ Project ready");
     println!("\nStructure:");
     println!("  .ai/");
     println!("  ├── actions/      # Tracked - fixer scripts");
     println!("  ├── skills/       # Tracked - shared skills");
     println!("  ├── tools/        # Tracked - shared tools");
+    println!("  ├── agents.md     # Tracked - agent instructions");
     println!("  └── internal/     # Gitignored - private data");
-    println!("      ├── sessions/ # AI conversation history");
-    println!("      ├── db/       # SQLite database");
-    println!("      └── ...       # Checkpoints, logs, etc.");
+    println!("  .claude/          # Gitignored - symlinks to .ai/");
+    println!("  .codex/           # Gitignored - symlinks to .ai/");
     Ok(())
 }
 
@@ -121,6 +124,34 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
 
     for dir in public_dirs.iter().chain(internal_dirs.iter()) {
         fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Materialize .claude/ and .codex/ folders with symlinks to .ai/
+fn materialize_tool_folders(project_root: &Path) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let ai_dir = project_root.join(".ai");
+    let agents_source = ai_dir.join("agents.md");
+    let skills_source = ai_dir.join("skills");
+
+    for tool_dir in [".claude", ".codex"] {
+        let tool_path = project_root.join(tool_dir);
+        fs::create_dir_all(&tool_path)?;
+
+        // Symlink skills -> ../.ai/skills
+        let skills_link = tool_path.join("skills");
+        if !skills_link.exists() && skills_source.exists() {
+            let _ = symlink("../.ai/skills", &skills_link);
+        }
+
+        // Symlink agents.md -> ../.ai/agents.md
+        let agents_link = tool_path.join("agents.md");
+        if !agents_link.exists() && agents_source.exists() {
+            let _ = symlink("../.ai/agents.md", &agents_link);
+        }
     }
 
     Ok(())
@@ -245,8 +276,15 @@ const DB_PACKAGE_TEMPLATE: &str = r#"{
 }
 "#;
 
-/// Add .ai/internal/ to .gitignore if not already present.
-/// Only the internal folder is gitignored - actions, skills, tools are tracked.
+/// Flow gitignore patterns.
+const FLOW_GITIGNORE_SECTION: &str = "\
+# flow
+.ai/internal/
+.claude/
+.codex/
+";
+
+/// Add flow section to .gitignore if not already present.
 fn update_gitignore(project_root: &Path) -> Result<()> {
     let gitignore_path = project_root.join(".gitignore");
 
@@ -256,20 +294,30 @@ fn update_gitignore(project_root: &Path) -> Result<()> {
         String::new()
     };
 
-    // Check if .ai/internal/ is already in .gitignore
-    let internal_patterns = [".ai/internal/", ".ai/internal", "/.ai/internal/", "/.ai/internal"];
-    let already_ignored = content
-        .lines()
-        .any(|line| internal_patterns.iter().any(|p| line.trim() == *p));
-
-    if !already_ignored {
-        let mut new_content = content;
-        if !new_content.is_empty() && !new_content.ends_with('\n') {
-            new_content.push('\n');
-        }
-        new_content.push_str(".ai/internal/\n");
-        fs::write(&gitignore_path, new_content)?;
+    // Check if flow section already exists
+    if content.contains("# flow") {
+        return Ok(());
     }
+
+    // Also check if all patterns are already present (legacy)
+    let has_ai_internal = content.lines().any(|l| l.trim() == ".ai/internal/");
+    let has_claude = content.lines().any(|l| l.trim() == ".claude/");
+    let has_codex = content.lines().any(|l| l.trim() == ".codex/");
+
+    if has_ai_internal && has_claude && has_codex {
+        return Ok(());
+    }
+
+    // Add flow section
+    let mut new_content = content;
+    if !new_content.is_empty() && !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    if !new_content.is_empty() && !new_content.ends_with("\n\n") {
+        new_content.push('\n');
+    }
+    new_content.push_str(FLOW_GITIGNORE_SECTION);
+    fs::write(&gitignore_path, new_content)?;
 
     Ok(())
 }
@@ -320,7 +368,10 @@ mod tests {
         update_gitignore(root).unwrap();
 
         let content = fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert!(content.contains("# flow"));
         assert!(content.contains(".ai/internal/"));
+        assert!(content.contains(".claude/"));
+        assert!(content.contains(".codex/"));
     }
 
     #[test]
@@ -334,7 +385,10 @@ mod tests {
 
         let content = fs::read_to_string(root.join(".gitignore")).unwrap();
         assert!(content.contains("node_modules/"));
+        assert!(content.contains("# flow"));
         assert!(content.contains(".ai/internal/"));
+        assert!(content.contains(".claude/"));
+        assert!(content.contains(".codex/"));
     }
 
     #[test]
@@ -342,12 +396,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
-        fs::write(root.join(".gitignore"), ".ai/internal/\nnode_modules/\n").unwrap();
+        fs::write(root.join(".gitignore"), "# flow\n.ai/internal/\n.claude/\n.codex/\n").unwrap();
 
         update_gitignore(root).unwrap();
 
         let content = fs::read_to_string(root.join(".gitignore")).unwrap();
         // Should not duplicate
+        assert_eq!(content.matches("# flow").count(), 1);
         assert_eq!(content.matches(".ai/internal/").count(), 1);
     }
 }
