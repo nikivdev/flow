@@ -92,37 +92,7 @@ fn main() -> Result<()> {
             })?;
         }
         Some(Commands::Commit(opts)) => {
-            if opts.sync {
-                commit::run_sync(!opts.no_push)?;
-            } else {
-                commit::run(!opts.no_push)?;
-            }
-        }
-        Some(Commands::CommitWithCheck(opts)) => {
-            let review_selection =
-                commit::resolve_review_selection(opts.claude, opts.review_model.clone());
-            if opts.dry {
-                commit::dry_run_context()?;
-            } else if opts.sync {
-                commit::run_with_check_sync(
-                    !opts.no_push,
-                    !opts.no_context,
-                    review_selection,
-                    opts.message.as_deref(),
-                    opts.tokens,
-                    false,
-                )?;
-            } else {
-                commit::run_with_check(
-                    !opts.no_push,
-                    !opts.no_context,
-                    review_selection,
-                    opts.message.as_deref(),
-                    opts.tokens,
-                )?;
-            }
-        }
-        Some(Commands::CommitWithCheckWithGitedit(opts)) => {
+            // Default: full commit with review and gitedit sync
             let review_selection =
                 commit::resolve_review_selection(opts.claude, opts.review_model.clone());
             if opts.dry {
@@ -138,6 +108,39 @@ fn main() -> Result<()> {
                 )?;
             } else {
                 commit::run_with_check_with_gitedit(
+                    !opts.no_push,
+                    !opts.no_context,
+                    review_selection,
+                    opts.message.as_deref(),
+                    opts.tokens,
+                )?;
+            }
+        }
+        Some(Commands::CommitSimple(opts)) => {
+            // Simple commit without review
+            if opts.sync {
+                commit::run_sync(!opts.no_push)?;
+            } else {
+                commit::run(!opts.no_push)?;
+            }
+        }
+        Some(Commands::CommitWithCheck(opts)) => {
+            // Review but no gitedit sync
+            let review_selection =
+                commit::resolve_review_selection(opts.claude, opts.review_model.clone());
+            if opts.dry {
+                commit::dry_run_context()?;
+            } else if opts.sync {
+                commit::run_with_check_sync(
+                    !opts.no_push,
+                    !opts.no_context,
+                    review_selection,
+                    opts.message.as_deref(),
+                    opts.tokens,
+                    false,
+                )?;
+            } else {
+                commit::run_with_check(
                     !opts.no_push,
                     !opts.no_context,
                     review_selection,
