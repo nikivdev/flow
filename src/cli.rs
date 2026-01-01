@@ -232,6 +232,11 @@ pub enum Commands {
         alias = "p"
     )]
     Parallel(ParallelCommand),
+    #[command(
+        about = "Manage auto-generated documentation in .ai/docs/.",
+        long_about = "AI-maintained documentation that stays in sync with the codebase. Docs are stored in .ai/docs/ and can be updated based on recent commits."
+    )]
+    Docs(DocsCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1080,4 +1085,33 @@ pub struct ParallelCommand {
     /// Tasks to run as "label:command" pairs, or just commands (auto-labeled).
     #[arg(value_name = "TASK", trailing_var_arg = true, num_args = 1..)]
     pub tasks: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DocsCommand {
+    #[command(subcommand)]
+    pub action: Option<DocsAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DocsAction {
+    /// Sync documentation with recent commits.
+    Sync {
+        /// Number of commits to analyze (default: 10).
+        #[arg(long, short = 'n', default_value_t = 10)]
+        commits: usize,
+        /// Dry run: show what would be updated without changing files.
+        #[arg(long)]
+        dry: bool,
+    },
+    /// List documentation files.
+    #[command(alias = "ls")]
+    List,
+    /// Show documentation status (what needs updating).
+    Status,
+    /// Open a doc file in editor.
+    Edit {
+        /// Doc file name (without .md).
+        name: String,
+    },
 }

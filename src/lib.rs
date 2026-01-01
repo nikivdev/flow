@@ -9,6 +9,7 @@ pub mod db;
 pub mod deploy;
 pub mod deploy_setup;
 pub mod discover;
+pub mod docs;
 pub mod doctor;
 pub mod env;
 pub mod fixup;
