@@ -7,8 +7,8 @@ use flowd::{
     agent, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     commit, commits, daemon, deploy, doctor, env, fixup, history, hub, init, init_tracing,
-    log_server, notify, palette, processes, projects, skills, start, task_match, tasks, tools,
-    upstream,
+    log_server, notify, palette, parallel, processes, projects, skills, start, task_match, tasks,
+    tools, upstream,
 };
 
 fn main() -> Result<()> {
@@ -181,6 +181,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Deploy(cmd)) => {
             deploy::run(cmd)?;
+        }
+        Some(Commands::Parallel(cmd)) => {
+            parallel::run(cmd)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
