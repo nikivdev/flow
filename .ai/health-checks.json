@@ -1,0 +1,12 @@
+{
+  "checks": [
+    {
+      "name": "share-page",
+      "type": "gitedit-share",
+      "baseUrl": "https://gitedit.dev",
+      "owner": "giteditdev",
+      "repo": "gitedit",
+      "commit": "HEAD"
+    }
+  ]
+}

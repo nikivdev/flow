@@ -9,7 +9,7 @@ primary_task = "deploy-cli-release"
 gitedit_mirror = true
 # Enable gitedit.dev mirroring for commitWithCheck
 commit_with_check_gitedit_mirror = true
-gitedit_url = "http://localhost:5083"
+gitedit_url = "https://gitedit.dev"
 commit_with_check_review_url = "http://100.114.156.47:3000/review"
 
 [flox]

@@ -95,6 +95,8 @@ pub struct CloudflareConfig {
     pub deploy: Option<String>,
     /// Custom dev command.
     pub dev: Option<String>,
+    /// URL for health checks (e.g., https://my-worker.workers.dev).
+    pub url: Option<String>,
 }
 
 /// Railway deployment config from flow.toml [railway] section.
@@ -970,18 +972,11 @@ fn check_health(
                 bail!("No domain configured. Use --url to specify a URL to check.");
             }
         } else if let Some(cf) = &config.cloudflare {
-            // For cloudflare, try to get the worker URL from wrangler
-            let path = cf.path.as_deref().unwrap_or(".");
-            let output = Command::new("wrangler")
-                .args(["whoami"])
-                .current_dir(_project_root.join(path))
-                .output();
-
-            if output.is_ok() {
-                // Could parse wrangler.toml for the worker name
-                bail!("Cloudflare Workers don't have a default URL. Use --url to specify.");
+            // Use configured URL if present
+            if let Some(cf_url) = &cf.url {
+                cf_url.clone()
             } else {
-                bail!("No URL configured. Use --url to specify a URL to check.");
+                bail!("No URL configured in [cloudflare]. Add 'url = \"https://...\"' or use --url.");
             }
         } else {
             bail!("No deployment config found. Use --url to specify a URL to check.");

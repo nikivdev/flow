@@ -458,7 +458,7 @@ pub fn run_with_check_with_gitedit(
 ) -> Result<()> {
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
         return delegate_to_hub_with_check(
-            "commitWithCheckWithGitedit",
+            "commit",  // CLI command name
             push,
             include_context,
             review_selection,
@@ -2179,6 +2179,10 @@ fn delegate_to_hub_with_check(
     max_tokens: usize,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let repo_root = resolve_commit_with_check_root()?;
+
+    // Generate early gitedit hash from session IDs + owner/repo
+    let early_gitedit_url = generate_early_gitedit_url(&repo_root);
 
     // Build the command to run using the current executable path
     let push_flag = if push { "" } else { " --no-push" };
@@ -2243,6 +2247,9 @@ fn delegate_to_hub_with_check(
             println!("Delegated {} to hub", command_name);
             println!("  View logs: f logs --task-id {}", task_id);
             println!("  Stream logs: f logs --task-id {} --follow", task_id);
+            if let Some(gitedit_url) = early_gitedit_url {
+                println!("  GitEdit: {}", gitedit_url);
+            }
         } else {
             println!("Delegated {} to hub", command_name);
         }
@@ -2251,6 +2258,35 @@ fn delegate_to_hub_with_check(
         let body = resp.text().unwrap_or_default();
         bail!("hub returned error: {}", body);
     }
+}
+
+/// Generate gitedit URL early from session IDs (before full data load).
+fn generate_early_gitedit_url(repo_root: &std::path::Path) -> Option<String> {
+    // Get owner/repo
+    let (owner, repo) = get_gitedit_project(repo_root)?;
+
+    // Get session IDs and checkpoint for hashing
+    let (session_ids, checkpoint_ts) = ai::get_session_ids_for_hash(&repo_root.to_path_buf()).ok()?;
+
+    if session_ids.is_empty() {
+        return None;
+    }
+
+    // Generate hash from owner/repo + session IDs + checkpoint
+    let mut hasher = DefaultHasher::new();
+    owner.hash(&mut hasher);
+    repo.hash(&mut hasher);
+    for sid in &session_ids {
+        sid.hash(&mut hasher);
+    }
+    if let Some(ts) = &checkpoint_ts {
+        ts.hash(&mut hasher);
+    }
+    let hash = format!("{:016x}", hasher.finish());
+
+    let base_url = gitedit_api_url(repo_root);
+    let base_url = base_url.trim_end_matches('/');
+    Some(format!("{}/{}", base_url, hash))
 }
 
 // ─────────────────────────────────────────────────────────────
