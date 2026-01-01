@@ -5,7 +5,9 @@ Auto-maintained changelog tracking flow features and changes.
 ## 2024-12-31
 
 ### Added
+- **Documentation system** (`f docs`): Auto-generated documentation in `.ai/docs/`. Commands: `list`, `status`, `sync`, `edit`. Docs are updated by AI as part of commit flow.
 - **Parallel task runner** (`f parallel`): Run multiple tasks concurrently with animated spinners, real-time status display, and pretty output. Supports custom labels (`label:command`) and fail-fast mode.
+- **Docs update reminder**: Commit flow now detects when docs may need updating and shows a reminder.
 
 ### Changed
 - **`.flox/` materialization**: Flox environment now gitignored and materialized from `.ai/flox/manifest.toml` via `f start`. Source of truth moved to `.ai/flox/`.

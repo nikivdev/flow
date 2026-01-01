@@ -18,6 +18,7 @@ src/
 ├── ai.rs            # AI session management (Claude, Codex)
 ├── deploy.rs        # Deployment to hosts/platforms
 ├── deploy_setup.rs  # Interactive deployment setup
+├── docs.rs          # Auto-generated documentation management
 ├── daemon.rs        # Background daemon management
 ├── start.rs         # Project bootstrap (.ai/ folder)
 ├── env.rs           # Environment variable management

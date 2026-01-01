@@ -318,6 +318,24 @@ Subcommands:
 - `foreground` - Run in foreground
 - `stop` - Stop background server
 
+## Documentation
+
+### `f docs`
+Manage auto-generated documentation in `.ai/docs/`.
+
+Subcommands:
+- `list` (alias: `ls`) - List documentation files
+- `status` - Show recent commits and what may need documenting
+- `sync` - Update sync marker after docs are updated
+  - `-n, --commits <n>` - Commits to analyze (default: 10)
+  - `--dry` - Dry run
+- `edit <name>` - Open doc file in editor
+
+The docs are updated by AI assistants as part of the commit flow. When running `f commitWithCheckWithGitedit`, the AI reviews changes and updates:
+- `commands.md` - CLI command reference
+- `changelog.md` - Feature changelog
+- `architecture.md` - Project structure
+
 ## Notifications
 
 ### `f notify <action>`
