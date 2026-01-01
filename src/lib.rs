@@ -12,6 +12,7 @@ pub mod discover;
 pub mod docs;
 pub mod doctor;
 pub mod env;
+pub mod env_setup;
 pub mod fixup;
 pub mod flox;
 pub mod history;
