@@ -60,10 +60,12 @@ pub fn run() -> Result<()> {
     println!("  ├── actions/      # Tracked - fixer scripts");
     println!("  ├── skills/       # Tracked - shared skills");
     println!("  ├── tools/        # Tracked - shared tools");
+    println!("  ├── flox/         # Tracked - flox manifest");
     println!("  ├── agents.md     # Tracked - agent instructions");
     println!("  └── internal/     # Gitignored - private data");
     println!("  .claude/          # Gitignored - symlinks to .ai/");
     println!("  .codex/           # Gitignored - symlinks to .ai/");
+    println!("  .flox/            # Gitignored - symlinks to .ai/flox/");
     Ok(())
 }
 
@@ -112,6 +114,7 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
         ai_dir.join("actions"),
         ai_dir.join("skills"),
         ai_dir.join("tools"),
+        ai_dir.join("flox"),
     ];
 
     // Private folders (gitignored)
@@ -129,7 +132,7 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Materialize .claude/ and .codex/ folders with symlinks to .ai/
+/// Materialize .claude/, .codex/, and .flox/ folders with symlinks to .ai/
 fn materialize_tool_folders(project_root: &Path) -> Result<()> {
     use std::os::unix::fs::symlink;
 
@@ -137,6 +140,7 @@ fn materialize_tool_folders(project_root: &Path) -> Result<()> {
     let agents_source = ai_dir.join("agents.md");
     let skills_source = ai_dir.join("skills");
 
+    // Materialize .claude/ and .codex/
     for tool_dir in [".claude", ".codex"] {
         let tool_path = project_root.join(tool_dir);
         fs::create_dir_all(&tool_path)?;
@@ -151,6 +155,42 @@ fn materialize_tool_folders(project_root: &Path) -> Result<()> {
         let agents_link = tool_path.join("agents.md");
         if !agents_link.exists() && agents_source.exists() {
             let _ = symlink("../.ai/agents.md", &agents_link);
+        }
+    }
+
+    // Materialize .flox/ from .ai/flox/
+    let flox_source = ai_dir.join("flox");
+    let manifest_source = flox_source.join("manifest.toml");
+    if manifest_source.exists() {
+        let flox_dir = project_root.join(".flox");
+        let flox_env_dir = flox_dir.join("env");
+        fs::create_dir_all(&flox_env_dir)?;
+
+        // Symlink manifest.toml -> ../../.ai/flox/manifest.toml
+        let manifest_link = flox_env_dir.join("manifest.toml");
+        if !manifest_link.exists() {
+            let _ = symlink("../../.ai/flox/manifest.toml", &manifest_link);
+        }
+
+        // Create env.json files that flox expects
+        let env_json = flox_dir.join("env.json");
+        if !env_json.exists() {
+            fs::write(&env_json, r#"{
+  "version": 1,
+  "manifest": "env/manifest.toml",
+  "lockfile": "env/manifest.lock"
+}"#)?;
+        }
+
+        let env_env_json = flox_env_dir.join("env.json");
+        if !env_env_json.exists() {
+            let manifest_path = flox_env_dir.join("manifest.toml");
+            let lockfile_path = flox_env_dir.join("manifest.lock");
+            fs::write(&env_env_json, format!(r#"{{
+  "version": 1,
+  "manifest": "{}",
+  "lockfile": "{}"
+}}"#, manifest_path.display(), lockfile_path.display()))?;
         }
     }
 
@@ -282,6 +322,7 @@ const FLOW_GITIGNORE_SECTION: &str = "\
 .ai/internal/
 .claude/
 .codex/
+.flox/
 ";
 
 /// Add flow section to .gitignore if not already present.
@@ -303,8 +344,9 @@ fn update_gitignore(project_root: &Path) -> Result<()> {
     let has_ai_internal = content.lines().any(|l| l.trim() == ".ai/internal/");
     let has_claude = content.lines().any(|l| l.trim() == ".claude/");
     let has_codex = content.lines().any(|l| l.trim() == ".codex/");
+    let has_flox = content.lines().any(|l| l.trim() == ".flox/");
 
-    if has_ai_internal && has_claude && has_codex {
+    if has_ai_internal && has_claude && has_codex && has_flox {
         return Ok(());
     }
 

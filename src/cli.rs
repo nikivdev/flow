@@ -226,6 +226,12 @@ pub enum Commands {
         long_about = "Deploy your project to a Linux host (via SSH), Cloudflare Workers, or Railway. Automatically detects platform from flow.toml [host], [cloudflare], or [railway] sections."
     )]
     Deploy(DeployCommand),
+    #[command(
+        about = "Run tasks in parallel with pretty status display.",
+        long_about = "Execute multiple shell commands in parallel with a real-time status display showing spinners, progress, and output. Useful for running independent tasks concurrently.",
+        alias = "p"
+    )]
+    Parallel(ParallelCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1061,4 +1067,17 @@ pub enum DeployAction {
         #[arg(long, default_value_t = 200)]
         status: u16,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ParallelCommand {
+    /// Maximum number of concurrent jobs (default: number of CPU cores).
+    #[arg(long, short = 'j')]
+    pub jobs: Option<usize>,
+    /// Stop all tasks on first failure.
+    #[arg(long, short = 'f')]
+    pub fail_fast: bool,
+    /// Tasks to run as "label:command" pairs, or just commands (auto-labeled).
+    #[arg(value_name = "TASK", trailing_var_arg = true, num_args = 1..)]
+    pub tasks: Vec<String>,
 }

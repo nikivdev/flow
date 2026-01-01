@@ -22,6 +22,7 @@ pub mod log_server;
 pub mod log_store;
 pub mod notify;
 pub mod palette;
+pub mod parallel;
 pub mod processes;
 pub mod projects;
 pub mod running;
