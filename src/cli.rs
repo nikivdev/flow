@@ -850,6 +850,8 @@ pub enum EnvAction {
         #[arg(short, long, default_value = "production")]
         environment: String,
     },
+    /// Apply env vars from 1focus to the configured Cloudflare worker.
+    Apply,
     /// Interactive wizard to push env vars to 1focus.
     Setup {
         /// Optional .env file path to preselect.

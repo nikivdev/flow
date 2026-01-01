@@ -225,6 +225,9 @@ f env pull -e staging
 f env push
 f env push -e production
 
+# Apply 1focus envs to Cloudflare
+f env apply
+
 # Interactive setup (select env file + keys)
 f env setup
 f env setup -e staging -f .env.staging

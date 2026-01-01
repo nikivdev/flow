@@ -28,6 +28,34 @@ const MAX_DIFF_CHARS: usize = 12_000;
 const HUB_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 const HUB_PORT: u16 = 9050;
 
+/// Patterns for files that likely contain secrets and shouldn't be committed.
+const SENSITIVE_PATTERNS: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    ".env.staging",
+    "credentials.json",
+    "secrets.json",
+    "service-account.json",
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".keystore",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "htpasswd",
+    ".htpasswd",
+    "shadow",
+    "passwd",
+];
+
 const SYSTEM_PROMPT: &str = "You are an expert software engineer who writes clear, concise git commit messages. Use imperative mood, keep the subject line under 72 characters, and include an optional body with bullet points if helpful. Never wrap the message in quotes. Never include secrets, credentials, or file contents from .env files, environment variables, keys, or other sensitive data—even if they appear in the diff.";
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -110,6 +138,132 @@ impl ReviewSelection {
             ReviewSelection::Claude(model) => model.as_claude_arg(),
         }
     }
+}
+
+/// Check staged files for potentially sensitive content and warn the user.
+/// Returns list of sensitive files found.
+fn check_sensitive_files(repo_root: &Path) -> Vec<String> {
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(repo_root)
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let files = String::from_utf8_lossy(&output.stdout);
+    let mut sensitive = Vec::new();
+
+    for file in files.lines() {
+        let file_lower = file.to_lowercase();
+        let file_name = Path::new(file)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(file)
+            .to_lowercase();
+
+        for pattern in SENSITIVE_PATTERNS {
+            let pattern_lower = pattern.to_lowercase();
+            // Check if filename matches or ends with pattern
+            if file_name == pattern_lower
+                || file_name.ends_with(&pattern_lower)
+                || file_lower.contains(&format!("/{}", pattern_lower))
+            {
+                sensitive.push(file.to_string());
+                break;
+            }
+        }
+    }
+
+    sensitive
+}
+
+/// Warn about sensitive files and optionally abort.
+fn warn_sensitive_files(files: &[String]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    println!("\n⚠️  Warning: Potentially sensitive files detected:");
+    for file in files {
+        println!("   - {}", file);
+    }
+    println!();
+    println!("These files may contain secrets. Consider:");
+    println!("   - Adding them to .gitignore");
+    println!("   - Using `git reset HEAD <file>` to unstage");
+    println!();
+
+    // For now just warn, don't block
+    // In the future, could add --force flag to skip this check
+    Ok(())
+}
+
+/// Threshold for "large" file changes (lines added + removed).
+const LARGE_DIFF_THRESHOLD: usize = 500;
+
+/// Check for files with unusually large diffs.
+/// Returns list of (filename, lines_changed) for files over threshold.
+fn check_large_diffs(repo_root: &Path) -> Vec<(String, usize)> {
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--numstat"])
+        .current_dir(repo_root)
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let stats = String::from_utf8_lossy(&output.stdout);
+    let mut large_files = Vec::new();
+
+    for line in stats.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 {
+            // Format: added<tab>removed<tab>filename
+            // Binary files show "-" for added/removed
+            let added: usize = parts[0].parse().unwrap_or(0);
+            let removed: usize = parts[1].parse().unwrap_or(0);
+            let filename = parts[2].to_string();
+            let total = added + removed;
+
+            if total >= LARGE_DIFF_THRESHOLD {
+                large_files.push((filename, total));
+            }
+        }
+    }
+
+    // Sort by size descending
+    large_files.sort_by(|a, b| b.1.cmp(&a.1));
+    large_files
+}
+
+/// Warn about files with large diffs.
+fn warn_large_diffs(files: &[(String, usize)]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    println!("⚠️  Warning: Files with large diffs ({}+ lines):", LARGE_DIFF_THRESHOLD);
+    for (file, lines) in files {
+        println!("   - {} ({} lines)", file, lines);
+    }
+    println!();
+    println!("These might be generated/lock files. Consider:");
+    println!("   - Adding them to .gitignore if generated");
+    println!("   - Using `git reset HEAD <file>` to unstage");
+    println!();
+
+    Ok(())
 }
 
 pub fn resolve_review_selection(
@@ -322,6 +476,15 @@ pub fn run_sync(push: bool) -> Result<()> {
     git_run(&["add", "."])?;
     println!("done");
     debug!("staged all changes");
+
+    // Check for sensitive files before proceeding
+    let cwd = std::env::current_dir()?;
+    let sensitive_files = check_sensitive_files(&cwd);
+    warn_sensitive_files(&sensitive_files)?;
+
+    // Check for files with large diffs
+    let large_diffs = check_large_diffs(&cwd);
+    warn_large_diffs(&large_diffs)?;
 
     // Get diff
     let diff = git_capture(&["diff", "--cached"])?;
@@ -699,6 +862,14 @@ pub fn run_with_check_sync(
     io::stdout().flush()?;
     git_run_in(&repo_root, &["add", "."])?;
     println!("done");
+
+    // Check for sensitive files before proceeding
+    let sensitive_files = check_sensitive_files(&repo_root);
+    warn_sensitive_files(&sensitive_files)?;
+
+    // Check for files with large diffs
+    let large_diffs = check_large_diffs(&repo_root);
+    warn_large_diffs(&large_diffs)?;
 
     // Get diff
     let diff = git_capture_in(&repo_root, &["diff", "--cached"])?;

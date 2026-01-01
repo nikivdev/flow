@@ -5,7 +5,7 @@
 //! - Cloudflare Workers
 //! - Railway
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -88,6 +88,14 @@ pub struct CloudflareConfig {
     pub path: Option<String>,
     /// Path to .env file for secrets.
     pub env_file: Option<String>,
+    /// Env source for secrets ("1focus" or "file").
+    pub env_source: Option<String>,
+    /// Specific env keys to fetch when env_source = "1focus".
+    #[serde(default)]
+    pub env_keys: Vec<String>,
+    /// Env keys to set as non-secret vars when env_source = "1focus".
+    #[serde(default)]
+    pub env_vars: Vec<String>,
     /// Wrangler environment name (e.g., staging).
     #[serde(default, alias = "env")]
     pub environment: Option<String>,
@@ -309,24 +317,15 @@ fn deploy_cloudflare(
         .map(|p| project_root.join(p))
         .unwrap_or_else(|| project_root.to_path_buf());
 
-    // Check for wrangler config
-    let has_wrangler = worker_path.join("wrangler.toml").exists()
-        || worker_path.join("wrangler.jsonc").exists()
-        || worker_path.join("wrangler.json").exists();
-
-    if !has_wrangler {
-        bail!(
-            "No wrangler config found in {}.\n\
-            Create a wrangler.toml or run: npx wrangler init",
-            worker_path.display()
-        );
-    }
+    ensure_wrangler_config(&worker_path)?;
 
     let env_name = cf_cfg.environment.as_deref();
 
     // Set secrets if requested
     if set_secrets {
-        if let Some(env_file) = &cf_cfg.env_file {
+        if is_1focus_source(cf_cfg.env_source.as_deref()) {
+            apply_cloudflare_env_from_config(project_root, cf_cfg)?;
+        } else if let Some(env_file) = &cf_cfg.env_file {
             let env_path = project_root.join(env_file);
             if env_path.exists() {
                 println!("==> Setting secrets from {}...", env_file);
@@ -358,6 +357,141 @@ fn deploy_cloudflare(
     }
 
     println!("\n✓ Deployed to Cloudflare!");
+    Ok(())
+}
+
+pub fn apply_cloudflare_env(project_root: &Path, config: Option<&Config>) -> Result<()> {
+    let cf_cfg = config
+        .and_then(|c| c.cloudflare.as_ref())
+        .context("No [cloudflare] section in flow.toml")?;
+    apply_cloudflare_env_from_config(project_root, cf_cfg)
+}
+
+fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConfig) -> Result<()> {
+    if !is_1focus_source(cf_cfg.env_source.as_deref()) {
+        bail!("cloudflare.env_source must be set to \"1focus\" to apply envs");
+    }
+
+    let worker_path = cf_cfg
+        .path
+        .as_ref()
+        .map(|p| project_root.join(p))
+        .unwrap_or_else(|| project_root.to_path_buf());
+    ensure_wrangler_config(&worker_path)?;
+
+    let wrangler_env = cf_cfg.environment.as_deref();
+    let onefocus_env = wrangler_env.unwrap_or("production");
+
+    let mut keys = cf_cfg.env_keys.clone();
+    if !keys.is_empty() {
+        for key in &cf_cfg.env_vars {
+            if !keys.iter().any(|existing| existing == key) {
+                keys.push(key.clone());
+            }
+        }
+    }
+
+    let vars = crate::env::fetch_project_env_vars(onefocus_env, &keys)?;
+    if vars.is_empty() {
+        bail!("No env vars found in 1focus for environment '{}'", onefocus_env);
+    }
+
+    let var_keys: HashSet<String> = cf_cfg.env_vars.iter().cloned().collect();
+    println!("==> Applying {} env var(s) from 1focus...", vars.len());
+    set_wrangler_env_map(&worker_path, wrangler_env, &vars, &var_keys)?;
+    Ok(())
+}
+
+fn ensure_wrangler_config(worker_path: &Path) -> Result<()> {
+    let has_wrangler = worker_path.join("wrangler.toml").exists()
+        || worker_path.join("wrangler.jsonc").exists()
+        || worker_path.join("wrangler.json").exists();
+
+    if !has_wrangler {
+        bail!(
+            "No wrangler config found in {}.\n\
+            Create a wrangler.toml or run: npx wrangler init",
+            worker_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn is_1focus_source(source: Option<&str>) -> bool {
+    matches!(
+        source.map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("1focus") | Some("1f") | Some("onefocus")
+    )
+}
+
+fn set_wrangler_env_map(
+    worker_path: &Path,
+    env_name: Option<&str>,
+    vars: &HashMap<String, String>,
+    var_keys: &HashSet<String>,
+) -> Result<()> {
+    for (key, value) in vars {
+        if var_keys.contains(key) {
+            println!("  Setting var {}...", key);
+            set_wrangler_var_value(worker_path, env_name, key, value)?;
+        } else {
+            println!("  Setting secret {}...", key);
+            set_wrangler_secret_value(worker_path, env_name, key, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn set_wrangler_var_value(
+    worker_path: &Path,
+    env_name: Option<&str>,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let mut cmd = Command::new("wrangler");
+    cmd.args(["vars", "set", key, value]);
+    if let Some(env) = env_name {
+        cmd.args(["--env", env]);
+    }
+    let status = cmd
+        .current_dir(worker_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+
+    if !status.success() {
+        bail!("Failed to set wrangler var {}", key);
+    }
+    Ok(())
+}
+
+fn set_wrangler_secret_value(
+    worker_path: &Path,
+    env_name: Option<&str>,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let mut cmd = Command::new("wrangler");
+    cmd.args(["secret", "put", key]);
+    if let Some(env) = env_name {
+        cmd.args(["--env", env]);
+    }
+    let mut child = cmd
+        .current_dir(worker_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "{}", value)?;
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("Failed to set wrangler secret {}", key);
+    }
     Ok(())
 }
 
@@ -785,22 +919,7 @@ fn set_wrangler_secrets(
             }
         }
         println!("  Setting {}...", key);
-        let mut cmd = Command::new("wrangler");
-        cmd.args(["secret", "put", &key]);
-        if let Some(env) = env_name {
-            cmd.args(["--env", env]);
-        }
-        let mut child = cmd
-            .current_dir(worker_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            writeln!(stdin, "{}", value)?;
-        }
-        child.wait()?;
+        set_wrangler_secret_value(worker_path, env_name, &key, &value)?;
     }
     Ok(())
 }
