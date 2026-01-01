@@ -102,8 +102,16 @@ f deploy shell      # SSH into the server
 [cloudflare]
 path = "worker"                  # Path to worker directory
 env_file = ".env.cloudflare"     # Secrets to set
+environment = "staging"          # Optional wrangler environment
 deploy = "wrangler deploy"       # Custom deploy command (optional)
 dev = "wrangler dev"             # Custom dev command (optional)
+```
+
+### Setup (TUI)
+
+```bash
+# Interactive Cloudflare setup (detects wrangler config + env files)
+f deploy setup
 ```
 
 ### Deploy
@@ -133,6 +141,8 @@ DATABASE_URL=postgres://...
 f deploy cf --secrets
 # Sets API_KEY and DATABASE_URL via `wrangler secret put`
 ```
+
+If `environment` is set, Flow appends `--env <name>` for secrets and deploys.
 
 ## Railway
 
