@@ -871,6 +871,21 @@ pub fn run_with_check_sync(
     println!("{}", full_message);
     println!("────────────────────────────────────────\n");
 
+    // Check if docs need updating (reminder for AI assistant)
+    let docs_dir = repo_root.join(".ai/docs");
+    if docs_dir.exists() {
+        let has_new_commands = diff.contains("pub enum Commands")
+            || diff.contains("Subcommand")
+            || diff.contains("#[command(");
+        let has_new_features = diff.contains("pub fn run")
+            || diff.contains("pub async fn")
+            || diff.lines().any(|l| l.starts_with("+pub mod"));
+
+        if has_new_commands || has_new_features {
+            println!("📝 Docs may need updating (.ai/docs/)");
+        }
+    }
+
     // Commit
     let paragraphs = split_paragraphs(&full_message);
     let mut args = vec!["commit"];
