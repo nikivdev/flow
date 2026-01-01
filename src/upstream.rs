@@ -77,8 +77,6 @@ fn show_status() -> Result<()> {
 
 /// Set up upstream remote and local tracking branch.
 fn setup_upstream(upstream_url: Option<&str>, upstream_branch: Option<&str>) -> Result<()> {
-    let upstream_branch = upstream_branch.unwrap_or("main");
-
     // Check if upstream remote exists
     let has_upstream = git_capture(&["remote", "get-url", "upstream"]).is_ok();
 
@@ -106,10 +104,29 @@ fn setup_upstream(upstream_url: Option<&str>, upstream_branch: Option<&str>) -> 
     println!("\nFetching upstream...");
     git_run(&["fetch", "upstream", "--prune"])?;
 
+    // Determine upstream branch (explicit > HEAD > main > master)
+    let upstream_branch = if let Some(branch) = upstream_branch {
+        branch.to_string()
+    } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
+        head_ref.trim().replace("refs/remotes/upstream/", "")
+    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
+        "main".to_string()
+    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
+        "master".to_string()
+    } else {
+        // List available branches
+        let branches = git_capture(&["branch", "-r", "--list", "upstream/*"])?;
+        println!("Cannot auto-detect upstream branch.");
+        println!("Available upstream branches:");
+        for line in branches.lines() {
+            println!("  {}", line.trim());
+        }
+        bail!("Specify branch with: f upstream setup --branch <branch-name>");
+    };
+
     // Check if upstream branch exists on remote
     let remote_ref = format!("refs/remotes/upstream/{}", upstream_branch);
     if git_capture(&["rev-parse", "--verify", &remote_ref]).is_err() {
-        // Try to find the default branch
         let branches = git_capture(&["branch", "-r", "--list", "upstream/*"])?;
         println!("Branch 'upstream/{}' not found.", upstream_branch);
         println!("Available upstream branches:");
@@ -165,18 +182,20 @@ fn pull_upstream(target_branch: Option<&str>) -> Result<()> {
     println!("Fetching upstream...");
     git_run(&["fetch", "upstream", "--prune"])?;
 
-    // Determine the upstream branch to track
+    // Determine the upstream branch to track (check config, then HEAD, then try main/master)
     let upstream_branch = if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
         merge_ref.trim().replace("refs/heads/", "")
+    } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
+        // Parse "refs/remotes/upstream/master" -> "master"
+        head_ref.trim().replace("refs/remotes/upstream/", "")
+    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
+        "main".to_string()
+    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
+        "master".to_string()
+    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/dev"]).is_ok() {
+        "dev".to_string()
     } else {
-        // Default to main or dev
-        if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
-            "main".to_string()
-        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/dev"]).is_ok() {
-            "dev".to_string()
-        } else {
-            bail!("Cannot determine upstream branch. Run: f upstream setup --branch <branch>");
-        }
+        bail!("Cannot determine upstream branch. Run: f upstream setup --branch <branch>");
     };
 
     let upstream_ref = format!("upstream/{}", upstream_branch);
@@ -185,15 +204,22 @@ fn pull_upstream(target_branch: Option<&str>) -> Result<()> {
     let current = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     let current = current.trim();
 
-    // Check for uncommitted changes
-    let status = git_capture(&["status", "--porcelain"])?;
-    let has_changes = !status.trim().is_empty();
+    // Check for uncommitted changes and stash if needed
     let mut stashed = false;
+    let stash_count_before = git_capture(&["stash", "list"])
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
 
-    if has_changes {
+    let status = git_capture(&["status", "--porcelain"])?;
+    if !status.trim().is_empty() {
         println!("Stashing local changes...");
-        git_run(&["stash", "push", "-m", "upstream-pull auto-stash"])?;
-        stashed = true;
+        let _ = git_run(&["stash", "push", "-m", "upstream-pull auto-stash"]);
+
+        // Check if stash actually added an entry
+        let stash_count_after = git_capture(&["stash", "list"])
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        stashed = stash_count_after > stash_count_before;
     }
 
     // Update local upstream branch
@@ -268,24 +294,38 @@ fn sync_upstream(push: bool) -> Result<()> {
     let current = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     let current = current.trim().to_string();
 
-    // Check for uncommitted changes
-    let status = git_capture(&["status", "--porcelain"])?;
-    let has_changes = !status.trim().is_empty();
+    // Check for uncommitted changes and stash if needed
     let mut stashed = false;
+    let stash_count_before = git_capture(&["stash", "list"])
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
 
-    if has_changes {
+    let status = git_capture(&["status", "--porcelain"])?;
+    if !status.trim().is_empty() {
         println!("Stashing local changes...");
-        git_run(&["stash", "push", "-m", "upstream-sync auto-stash"])?;
-        stashed = true;
+        let _ = git_run(&["stash", "push", "-m", "upstream-sync auto-stash"]);
+
+        // Check if stash actually added an entry
+        let stash_count_after = git_capture(&["stash", "list"])
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        stashed = stash_count_after > stash_count_before;
     }
 
     // Fetch upstream
     println!("==> Fetching upstream...");
     git_run(&["fetch", "upstream", "--prune"])?;
 
-    // Determine upstream branch
+    // Determine upstream branch (check config, then HEAD, then try main/master)
     let upstream_branch = if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
         merge_ref.trim().replace("refs/heads/", "")
+    } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
+        // Parse "refs/remotes/upstream/master" -> "master"
+        head_ref.trim().replace("refs/remotes/upstream/", "")
+    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
+        "main".to_string()
+    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
+        "master".to_string()
     } else {
         "main".to_string()
     };

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::EnvAction;
 use crate::config;
+use crate::deploy;
 use crate::env_setup::{EnvSetupDefaults, run_env_setup};
 use crate::sync;
 
@@ -118,6 +119,19 @@ fn get_api_url(auth: &AuthConfig) -> String {
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
 }
 
+fn find_flow_toml(start: &PathBuf) -> Option<PathBuf> {
+    let mut current = start.clone();
+    loop {
+        let candidate = current.join("flow.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
 pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
     let auth = load_auth_config()?;
     let token = match auth.token.as_ref() {
@@ -163,6 +177,17 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
         EnvAction::Login => login()?,
         EnvAction::Pull { environment } => pull(&environment)?,
         EnvAction::Push { environment } => push(&environment)?,
+        EnvAction::Apply => {
+            let cwd = std::env::current_dir()?;
+            let flow_path = find_flow_toml(&cwd)
+                .ok_or_else(|| anyhow::anyhow!("flow.toml not found. Run `f init` first."))?;
+            let project_root = flow_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(cwd);
+            let flow_config = config::load(&flow_path)?;
+            deploy::apply_cloudflare_env(&project_root, Some(&flow_config))?;
+        }
         EnvAction::Setup { env_file, environment } => setup(env_file, environment)?,
         EnvAction::List { environment } => list(&environment)?,
         EnvAction::Set { pair, environment, description } => set_var(&pair, &environment, description.as_deref())?,
@@ -649,6 +674,7 @@ fn status() -> Result<()> {
         println!("Commands:");
         println!("  f env pull    - Fetch env vars");
         println!("  f env push    - Push .env to 1focus");
+        println!("  f env apply   - Apply 1focus envs to Cloudflare");
         println!("  f env setup   - Interactive env setup");
         println!("  f env list    - List env vars");
         println!("  f env set K=V - Set env var");
@@ -758,6 +784,10 @@ fn fetch_env_vars(
         let data: EnvResponse = resp.json().context("failed to parse response")?;
         Ok(data.env)
     }
+}
+
+pub fn fetch_project_env_vars(environment: &str, keys: &[String]) -> Result<HashMap<String, String>> {
+    fetch_env_vars(false, environment, keys)
 }
 
 /// Get specific env vars and print to stdout.
