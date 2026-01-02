@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     cli::TaskRunOpts,
+    config,
     discover::{self, DiscoveredTask},
     lmstudio, tasks,
 };
@@ -42,6 +43,7 @@ const CLI_SUBCOMMANDS: &[&str] = &[
     "init",
     "doctor",
     "tasks",
+    "global",
     "run",
     "search",
     "match",
@@ -75,6 +77,7 @@ const CLI_SUBCOMMANDS: &[&str] = &[
     "upstream",
     // Aliases
     "s",  // search
+    "g",  // global
     "a",  // agent
     "up", // upstream
     // Deploy
@@ -134,35 +137,68 @@ fn passthrough_to_cli(args: &[String]) -> Result<()> {
 
 /// Match a user query to a task and optionally execute it.
 pub fn run(opts: MatchOpts) -> Result<()> {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let discovery = discover::discover_tasks(&root)?;
+    run_with_tasks(opts, discovery.tasks, true)
+}
+
+/// Match a user query to a global task and optionally execute it.
+pub fn run_global(opts: MatchOpts) -> Result<()> {
+    let config_path = config::default_config_path();
+    if !config_path.exists() {
+        bail!("global flow config not found at {}", config_path.display());
+    }
+
+    let cfg = config::load(&config_path).with_context(|| {
+        format!(
+            "failed to load global flow config at {}",
+            config_path.display()
+        )
+    })?;
+
+    let tasks = cfg
+        .tasks
+        .iter()
+        .map(|task| DiscoveredTask {
+            task: task.clone(),
+            config_path: config_path.clone(),
+            relative_dir: "global".to_string(),
+            depth: 0,
+        })
+        .collect();
+
+    run_with_tasks(opts, tasks, false)
+}
+
+fn run_with_tasks(opts: MatchOpts, tasks: Vec<DiscoveredTask>, allow_passthrough: bool) -> Result<()> {
     // Check if this is a CLI subcommand that should bypass matching
-    if is_cli_subcommand(&opts.args) {
+    if allow_passthrough && is_cli_subcommand(&opts.args) {
         return passthrough_to_cli(&opts.args);
     }
 
     // Join args for display/LLM purposes (but task execution uses the preserved args)
     let query_display = opts.args.join(" ");
 
-    // Discover all tasks
-    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let discovery = discover::discover_tasks(&root)?;
-
     // Try direct match first (exact name, shortcut, or abbreviation) - no LLM needed
     let (task_name, task_args, was_direct_match) = if let Some(direct) =
-        try_direct_match(&opts.args, &discovery.tasks)
+        try_direct_match(&opts.args, &tasks)
     {
         (direct.task_name, direct.args, true)
     } else if let Some(builtin) = find_builtin(&query_display) {
         // No task match, but matches a built-in command
         return run_builtin(builtin, opts.execute);
-    } else if discovery.tasks.is_empty() {
-        // No tasks and no built-in match: behave like `f <args>`
-        return passthrough_to_cli(&opts.args);
-    } else if opts.args.len() == 1 {
+    } else if tasks.is_empty() {
+        if allow_passthrough {
+            // No tasks and no built-in match: behave like `f <args>`
+            return passthrough_to_cli(&opts.args);
+        }
+        bail!("No global tasks available to match.");
+    } else if allow_passthrough && opts.args.len() == 1 {
         // Single-token queries should behave like `f <arg>` if no direct match.
         return passthrough_to_cli(&opts.args);
     } else {
         // No direct match, use LM Studio
-        let prompt = build_matching_prompt(&query_display, &discovery.tasks);
+        let prompt = build_matching_prompt(&query_display, &tasks);
 
         // Query LM Studio (will fail with clear error if not running)
         let response = match lmstudio::quick_prompt(&prompt, opts.model.as_deref(), opts.port) {
@@ -172,11 +208,7 @@ pub fn run(opts: MatchOpts) -> Result<()> {
                 if let Some(builtin) = find_builtin(&query_display) {
                     return run_builtin(builtin, opts.execute);
                 }
-                let task_list: Vec<_> = discovery
-                    .tasks
-                    .iter()
-                    .map(|t| t.task.name.as_str())
-                    .collect();
+                let task_list: Vec<_> = tasks.iter().map(|t| t.task.name.as_str()).collect();
                 bail!(
                     "No match for '{}'. LM Studio returned empty response.\n\nAvailable tasks:\n  {}",
                     query_display,
@@ -188,11 +220,7 @@ pub fn run(opts: MatchOpts) -> Result<()> {
                 if let Some(builtin) = find_builtin(&query_display) {
                     return run_builtin(builtin, opts.execute);
                 }
-                let task_list: Vec<_> = discovery
-                    .tasks
-                    .iter()
-                    .map(|t| t.task.name.as_str())
-                    .collect();
+                let task_list: Vec<_> = tasks.iter().map(|t| t.task.name.as_str()).collect();
                 bail!(
                     "No direct match for '{}'. LM Studio error: {}\n\nAvailable tasks:\n  {}",
                     query_display,
@@ -204,15 +232,14 @@ pub fn run(opts: MatchOpts) -> Result<()> {
 
         // Parse the response to get the task name (no args for LLM matches)
         (
-            extract_task_name(&response, &discovery.tasks)?,
+            extract_task_name(&response, &tasks)?,
             Vec::new(),
             false,
         )
     };
 
     // Find the matched task
-    let matched = discovery
-        .tasks
+    let matched = tasks
         .iter()
         .find(|t| t.task.name.eq_ignore_ascii_case(&task_name))
         .ok_or_else(|| anyhow::anyhow!("LM Studio returned unknown task: {}", task_name))?;

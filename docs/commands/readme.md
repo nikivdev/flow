@@ -8,10 +8,12 @@ Complete documentation for all `f` (flow) commands.
 |---------|-------------|
 | [`deploy`](deploy.md) | Deploy to Linux hosts, Cloudflare Workers, or Railway |
 | [`publish`](publish.md) | Publish project to GitHub |
+| [`repos`](repos.md) | Clone repositories into ~/repos |
 | [`commit`](commit.md) | AI-powered commit with code review |
 | [`upstream`](upstream.md) | Manage upstream fork workflow |
 | [`env`](env.md) | Sync project environment and manage env vars |
 | [`tasks`](tasks.md) | List and run project tasks |
+| [`global`](global.md) | Run tasks from global flow config |
 | [`ai`](ai.md) | Manage AI coding sessions (Claude Code) |
 | [`daemon`](daemon.md) | Manage background daemons |
 | [`parallel`](parallel.md) | Run tasks in parallel |
@@ -38,12 +40,14 @@ f commit --help
 ### Version Control
 
 - **[commit](commit.md)** - AI-powered commits with review
+- **[repos](repos.md)** - Clone repos into a structured directory
 - **[upstream](upstream.md)** - Fork management and sync
 - **[fixup](fixup.md)** - Fix common TOML syntax errors
 
 ### Task Management
 
 - **[tasks](tasks.md)** - List project tasks
+- **[global](global.md)** - Run tasks from ~/.config/flow/flow.toml
 - **[run](run.md)** - Run a specific task
 - **[parallel](parallel.md)** - Run tasks in parallel
 - **[rerun](rerun.md)** - Re-run last task

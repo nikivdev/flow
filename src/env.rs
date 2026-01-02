@@ -7,8 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +29,12 @@ const DEFAULT_API_URL: &str = "https://1focus.ai";
 struct AuthConfig {
     token: Option<String>,
     api_url: Option<String>,
+    token_source: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EnvReadUnlock {
+    expires_at: i64,
 }
 
 /// An env var with optional description.
@@ -71,7 +79,7 @@ fn get_auth_config_path() -> PathBuf {
 }
 
 /// Load auth config.
-fn load_auth_config() -> Result<AuthConfig> {
+fn load_auth_config_raw() -> Result<AuthConfig> {
     let path = get_auth_config_path();
     if !path.exists() {
         return Ok(AuthConfig::default());
@@ -79,6 +87,24 @@ fn load_auth_config() -> Result<AuthConfig> {
     let content =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     toml::from_str(&content).context("failed to parse auth.toml")
+}
+
+/// Load auth config and hydrate token from Keychain on macOS when configured.
+fn load_auth_config() -> Result<AuthConfig> {
+    let mut auth = load_auth_config_raw()?;
+    if auth.token.is_none()
+        && auth
+            .token_source
+            .as_deref()
+            .map(|source| source == "keychain")
+            .unwrap_or(false)
+    {
+        require_env_read_unlock()?;
+        if let Some(token) = get_keychain_token(&get_api_url(&auth))? {
+            auth.token = Some(token);
+        }
+    }
+    Ok(auth)
 }
 
 /// Save auth config.
@@ -90,6 +116,218 @@ fn save_auth_config(config: &AuthConfig) -> Result<()> {
     let content = toml::to_string_pretty(config)?;
     fs::write(&path, content)?;
     Ok(())
+}
+
+fn keychain_service(api_url: &str) -> String {
+    format!("flow-1focus-token:{}", api_url)
+}
+
+fn set_keychain_token(api_url: &str, token: &str) -> Result<()> {
+    let service = keychain_service(api_url);
+    let status = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-a",
+            "flow",
+            "-s",
+            &service,
+            "-w",
+            token,
+            "-U",
+        ])
+        .status()
+        .context("failed to store token in Keychain")?;
+    if !status.success() {
+        bail!("failed to store token in Keychain");
+    }
+    Ok(())
+}
+
+fn get_keychain_token(api_url: &str) -> Result<Option<String>> {
+    if !cfg!(target_os = "macos") {
+        return Ok(None);
+    }
+
+    let service = keychain_service(api_url);
+    let output = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-a",
+            "flow",
+            "-s",
+            &service,
+            "-w",
+        ])
+        .output()
+        .context("failed to read token from Keychain")?;
+
+    if output.status.success() {
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if token.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(token));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("could not be found") || stderr.contains("SecKeychainSearchCopyNext") {
+        return Ok(None);
+    }
+
+    bail!("failed to read token from Keychain: {}", stderr.trim());
+}
+
+fn store_auth_token(auth: &mut AuthConfig, token: String) -> Result<()> {
+    let api_url = get_api_url(auth);
+    if cfg!(target_os = "macos") {
+        if let Err(err) = set_keychain_token(&api_url, &token) {
+            eprintln!("⚠ Failed to store token in Keychain: {}", err);
+            eprintln!("  Falling back to auth.toml storage.");
+            auth.token = Some(token);
+            auth.token_source = None;
+            return Ok(());
+        }
+        auth.token = None;
+        auth.token_source = Some("keychain".to_string());
+    } else {
+        auth.token = Some(token);
+        auth.token_source = None;
+    }
+    Ok(())
+}
+
+fn get_env_unlock_path() -> PathBuf {
+    let config_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("flow");
+    config_dir.join("env_read_unlock.json")
+}
+
+fn load_env_unlock() -> Option<EnvReadUnlock> {
+    let path = get_env_unlock_path();
+    let content = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn unlock_expires_at(entry: &EnvReadUnlock) -> Option<DateTime<Utc>> {
+    Utc.timestamp_opt(entry.expires_at, 0).single()
+}
+
+fn save_env_unlock(expires_at: DateTime<Utc>) -> Result<()> {
+    let path = get_env_unlock_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let entry = EnvReadUnlock {
+        expires_at: expires_at.timestamp(),
+    };
+    let content = serde_json::to_string_pretty(&entry)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+fn next_local_midnight_utc() -> Result<DateTime<Utc>> {
+    let now = Local::now();
+    let tomorrow = now
+        .date_naive()
+        .succ_opt()
+        .ok_or_else(|| anyhow::anyhow!("failed to calculate next day"))?;
+    let naive = tomorrow
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("failed to build midnight time"))?;
+    let local_dt = Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| Local.from_local_datetime(&naive).earliest())
+        .ok_or_else(|| anyhow::anyhow!("failed to resolve local midnight"))?;
+    Ok(local_dt.with_timezone(&Utc))
+}
+
+fn prompt_touch_id() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("Touch ID is not available on this OS");
+    }
+
+    let reason = "Flow needs Touch ID to read env vars.";
+    let reason = reason.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"ObjC.import('stdlib');
+ObjC.import('Foundation');
+ObjC.import('LocalAuthentication');
+const context = $.LAContext.alloc.init;
+const policy = $.LAPolicyDeviceOwnerAuthenticationWithBiometrics;
+const error = Ref();
+if (!context.canEvaluatePolicyError(policy, error)) {{
+  $.exit(2);
+}}
+let ok = false;
+const sem = $.dispatch_semaphore_create(0);
+context.evaluatePolicyLocalizedReasonReply(policy, "{reason}", function(success, err) {{
+  ok = success;
+  $.dispatch_semaphore_signal(sem);
+}});
+$.dispatch_semaphore_wait(sem, $.DISPATCH_TIME_FOREVER);
+$.exit(ok ? 0 : 1);"#
+    );
+
+    let status = Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", &script])
+        .status()
+        .context("failed to launch Touch ID prompt")?;
+
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(1) => bail!("Touch ID verification failed"),
+        Some(2) => bail!("Touch ID is not available on this device"),
+        _ => bail!("Touch ID verification failed"),
+    }
+}
+
+fn unlock_env_read() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        println!("Touch ID unlock is not available on this OS.");
+        return Ok(());
+    }
+
+    if let Some(entry) = load_env_unlock() {
+        if let Some(expires_at) = unlock_expires_at(&entry) {
+            if expires_at > Utc::now() {
+                let local_expiry = expires_at.with_timezone(&Local);
+                println!(
+                    "Env read access already unlocked until {}",
+                    local_expiry.format("%Y-%m-%d %H:%M %Z")
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    println!("Touch ID required to read env vars.");
+    prompt_touch_id()?;
+    let expires_at = next_local_midnight_utc()?;
+    save_env_unlock(expires_at)?;
+    let local_expiry = expires_at.with_timezone(&Local);
+    println!(
+        "✓ Env read access unlocked until {}",
+        local_expiry.format("%Y-%m-%d %H:%M %Z")
+    );
+    Ok(())
+}
+
+fn require_env_read_unlock() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    if let Some(entry) = load_env_unlock() {
+        if let Some(expires_at) = unlock_expires_at(&entry) {
+            if expires_at > Utc::now() {
+                return Ok(());
+            }
+        }
+    }
+
+    unlock_env_read()
 }
 
 /// Get the project name from flow.toml.
@@ -141,12 +379,17 @@ fn is_1focus_source(source: Option<&str>) -> bool {
     )
 }
 
+fn format_default_hint(value: &str) -> String {
+    value.to_string()
+}
+
 pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
     let auth = load_auth_config()?;
     let token = match auth.token.as_ref() {
         Some(t) => t,
         None => return Ok(None),
     };
+    require_env_read_unlock()?;
 
     let api_url = get_api_url(&auth);
     let url = format!("{}/api/env/personal?keys={}", api_url, key);
@@ -177,12 +420,18 @@ pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
 
 /// Run the env subcommand.
 pub fn run(action: Option<EnvAction>) -> Result<()> {
-    // No action = run sync (base env + agents.md setup)
+    // No action = list env vars (or show status if not logged in)
     let Some(action) = action else {
-        return sync::run();
+        let auth = load_auth_config()?;
+        if auth.token.is_some() {
+            return list("production");
+        }
+        return status();
     };
 
     match action {
+        EnvAction::Sync => sync::run()?,
+        EnvAction::Unlock => unlock_env_read()?,
         EnvAction::Login => login()?,
         EnvAction::Pull { environment } => pull(&environment)?,
         EnvAction::Push { environment } => push(&environment)?,
@@ -209,6 +458,9 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
             let flow_config = config::load(&flow_path)?;
             bootstrap_cloudflare_secrets(&project_root, &flow_config)?;
         }
+        EnvAction::Keys => {
+            show_keys()?;
+        }
         EnvAction::Setup { env_file, environment } => setup(env_file, environment)?,
         EnvAction::List { environment } => list(&environment)?,
         EnvAction::Set { pair, environment, description } => set_var(&pair, &environment, description.as_deref())?,
@@ -227,7 +479,7 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
 
 /// Login / set token.
 fn login() -> Result<()> {
-    let mut auth = load_auth_config()?;
+    let mut auth = load_auth_config_raw()?;
 
     println!("1focus Environment Manager");
     println!("─────────────────────────────");
@@ -258,11 +510,15 @@ fn login() -> Result<()> {
         println!("Warning: Token doesn't start with '1f_' - are you sure this is correct?");
     }
 
-    auth.token = Some(token);
+    store_auth_token(&mut auth, token)?;
     save_auth_config(&auth)?;
 
     println!();
-    println!("✓ Token saved to {}", get_auth_config_path().display());
+    if auth.token_source.as_deref() == Some("keychain") {
+        println!("✓ Token saved to Keychain");
+    } else {
+        println!("✓ Token saved to {}", get_auth_config_path().display());
+    }
     println!();
     println!("You can now use:");
     println!("  f env pull    - Fetch env vars for this project");
@@ -279,6 +535,7 @@ fn pull(environment: &str) -> Result<()> {
         .token
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+    require_env_read_unlock()?;
 
     let project = get_project_name()?;
     let api_url = get_api_url(&auth);
@@ -480,11 +737,8 @@ fn guide(environment: &str) -> Result<()> {
     println!("Enter missing values (leave empty to skip).");
     for key in missing {
         let default_value = cf_cfg.env_defaults.get(&key).map(|value| value.as_str());
-        let value = if var_keys.contains(&key) {
-            prompt_line_default(&key, default_value)?
-        } else {
-            prompt_secret(&format!("{}: ", key))?
-        };
+        let is_secret = !var_keys.contains(&key);
+        let value = prompt_value(&key, default_value, is_secret)?;
 
         if let Some(value) = value {
             set_project_env_var(&key, &value, environment, None)?;
@@ -605,13 +859,13 @@ fn bootstrap_cloudflare_secrets(project_root: &Path, cfg: &config::Config) -> Re
     deploy::set_cloudflare_secrets(project_root, Some(cfg), &values)?;
     println!("✓ Cloudflare secrets updated");
 
-    let mut auth = load_auth_config()?;
+    let mut auth = load_auth_config_raw()?;
     let bootstrap_token = values
         .get("ENV_API_TOKEN")
         .or_else(|| values.get("FLOW_ENV_TOKEN"))
         .cloned();
     if let Some(token) = bootstrap_token {
-        auth.token = Some(token);
+        store_auth_token(&mut auth, token)?;
         let needs_default_api = auth
             .api_url
             .as_deref()
@@ -640,7 +894,11 @@ fn bootstrap_cloudflare_secrets(project_root: &Path, cfg: &config::Config) -> Re
     }
 
     if generated_env_token.is_some() {
-        println!("✓ Saved ENV_API_TOKEN to {}", get_auth_config_path().display());
+        if auth.token_source.as_deref() == Some("keychain") {
+            println!("✓ Saved ENV_API_TOKEN to Keychain");
+        } else {
+            println!("✓ Saved ENV_API_TOKEN to {}", get_auth_config_path().display());
+        }
     }
 
     Ok(())
@@ -666,6 +924,38 @@ fn prompt_line_default(key: &str, default_value: Option<&str>) -> Result<Option<
     } else {
         format!("{}: ", key)
     };
+    let value = prompt_line(&label)?;
+    if value.is_none() {
+        Ok(default_value.map(|value| value.to_string()))
+    } else {
+        Ok(value)
+    }
+}
+
+fn prompt_value(
+    key: &str,
+    default_value: Option<&str>,
+    secret: bool,
+) -> Result<Option<String>> {
+    if secret {
+        return prompt_secret(&format!("{}: ", key));
+    }
+
+    let default_value = default_value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    let label = if let Some(default_value) = default_value {
+        format!("{} [{}]: ", key, default_value)
+    } else {
+        format!("{}: ", key)
+    };
+
     let value = prompt_line(&label)?;
     if value.is_none() {
         Ok(default_value.map(|value| value.to_string()))
@@ -783,6 +1073,92 @@ fn setup(env_file: Option<PathBuf>, environment: Option<String>) -> Result<()> {
     push_vars(&result.environment, selected)
 }
 
+fn show_keys() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let flow_path = find_flow_toml(&cwd)
+        .ok_or_else(|| anyhow::anyhow!("flow.toml not found. Run `f init` first."))?;
+    let cfg = config::load(&flow_path)?;
+    let cf_cfg = cfg
+        .cloudflare
+        .as_ref()
+        .context("No [cloudflare] section in flow.toml")?;
+
+    let project = cfg
+        .project_name
+        .clone()
+        .unwrap_or_else(|| get_project_name().unwrap_or_else(|_| "unknown".to_string()));
+
+    println!("Env keys for {}", project);
+    println!("─────────────────────────────");
+    if let Some(source) = cf_cfg.env_source.as_deref() {
+        println!("Source: {}", source);
+    }
+    if let Some(environment) = cf_cfg.environment.as_deref() {
+        println!("Environment: {}", environment);
+    }
+    if let Some(apply) = cf_cfg.env_apply.as_deref() {
+        println!("Apply: {}", apply);
+    }
+    println!();
+
+    let mut secrets = cf_cfg.env_keys.clone();
+    secrets.sort();
+    let mut vars = cf_cfg.env_vars.clone();
+    vars.sort();
+
+    if secrets.is_empty() && vars.is_empty() {
+        println!("No env keys configured.");
+        return Ok(());
+    }
+
+    if !secrets.is_empty() {
+        println!("Secrets:");
+        for key in &secrets {
+            if cf_cfg.env_defaults.contains_key(key) {
+                println!("  {}  (default set)", key);
+            } else {
+                println!("  {}", key);
+            }
+        }
+        println!();
+    }
+
+    if !vars.is_empty() {
+        println!("Vars:");
+        for key in &vars {
+            let default_value = cf_cfg
+                .env_defaults
+                .get(key)
+                .map(|value| format_default_hint(value));
+            if let Some(default_value) = default_value {
+                println!("  {} = {}", key, default_value);
+            } else {
+                println!("  {}", key);
+            }
+        }
+        println!();
+    }
+
+    let mut extra_defaults: Vec<_> = cf_cfg
+        .env_defaults
+        .keys()
+        .filter(|key| !secrets.contains(*key) && !vars.contains(*key))
+        .cloned()
+        .collect();
+    extra_defaults.sort();
+
+    if !extra_defaults.is_empty() {
+        println!("Defaults (not in env_keys/env_vars):");
+        for key in extra_defaults {
+            if let Some(value) = cf_cfg.env_defaults.get(&key) {
+                println!("  {} = {}", key, format_default_hint(value));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// List env vars for this project.
 fn list(environment: &str) -> Result<()> {
     let auth = load_auth_config()?;
@@ -790,6 +1166,7 @@ fn list(environment: &str) -> Result<()> {
         .token
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+    require_env_read_unlock()?;
 
     let project = get_project_name()?;
     let api_url = get_api_url(&auth);
@@ -898,6 +1275,7 @@ fn set_project_env_var_internal(
 
     let project = get_project_name()?;
     let api_url = get_api_url(&auth);
+    let resolved_value = value.to_string();
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -905,7 +1283,7 @@ fn set_project_env_var_internal(
 
     let url = format!("{}/api/env/{}", api_url, project);
     let mut vars = HashMap::new();
-    vars.insert(key.to_string(), value.to_string());
+    vars.insert(key.to_string(), resolved_value.clone());
 
     let mut body = serde_json::json!({
         "vars": vars,
@@ -932,8 +1310,8 @@ fn set_project_env_var_internal(
         bail!("API error {}: {}", status, body);
     }
 
-    let masked = if value.len() > 8 {
-        format!("{}...", &value[..4])
+    let masked = if resolved_value.len() > 8 {
+        format!("{}...", &resolved_value[..4])
     } else {
         "****".to_string()
     };
@@ -992,35 +1370,43 @@ fn delete_vars(keys: &[String], environment: &str) -> Result<()> {
 
 /// Show current auth status.
 fn status() -> Result<()> {
-    let auth = load_auth_config()?;
+    let auth = load_auth_config_raw()?;
 
     println!("1focus Environment Manager");
     println!("─────────────────────────────");
 
+    let api_url = get_api_url(&auth);
     if let Some(ref token) = auth.token {
         let masked = format!("{}...", &token[..7.min(token.len())]);
         println!("Token: {}", masked);
-        println!("API:   {}", get_api_url(&auth));
-
-        if let Ok(project) = get_project_name() {
-            println!("Project: {}", project);
-        }
-
-        println!();
-        println!("Commands:");
-        println!("  f env pull    - Fetch env vars");
-        println!("  f env push    - Push .env to 1focus");
-        println!("  f env guide   - Guided env setup from flow.toml");
-        println!("  f env apply   - Apply 1focus envs to Cloudflare");
-        println!("  f env bootstrap - Bootstrap Cloudflare secrets");
-        println!("  f env setup   - Interactive env setup");
-        println!("  f env list    - List env vars");
-        println!("  f env set K=V - Set env var");
+        println!("API:   {}", api_url);
+    } else if auth.token_source.as_deref() == Some("keychain") {
+        println!("Token: stored in Keychain");
+        println!("API:   {}", api_url);
     } else {
         println!("Status: Not logged in");
         println!();
         println!("Run `f env login` to authenticate.");
+        return Ok(());
     }
+
+    if let Ok(project) = get_project_name() {
+        println!("Project: {}", project);
+    }
+
+    println!();
+    println!("Commands:");
+    println!("  f env sync    - Sync project settings");
+    println!("  f env unlock  - Unlock env reads (Touch ID on macOS)");
+    println!("  f env pull    - Fetch env vars");
+    println!("  f env push    - Push .env to 1focus");
+    println!("  f env guide   - Guided env setup from flow.toml");
+    println!("  f env apply   - Apply 1focus envs to Cloudflare");
+    println!("  f env bootstrap - Bootstrap Cloudflare secrets");
+    println!("  f env setup   - Interactive env setup");
+    println!("  f env list    - List env vars");
+    println!("  f env keys    - Show configured env keys");
+    println!("  f env set K=V - Set env var");
 
     Ok(())
 }
@@ -1069,6 +1455,7 @@ fn fetch_env_vars(
         .token
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+    require_env_read_unlock()?;
 
     let api_url = get_api_url(&auth);
     let client = Client::builder()
@@ -1175,8 +1562,6 @@ fn run_with_env(
     keys: &[String],
     command: &[String],
 ) -> Result<()> {
-    use std::process::Command;
-
     if command.is_empty() {
         bail!("No command specified");
     }
