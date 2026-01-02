@@ -96,6 +96,8 @@ pub struct CloudflareConfig {
     /// Env keys to set as non-secret vars when env_source = "1focus".
     #[serde(default)]
     pub env_vars: Vec<String>,
+    /// Env apply mode: "always", "auto", or "never".
+    pub env_apply: Option<String>,
     /// Wrangler environment name (e.g., staging).
     #[serde(default, alias = "env")]
     pub environment: Option<String>,
@@ -105,6 +107,29 @@ pub struct CloudflareConfig {
     pub dev: Option<String>,
     /// URL for health checks (e.g., https://my-worker.workers.dev).
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvApplyMode {
+    Always,
+    Auto,
+    Never,
+}
+
+fn env_apply_mode_from_str(value: Option<&str>) -> EnvApplyMode {
+    match value.map(|s| s.to_ascii_lowercase()) {
+        Some(ref v) if v == "always" => EnvApplyMode::Always,
+        Some(ref v) if v == "auto" => EnvApplyMode::Auto,
+        Some(ref v) if v == "never" => EnvApplyMode::Never,
+        _ => EnvApplyMode::Never,
+    }
+}
+
+fn is_tls_connect_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("certificate was not trusted")
+        || msg.contains("client error (Connect)")
+        || msg.contains("failed to connect to 1focus")
 }
 
 /// Railway deployment config from flow.toml [railway] section.
@@ -321,10 +346,28 @@ fn deploy_cloudflare(
 
     let env_name = cf_cfg.environment.as_deref();
 
-    // Set secrets if requested
-    if set_secrets {
+    let env_apply_mode = if set_secrets {
+        EnvApplyMode::Always
+    } else {
+        env_apply_mode_from_str(cf_cfg.env_apply.as_deref())
+    };
+    let should_apply = matches!(env_apply_mode, EnvApplyMode::Always | EnvApplyMode::Auto);
+
+    if should_apply {
         if is_1focus_source(cf_cfg.env_source.as_deref()) {
-            apply_cloudflare_env_from_config(project_root, cf_cfg)?;
+            if let Err(err) = apply_cloudflare_env_from_config(project_root, cf_cfg) {
+                if env_apply_mode == EnvApplyMode::Auto {
+                    if is_tls_connect_error(&err) {
+                        eprintln!(
+                            "⚠ Unable to reach 1focus (TLS/connect). Skipping env sync for now."
+                        );
+                    } else {
+                        eprintln!("⚠ Env sync skipped: {err}");
+                    }
+                } else {
+                    return Err(err);
+                }
+            }
         } else if let Some(env_file) = &cf_cfg.env_file {
             let env_path = project_root.join(env_file);
             if env_path.exists() {
@@ -418,6 +461,21 @@ fn ensure_wrangler_config(worker_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn wrangler_command(worker_path: &Path) -> Command {
+    let local_bin = worker_path.join("node_modules").join(".bin").join("wrangler");
+    let mut cmd = if local_bin.exists() {
+        Command::new(local_bin)
+    } else if worker_path.join("package.json").exists() {
+        let mut cmd = Command::new("pnpm");
+        cmd.args(["exec", "wrangler"]);
+        cmd
+    } else {
+        Command::new("wrangler")
+    };
+    cmd.current_dir(worker_path);
+    cmd
+}
+
 fn is_1focus_source(source: Option<&str>) -> bool {
     matches!(
         source.map(|s| s.to_ascii_lowercase()).as_deref(),
@@ -449,13 +507,12 @@ fn set_wrangler_var_value(
     key: &str,
     value: &str,
 ) -> Result<()> {
-    let mut cmd = Command::new("wrangler");
+    let mut cmd = wrangler_command(worker_path);
     cmd.args(["vars", "set", key, value]);
     if let Some(env) = env_name {
         cmd.args(["--env", env]);
     }
     let status = cmd
-        .current_dir(worker_path)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -473,13 +530,12 @@ fn set_wrangler_secret_value(
     key: &str,
     value: &str,
 ) -> Result<()> {
-    let mut cmd = Command::new("wrangler");
+    let mut cmd = wrangler_command(worker_path);
     cmd.args(["secret", "put", key]);
     if let Some(env) = env_name {
         cmd.args(["--env", env]);
     }
     let mut child = cmd
-        .current_dir(worker_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -615,7 +671,11 @@ fn show_status(_project_root: &Path, config: Option<&Config>) -> Result<()> {
 }
 
 /// Show deployment logs.
-fn show_logs(_project_root: &Path, config: Option<&Config>, follow: bool, lines: usize) -> Result<()> {
+fn show_logs(project_root: &Path, config: Option<&Config>, follow: bool, lines: usize) -> Result<()> {
+    if let Some(cf_cfg) = config.and_then(|c| c.cloudflare.as_ref()) {
+        return show_cloudflare_logs(project_root, cf_cfg, follow, lines);
+    }
+
     let deploy_config = load_deploy_config()?;
     let conn = deploy_config
         .host
@@ -634,6 +694,43 @@ fn show_logs(_project_root: &Path, config: Option<&Config>, follow: bool, lines:
     );
 
     ssh_run(conn, &cmd)?;
+    Ok(())
+}
+
+fn show_cloudflare_logs(
+    project_root: &Path,
+    cf_cfg: &CloudflareConfig,
+    follow: bool,
+    lines: usize,
+) -> Result<()> {
+    let worker_path = cf_cfg
+        .path
+        .as_ref()
+        .map(|p| project_root.join(p))
+        .unwrap_or_else(|| project_root.to_path_buf());
+    ensure_wrangler_config(&worker_path)?;
+
+    if !follow {
+        eprintln!("Note: wrangler tail streams logs until you stop it (Ctrl+C).");
+        let _ = lines;
+    }
+
+    let mut cmd = wrangler_command(&worker_path);
+    cmd.arg("tail").args(["--format", "pretty"]);
+    if let Some(env) = cf_cfg.environment.as_deref() {
+        cmd.args(["--env", env]);
+    }
+
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+
+    if !status.success() {
+        bail!("Cloudflare log tail failed");
+    }
+
     Ok(())
 }
 
