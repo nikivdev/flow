@@ -8,7 +8,7 @@ use flowd::{
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     commit, commits, daemon, deploy, docs, doctor, env, fixup, history, hub, init, init_tracing,
     log_server, notify, palette, parallel, processes, projects, publish, skills, start, storage,
-    task_match, tasks, tools, upstream,
+    task_match, tasks, todo, tools, upstream, deps,
 };
 
 fn main() -> Result<()> {
@@ -161,8 +161,14 @@ fn main() -> Result<()> {
         Some(Commands::Env(cmd)) => {
             env::run(cmd.action)?;
         }
+        Some(Commands::Todo(cmd)) => {
+            todo::run(cmd)?;
+        }
         Some(Commands::Skills(cmd)) => {
             skills::run(cmd)?;
+        }
+        Some(Commands::Deps(cmd)) => {
+            deps::run(cmd)?;
         }
         Some(Commands::Storage(cmd)) => {
             storage::run(cmd)?;

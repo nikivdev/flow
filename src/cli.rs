@@ -185,10 +185,20 @@ pub enum Commands {
     )]
     Env(EnvCommand),
     #[command(
+        about = "Manage project todos.",
+        long_about = "Create, list, edit, and complete lightweight todos stored in .ai/todos/todos.json."
+    )]
+    Todo(TodoCommand),
+    #[command(
         about = "Manage Codex skills (.ai/skills/).",
         long_about = "Create, list, and manage Codex skills for this project. Skills are stored in .ai/skills/ and help Codex understand project-specific workflows."
     )]
     Skills(SkillsCommand),
+    #[command(
+        about = "Install or update project dependencies.",
+        long_about = "Detects the package manager from lockfiles and runs install/update at the project root."
+    )]
+    Deps(DepsCommand),
     #[command(
         about = "Manage storage providers (e.g., Jazz).",
         long_about = "Provision storage backends and populate environment variables for services like Jazz."
@@ -608,6 +618,9 @@ pub struct JazzStorageCommand {
 pub enum JazzStorageAction {
     /// Create a new Jazz worker account and store env vars.
     New {
+        /// What the worker account will be used for.
+        #[arg(long, value_enum, default_value = "mirror")]
+        kind: JazzStorageKind,
         /// Optional name for the worker account.
         #[arg(long)]
         name: Option<String>,
@@ -621,6 +634,14 @@ pub enum JazzStorageAction {
         #[arg(short, long, default_value = "production")]
         environment: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum JazzStorageKind {
+    /// Mirror worker account (gitedit-style mirror sync).
+    Mirror,
+    /// Env store worker account (1focus env storage).
+    EnvStore,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -863,6 +884,8 @@ pub enum EnvAction {
     },
     /// Apply env vars from 1focus to the configured Cloudflare worker.
     Apply,
+    /// Bootstrap Cloudflare secrets from flow.toml (interactive).
+    Bootstrap,
     /// Interactive env setup (uses flow.toml when configured).
     Setup {
         /// Optional .env file path to preselect.
@@ -929,6 +952,106 @@ pub enum EnvAction {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TodoCommand {
+    #[command(subcommand)]
+    pub action: Option<TodoAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum TodoAction {
+    /// Add a new todo.
+    Add {
+        /// Short title for the todo.
+        title: String,
+        /// Optional note to store with the todo.
+        #[arg(short, long)]
+        note: Option<String>,
+        /// Attach a specific AI session reference (provider:session_id).
+        #[arg(long, conflicts_with = "no_session")]
+        session: Option<String>,
+        /// Skip attaching the most recent AI session.
+        #[arg(long)]
+        no_session: bool,
+        /// Initial status (pending, in-progress, completed, blocked).
+        #[arg(short, long, value_enum, default_value_t = TodoStatusArg::Pending)]
+        status: TodoStatusArg,
+    },
+    /// List todos (active by default).
+    #[command(alias = "ls")]
+    List {
+        /// Include completed todos.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Mark a todo as completed.
+    Done {
+        /// Todo id (full or prefix).
+        id: String,
+    },
+    /// Edit a todo.
+    Edit {
+        /// Todo id (full or prefix).
+        id: String,
+        /// Update the title.
+        #[arg(short, long)]
+        title: Option<String>,
+        /// Update the status.
+        #[arg(short, long, value_enum)]
+        status: Option<TodoStatusArg>,
+        /// Update the note (empty clears).
+        #[arg(short, long)]
+        note: Option<String>,
+    },
+    /// Remove a todo.
+    Remove {
+        /// Todo id (full or prefix).
+        id: String,
+    },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum TodoStatusArg {
+    Pending,
+    #[value(alias = "in_progress")]
+    InProgress,
+    Completed,
+    Blocked,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DepsCommand {
+    #[command(subcommand)]
+    pub action: Option<DepsAction>,
+    /// Force a package manager instead of auto-detect.
+    #[arg(long, value_enum)]
+    pub manager: Option<DepsManager>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DepsAction {
+    /// Install dependencies (default).
+    Install {
+        /// Extra args to pass to the package manager.
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Update dependencies to latest.
+    Update {
+        /// Extra args to pass to the package manager.
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum DepsManager {
+    Pnpm,
+    Npm,
+    Yarn,
+    Bun,
 }
 
 #[derive(Args, Debug, Clone)]

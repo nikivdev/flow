@@ -2648,6 +2648,20 @@ fn get_display_summary(
     Ok(None)
 }
 
+/// Return provider:session_id for the most recent session in the project.
+pub fn get_latest_session_ref_for_path(project_path: &PathBuf) -> Result<Option<String>> {
+    let sessions = read_sessions_for_path(Provider::All, project_path)?;
+    let Some(session) = sessions.first() else {
+        return Ok(None);
+    };
+    let provider = match session.provider {
+        Provider::Claude => "claude",
+        Provider::Codex => "codex",
+        Provider::All => "ai",
+    };
+    Ok(Some(format!("{}:{}", provider, session.session_id)))
+}
+
 fn maybe_update_summary(
     session: &CrossProjectSession,
     cache: &mut HashMap<PathBuf, SummaryCacheEntry>,
