@@ -43,6 +43,22 @@ Use the wizard to pick a .env file, select keys, and push to 1focus:
 f env setup
 ```
 
+If your project has `[cloudflare].env_source = "1focus"`, `f env setup` uses
+the keys from `env_keys` and `env_vars` and prompts only for missing values.
+
+## Guided setup from flow.toml
+
+If your project declares required keys in `flow.toml`, you can prompt for
+missing values:
+
+```bash
+f env guide
+f env guide -e staging
+```
+
+This uses `[cloudflare].env_keys` and `[cloudflare].env_vars` to decide what
+to ask for.
+
 ## Pull envs back to a local .env
 
 ```bash
