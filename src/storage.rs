@@ -4,18 +4,20 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::cli::{JazzStorageAction, StorageAction, StorageCommand};
+use crate::cli::{JazzStorageAction, JazzStorageKind, StorageAction, StorageCommand};
 use crate::{config, env};
 
-const DEFAULT_JAZZ_API_KEY: &str = "jazz-gitedit-prod";
-const DEFAULT_JAZZ_PEER: &str = "wss://cloud.jazz.tools/?key=jazz-gitedit-prod";
+const DEFAULT_JAZZ_API_KEY_MIRROR: &str = "jazz-gitedit-prod";
+const DEFAULT_JAZZ_PEER_MIRROR: &str = "wss://cloud.jazz.tools/?key=jazz-gitedit-prod";
+const DEFAULT_JAZZ_API_KEY_ENV: &str = "1focus@1focus.app";
+const DEFAULT_JAZZ_PEER_ENV: &str = "wss://cloud.jazz.tools/?key=1focus@1focus.app";
 
 #[derive(Debug, Deserialize)]
-struct JazzCreateOutput {
+pub(crate) struct JazzCreateOutput {
     #[serde(rename = "accountID")]
-    account_id: String,
+    pub(crate) account_id: String,
     #[serde(rename = "agentSecret")]
-    agent_secret: String,
+    pub(crate) agent_secret: String,
 }
 
 pub fn run(cmd: StorageCommand) -> Result<()> {
@@ -27,47 +29,78 @@ pub fn run(cmd: StorageCommand) -> Result<()> {
 fn run_jazz(action: JazzStorageAction) -> Result<()> {
     match action {
         JazzStorageAction::New {
+            kind,
             name,
             peer,
             api_key,
             environment,
-        } => jazz_new(name, peer, api_key, &environment),
+        } => jazz_new(kind, name, peer, api_key, &environment),
     }
 }
 
 fn jazz_new(
+    kind: JazzStorageKind,
     name: Option<String>,
     peer: Option<String>,
     api_key: Option<String>,
     environment: &str,
 ) -> Result<()> {
     let project = get_project_name()?;
-    let default_name = format!("{}-jazz-mirror", sanitize_name(&project));
+    let default_name = match kind {
+        JazzStorageKind::Mirror => format!("{}-jazz-mirror", sanitize_name(&project)),
+        JazzStorageKind::EnvStore => format!("{}-jazz-env", sanitize_name(&project)),
+    };
     let name = name.unwrap_or(default_name);
+
+    let default_peer = match kind {
+        JazzStorageKind::Mirror => DEFAULT_JAZZ_PEER_MIRROR,
+        JazzStorageKind::EnvStore => DEFAULT_JAZZ_PEER_ENV,
+    };
 
     let peer = match (peer, api_key.as_deref()) {
         (Some(peer), _) => peer,
         (None, Some(key)) => format!("wss://cloud.jazz.tools/?key={}", key),
-        (None, None) => DEFAULT_JAZZ_PEER.to_string(),
+        (None, None) => default_peer.to_string(),
     };
 
     let creds = create_jazz_worker_account(&peer, &name)?;
 
-    env::set_project_env_var(
-        "JAZZ_MIRROR_ACCOUNT_ID",
-        &creds.account_id,
-        environment,
-        Some("Jazz mirror worker account ID"),
-    )?;
-    env::set_project_env_var(
-        "JAZZ_MIRROR_ACCOUNT_SECRET",
-        &creds.agent_secret,
-        environment,
-        Some("Jazz mirror worker account secret"),
-    )?;
+    match kind {
+        JazzStorageKind::Mirror => {
+            env::set_project_env_var(
+                "JAZZ_MIRROR_ACCOUNT_ID",
+                &creds.account_id,
+                environment,
+                Some("Jazz mirror worker account ID"),
+            )?;
+            env::set_project_env_var(
+                "JAZZ_MIRROR_ACCOUNT_SECRET",
+                &creds.agent_secret,
+                environment,
+                Some("Jazz mirror worker account secret"),
+            )?;
+        }
+        JazzStorageKind::EnvStore => {
+            env::set_project_env_var(
+                "JAZZ_WORKER_ACCOUNT",
+                &creds.account_id,
+                environment,
+                Some("Jazz worker account ID"),
+            )?;
+            env::set_project_env_var(
+                "JAZZ_WORKER_SECRET",
+                &creds.agent_secret,
+                environment,
+                Some("Jazz worker account secret"),
+            )?;
+        }
+    }
 
     if api_key.is_some() {
-        let key = api_key.unwrap_or_else(|| DEFAULT_JAZZ_API_KEY.to_string());
+        let key = api_key.unwrap_or_else(|| match kind {
+            JazzStorageKind::Mirror => DEFAULT_JAZZ_API_KEY_MIRROR.to_string(),
+            JazzStorageKind::EnvStore => DEFAULT_JAZZ_API_KEY_ENV.to_string(),
+        });
         env::set_project_env_var(
             "JAZZ_API_KEY",
             &key,
@@ -76,20 +109,25 @@ fn jazz_new(
         )?;
     }
 
-    if peer != DEFAULT_JAZZ_PEER {
-        env::set_project_env_var(
-            "JAZZ_MIRROR_SYNC_SERVER",
-            &peer,
-            environment,
-            Some("Custom Jazz sync server for mirror worker"),
-        )?;
+    if peer != default_peer {
+        let (key, desc) = match kind {
+            JazzStorageKind::Mirror => (
+                "JAZZ_MIRROR_SYNC_SERVER",
+                "Custom Jazz sync server for mirror worker",
+            ),
+            JazzStorageKind::EnvStore => (
+                "JAZZ_SYNC_SERVER",
+                "Custom Jazz sync server for env worker",
+            ),
+        };
+        env::set_project_env_var(key, &peer, environment, Some(desc))?;
     }
 
     println!("✓ Jazz storage initialized for {}", project);
     Ok(())
 }
 
-fn create_jazz_worker_account(peer: &str, name: &str) -> Result<JazzCreateOutput> {
+pub(crate) fn create_jazz_worker_account(peer: &str, name: &str) -> Result<JazzCreateOutput> {
     let output = if let Some(path) = find_in_path("jazz-run") {
         Command::new(path)
             .args([
@@ -159,7 +197,7 @@ fn find_in_path(binary: &str) -> Option<PathBuf> {
     None
 }
 
-fn sanitize_name(name: &str) -> String {
+pub(crate) fn sanitize_name(name: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;
     for ch in name.chars() {
@@ -180,7 +218,7 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
-fn get_project_name() -> Result<String> {
+pub(crate) fn get_project_name() -> Result<String> {
     let cwd = std::env::current_dir()?;
     let flow_toml = cwd.join("flow.toml");
 

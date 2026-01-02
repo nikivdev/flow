@@ -96,6 +96,20 @@ pub struct CloudflareConfig {
     /// Env keys to set as non-secret vars when env_source = "1focus".
     #[serde(default)]
     pub env_vars: Vec<String>,
+    /// Default values for env vars (key/value).
+    #[serde(default)]
+    pub env_defaults: HashMap<String, String>,
+    /// Secret keys to bootstrap directly in Cloudflare.
+    #[serde(default)]
+    pub bootstrap_secrets: Vec<String>,
+    /// Optional Jazz sync peer for bootstrap (env store).
+    pub bootstrap_jazz_peer: Option<String>,
+    /// Optional Jazz worker account name for bootstrap (env store).
+    pub bootstrap_jazz_name: Option<String>,
+    /// Optional Jazz sync peer for bootstrap (auth store).
+    pub bootstrap_jazz_auth_peer: Option<String>,
+    /// Optional Jazz worker account name for bootstrap (auth store).
+    pub bootstrap_jazz_auth_name: Option<String>,
     /// Env apply mode: "always", "auto", or "never".
     pub env_apply: Option<String>,
     /// Wrangler environment name (e.g., staging).
@@ -408,6 +422,34 @@ pub fn apply_cloudflare_env(project_root: &Path, config: Option<&Config>) -> Res
         .and_then(|c| c.cloudflare.as_ref())
         .context("No [cloudflare] section in flow.toml")?;
     apply_cloudflare_env_from_config(project_root, cf_cfg)
+}
+
+pub fn set_cloudflare_secrets(
+    project_root: &Path,
+    config: Option<&Config>,
+    secrets: &HashMap<String, String>,
+) -> Result<()> {
+    let cf_cfg = config
+        .and_then(|c| c.cloudflare.as_ref())
+        .context("No [cloudflare] section in flow.toml")?;
+    let worker_path = cf_cfg
+        .path
+        .as_ref()
+        .map(|p| project_root.join(p))
+        .unwrap_or_else(|| project_root.to_path_buf());
+    ensure_wrangler_config(&worker_path)?;
+
+    let env_name = cf_cfg.environment.as_deref();
+    let mut keys: Vec<_> = secrets.keys().cloned().collect();
+    keys.sort();
+    for key in keys {
+        if let Some(value) = secrets.get(&key) {
+            println!("  Setting secret {}...", key);
+            set_wrangler_secret_value(&worker_path, env_name, &key, value)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConfig) -> Result<()> {

@@ -1,0 +1,10 @@
+[
+  {
+    "id": "c1b0f1e0e6d84f33b169b9b0f87f3c4e",
+    "title": "Evaluate Rolldown for builds and deployment speedups",
+    "status": "pending",
+    "created_at": "2026-01-02T19:30:00Z",
+    "updated_at": null,
+    "note": "Compare Vite/Rollup vs Rolldown (Rust) and list build cache, asset diffing, and deploy pipeline optimizations."
+  }
+]

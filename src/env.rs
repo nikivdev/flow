@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
@@ -16,7 +16,9 @@ use crate::cli::EnvAction;
 use crate::config;
 use crate::deploy;
 use crate::env_setup::{EnvSetupDefaults, run_env_setup};
+use crate::storage::{create_jazz_worker_account, get_project_name as storage_project_name, sanitize_name};
 use crate::sync;
+use uuid::Uuid;
 
 const DEFAULT_API_URL: &str = "https://1focus.ai";
 
@@ -196,6 +198,17 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
             let flow_config = config::load(&flow_path)?;
             deploy::apply_cloudflare_env(&project_root, Some(&flow_config))?;
         }
+        EnvAction::Bootstrap => {
+            let cwd = std::env::current_dir()?;
+            let flow_path = find_flow_toml(&cwd)
+                .ok_or_else(|| anyhow::anyhow!("flow.toml not found. Run `f init` first."))?;
+            let project_root = flow_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(cwd);
+            let flow_config = config::load(&flow_path)?;
+            bootstrap_cloudflare_secrets(&project_root, &flow_config)?;
+        }
         EnvAction::Setup { env_file, environment } => setup(env_file, environment)?,
         EnvAction::List { environment } => list(&environment)?,
         EnvAction::Set { pair, environment, description } => set_var(&pair, &environment, description.as_deref())?,
@@ -224,6 +237,11 @@ fn login() -> Result<()> {
     println!("  2. Go to Settings → API Tokens");
     println!("  3. Create a new token");
     println!();
+
+    let api_url = prompt_line_default("API base URL", Some(DEFAULT_API_URL))?;
+    if let Some(api_url) = api_url {
+        auth.api_url = Some(api_url);
+    }
 
     print!("Enter your API token: ");
     io::stdout().flush()?;
@@ -429,7 +447,18 @@ fn guide(environment: &str) -> Result<()> {
     }
 
     println!("Checking required env vars for '{}'...", environment);
-    let existing = fetch_project_env_vars(environment, &required)?;
+    let existing = match fetch_project_env_vars(environment, &required) {
+        Ok(vars) => vars,
+        Err(err) => {
+            let msg = format!("{err:#}");
+            if msg.contains("Project not found.") {
+                println!("  (project not found yet; will create on first set)");
+                HashMap::new()
+            } else {
+                return Err(err);
+            }
+        }
+    };
     let var_keys: HashSet<String> = cf_cfg.env_vars.iter().cloned().collect();
 
     let mut missing = Vec::new();
@@ -450,8 +479,9 @@ fn guide(environment: &str) -> Result<()> {
     println!();
     println!("Enter missing values (leave empty to skip).");
     for key in missing {
+        let default_value = cf_cfg.env_defaults.get(&key).map(|value| value.as_str());
         let value = if var_keys.contains(&key) {
-            prompt_line(&format!("{}: ", key))?
+            prompt_line_default(&key, default_value)?
         } else {
             prompt_secret(&format!("{}: ", key))?
         };
@@ -459,6 +489,158 @@ fn guide(environment: &str) -> Result<()> {
         if let Some(value) = value {
             set_project_env_var(&key, &value, environment, None)?;
         }
+    }
+
+    Ok(())
+}
+
+fn bootstrap_cloudflare_secrets(project_root: &Path, cfg: &config::Config) -> Result<()> {
+    let cf_cfg = cfg
+        .cloudflare
+        .as_ref()
+        .context("No [cloudflare] section in flow.toml")?;
+
+    if cf_cfg.bootstrap_secrets.is_empty() {
+        bail!("No bootstrap secrets configured. Add cloudflare.bootstrap_secrets to flow.toml.");
+    }
+
+    println!("Bootstrap Cloudflare secrets");
+    println!("─────────────────────────────");
+    println!("Enter values (leave empty to skip).");
+
+    let mut values = HashMap::new();
+    let mut generated_env_token: Option<String> = None;
+    let needs_env_account = cf_cfg.bootstrap_secrets.iter().any(|key| {
+        key == "JAZZ_WORKER_ACCOUNT" || key == "JAZZ_WORKER_SECRET"
+    });
+    let needs_auth_account = cf_cfg.bootstrap_secrets.iter().any(|key| {
+        key == "JAZZ_AUTH_WORKER_ACCOUNT_ID" || key == "JAZZ_AUTH_WORKER_ACCOUNT_SECRET"
+    });
+
+    if needs_env_account || needs_auth_account {
+        let project = storage_project_name()?;
+        let default_env_name = format!("{}-jazz-env", sanitize_name(&project));
+        let default_auth_name = format!("{}-jazz-auth", sanitize_name(&project));
+        let default_peer = "wss://cloud.jazz.tools/?key=1focus@1focus.app";
+
+        if needs_env_account {
+            if prompt_confirm("Generate a new Jazz env-store account now? (y/N): ")? {
+                println!("Creating Jazz env-store account...");
+                let name = cf_cfg
+                    .bootstrap_jazz_name
+                    .as_deref()
+                    .unwrap_or(&default_env_name);
+                let peer = cf_cfg
+                    .bootstrap_jazz_peer
+                    .as_deref()
+                    .unwrap_or(default_peer);
+                let creds = create_jazz_worker_account(peer, name)?;
+                values.insert("JAZZ_WORKER_ACCOUNT".to_string(), creds.account_id);
+                values.insert("JAZZ_WORKER_SECRET".to_string(), creds.agent_secret);
+                println!("✓ Jazz env-store account created");
+            }
+        }
+
+        if needs_auth_account {
+            if prompt_confirm("Generate a new Jazz auth account now? (y/N): ")? {
+                println!("Creating Jazz auth account...");
+                let name = cf_cfg
+                    .bootstrap_jazz_auth_name
+                    .as_deref()
+                    .unwrap_or(&default_auth_name);
+                let peer = cf_cfg
+                    .bootstrap_jazz_auth_peer
+                    .as_deref()
+                    .unwrap_or(default_peer);
+                let creds = create_jazz_worker_account(peer, name)?;
+                values.insert(
+                    "JAZZ_AUTH_WORKER_ACCOUNT_ID".to_string(),
+                    creds.account_id,
+                );
+                values.insert(
+                    "JAZZ_AUTH_WORKER_ACCOUNT_SECRET".to_string(),
+                    creds.agent_secret,
+                );
+                println!("✓ Jazz auth account created");
+            }
+        }
+    }
+
+    for key in &cf_cfg.bootstrap_secrets {
+        if values.contains_key(key) {
+            continue;
+        }
+        if key == "ENV_API_TOKEN" || key == "FLOW_ENV_TOKEN" {
+            let value = prompt_secret(&format!("{} (leave empty to auto-generate): ", key))?;
+            let value = match value {
+                Some(value) => value,
+                None => {
+                    if let Some(existing) = generated_env_token.clone() {
+                        existing
+                    } else {
+                        let token = generate_env_api_token();
+                        generated_env_token = Some(token.clone());
+                        token
+                    }
+                }
+            };
+            values.insert(key.clone(), value);
+            continue;
+        }
+
+        let value = prompt_secret(&format!("{}: ", key))?;
+        if let Some(value) = value {
+            values.insert(key.clone(), value);
+        }
+    }
+
+    values.retain(|_, value| !value.trim().is_empty());
+
+    if values.is_empty() {
+        println!("No secrets provided; nothing to set.");
+        return Ok(());
+    }
+
+    println!("Setting Cloudflare secrets...");
+    deploy::set_cloudflare_secrets(project_root, Some(cfg), &values)?;
+    println!("✓ Cloudflare secrets updated");
+
+    let mut auth = load_auth_config()?;
+    let bootstrap_token = values
+        .get("ENV_API_TOKEN")
+        .or_else(|| values.get("FLOW_ENV_TOKEN"))
+        .cloned();
+    if let Some(token) = bootstrap_token {
+        auth.token = Some(token);
+        let needs_default_api = auth
+            .api_url
+            .as_deref()
+            .map(|url| url.contains("workers.dev"))
+            .unwrap_or(true);
+        if needs_default_api {
+            auth.api_url = Some(DEFAULT_API_URL.to_string());
+        }
+        save_auth_config(&auth)?;
+    }
+
+    let env_name = cf_cfg
+        .environment
+        .clone()
+        .unwrap_or_else(|| "production".to_string());
+    let mut env_key_set: HashSet<String> = HashSet::new();
+    for key in cf_cfg.env_keys.iter().chain(cf_cfg.env_vars.iter()) {
+        env_key_set.insert(key.clone());
+    }
+    for (key, value) in &values {
+        if env_key_set.contains(key) {
+            if let Err(err) = set_project_env_var(key, value, &env_name, None) {
+                eprintln!("⚠ Failed to store {} in env store: {}", key, err);
+            }
+        }
+    }
+
+    if generated_env_token.is_some() {
+        println!("✓ Saved ENV_API_TOKEN to {}", get_auth_config_path().display());
     }
 
     Ok(())
@@ -476,6 +658,46 @@ fn prompt_line(label: &str) -> Result<Option<String>> {
     } else {
         Ok(Some(value))
     }
+}
+
+fn prompt_line_default(key: &str, default_value: Option<&str>) -> Result<Option<String>> {
+    let label = if let Some(default_value) = default_value {
+        format!("{} [{}]: ", key, default_value)
+    } else {
+        format!("{}: ", key)
+    };
+    let value = prompt_line(&label)?;
+    if value.is_none() {
+        Ok(default_value.map(|value| value.to_string()))
+    } else {
+        Ok(value)
+    }
+}
+
+fn prompt_confirm(label: &str) -> Result<bool> {
+    print!("{}", label);
+    io::stdout().flush()?;
+
+    if std::io::stdin().is_terminal() {
+        if let Ok(()) = crossterm::terminal::enable_raw_mode() {
+            let read = crossterm::event::read();
+            let _ = crossterm::terminal::disable_raw_mode();
+            if let Ok(crossterm::event::Event::Key(key)) = read {
+                println!();
+                return Ok(matches!(key.code, crossterm::event::KeyCode::Char('y' | 'Y')));
+            }
+        }
+    }
+
+    let value = prompt_line("")?;
+    Ok(matches!(
+        value.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn generate_env_api_token() -> String {
+    format!("1f_{}", Uuid::new_v4().simple())
 }
 
 fn prompt_secret(label: &str) -> Result<Option<String>> {
@@ -790,6 +1012,7 @@ fn status() -> Result<()> {
         println!("  f env push    - Push .env to 1focus");
         println!("  f env guide   - Guided env setup from flow.toml");
         println!("  f env apply   - Apply 1focus envs to Cloudflare");
+        println!("  f env bootstrap - Bootstrap Cloudflare secrets");
         println!("  f env setup   - Interactive env setup");
         println!("  f env list    - List env vars");
         println!("  f env set K=V - Set env var");
