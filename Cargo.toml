@@ -39,6 +39,7 @@ dirs = "6.0.0"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 ctrlc = "3.4"
+rpassword = "7"
 
 [dev-dependencies]
 mockito = "1.7"

@@ -1,0 +1,106 @@
+# Flow Commands Reference
+
+Complete documentation for all `f` (flow) commands.
+
+## Quick Reference
+
+| Command | Description |
+|---------|-------------|
+| [`deploy`](deploy.md) | Deploy to Linux hosts, Cloudflare Workers, or Railway |
+| [`publish`](publish.md) | Publish project to GitHub |
+| [`commit`](commit.md) | AI-powered commit with code review |
+| [`upstream`](upstream.md) | Manage upstream fork workflow |
+| [`env`](env.md) | Sync project environment and manage env vars |
+| [`tasks`](tasks.md) | List and run project tasks |
+| [`ai`](ai.md) | Manage AI coding sessions (Claude Code) |
+| [`daemon`](daemon.md) | Manage background daemons |
+| [`parallel`](parallel.md) | Run tasks in parallel |
+| [`docs`](docs.md) | Manage auto-generated documentation |
+
+## Getting Started
+
+```bash
+# Show all commands
+f --help
+
+# Get help for a specific command
+f deploy --help
+f commit --help
+```
+
+## Command Categories
+
+### Deployment
+
+- **[deploy](deploy.md)** - Deploy to hosts and cloud platforms
+- **[publish](publish.md)** - Publish project to GitHub
+
+### Version Control
+
+- **[commit](commit.md)** - AI-powered commits with review
+- **[upstream](upstream.md)** - Fork management and sync
+- **[fixup](fixup.md)** - Fix common TOML syntax errors
+
+### Task Management
+
+- **[tasks](tasks.md)** - List project tasks
+- **[run](run.md)** - Run a specific task
+- **[parallel](parallel.md)** - Run tasks in parallel
+- **[rerun](rerun.md)** - Re-run last task
+- **[search](search.md)** - Fuzzy search global commands
+
+### Process Management
+
+- **[ps](ps.md)** - List running flow processes
+- **[kill](kill.md)** - Stop running processes
+- **[logs](logs.md)** - View task logs
+- **[daemon](daemon.md)** - Manage background daemons
+
+### AI & Development
+
+- **[ai](ai.md)** - Manage AI coding sessions
+- **[agent](agent.md)** - Invoke AI subagents
+- **[match](match.md)** - Match natural language to tasks
+- **[sessions](sessions.md)** - Search AI sessions across projects
+
+### Environment & Configuration
+
+- **[env](env.md)** - Manage environment variables
+- **[init](init.md)** - Scaffold a new flow.toml
+- **[doctor](doctor.md)** - Verify tools and integrations
+- **[start](start.md)** - Bootstrap project with .ai/ folder
+
+### Project Management
+
+- **[projects](projects.md)** - List registered projects
+- **[active](active.md)** - Show or set active project
+- **[hub](hub.md)** - Ensure hub daemon is running
+
+### Documentation
+
+- **[docs](docs.md)** - Manage auto-generated documentation
+- **[commits](commits.md)** - Browse commits with AI metadata
+
+### Other
+
+- **[skills](skills.md)** - Manage Codex skills
+- **[storage](storage.md)** - Manage storage providers
+- **[tools](tools.md)** - Manage AI tools
+- **[notify](notify.md)** - Send proposal notifications
+- **[server](server.md)** - Start HTTP server for logs
+
+## Global Options
+
+```bash
+-h, --help     Print help
+-V, --version  Print version
+```
+
+## Configuration
+
+Flow uses `flow.toml` for project configuration. See [flow.toml reference](../flow-toml.md) for full documentation.
+
+## See Also
+
+- [Getting Started Guide](../getting-started.md)
+- [flow.toml Reference](../flow-toml.md)

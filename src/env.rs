@@ -3,7 +3,7 @@
 //! Fetches, sets, and manages environment variables for projects
 //! using the 1focus API.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -132,6 +132,13 @@ fn find_flow_toml(start: &PathBuf) -> Option<PathBuf> {
     }
 }
 
+fn is_1focus_source(source: Option<&str>) -> bool {
+    matches!(
+        source.map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("1focus") | Some("1f") | Some("onefocus")
+    )
+}
+
 pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
     let auth = load_auth_config()?;
     let token = match auth.token.as_ref() {
@@ -177,6 +184,7 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
         EnvAction::Login => login()?,
         EnvAction::Pull { environment } => pull(&environment)?,
         EnvAction::Push { environment } => push(&environment)?,
+        EnvAction::Guide { environment } => guide(&environment)?,
         EnvAction::Apply => {
             let cwd = std::env::current_dir()?;
             let flow_path = find_flow_toml(&cwd)
@@ -397,11 +405,117 @@ fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+fn guide(environment: &str) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let flow_path = find_flow_toml(&cwd)
+        .ok_or_else(|| anyhow::anyhow!("flow.toml not found. Run `f init` first."))?;
+    let cfg = config::load(&flow_path)?;
+
+    let cf_cfg = cfg
+        .cloudflare
+        .as_ref()
+        .context("No [cloudflare] section in flow.toml")?;
+
+    let mut required = Vec::new();
+    let mut seen = HashSet::new();
+    for key in cf_cfg.env_keys.iter().chain(cf_cfg.env_vars.iter()) {
+        if seen.insert(key.clone()) {
+            required.push(key.clone());
+        }
+    }
+
+    if required.is_empty() {
+        bail!("No env keys configured. Add cloudflare.env_keys or cloudflare.env_vars to flow.toml.");
+    }
+
+    println!("Checking required env vars for '{}'...", environment);
+    let existing = fetch_project_env_vars(environment, &required)?;
+    let var_keys: HashSet<String> = cf_cfg.env_vars.iter().cloned().collect();
+
+    let mut missing = Vec::new();
+    for key in &required {
+        if existing.get(key).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+            println!("  ✓ {}", key);
+        } else {
+            println!("  ✗ {} (missing)", key);
+            missing.push(key.clone());
+        }
+    }
+
+    if missing.is_empty() {
+        println!("✓ All required env vars are set.");
+        return Ok(());
+    }
+
+    println!();
+    println!("Enter missing values (leave empty to skip).");
+    for key in missing {
+        let value = if var_keys.contains(&key) {
+            prompt_line(&format!("{}: ", key))?
+        } else {
+            prompt_secret(&format!("{}: ", key))?
+        };
+
+        if let Some(value) = value {
+            set_project_env_var(&key, &value, environment, None)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn prompt_line(label: &str) -> Result<Option<String>> {
+    print!("{}", label);
+    io::stdout().flush()?;
+
+    let mut value = String::new();
+    io::stdin().read_line(&mut value)?;
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+fn prompt_secret(label: &str) -> Result<Option<String>> {
+    let value = rpassword::prompt_password(label)?;
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
 fn setup(env_file: Option<PathBuf>, environment: Option<String>) -> Result<()> {
-    let project_root = std::env::current_dir()?;
+    let cwd = std::env::current_dir()?;
+    let flow_path = find_flow_toml(&cwd);
+    let (project_root, flow_cfg) = if let Some(path) = flow_path {
+        let cfg = config::load(&path)?;
+        let root = path.parent().unwrap_or(&cwd).to_path_buf();
+        (root, Some(cfg))
+    } else {
+        (cwd, None)
+    };
+
+    let cf_cfg = flow_cfg.as_ref().and_then(|cfg| cfg.cloudflare.as_ref());
+    let default_env = environment
+        .clone()
+        .or_else(|| cf_cfg.and_then(|cfg| cfg.environment.clone()));
+
+    if env_file.is_none() {
+        if let Some(cfg) = cf_cfg {
+            if is_1focus_source(cfg.env_source.as_deref()) {
+                let env = default_env.unwrap_or_else(|| "production".to_string());
+                return guide(&env);
+            }
+        }
+    }
+
     let defaults = EnvSetupDefaults {
         env_file,
-        environment,
+        environment: default_env,
     };
 
     let Some(result) = run_env_setup(&project_root, defaults)? else {
@@ -674,6 +788,7 @@ fn status() -> Result<()> {
         println!("Commands:");
         println!("  f env pull    - Fetch env vars");
         println!("  f env push    - Push .env to 1focus");
+        println!("  f env guide   - Guided env setup from flow.toml");
         println!("  f env apply   - Apply 1focus envs to Cloudflare");
         println!("  f env setup   - Interactive env setup");
         println!("  f env list    - List env vars");
