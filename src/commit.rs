@@ -1460,178 +1460,200 @@ fn run_claude_review(
     model: ClaudeModel,
 ) -> Result<ReviewResult> {
     if commit_with_check_review_url().is_some() {
-        return run_remote_claude_review(diff, session_context, review_instructions, model);
-    }
-
-    use std::io::{BufRead, BufReader};
-    use std::sync::mpsc;
-    use std::time::Instant;
-
-    let (diff_for_prompt, _truncated) = truncate_diff(diff);
-
-    // Build compact review prompt optimized for speed/cost
-    let mut prompt = String::from("Review diff for bugs, security, perf issues. Return JSON: {\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}\n");
-
-    // Add custom review instructions if provided
-    if let Some(instructions) = review_instructions {
-        prompt.push_str(&format!("\nAdditional review instructions:\n{}\n", instructions));
-    }
-
-    // Add session context if provided
-    if let Some(context) = session_context {
-        prompt.push_str(&format!("\nContext:\n{}\n", context));
-    }
-
-    prompt.push_str(&format!("```diff\n{}\n```", diff_for_prompt));
-
-    // Use claude CLI with print mode, piping prompt via stdin to avoid arg length limits
-    let model_arg = model.as_claude_arg();
-
-    let mut child = Command::new("claude")
-        .args(["-p", "--model", model_arg])
-        .current_dir(workdir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to run claude - is Claude Code SDK installed?")?;
-
-    // Write prompt to stdin
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .context("failed to write prompt to claude stdin")?;
-    }
-
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    let start = Instant::now();
-
-    let tx_stdout = tx.clone();
-    let reader_handle = std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().flatten() {
-            let _ = tx_stdout.send(ReviewEvent::Line(line));
+        match run_remote_claude_review(diff, session_context, review_instructions, model) {
+            Ok(review) => return Ok(review),
+            Err(err) => {
+                println!("⚠ Remote review failed: {}", err);
+                println!("  Falling back to local Claude review...");
+            }
         }
-        let _ = tx_stdout.send(ReviewEvent::StdoutDone);
-    });
+    }
 
-    let tx_stderr = tx.clone();
-    let stderr_handle = std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
-            let _ = tx_stderr.send(ReviewEvent::StderrLine(line));
+    let local_review = (|| -> Result<ReviewResult> {
+        use std::io::{BufRead, BufReader};
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let (diff_for_prompt, _truncated) = truncate_diff(diff);
+
+        // Build compact review prompt optimized for speed/cost
+        let mut prompt = String::from("Review diff for bugs, security, perf issues. Return JSON: {\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}\n");
+
+        // Add custom review instructions if provided
+        if let Some(instructions) = review_instructions {
+            prompt.push_str(&format!("\nAdditional review instructions:\n{}\n", instructions));
         }
-        let _ = tx_stderr.send(ReviewEvent::StderrDone);
-    });
 
-    let mut output_lines = Vec::new();
-    let mut stderr_lines = Vec::new();
-    let mut last_progress = Instant::now();
-    let timeout = Duration::from_secs(commit_with_check_timeout_secs());
-    let mut deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let mut done_count = 0;
-    loop {
-        match rx.recv_timeout(Duration::from_secs(2)) {
-            Ok(ReviewEvent::Line(line)) => {
-                println!("{}", line);
-                output_lines.push(line);
-                last_progress = Instant::now();
+        // Add session context if provided
+        if let Some(context) = session_context {
+            prompt.push_str(&format!("\nContext:\n{}\n", context));
+        }
+
+        prompt.push_str(&format!("```diff\n{}\n```", diff_for_prompt));
+
+        // Use claude CLI with print mode, piping prompt via stdin to avoid arg length limits
+        let model_arg = model.as_claude_arg();
+
+        let mut child = Command::new("claude")
+            .args(["-p", "--model", model_arg])
+            .current_dir(workdir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("failed to run claude - is Claude Code SDK installed?")?;
+
+        // Write prompt to stdin
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .context("failed to write prompt to claude stdin")?;
+        }
+
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let start = Instant::now();
+
+        let tx_stdout = tx.clone();
+        let reader_handle = std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                let _ = tx_stdout.send(ReviewEvent::Line(line));
             }
-            Ok(ReviewEvent::StderrLine(line)) => {
-                if !line.trim().is_empty() {
-                    println!("claude: {}", line);
-                }
-                stderr_lines.push(line);
+            let _ = tx_stdout.send(ReviewEvent::StdoutDone);
+        });
+
+        let tx_stderr = tx.clone();
+        let stderr_handle = std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                let _ = tx_stderr.send(ReviewEvent::StderrLine(line));
             }
-            Ok(ReviewEvent::StdoutDone) | Ok(ReviewEvent::StderrDone) => {
-                done_count += 1;
-                if done_count >= 2 {
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if last_progress.elapsed() >= Duration::from_secs(10) {
-                    println!(
-                        "Waiting on Claude review... ({}s elapsed, no output yet)",
-                        start.elapsed().as_secs()
-                    );
+            let _ = tx_stderr.send(ReviewEvent::StderrDone);
+        });
+
+        let mut output_lines = Vec::new();
+        let mut stderr_lines = Vec::new();
+        let mut last_progress = Instant::now();
+        let timeout = Duration::from_secs(commit_with_check_timeout_secs());
+        let mut deadline = Instant::now() + timeout;
+        let mut timed_out = false;
+        let mut done_count = 0;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(ReviewEvent::Line(line)) => {
+                    println!("{}", line);
+                    output_lines.push(line);
                     last_progress = Instant::now();
                 }
-                if Instant::now() >= deadline {
-                    if prompt_yes_no("Claude review is taking longer than expected. Keep waiting?")?
-                    {
-                        deadline = Instant::now() + timeout;
-                    } else {
-                        timed_out = true;
-                        let _ = child.kill();
+                Ok(ReviewEvent::StderrLine(line)) => {
+                    if !line.trim().is_empty() {
+                        println!("claude: {}", line);
+                    }
+                    stderr_lines.push(line);
+                }
+                Ok(ReviewEvent::StdoutDone) | Ok(ReviewEvent::StderrDone) => {
+                    done_count += 1;
+                    if done_count >= 2 {
                         break;
                     }
                 }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if last_progress.elapsed() >= Duration::from_secs(10) {
+                        println!(
+                            "Waiting on Claude review... ({}s elapsed, no output yet)",
+                            start.elapsed().as_secs()
+                        );
+                        last_progress = Instant::now();
+                    }
+                    if Instant::now() >= deadline {
+                        if prompt_yes_no("Claude review is taking longer than expected. Keep waiting?")?
+                        {
+                            deadline = Instant::now() + timeout;
+                        } else {
+                            timed_out = true;
+                            let _ = child.kill();
+                            break;
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        let _ = reader_handle.join();
+        let _ = stderr_handle.join();
+        let status = child.wait()?;
+        let stderr_output = stderr_lines.join("\n");
+
+        if timed_out {
+            if !stderr_output.trim().is_empty() {
+                println!("{}", stderr_output.trim_end());
+            }
+            return Ok(ReviewResult {
+                issues_found: false,
+                issues: Vec::new(),
+                summary: Some(format!(
+                    "Claude review timed out after {}s",
+                    timeout.as_secs()
+                )),
+                timed_out: true,
+            });
+        }
+
+        if !status.success() {
+            if !stderr_output.trim().is_empty() {
+                println!("{}", stderr_output.trim_end());
+            }
+            println!("\nnotify: Claude review failed");
+            bail!("Claude review failed");
+        }
+
+        let result = output_lines.join("\n");
+
+        let review_json = parse_review_json(&result);
+        let (issues_found, issues) = if let Some(ref parsed) = review_json {
+            if let Some(summary) = parsed.summary.as_ref() {
+                debug!(summary = summary.as_str(), "claude review summary");
+            }
+            (parsed.issues_found, parsed.issues.clone())
+        } else if result.trim().is_empty() {
+            (false, Vec::new())
+        } else {
+            debug!(review_output = result.as_str(), "claude review output");
+            let lowered = result.to_lowercase();
+            let has_issues = lowered.contains("bug")
+                || lowered.contains("issue")
+                || lowered.contains("problem")
+                || lowered.contains("error")
+                || lowered.contains("vulnerability")
+                || lowered.contains("performance issue")
+                || lowered.contains("memory leak");
+            (has_issues, Vec::new())
+        };
+
+        Ok(ReviewResult {
+            issues_found,
+            issues,
+            summary: review_json.and_then(|r| r.summary),
+            timed_out: false,
+        })
+    })();
+
+    match local_review {
+        Ok(review) => Ok(review),
+        Err(err) => {
+            println!("⚠ Local Claude review failed: {}", err);
+            println!("  Proceeding without review.");
+            Ok(ReviewResult {
+                issues_found: false,
+                issues: Vec::new(),
+                summary: Some(format!("Claude review failed: {}", err)),
+                timed_out: false,
+            })
         }
     }
-
-    let _ = reader_handle.join();
-    let _ = stderr_handle.join();
-    let status = child.wait()?;
-    let stderr_output = stderr_lines.join("\n");
-
-    if timed_out {
-        if !stderr_output.trim().is_empty() {
-            println!("{}", stderr_output.trim_end());
-        }
-        return Ok(ReviewResult {
-            issues_found: false,
-            issues: Vec::new(),
-            summary: Some(format!(
-                "Claude review timed out after {}s",
-                timeout.as_secs()
-            )),
-            timed_out: true,
-        });
-    }
-
-    if !status.success() {
-        if !stderr_output.trim().is_empty() {
-            println!("{}", stderr_output.trim_end());
-        }
-        println!("\nnotify: Claude review failed");
-        bail!("Claude review failed");
-    }
-
-    let result = output_lines.join("\n");
-
-    let review_json = parse_review_json(&result);
-    let (issues_found, issues) = if let Some(ref parsed) = review_json {
-        if let Some(summary) = parsed.summary.as_ref() {
-            debug!(summary = summary.as_str(), "claude review summary");
-        }
-        (parsed.issues_found, parsed.issues.clone())
-    } else if result.trim().is_empty() {
-        (false, Vec::new())
-    } else {
-        debug!(review_output = result.as_str(), "claude review output");
-        let lowered = result.to_lowercase();
-        let has_issues = lowered.contains("bug")
-            || lowered.contains("issue")
-            || lowered.contains("problem")
-            || lowered.contains("error")
-            || lowered.contains("vulnerability")
-            || lowered.contains("performance issue")
-            || lowered.contains("memory leak");
-        (has_issues, Vec::new())
-    };
-
-    Ok(ReviewResult {
-        issues_found,
-        issues,
-        summary: review_json.and_then(|r| r.summary),
-        timed_out: false,
-    })
 }
 
 fn ensure_git_repo() -> Result<()> {

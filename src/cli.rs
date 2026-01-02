@@ -69,6 +69,12 @@ pub enum Commands {
     )]
     Search,
     #[command(
+        about = "Run tasks from the global flow config.",
+        long_about = "Run tasks defined in ~/.config/flow/flow.toml without project discovery.",
+        alias = "g"
+    )]
+    Global(GlobalCommand),
+    #[command(
         about = "Ensure the background hub daemon is running (spawns it if missing).",
         long_about = "Checks the /health endpoint on the configured host/port (defaults to 127.0.0.1:9050). If unreachable, a daemon is launched in the background using the lin runtime recorded via `lin register` (or PATH), then a TUI opens so you can inspect managed servers and aggregated logs."
     )]
@@ -180,8 +186,8 @@ pub enum Commands {
     )]
     Ai(AiCommand),
     #[command(
-        about = "Sync project environment and manage env vars.",
-        long_about = "With no arguments, syncs project settings and sets up autonomous agent workflow (creates agents.md). With subcommands, manages environment variables via 1focus."
+        about = "Manage project env vars and 1focus sync.",
+        long_about = "With no arguments, lists project env vars for the current environment. Use subcommands to manage env vars via 1focus or run the sync workflow."
     )]
     Env(EnvCommand),
     #[command(
@@ -247,6 +253,11 @@ pub enum Commands {
         long_about = "Create a new GitHub repository and push the current project. Infers repo name from folder, asks for public/private visibility."
     )]
     Publish(PublishOpts),
+    #[command(
+        about = "Clone repositories into a structured local directory.",
+        long_about = "Clone repositories into ~/repos/<owner>/<repo> with SSH URLs and optional upstream setup for forks."
+    )]
+    Repos(ReposCommand),
     #[command(
         about = "Run tasks in parallel with pretty status display.",
         long_about = "Execute multiple shell commands in parallel with a real-time status display showing spinners, progress, and output. Useful for running independent tasks concurrently.",
@@ -356,6 +367,38 @@ impl Default for TasksOpts {
             config: PathBuf::from("flow.toml"),
         }
     }
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GlobalCommand {
+    #[command(subcommand)]
+    pub action: Option<GlobalAction>,
+    /// Task name to run (omit to list global tasks).
+    #[arg(value_name = "TASK")]
+    pub task: Option<String>,
+    /// List global tasks.
+    #[arg(long, short)]
+    pub list: bool,
+    /// Additional arguments passed to the task command.
+    #[arg(value_name = "ARGS", trailing_var_arg = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum GlobalAction {
+    /// List global tasks.
+    List,
+    /// Run a global task by name.
+    Run {
+        /// Task name to run.
+        #[arg(value_name = "TASK")]
+        task: String,
+        /// Additional arguments passed to the task command.
+        #[arg(value_name = "ARGS", trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Match a query against global tasks (LM Studio).
+    Match(MatchOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -862,6 +905,10 @@ pub struct EnvCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum EnvAction {
+    /// Sync project settings and set up autonomous agent workflow.
+    Sync,
+    /// Unlock env read access (Touch ID on macOS).
+    Unlock,
     /// Authenticate with 1focus to fetch env vars.
     Login,
     /// Fetch env vars from 1focus and write to .env.
@@ -952,6 +999,8 @@ pub enum EnvAction {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+    /// Show configured env keys from flow.toml.
+    Keys,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1182,6 +1231,36 @@ pub struct PublishOpts {
     /// Skip confirmation prompts.
     #[arg(short, long)]
     pub yes: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReposCommand {
+    #[command(subcommand)]
+    pub action: Option<ReposAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ReposAction {
+    /// Clone a repository into ~/repos/<owner>/<repo>.
+    Clone(ReposCloneOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReposCloneOpts {
+    /// Repository URL or owner/repo.
+    pub url: String,
+    /// Root directory for clones (default: ~/repos).
+    #[arg(long, default_value = "~/repos")]
+    pub root: String,
+    /// Perform a full clone (skip shallow clone + background history fetch).
+    #[arg(long)]
+    pub full: bool,
+    /// Skip automatic upstream setup for forks.
+    #[arg(long)]
+    pub no_upstream: bool,
+    /// Upstream URL override (defaults to fork parent via gh).
+    #[arg(short = 'u', long)]
+    pub upstream_url: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]

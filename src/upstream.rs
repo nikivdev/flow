@@ -25,6 +25,15 @@ pub fn run(cmd: UpstreamCommand) -> Result<()> {
     }
 }
 
+/// Set up upstream remote and local tracking branch, with optional fetch depth.
+pub fn setup_upstream_with_depth(
+    upstream_url: Option<&str>,
+    upstream_branch: Option<&str>,
+    depth: Option<u32>,
+) -> Result<()> {
+    setup_upstream_internal(upstream_url, upstream_branch, depth)
+}
+
 /// Show current upstream configuration status.
 fn show_status() -> Result<()> {
     println!("Upstream Fork Status\n");
@@ -77,6 +86,14 @@ fn show_status() -> Result<()> {
 
 /// Set up upstream remote and local tracking branch.
 fn setup_upstream(upstream_url: Option<&str>, upstream_branch: Option<&str>) -> Result<()> {
+    setup_upstream_internal(upstream_url, upstream_branch, None)
+}
+
+fn setup_upstream_internal(
+    upstream_url: Option<&str>,
+    upstream_branch: Option<&str>,
+    depth: Option<u32>,
+) -> Result<()> {
     // Check if upstream remote exists
     let has_upstream = git_capture(&["remote", "get-url", "upstream"]).is_ok();
 
@@ -102,7 +119,12 @@ fn setup_upstream(upstream_url: Option<&str>, upstream_branch: Option<&str>) -> 
 
     // Fetch upstream
     println!("\nFetching upstream...");
-    git_run(&["fetch", "upstream", "--prune"])?;
+    if let Some(depth) = depth {
+        let depth_str = depth.to_string();
+        git_run(&["fetch", "upstream", "--prune", "--depth", &depth_str])?;
+    } else {
+        git_run(&["fetch", "upstream", "--prune"])?;
+    }
 
     // Determine upstream branch (explicit > HEAD > main > master)
     let upstream_branch = if let Some(branch) = upstream_branch {
