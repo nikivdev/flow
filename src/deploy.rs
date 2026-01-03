@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{DeployAction, DeployCommand};
+use crate::cli::{DeployAction, DeployCommand, EnvAction};
 use crate::config::Config;
 use crate::deploy_setup::{CloudflareSetupDefaults, CloudflareSetupResult, run_cloudflare_setup};
 use crate::env::parse_env_file;
@@ -366,21 +366,46 @@ fn deploy_cloudflare(
         env_apply_mode_from_str(cf_cfg.env_apply.as_deref())
     };
     let should_apply = matches!(env_apply_mode, EnvApplyMode::Always | EnvApplyMode::Auto);
+    let use_1focus = is_1focus_source(cf_cfg.env_source.as_deref());
 
-    if should_apply {
-        if is_1focus_source(cf_cfg.env_source.as_deref()) {
-            if let Err(err) = apply_cloudflare_env_from_config(project_root, cf_cfg) {
-                if env_apply_mode == EnvApplyMode::Auto {
-                    if is_tls_connect_error(&err) {
-                        eprintln!(
-                            "⚠ Unable to reach 1focus (TLS/connect). Skipping env sync for now."
-                        );
+    let onefocus_env = env_name.unwrap_or("production");
+    let mut onefocus_vars: HashMap<String, String> = HashMap::new();
+
+    if use_1focus {
+        let keys = collect_cloudflare_env_keys(cf_cfg);
+        if !keys.is_empty() {
+            match crate::env::fetch_project_env_vars(onefocus_env, &keys) {
+                Ok(vars) => {
+                    onefocus_vars = vars;
+                }
+                Err(err) => {
+                    if env_apply_mode == EnvApplyMode::Auto {
+                        if is_tls_connect_error(&err) {
+                            eprintln!(
+                                "⚠ Unable to reach 1focus (TLS/connect). Skipping env sync for now."
+                            );
+                        } else {
+                            eprintln!("⚠ Env sync skipped: {err}");
+                        }
+                    } else if env_apply_mode == EnvApplyMode::Always {
+                        return Err(err);
                     } else {
                         eprintln!("⚠ Env sync skipped: {err}");
                     }
-                } else {
-                    return Err(err);
                 }
+            }
+        }
+    }
+
+    if should_apply {
+        if use_1focus {
+            if !onefocus_vars.is_empty() {
+                apply_cloudflare_env_map(project_root, cf_cfg, &onefocus_vars)?;
+            } else if env_apply_mode == EnvApplyMode::Always {
+                bail!(
+                    "No env vars found in 1focus for environment '{}'",
+                    onefocus_env
+                );
             }
         } else if let Some(env_file) = &cf_cfg.env_file {
             let env_path = project_root.join(env_file);
@@ -400,14 +425,20 @@ fn deploy_cloudflare(
     let cmd = append_env_arg(cmd, env_name);
 
     println!("==> Running: {}", cmd);
-    let status = Command::new("sh")
+    let mut deploy_cmd = Command::new("sh");
+    deploy_cmd
         .arg("-c")
         .arg(cmd)
         .current_dir(&worker_path)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+        .stderr(Stdio::inherit());
+
+    if use_1focus && !onefocus_vars.is_empty() {
+        deploy_cmd.envs(&onefocus_vars);
+    }
+
+    let status = deploy_cmd.status()?;
 
     if !status.success() {
         bail!("Cloudflare deployment failed");
@@ -457,6 +488,36 @@ fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConf
         bail!("cloudflare.env_source must be set to \"1focus\" to apply envs");
     }
 
+    let onefocus_env = cf_cfg
+        .environment
+        .as_deref()
+        .unwrap_or("production");
+    let keys = collect_cloudflare_env_keys(cf_cfg);
+    let vars = crate::env::fetch_project_env_vars(onefocus_env, &keys)?;
+    if vars.is_empty() {
+        bail!("No env vars found in 1focus for environment '{}'", onefocus_env);
+    }
+
+    apply_cloudflare_env_map(project_root, cf_cfg, &vars)?;
+    Ok(())
+}
+
+fn collect_cloudflare_env_keys(cf_cfg: &CloudflareConfig) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut seen = HashSet::new();
+    for key in cf_cfg.env_keys.iter().chain(cf_cfg.env_vars.iter()) {
+        if seen.insert(key.clone()) {
+            keys.push(key.clone());
+        }
+    }
+    keys
+}
+
+fn apply_cloudflare_env_map(
+    project_root: &Path,
+    cf_cfg: &CloudflareConfig,
+    vars: &HashMap<String, String>,
+) -> Result<()> {
     let worker_path = cf_cfg
         .path
         .as_ref()
@@ -465,25 +526,9 @@ fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConf
     ensure_wrangler_config(&worker_path)?;
 
     let wrangler_env = cf_cfg.environment.as_deref();
-    let onefocus_env = wrangler_env.unwrap_or("production");
-
-    let mut keys = cf_cfg.env_keys.clone();
-    if !keys.is_empty() {
-        for key in &cf_cfg.env_vars {
-            if !keys.iter().any(|existing| existing == key) {
-                keys.push(key.clone());
-            }
-        }
-    }
-
-    let vars = crate::env::fetch_project_env_vars(onefocus_env, &keys)?;
-    if vars.is_empty() {
-        bail!("No env vars found in 1focus for environment '{}'", onefocus_env);
-    }
-
     let var_keys: HashSet<String> = cf_cfg.env_vars.iter().cloned().collect();
     println!("==> Applying {} env var(s) from 1focus...", vars.len());
-    set_wrangler_env_map(&worker_path, wrangler_env, &vars, &var_keys)?;
+    set_wrangler_env_map(&worker_path, wrangler_env, vars, &var_keys)?;
     Ok(())
 }
 
@@ -604,10 +649,13 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
             .path
             .as_ref()
             .map(|p| project_root.join(p)),
-        env_file: cf_cfg
-            .env_file
-            .as_ref()
-            .map(|p| project_root.join(p)),
+        env_file: if is_1focus_source(cf_cfg.env_source.as_deref()) {
+            None
+        } else {
+            cf_cfg.env_file
+                .as_ref()
+                .map(|p| project_root.join(p))
+        },
         environment: cf_cfg.environment.clone(),
     };
 
@@ -624,7 +672,19 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
     update_flow_toml_cloudflare(&flow_path, project_root, &result)?;
 
     if result.apply_secrets {
-        if let Some(env_file) = result.env_file.as_ref() {
+        if is_1focus_source(cf_cfg.env_source.as_deref()) {
+            if !cf_cfg.bootstrap_secrets.is_empty() {
+                println!("==> Bootstrapping secrets (optional)...");
+                crate::env::run(Some(EnvAction::Bootstrap))?;
+            }
+
+            let env_name = result
+                .environment
+                .clone()
+                .unwrap_or_else(|| "production".to_string());
+            crate::env::run(Some(EnvAction::Guide { environment: env_name }))?;
+            crate::env::run(Some(EnvAction::Apply))?;
+        } else if let Some(env_file) = result.env_file.as_ref() {
             let env_name = result.environment.as_deref();
             set_wrangler_secrets(
                 &result.worker_path,
