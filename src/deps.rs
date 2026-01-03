@@ -20,8 +20,8 @@ pub fn run(cmd: DepsCommand) -> Result<()> {
         None | Some(DepsAction::Pick) => {
             pick_dependency(&project_root)?;
         }
-        Some(DepsAction::Repo { repo, root }) => {
-            link_repo_dependency(&project_root, &repo, &root)?;
+        Some(DepsAction::Repo { repo, root, private }) => {
+            link_repo_dependency(&project_root, &repo, &root, private)?;
         }
         Some(other) => {
             let (program, args) = build_command(manager, &project_root, &other)?;
@@ -180,7 +180,9 @@ fn pick_dependency(project_root: &Path) -> Result<()> {
     };
 
     match &entry.action {
-        DepPickAction::RepoLink { repo } => link_repo_dependency(project_root, repo, &default_root)?,
+        DepPickAction::RepoLink { repo } => {
+            link_repo_dependency(project_root, repo, &default_root, false)?
+        }
         DepPickAction::RepoOpen { owner, repo } => {
             let repo_ref = repos::RepoRef {
                 owner: owner.clone(),
@@ -189,7 +191,7 @@ fn pick_dependency(project_root: &Path) -> Result<()> {
             let repo_path = root_path.join(&repo_ref.owner).join(&repo_ref.repo);
             if !repo_path.exists() {
                 let repo_id = format!("{}/{}", repo_ref.owner, repo_ref.repo);
-                link_repo_dependency(project_root, &repo_id, &default_root)?;
+                link_repo_dependency(project_root, &repo_id, &default_root, false)?;
             }
             open_in_zed(&repo_path)?;
         }
@@ -685,7 +687,12 @@ fn is_project_root(root: &Path, candidate: &Path) -> bool {
     root == candidate
 }
 
-fn link_repo_dependency(project_root: &Path, repo: &str, root: &str) -> Result<()> {
+fn link_repo_dependency(
+    project_root: &Path,
+    repo: &str,
+    root: &str,
+    private_origin: bool,
+) -> Result<()> {
     let ai_dir = project_root.join(".ai");
     let repos_dir = ai_dir.join("repos");
     std::fs::create_dir_all(&repos_dir)
@@ -699,6 +706,7 @@ fn link_repo_dependency(project_root: &Path, repo: &str, root: &str) -> Result<(
     };
 
     let target_dir = root_path.join(&repo_ref.owner).join(&repo_ref.repo);
+    let mut cloned = false;
     if !target_dir.exists() {
         let opts = ReposCloneOpts {
             url: repo.to_string(),
@@ -708,13 +716,22 @@ fn link_repo_dependency(project_root: &Path, repo: &str, root: &str) -> Result<(
             upstream_url: None,
         };
         repos::clone_repo(opts)?;
+        cloned = true;
     } else {
         println!("✓ found repo at {}", target_dir.display());
     }
 
     let origin_url = format!("git@github.com:{}/{}.git", repo_ref.owner, repo_ref.repo);
-    if let Err(err) = maybe_setup_private_origin(&target_dir, &repo_ref, &origin_url) {
-        println!("⚠ private origin setup skipped: {}", err);
+    if cloned {
+        if let Err(err) = ensure_upstream(&target_dir, &origin_url) {
+            println!("⚠ upstream setup skipped: {}", err);
+        }
+    }
+
+    if private_origin {
+        if let Err(err) = maybe_setup_private_origin(&target_dir, &repo_ref, &origin_url) {
+            println!("⚠ private origin setup skipped: {}", err);
+        }
     }
 
     let owner_dir = repos_dir.join(&repo_ref.owner);
@@ -883,6 +900,19 @@ fn maybe_setup_private_origin(
     }
     println!("✓ origin -> {}", private_repo);
 
+    Ok(())
+}
+
+fn ensure_upstream(repo_dir: &Path, origin_url: &str) -> Result<()> {
+    if !repo_dir.join(".git").exists() {
+        return Ok(());
+    }
+
+    if git_remote_get(repo_dir, "upstream")?.is_some() {
+        return Ok(());
+    }
+
+    configure_upstream(repo_dir, origin_url)?;
     Ok(())
 }
 
