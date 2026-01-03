@@ -1,0 +1,16 @@
+root = "~/repos"
+
+[[repos]]
+owner = "rust-lang"
+repo = "crates.io-index"
+url = "https://github.com/rust-lang/crates.io-index"
+
+[[repos]]
+owner = "dtolnay"
+repo = "anyhow"
+url = "https://github.com/dtolnay/anyhow"
+
+[[repos]]
+owner = "tokio-rs"
+repo = "tokio"
+url = "https://github.com/tokio-rs/tokio"

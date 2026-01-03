@@ -15,7 +15,10 @@ use crate::{config, upstream};
 /// Run the repos subcommand.
 pub fn run(cmd: ReposCommand) -> Result<()> {
     match cmd.action {
-        Some(ReposAction::Clone(opts)) => clone_repo(opts),
+        Some(ReposAction::Clone(opts)) => {
+            clone_repo(opts)?;
+            Ok(())
+        }
         None => {
             println!("Usage: f repos clone <url>");
             Ok(())
@@ -23,10 +26,10 @@ pub fn run(cmd: ReposCommand) -> Result<()> {
     }
 }
 
-#[derive(Debug)]
-struct RepoRef {
-    owner: String,
-    repo: String,
+#[derive(Debug, Clone)]
+pub(crate) struct RepoRef {
+    pub(crate) owner: String,
+    pub(crate) repo: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,7 +45,7 @@ struct RepoParent {
     ssh_url: String,
 }
 
-fn clone_repo(opts: ReposCloneOpts) -> Result<()> {
+pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     let repo_ref = parse_github_repo(&opts.url)?;
     let root = normalize_root(&opts.root)?;
     let owner_dir = root.join(&repo_ref.owner);
@@ -66,7 +69,7 @@ fn clone_repo(opts: ReposCloneOpts) -> Result<()> {
         if shallow {
             spawn_background_history_fetch(&target_dir, false)?;
         }
-        return Ok(());
+        return Ok(target_dir);
     }
 
     let upstream_url = if let Some(url) = opts.upstream_url {
@@ -81,7 +84,7 @@ fn clone_repo(opts: ReposCloneOpts) -> Result<()> {
         if shallow {
             spawn_background_history_fetch(&target_dir, false)?;
         }
-        return Ok(());
+        return Ok(target_dir);
     };
 
     if upstream_url.trim() == clone_url {
@@ -89,7 +92,7 @@ fn clone_repo(opts: ReposCloneOpts) -> Result<()> {
         if shallow {
             spawn_background_history_fetch(&target_dir, false)?;
         }
-        return Ok(());
+        return Ok(target_dir);
     }
 
     configure_upstream(&target_dir, &upstream_url, fetch_depth)?;
@@ -97,10 +100,10 @@ fn clone_repo(opts: ReposCloneOpts) -> Result<()> {
         spawn_background_history_fetch(&target_dir, true)?;
     }
 
-    Ok(())
+    Ok(target_dir)
 }
 
-fn parse_github_repo(input: &str) -> Result<RepoRef> {
+pub(crate) fn parse_github_repo(input: &str) -> Result<RepoRef> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         bail!("missing repository URL");
@@ -140,7 +143,7 @@ fn parse_github_repo(input: &str) -> Result<RepoRef> {
     })
 }
 
-fn normalize_root(raw: &str) -> Result<PathBuf> {
+pub(crate) fn normalize_root(raw: &str) -> Result<PathBuf> {
     let expanded = config::expand_path(raw);
     if expanded.is_absolute() {
         return Ok(expanded);

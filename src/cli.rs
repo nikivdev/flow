@@ -1081,7 +1081,7 @@ pub struct DepsCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum DepsAction {
-    /// Install dependencies (default).
+    /// Install dependencies.
     Install {
         /// Extra args to pass to the package manager.
         #[arg(trailing_var_arg = true)]
@@ -1092,6 +1092,17 @@ pub enum DepsAction {
         /// Extra args to pass to the package manager.
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+    /// Fuzzy-pick a dependency or linked repo and fetch it to ~/repos.
+    #[command(alias = "pick", alias = "find", alias = "search")]
+    Pick,
+    /// Add an external repo dependency and link it under .ai/repos.
+    Repo {
+        /// Repository URL, owner/repo, or repo name (searches ~/repos).
+        repo: String,
+        /// Root directory for clones (default: ~/repos).
+        #[arg(long, default_value = "~/repos")]
+        root: String,
     },
 }
 
