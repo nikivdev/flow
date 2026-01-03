@@ -9,6 +9,7 @@ Manage environment variables securely via 1focus. Supports:
 - Personal/global variables
 - Multiple environments (dev, staging, production)
 - Direct injection into commands
+- Touch ID gating for env reads on macOS
 
 ## Quick Start
 
@@ -16,8 +17,8 @@ Manage environment variables securely via 1focus. Supports:
 # Store a secret
 f env set API_KEY=sk-xxx -d "OpenAI API key"
 
-# List variables
-f env list
+# List variables (default action when logged in)
+f env
 
 # Run command with env vars injected
 f env run -- npm start
@@ -41,6 +42,10 @@ f env get API_KEY -f value
 | `setup` | Interactive wizard to push env vars |
 | `run` | Run command with env vars injected |
 | `status` | Show current auth status |
+| `keys` | Show configured env keys from flow.toml |
+| `sync` | Sync project settings and hub workflow |
+| `bootstrap` | Bootstrap Cloudflare secrets from flow.toml |
+| `unlock` | Unlock env reads (Touch ID on macOS) |
 
 ---
 
@@ -57,9 +62,6 @@ f env set API_KEY=sk-xxx -d "OpenAI API key"
 
 # Specific environment
 f env set DATABASE_URL=postgres://... -e staging
-
-# Personal (global, not project-specific)
-f env set --personal GITHUB_TOKEN=ghp_xxx
 ```
 
 ### Options
@@ -68,7 +70,7 @@ f env set --personal GITHUB_TOKEN=ghp_xxx
 |--------|-------|-------------|
 | `--environment <ENV>` | `-e` | Environment: dev, staging, production (default: production) |
 | `--description <DESC>` | `-d` | Optional description for this env var |
-| `--personal` | | Store as personal/global variable |
+| `--personal` | | Fetch from personal store (get/run only) |
 
 ---
 
@@ -206,7 +208,8 @@ Interactive wizard for pushing env vars:
 f env setup
 ```
 
-Guides you through:
+If `[cloudflare] env_source = "1focus"` is set in `flow.toml`, this runs a guided
+prompt based on `env_keys`/`env_vars`. Otherwise it guides you through:
 1. Reading your `.env` file
 2. Selecting which keys to push
 3. Confirming before upload
@@ -235,7 +238,8 @@ Authenticate with 1focus:
 f env login
 ```
 
-Opens browser for OAuth flow. Tokens stored securely.
+Prompts for API base URL and token. On macOS, the token is stored in Keychain
+and Flow uses Touch ID to unlock env reads.
 
 ---
 
@@ -250,8 +254,8 @@ f env status
 Output:
 ```
 1focus Status
-  Authenticated: yes
-  User: youruser
+  Token: stored in Keychain
+  API: https://1focus.ai
   Project: myproject
 ```
 
@@ -266,6 +270,22 @@ f env apply
 ```
 
 Requires `env_source = "1focus"` in your `[cloudflare]` config.
+
+## Keys
+
+Show env keys configured in `flow.toml` without printing values:
+
+```bash
+f env keys
+```
+
+## Unlock
+
+On macOS, unlock env reads for the day (Touch ID):
+
+```bash
+f env unlock
+```
 
 ---
 
@@ -297,12 +317,11 @@ f env run -e staging -- npm run preview
 | Personal | `--personal` | Global/user | GitHub token, Telegram bot token |
 
 Personal variables are tied to your user account, not a specific project.
+`--personal` is supported for `get` and `run` (reading), while `set` writes
+project env vars.
 
 ```bash
-# Store globally
-f env set --personal ANTHROPIC_API_KEY=sk-xxx
-
-# Use in any project
+# Use a personal token in any project
 f env run --personal -k ANTHROPIC_API_KEY -- ./my-script
 ```
 
