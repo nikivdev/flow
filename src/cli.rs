@@ -1103,6 +1103,9 @@ pub enum DepsAction {
         /// Root directory for clones (default: ~/repos).
         #[arg(long, default_value = "~/repos")]
         root: String,
+        /// Create a private fork in your GitHub account and set origin.
+        #[arg(long, alias = "private-origin")]
+        private: bool,
     },
 }
 
