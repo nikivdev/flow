@@ -11,6 +11,8 @@ use crate::{
     discover::{self, DiscoveredTask},
     lmstudio, tasks,
 };
+use clap::CommandFactory;
+use crate::cli::Cli;
 
 /// Options for the match command.
 #[derive(Debug, Clone)]
@@ -36,53 +38,18 @@ pub struct MatchResult {
 // Built-in commands that can be run directly if no task matches
 const BUILTIN_COMMANDS: &[(&str, &[&str])] = &[("commit", &["commit", "c"])];
 
-// CLI subcommands that should be passed through to the CLI parser, not matched as tasks
-const CLI_SUBCOMMANDS: &[&str] = &[
-    // Core commands
-    "hub",
-    "init",
-    "doctor",
-    "tasks",
-    "global",
-    "run",
-    "search",
-    "match",
-    "help",
-    // Process management
-    "logs",
-    "ps",
-    "kill",
-    "projects",
-    "active",
-    "server",
-    // History
-    "rerun",
-    "last-cmd",
-    "last-cmd-full",
-    // Git/commit
-    "commit",
-    "commitwithcheck",
-    "fixup",
-    "commits",
-    // AI/sessions
-    "sessions",
-    "ai",
-    "agent",
-    // Environment
-    "env",
-    "skills",
-    "tools",
-    "notify",
-    "start",
-    "upstream",
-    // Aliases
-    "s",  // search
-    "g",  // global
-    "a",  // agent
-    "up", // upstream
-    // Deploy
-    "deploy",
-];
+fn cli_subcommands() -> Vec<String> {
+    let mut names = Vec::new();
+    let cmd = Cli::command();
+    for sub in cmd.get_subcommands() {
+        names.push(sub.get_name().to_string());
+        for alias in sub.get_all_aliases() {
+            names.push(alias.to_string());
+        }
+    }
+    names.extend(["help", "-h", "--help"].iter().map(|s| s.to_string()));
+    names
+}
 
 fn run_builtin(name: &str, execute: bool) -> Result<()> {
     match name {
@@ -109,13 +76,13 @@ fn find_builtin(query: &str) -> Option<&'static str> {
 
 /// Check if the first arg is a CLI subcommand that needs pass-through
 fn is_cli_subcommand(args: &[String]) -> bool {
-    args.first()
-        .map(|first| {
-            CLI_SUBCOMMANDS
-                .iter()
-                .any(|cmd| cmd.eq_ignore_ascii_case(first))
-        })
-        .unwrap_or(false)
+    let Some(first) = args.first() else {
+        return false;
+    };
+    let first_lower = first.to_ascii_lowercase();
+    cli_subcommands()
+        .iter()
+        .any(|cmd| cmd.eq_ignore_ascii_case(&first_lower))
 }
 
 /// Re-invoke the CLI with the original arguments (bypassing match)

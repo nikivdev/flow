@@ -261,12 +261,15 @@ if (!context.canEvaluatePolicyError(policy, error)) {{
   $.exit(2);
 }}
 let ok = false;
-const sem = $.dispatch_semaphore_create(0);
+let done = false;
 context.evaluatePolicyLocalizedReasonReply(policy, "{reason}", function(success, err) {{
   ok = success;
-  $.dispatch_semaphore_signal(sem);
+  done = true;
 }});
-$.dispatch_semaphore_wait(sem, $.DISPATCH_TIME_FOREVER);
+const runLoop = $.NSRunLoop.currentRunLoop;
+while (!done) {{
+  runLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));
+}}
 $.exit(ok ? 0 : 1);"#
     );
 
