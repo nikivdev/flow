@@ -707,12 +707,6 @@ fn execute_task(
     let flox_disabled = flox_disabled_marker(workdir).exists();
 
     if flox_pkgs.is_empty() || flox_disabled || !flox_enabled {
-        if flox_disabled {
-            log_and_capture(
-                &mut combined_output,
-                "flox disabled for this project (marker present); using host PATH",
-            );
-        }
         let (st, out) = run_host_command(workdir, command, args, Some(task_ctx.clone()))?;
         status = st;
         combined_output.push_str(&out);

@@ -103,23 +103,33 @@ fn resolve_project_root(config_path: &PathBuf) -> Result<(PathBuf, PathBuf)> {
 }
 
 fn setup_deploy(project_root: &Path, config_path: &Path) -> Result<()> {
+    let server_reason = detect_server_project(project_root);
+    let auto_mode = server_reason.is_some();
+
     if !config_path.exists() {
-        create_flow_toml_interactive(project_root, config_path)?;
+        if auto_mode {
+            create_flow_toml_auto(project_root, config_path)?;
+        } else {
+            create_flow_toml_interactive(project_root, config_path)?;
+        }
     }
 
     let mut flow_content = fs::read_to_string(config_path).unwrap_or_default();
     if has_host_section(&flow_content) {
-        println!("flow.toml already includes [host] configuration.");
+        if auto_mode {
+            repair_existing_host_config(project_root, config_path, &flow_content)?;
+        } else {
+            println!("flow.toml already includes [host] configuration.");
+        }
         return Ok(());
     }
 
     let is_tty = io::stdin().is_terminal();
-    let server_reason = detect_server_project(project_root);
     let mut defaults = deploy_defaults(project_root);
 
     if let Some(reason) = server_reason.as_deref() {
         println!("Detected server project: {reason}");
-        if is_tty && !prompt_yes_no("Configure Linux host deployment now?", true)? {
+        if !auto_mode && is_tty && !prompt_yes_no("Configure Linux host deployment now?", true)? {
             println!("Skipped host setup. Run `f setup deploy` later to configure.");
             return Ok(());
         }
@@ -130,9 +140,9 @@ fn setup_deploy(project_root: &Path, config_path: &Path) -> Result<()> {
         if let Some(template) = template.as_ref() {
             println!("Using server setup template from {}.", template.source);
         }
-        apply_server_template(&mut defaults, template.as_ref());
+        apply_server_template(&mut defaults, template.as_ref(), project_root);
 
-        if is_tty && prompt_yes_no("Use AI to draft host config?", true)? {
+        if !auto_mode && is_tty && prompt_yes_no("Use AI to draft host config?", true)? {
             println!("Generating host config with AI...");
             io::stdout().flush()?;
             let result = generate_host_config_with_agent(project_root, None);
@@ -247,16 +257,24 @@ fn setup_deploy(project_root: &Path, config_path: &Path) -> Result<()> {
 
     if let Some(script_path) = setup_script.as_ref() {
         if let Some(content) = defaults.setup_script_content.as_deref() {
-            ensure_setup_script(project_root, script_path, content)?;
+            ensure_setup_script(project_root, script_path, content, false)?;
         }
     }
 
     if let Some(env_path) = env_file.as_ref() {
-        ensure_env_file(project_root, env_path, defaults.env_example.as_ref(), is_tty)?;
+        ensure_env_file(
+            project_root,
+            env_path,
+            defaults.env_example.as_ref(),
+            !auto_mode && is_tty,
+            auto_mode,
+        )?;
     }
 
-    if is_tty {
-        maybe_configure_deploy_host()?;
+    if auto_mode {
+        maybe_configure_deploy_host(true)?;
+    } else if is_tty {
+        maybe_configure_deploy_host(false)?;
     }
 
     let host_cfg = HostSetupConfig {
@@ -308,7 +326,7 @@ fn setup_release(project_root: &Path, config_path: &Path) -> Result<()> {
     }
 
     let mut defaults = deploy_defaults(project_root);
-    apply_server_template(&mut defaults, template.as_ref());
+    apply_server_template(&mut defaults, template.as_ref(), project_root);
 
     if defaults.run.is_none() {
         println!("Warning: no run command set; deploy will not create a systemd service.");
@@ -316,16 +334,16 @@ fn setup_release(project_root: &Path, config_path: &Path) -> Result<()> {
 
     if let Some(content) = defaults.setup_script_content.as_deref() {
         if !defaults.setup_path.trim().is_empty() {
-            ensure_setup_script(project_root, &defaults.setup_path, content)?;
+            ensure_setup_script(project_root, &defaults.setup_path, content, false)?;
         }
     }
 
     if let Some(env_path) = defaults.env_file.as_ref() {
-        ensure_env_file(project_root, env_path, defaults.env_example.as_ref(), false)?;
+        ensure_env_file(project_root, env_path, defaults.env_example.as_ref(), false, false)?;
     }
 
     if io::stdin().is_terminal() {
-        maybe_configure_deploy_host()?;
+        maybe_configure_deploy_host(false)?;
     }
 
     let host_cfg = HostSetupConfig {
@@ -416,6 +434,128 @@ fn create_flow_toml_interactive(project_root: &Path, config_path: &Path) -> Resu
         println!("{}", content);
     }
     write_flow_toml(config_path, &content)?;
+    Ok(())
+}
+
+fn create_flow_toml_auto(project_root: &Path, config_path: &Path) -> Result<()> {
+    println!("No flow.toml found. Creating defaults.");
+    let content = ensure_trailing_newline(default_flow_template(project_root));
+    write_flow_toml(config_path, &content)
+}
+
+fn repair_existing_host_config(
+    project_root: &Path,
+    config_path: &Path,
+    flow_content: &str,
+) -> Result<()> {
+    let Some(reason) = detect_server_project(project_root) else {
+        println!("flow.toml already includes [host] configuration.");
+        return Ok(());
+    };
+    println!("Detected server project: {reason}");
+
+    let cfg = config::load(config_path)?;
+    let Some(mut host_cfg) = cfg.host else {
+        println!("flow.toml already includes [host] configuration.");
+        return Ok(());
+    };
+
+    let mut defaults = deploy_defaults(project_root);
+    let template = load_server_setup_template();
+    apply_server_template(&mut defaults, template.as_ref(), project_root);
+
+    let mut changed = false;
+    let mut force_setup_script = false;
+
+    if host_cfg.dest.is_none() {
+        host_cfg.dest = Some(defaults.dest.clone());
+        changed = true;
+    }
+
+    if host_cfg.run.is_none() {
+        if let Some(run) = defaults.run.clone() {
+            host_cfg.run = Some(run);
+            changed = true;
+        }
+    } else if let Some(run) = host_cfg.run.as_deref() {
+        if let Some(default_run) = defaults.run.clone() {
+            if let Some(reason) = command_mismatch_reason(project_root, run) {
+                println!("Warning: replacing run command: {reason}");
+                host_cfg.run = Some(default_run);
+                changed = true;
+            }
+        }
+    }
+
+    if host_cfg.service.is_none() {
+        host_cfg.service = Some(defaults.service.clone());
+        changed = true;
+    }
+
+    if host_cfg.setup.is_none() {
+        if !defaults.setup_path.trim().is_empty() {
+            host_cfg.setup = Some(defaults.setup_path.clone());
+            changed = true;
+        }
+    } else if let Some(setup) = host_cfg.setup.as_deref() {
+        if let Some(reason) = setup_script_mismatch_reason(project_root, setup) {
+            println!("Warning: replacing setup script: {reason}");
+            if !defaults.setup_path.trim().is_empty() {
+                host_cfg.setup = Some(defaults.setup_path.clone());
+                changed = true;
+                force_setup_script = true;
+            }
+        }
+    }
+
+    if host_cfg.env_file.is_none() {
+        if let Some(env_file) = defaults.env_file.clone() {
+            host_cfg.env_file = Some(env_file);
+            changed = true;
+        }
+    }
+
+    if let Some(setup_path) = host_cfg.setup.as_deref() {
+        if let Some(content) = defaults.setup_script_content.as_deref() {
+            ensure_setup_script(project_root, setup_path, content, force_setup_script)?;
+        }
+    }
+
+    if let Some(env_path) = host_cfg.env_file.as_deref() {
+        ensure_env_file(
+            project_root,
+            env_path,
+            defaults.env_example.as_ref(),
+            false,
+            true,
+        )?;
+    }
+
+    maybe_configure_deploy_host(true)?;
+
+    if host_cfg.run.is_none() {
+        println!("Warning: no run command set; deploy will not create a systemd service.");
+    }
+
+    if changed {
+        let host_section = render_host_section(&HostSetupConfig {
+            dest: host_cfg.dest.unwrap_or_else(|| defaults.dest.clone()),
+            setup: host_cfg.setup,
+            run: host_cfg.run,
+            port: host_cfg.port,
+            service: host_cfg.service,
+            env_file: host_cfg.env_file,
+            domain: host_cfg.domain,
+            ssl: host_cfg.ssl,
+        });
+        let updated = replace_host_section(flow_content, &host_section);
+        fs::write(config_path, updated)
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+        println!("Updated [host] config in flow.toml.");
+    } else {
+        println!("Host config looks good.");
+    }
+
     Ok(())
 }
 
@@ -590,14 +730,20 @@ fn apply_host_overrides(defaults: &mut DeployDefaults, host: &deploy::HostConfig
     }
 }
 
-fn apply_server_template(defaults: &mut DeployDefaults, template: Option<&ServerSetupTemplate>) {
+fn apply_server_template(
+    defaults: &mut DeployDefaults,
+    template: Option<&ServerSetupTemplate>,
+    project_root: &Path,
+) {
     let Some(template) = template else {
         return;
     };
     let host = &template.host;
 
     if let Some(setup) = host.setup.as_ref() {
-        if looks_like_inline_script(setup) {
+        if let Some(reason) = setup_script_mismatch_reason(project_root, setup) {
+            println!("Warning: skipping template setup script: {reason}");
+        } else if looks_like_inline_script(setup) {
             defaults.setup_script_content = Some(setup.to_string());
         } else {
             defaults.setup_path = setup.to_string();
@@ -685,9 +831,54 @@ fn append_section(content: &str, section: &str) -> String {
     out
 }
 
-fn ensure_setup_script(project_root: &Path, script_path: &str, content: &str) -> Result<()> {
+fn replace_host_section(content: &str, section: &str) -> String {
+    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+    let had_trailing_newline = content.ends_with('\n');
+    let section_lines: Vec<String> = section
+        .trim_end()
+        .lines()
+        .map(|line| line.to_string())
+        .collect();
+
+    if let Some(start) = lines.iter().position(|line| line.trim() == "[host]") {
+        let end = find_section_end(&lines, start + 1);
+        let mut updated = Vec::new();
+        updated.extend_from_slice(&lines[..start]);
+        updated.extend(section_lines);
+        updated.extend_from_slice(&lines[end..]);
+        lines = updated;
+    } else {
+        if !lines.is_empty() && !lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+            lines.push(String::new());
+        }
+        lines.extend(section_lines);
+    }
+
+    let mut out = lines.join("\n");
+    if had_trailing_newline {
+        out.push('\n');
+    }
+    out
+}
+
+fn find_section_end(lines: &[String], start: usize) -> usize {
+    for (idx, line) in lines.iter().enumerate().skip(start) {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            return idx;
+        }
+    }
+    lines.len()
+}
+
+fn ensure_setup_script(
+    project_root: &Path,
+    script_path: &str,
+    content: &str,
+    overwrite: bool,
+) -> Result<()> {
     let path = project_root.join(script_path);
-    if path.exists() {
+    if path.exists() && !overwrite {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
@@ -703,7 +894,11 @@ fn ensure_setup_script(project_root: &Path, script_path: &str, content: &str) ->
         perms.set_mode(0o755);
         fs::set_permissions(&path, perms)?;
     }
-    println!("Created {}", path.display());
+    if overwrite && path.exists() {
+        println!("Updated {}", path.display());
+    } else {
+        println!("Created {}", path.display());
+    }
     Ok(())
 }
 
@@ -712,6 +907,7 @@ fn ensure_env_file(
     env_file: &str,
     env_example: Option<&PathBuf>,
     interactive: bool,
+    auto_gitignore: bool,
 ) -> Result<()> {
     let env_path = project_root.join(env_file);
     if env_path.exists() {
@@ -755,6 +951,10 @@ fn ensure_env_file(
         }
     }
 
+    if env_path.exists() && auto_gitignore && !interactive {
+        add_gitignore_entry(project_root, env_file)?;
+    }
+
     Ok(())
 }
 
@@ -784,8 +984,30 @@ fn add_gitignore_entry(project_root: &Path, entry: &str) -> Result<()> {
     Ok(())
 }
 
-fn maybe_configure_deploy_host() -> Result<()> {
+fn maybe_configure_deploy_host(auto_mode: bool) -> Result<()> {
     let existing = deploy::load_deploy_config()?.host;
+    if existing.is_some() && auto_mode {
+        return Ok(());
+    }
+
+    let default_conn = existing
+        .as_ref()
+        .map(|host| format!("{}@{}:{}", host.user, host.host, host.port))
+        .or_else(deploy::default_linux_connection_string);
+
+    if auto_mode {
+        if let Some(conn_str) = default_conn.as_deref() {
+            let conn = deploy::HostConnection::parse(conn_str)?;
+            let mut config = deploy::load_deploy_config()?;
+            config.host = Some(conn);
+            deploy::save_deploy_config(&config)?;
+            println!("Configured deploy host: {}", conn_str);
+        } else {
+            println!("Host not configured. Run `f deploy config`.");
+        }
+        return Ok(());
+    }
+
     let should_configure = if existing.is_some() {
         prompt_yes_no("Configure deploy host now?", false)?
     } else {
@@ -799,11 +1021,8 @@ fn maybe_configure_deploy_host() -> Result<()> {
         return Ok(());
     }
 
-    let default = existing.as_ref().map(|host| {
-        format!("{}@{}:{}", host.user, host.host, host.port)
-    });
     let prompt = "SSH host (user@host:port)";
-    let input = prompt_line(prompt, default.as_deref())?;
+    let input = prompt_line(prompt, default_conn.as_deref())?;
     if input.trim().is_empty() {
         if existing.is_none() {
             println!("Host not configured. Run `f deploy set-host user@host:port`.");
@@ -1241,6 +1460,57 @@ fn host_config_mismatch_reason(
 
     if let Some(reason) = host_config_name_mismatch(project_root, host_cfg) {
         return Some(reason);
+    }
+
+    None
+}
+
+fn command_mismatch_reason(project_root: &Path, command: &str) -> Option<String> {
+    let has_cargo = project_root.join("Cargo.toml").exists();
+    let has_package = project_root.join("package.json").exists();
+
+    let uses_node = command_uses_node_tool(command);
+    let uses_cargo = command_uses_cargo_tool(command);
+
+    if has_cargo && !has_package && uses_node {
+        return Some(
+            "uses Node tooling but no package.json was found for this project.".to_string(),
+        );
+    }
+    if has_package && !has_cargo && uses_cargo {
+        return Some("uses Cargo but no Cargo.toml was found for this project.".to_string());
+    }
+
+    None
+}
+
+fn setup_script_mismatch_reason(project_root: &Path, setup: &str) -> Option<String> {
+    let has_cargo = project_root.join("Cargo.toml").exists();
+    let has_package = project_root.join("package.json").exists();
+
+    let mut uses_node = false;
+    let mut uses_cargo = false;
+
+    if looks_like_inline_script(setup) {
+        uses_node |= command_uses_node_tool(setup);
+        uses_cargo |= command_uses_cargo_tool(setup);
+    } else {
+        let setup_path = project_root.join(setup);
+        if setup_path.exists() {
+            if let Ok(content) = fs::read_to_string(&setup_path) {
+                uses_node |= command_uses_node_tool(&content);
+                uses_cargo |= command_uses_cargo_tool(&content);
+            }
+        }
+    }
+
+    if has_cargo && !has_package && uses_node {
+        return Some(
+            "uses Node tooling but no package.json was found for this project.".to_string(),
+        );
+    }
+    if has_package && !has_cargo && uses_cargo {
+        return Some("uses Cargo but no Cargo.toml was found for this project.".to_string());
     }
 
     None

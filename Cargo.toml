@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "lin"
-path = "src/main.rs"
+path = "src/bin/lin.rs"
 
 [dependencies]
 axum = "0.8"

@@ -421,6 +421,10 @@ fn infra_linux_connection_string() -> Option<String> {
     None
 }
 
+pub fn default_linux_connection_string() -> Option<String> {
+    infra_linux_connection_string()
+}
+
 fn prompt_line(message: &str, default: Option<&str>) -> Result<String> {
     if let Some(default) = default {
         print!("{message} [{default}]: ");
