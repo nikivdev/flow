@@ -8,7 +8,8 @@ use flowd::{
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     commit, commits, daemon, deploy, docs, doctor, env, fixup, history, hub, init, init_tracing,
     log_server, notify, palette, parallel, processes, projects, publish, repos, setup,
-    skills, storage, task_match, tasks, todo, tools, upstream, deps,
+    skills, storage, sync, task_match, tasks, todo, tools, upstream, deps,
+    web,
 };
 
 fn main() -> Result<()> {
@@ -85,6 +86,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Server(opts)) => {
             log_server::run(opts)?;
+        }
+        Some(Commands::Web(opts)) => {
+            web::run(opts)?;
         }
         Some(Commands::Match(opts)) => {
             task_match::run(task_match::MatchOpts {
@@ -190,6 +194,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Agents(cmd)) => {
             agents::run(cmd)?;
+        }
+        Some(Commands::Sync(cmd)) => {
+            sync::run(cmd)?;
         }
         Some(Commands::Upstream(cmd)) => {
             upstream::run(cmd)?;

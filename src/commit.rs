@@ -1986,6 +1986,7 @@ fn truncate_context(context: &str, max_chars: usize) -> String {
 }
 
 /// Generate commit message using opencode with a specified model.
+#[allow(dead_code)]
 fn generate_commit_message_opencode(
     diff: &str,
     status: &str,

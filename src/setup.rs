@@ -682,6 +682,15 @@ fn merge_host_config(
         port: overlay.port.or(base.port),
         service: overlay.service.or(base.service),
         env_file: overlay.env_file.or(base.env_file),
+        env_source: overlay.env_source.or(base.env_source),
+        env_keys: if overlay.env_keys.is_empty() {
+            base.env_keys
+        } else {
+            overlay.env_keys
+        },
+        env_personal: overlay.env_personal || base.env_personal,
+        environment: overlay.environment.or(base.environment),
+        service_token: overlay.service_token.or(base.service_token),
         domain: overlay.domain.or(base.domain),
         ssl: overlay.ssl || base.ssl,
     }

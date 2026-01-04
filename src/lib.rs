@@ -1,3 +1,4 @@
+pub mod agent_setup;
 pub mod agents;
 pub mod ai;
 pub mod cli;
@@ -43,6 +44,7 @@ pub mod sync;
 pub mod task_match;
 pub mod tasks;
 pub mod watchers;
+pub mod web;
 
 /// Initialize tracing with a default filter if `RUST_LOG` is unset.
 pub fn init_tracing() {

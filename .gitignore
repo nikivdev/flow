@@ -1,5 +1,6 @@
 # flow
 .ai/internal/
+.ai/web/
 .claude/
 .codex/
 .flox/
