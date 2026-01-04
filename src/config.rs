@@ -118,6 +118,9 @@ pub struct TsCommitConfig {
     /// Custom review instructions
     #[serde(default)]
     pub review_instructions: Option<String>,
+    /// Whether to run async (delegate to hub). Default true.
+    #[serde(default, rename = "async")]
+    pub async_enabled: Option<bool>,
 }
 
 impl Default for Config {
