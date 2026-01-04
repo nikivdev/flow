@@ -3,10 +3,15 @@
 //! Invokes gen AI agents from the flow CLI.
 //! Gen is opencode with GEN_MODE=1, providing flow integration.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use ignore::WalkBuilder;
+use shell_words;
 
 use crate::cli::{AgentsAction, AgentsCommand};
 use crate::discover;
@@ -21,6 +26,13 @@ const GLOBAL_AGENTS: &[(&str, &str)] = &[
     ("os-health", "Identify high-CPU or hanging processes and clean safely"),
 ];
 
+const BUILTIN_SUBAGENTS: &[(&str, &str)] = &[
+    ("flow", "Flow-aware agent with full context about flow.toml, tasks, and CLI"),
+    ("explore", "Fast codebase exploration: find files, search code, answer questions"),
+    ("codify", "Convert scripts/sessions to reusable TypeScript for Bun"),
+    ("general", "Multi-step autonomous tasks, parallel execution"),
+];
+
 /// Run the agents subcommand.
 pub fn run(cmd: AgentsCommand) -> Result<()> {
     match cmd.action {
@@ -29,7 +41,7 @@ pub fn run(cmd: AgentsCommand) -> Result<()> {
         Some(AgentsAction::Global { agent, prompt }) => run_global_agent(&agent, prompt),
         None => {
             if cmd.agent.is_empty() {
-                list_agents()
+                run_fuzzy_agents()
             } else {
                 let agent = &cmd.agent[0];
                 let prompt = if cmd.agent.len() > 1 {
@@ -111,6 +123,7 @@ fn list_agents() -> Result<()> {
     println!("  f agents run flow \"add a deploy task\"");
     println!("  f agents run explore \"find all API endpoints\"");
     println!("  f agents os-health                 # Shortcut for global agents");
+    println!("  f agents os-health clean           # Cleanup non-system offenders");
     println!();
 
     match find_gen() {
@@ -124,6 +137,280 @@ fn list_agents() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AgentKind {
+    Global,
+    Subagent,
+}
+
+struct AgentEntry {
+    name: String,
+    display: String,
+    kind: AgentKind,
+}
+
+struct FzfAgentResult<'a> {
+    entry: &'a AgentEntry,
+    with_args: bool,
+}
+
+fn run_fuzzy_agents() -> Result<()> {
+    let entries = build_agent_entries()?;
+    if entries.is_empty() {
+        println!("No agents available.");
+        return Ok(());
+    }
+
+    if which::which("fzf").is_err() {
+        println!("fzf not found on PATH – install it to use fuzzy selection.");
+        list_agents()?;
+        return Ok(());
+    }
+
+    if let Some(result) = run_agent_fzf(&entries)? {
+        let mut prompt_args = if result.with_args {
+            prompt_for_agent_prompt(&result.entry.name)?
+        } else {
+            Vec::new()
+        };
+
+        match result.entry.kind {
+            AgentKind::Global => {
+                if prompt_args.is_empty() {
+                    run_global_agent(&result.entry.name, None)?;
+                } else {
+                    run_global_agent(&result.entry.name, Some(prompt_args))?;
+                }
+            }
+            AgentKind::Subagent => {
+                if prompt_args.is_empty() {
+                    prompt_args = prompt_for_agent_prompt(&result.entry.name)?;
+                }
+                if prompt_args.is_empty() {
+                    bail!("No prompt provided.");
+                }
+                run_agent(&result.entry.name, prompt_args)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_agent_fzf<'a>(entries: &'a [AgentEntry]) -> Result<Option<FzfAgentResult<'a>>> {
+    let mut child = Command::new("fzf")
+        .arg("--prompt")
+        .arg("agents> ")
+        .arg("--expect")
+        .arg("tab")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to spawn fzf")?;
+
+    {
+        let stdin = child.stdin.as_mut().context("failed to open fzf stdin")?;
+        for entry in entries {
+            writeln!(stdin, "{}", entry.display)?;
+        }
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let raw = String::from_utf8(output.stdout).context("fzf output was not valid UTF-8")?;
+    let mut lines = raw.lines();
+
+    let key = lines.next().unwrap_or("");
+    let with_args = key == "tab";
+
+    let selection = lines.next().unwrap_or("").trim();
+    if selection.is_empty() {
+        return Ok(None);
+    }
+
+    let entry = entries.iter().find(|entry| entry.display == selection);
+    Ok(entry.map(|e| FzfAgentResult {
+        entry: e,
+        with_args,
+    }))
+}
+
+fn prompt_for_agent_prompt(agent_name: &str) -> Result<Vec<String>> {
+    use std::io::{self, BufRead};
+
+    println!("(tip: use quotes for prompts with spaces, e.g. 'find all API endpoints')");
+    print!("f agents {} ", agent_name);
+    io::stdout().flush()?;
+
+    let stdin = io::stdin();
+    let line = stdin.lock().lines().next();
+    let input = match line {
+        Some(Ok(s)) => s,
+        _ => return Ok(Vec::new()),
+    };
+
+    let args = shell_words::split(&input).context("failed to parse prompt")?;
+    Ok(args)
+}
+
+fn build_agent_entries() -> Result<Vec<AgentEntry>> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (name, desc) in GLOBAL_AGENTS {
+        let display = format!("[global] {} - {}", name, desc);
+        if seen.insert(display.clone()) {
+            entries.push(AgentEntry {
+                name: (*name).to_string(),
+                display,
+                kind: AgentKind::Global,
+            });
+        }
+    }
+
+    for (name, desc) in BUILTIN_SUBAGENTS {
+        let display = format!("[builtin] {} - {}", name, desc);
+        if seen.insert(display.clone()) {
+            entries.push(AgentEntry {
+                name: (*name).to_string(),
+                display,
+                kind: AgentKind::Subagent,
+            });
+        }
+    }
+
+    if let Some(project_root) = find_project_root() {
+        let opencode_dir = project_root.join(".opencode");
+        entries.extend(collect_agent_entries(
+            &opencode_dir.join("agent"),
+            "project",
+            &mut seen,
+        )?);
+        entries.extend(collect_agent_entries(
+            &opencode_dir.join("agents"),
+            "project",
+            &mut seen,
+        )?);
+    }
+
+    if let Some(global_dir) = dirs::config_dir().map(|d| d.join("opencode")) {
+        entries.extend(collect_agent_entries(
+            &global_dir.join("agent"),
+            "global-config",
+            &mut seen,
+        )?);
+        entries.extend(collect_agent_entries(
+            &global_dir.join("agents"),
+            "global-config",
+            &mut seen,
+        )?);
+    }
+
+    Ok(entries)
+}
+
+fn find_project_root() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if dir.join(".opencode").exists() || dir.join("flow.toml").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn collect_agent_entries(
+    root: &Path,
+    label: &str,
+    seen: &mut HashSet<String>,
+) -> Result<Vec<AgentEntry>> {
+    let mut entries = Vec::new();
+    if !root.exists() {
+        return Ok(entries);
+    }
+
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_exclude(false)
+        .ignore(false)
+        .build();
+
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+
+        let name = match agent_name_from_path(root, path) {
+            Some(n) => n,
+            None => continue,
+        };
+        let (desc, mode) = parse_agent_frontmatter(path)?;
+        if matches!(mode.as_deref(), Some("primary")) {
+            continue;
+        }
+        let summary = desc.unwrap_or_else(|| "No description".to_string());
+        let display = format!("[{label}] {} - {}", name, summary);
+        if seen.insert(display.clone()) {
+            entries.push(AgentEntry {
+                name,
+                display,
+                kind: AgentKind::Subagent,
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
+fn agent_name_from_path(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let without_ext = relative.with_extension("");
+    Some(without_ext.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+}
+
+fn parse_agent_frontmatter(path: &Path) -> Result<(Option<String>, Option<String>)> {
+    let contents = fs::read_to_string(path).unwrap_or_default();
+    let mut lines = contents.lines();
+    if lines.next().map(|l| l.trim()) != Some("---") {
+        return Ok((None, None));
+    }
+
+    let mut desc: Option<String> = None;
+    let mut mode: Option<String> = None;
+    for line in lines {
+        let line = line.trim();
+        if line == "---" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("description:") {
+            desc = Some(trim_yaml_scalar(value));
+        } else if let Some(value) = line.strip_prefix("mode:") {
+            mode = Some(trim_yaml_scalar(value));
+        }
+    }
+
+    Ok((desc, mode))
+}
+
+fn trim_yaml_scalar(value: &str) -> String {
+    let trimmed = value.trim();
+    trimmed
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
 }
 
 /// Run a global agent (repos-health, repos-sync, etc.)
@@ -151,18 +438,19 @@ fn run_global_agent(agent: &str, prompt: Option<Vec<String>>) -> Result<()> {
     })?;
 
     // Build prompt - use custom if provided, otherwise default for the agent
-    let full_prompt = if let Some(p) = prompt {
-        if p.is_empty() {
-            build_global_agent_prompt(agent)
-        } else {
-            format!(
-                "Use the Task tool with subagent_type='{}' to: {}",
-                agent,
-                p.join(" ")
-            )
+    let full_prompt = match prompt {
+        Some(p) if !p.is_empty() => {
+            if agent == "os-health" && is_os_health_clean_request(&p) {
+                build_os_health_clean_prompt()
+            } else {
+                format!(
+                    "Use the Task tool with subagent_type='{}' to: {}",
+                    agent,
+                    p.join(" ")
+                )
+            }
         }
-    } else {
-        build_global_agent_prompt(agent)
+        _ => build_global_agent_prompt(agent),
     };
 
     println!("Invoking {} agent...\n", agent);
@@ -193,11 +481,33 @@ fn build_global_agent_prompt(agent: &str) -> String {
         ),
         "os-health" => format!(
             "Use the Task tool with subagent_type='os-health' to: \
-             Identify high-CPU or hanging processes on macOS. \
-             Report offenders and ask before terminating any process."
+             Identify high-CPU or hanging processes on macOS and report offenders. \
+             Then ask: \"Proceed with cleanup? (y/n)\". \
+             If the user answers \"y\", terminate non-system offenders with TERM, \
+             recheck, and only use KILL if needed. \
+             Do not terminate system processes; report them and ask before any action."
         ),
         _ => format!("Use the Task tool with subagent_type='{}' to complete the task.", agent),
     }
+}
+
+fn is_os_health_clean_request(prompt: &[String]) -> bool {
+    if prompt.len() != 1 {
+        return false;
+    }
+    matches!(
+        prompt[0].to_lowercase().as_str(),
+        "clean" | "cleanup"
+    )
+}
+
+fn build_os_health_clean_prompt() -> String {
+    "Use the Task tool with subagent_type='os-health' to: \
+     Identify high-CPU or hanging processes on macOS and report offenders. \
+     Ask \"Proceed with cleanup? (y/n)\" and if the user answers \"y\", \
+     terminate non-system offenders with TERM, recheck, and only use KILL if needed. \
+     Do not terminate system processes; report them and ask before any action."
+        .to_string()
 }
 
 /// Run an agent with a prompt.

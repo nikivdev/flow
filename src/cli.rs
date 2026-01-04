@@ -233,7 +233,7 @@ pub enum Commands {
     Start,
     #[command(
         about = "Invoke gen AI agents.",
-        long_about = "Run gen agents with prompts. Global agents: repos-health, repos-sync. Subagents: codify, explore, general. Special: flow (flow-aware).",
+        long_about = "Run gen agents with prompts. Global agents: repos-health, repos-sync, os-health. Subagents: codify, explore, general. Special: flow (flow-aware).",
         alias = "a"
     )]
     Agents(AgentsCommand),
