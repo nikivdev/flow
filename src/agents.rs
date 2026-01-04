@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -549,6 +549,23 @@ pub fn run_flow_agent_capture(prompt: &str) -> Result<String> {
     invoke_gen_capture(&gen_loc, &full_prompt)
 }
 
+/// Run the flow agent and stream text output while capturing the final response.
+pub fn run_flow_agent_capture_streaming(prompt: &str) -> Result<String> {
+    let gen_loc = find_gen().ok_or_else(|| {
+        anyhow::anyhow!(
+            "gen not found. Install with:\n  cd {} && f install\n  # or set GEN_REPO env var",
+            GEN_REPO
+        )
+    })?;
+
+    if prompt.trim().is_empty() {
+        bail!("No prompt provided for flow agent.");
+    }
+
+    let full_prompt = build_flow_prompt(prompt)?;
+    invoke_gen_capture_streaming(&gen_loc, &full_prompt)
+}
+
 /// Invoke gen with a prompt.
 fn invoke_gen(location: &GenLocation, prompt: &str) -> Result<std::process::ExitStatus> {
     match location {
@@ -626,28 +643,114 @@ fn invoke_gen_capture(location: &GenLocation, prompt: &str) -> Result<String> {
     bail!("gen returned no output");
 }
 
+fn invoke_gen_capture_streaming(location: &GenLocation, prompt: &str) -> Result<String> {
+    let mut cmd = match location {
+        GenLocation::Binary(path) => {
+            let mut cmd = Command::new(path);
+            cmd.args(["run", "--format", "json", prompt])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            cmd
+        }
+        GenLocation::Repo(repo) => {
+            let mut cmd = Command::new("bun");
+            cmd.args([
+                "run",
+                "--cwd",
+                &repo.join("packages/opencode").to_string_lossy(),
+                "--conditions=browser",
+                "src/index.ts",
+                "run",
+                "--format",
+                "json",
+                prompt,
+            ])
+            .env("GEN_MODE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+            apply_project_config_env(&mut cmd);
+            cmd
+        }
+    };
+
+    let mut child = cmd.spawn().context("failed to run gen")?;
+    let stdout = child.stdout.take().context("failed to capture gen stdout")?;
+    let reader = BufReader::new(stdout);
+
+    let mut last_text = String::new();
+    let mut final_text = String::new();
+    let mut printed_output = false;
+
+    for line in reader.lines() {
+        let line = line?;
+        if let Some(text) = extract_text_from_gen_line(&line) {
+            if text.starts_with(&last_text) {
+                let delta = &text[last_text.len()..];
+                if !delta.is_empty() {
+                    print!("{delta}");
+                    io::stdout().flush()?;
+                    printed_output = true;
+                }
+                final_text = text;
+            } else {
+                if !text.is_empty() {
+                    print!("{text}");
+                    io::stdout().flush()?;
+                    printed_output = true;
+                }
+                if final_text.is_empty() {
+                    final_text = text;
+                } else {
+                    final_text.push_str(&text);
+                }
+            }
+            last_text = final_text.clone();
+        }
+    }
+
+    let status = child.wait().context("failed to wait for gen")?;
+    if !status.success() {
+        bail!("gen exited with status: {}", status);
+    }
+
+    if printed_output {
+        if !final_text.ends_with('\n') {
+            println!();
+        }
+    }
+
+    if final_text.trim().is_empty() {
+        bail!("gen returned no output");
+    }
+
+    Ok(final_text)
+}
+
 fn extract_text_from_gen_output(stdout: &str) -> Option<String> {
     let mut last_text: Option<String> = None;
     for line in stdout.lines() {
-        let value: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let event_type = value.get("type").and_then(|t| t.as_str());
-        if event_type != Some("text") {
-            continue;
-        }
-        let text = value
-            .get("part")
-            .and_then(|part| part.get("text"))
-            .and_then(|t| t.as_str());
-        if let Some(text) = text {
+        if let Some(text) = extract_text_from_gen_line(line) {
             if !text.trim().is_empty() {
                 last_text = Some(text.to_string());
             }
         }
     }
     last_text
+}
+
+fn extract_text_from_gen_line(line: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let event_type = value.get("type").and_then(|t| t.as_str());
+    if event_type != Some("text") {
+        return None;
+    }
+    value
+        .get("part")
+        .and_then(|part| part.get("text"))
+        .and_then(|t| t.as_str())
+        .map(|text| text.to_string())
 }
 
 /// Build a flow-aware prompt with full context.

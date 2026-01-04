@@ -3,7 +3,9 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+use crossterm::event::{self, Event as CEvent, KeyCode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::{
     agents,
@@ -15,6 +17,7 @@ use crate::{
 
 pub fn run(opts: SetupOpts) -> Result<()> {
     let (project_root, config_path) = resolve_project_root(&opts.config)?;
+    let mut created_flow_toml = false;
 
     if !start::is_bootstrapped(&project_root) || !config_path.exists() {
         start::run_at(&project_root)?;
@@ -26,11 +29,23 @@ pub fn run(opts: SetupOpts) -> Result<()> {
 
     if !config_path.exists() {
         create_flow_toml_interactive(&project_root, &config_path)?;
+        created_flow_toml = true;
     }
 
     let (config_path, cfg) = load_project_config(config_path)?;
 
     if tasks::find_task(&cfg, "setup").is_some() {
+        if created_flow_toml {
+            if io::stdin().is_terminal() {
+                if !prompt_yes_no("Run setup task now?", false)? {
+                    println!("Skipping setup. Review flow.toml, then run `f setup` or `f run setup`.");
+                    return Ok(());
+                }
+            } else {
+                println!("Skipping setup for newly created flow.toml. Run `f setup` or `f run setup` when ready.");
+                return Ok(());
+            }
+        }
         return tasks::run(TaskRunOpts {
             config: config_path,
             delegate_to_hub: false,
@@ -204,6 +219,8 @@ fn create_flow_toml_interactive(project_root: &Path, config_path: &Path) -> Resu
 
     let use_ai = prompt_yes_no("Generate setup/dev tasks with AI?", true)?;
     let mut content: Option<String> = None;
+    let mut streamed_ai_output = false;
+    let mut used_ai_content = false;
 
     if use_ai {
         let hint_input = prompt_optional("Any notes about how dev should run? (optional)")?;
@@ -212,10 +229,27 @@ fn create_flow_toml_interactive(project_root: &Path, config_path: &Path) -> Resu
         } else {
             Some(hint_input.as_str())
         };
-        match generate_flow_toml_with_agent(project_root, hint) {
+        println!("Generating flow.toml with AI...");
+        io::stdout().flush()?;
+        let use_streaming = io::stdin().is_terminal();
+        let result = if use_streaming {
+            generate_flow_toml_with_agent_streaming(project_root, hint)
+        } else {
+            generate_flow_toml_with_agent(project_root, hint)
+        };
+        match result {
             Ok(text) => {
+                if use_streaming {
+                    streamed_ai_output = true;
+                }
                 if let Some(toml) = extract_flow_toml(&text) {
-                    content = Some(toml);
+                    if let Some(reason) = ai_flow_toml_mismatch_reason(project_root, &toml) {
+                        println!("Warning: {}", reason);
+                        println!("Using detected defaults instead.");
+                    } else {
+                        content = Some(toml);
+                        used_ai_content = true;
+                    }
                 } else {
                     println!("Warning: AI output did not include flow.toml content.");
                 }
@@ -228,24 +262,18 @@ fn create_flow_toml_interactive(project_root: &Path, config_path: &Path) -> Resu
 
     if content.is_none() {
         let defaults = suggested_commands(project_root);
-        let setup_cmd = prompt_line("Setup command", defaults.setup.as_deref())?;
-        let dev_cmd = prompt_line("Dev command", defaults.dev.as_deref())?;
-        content = Some(render_flow_toml(
-            &setup_cmd,
-            &dev_cmd,
-            defaults.deps,
-        ));
+        let setup_cmd = defaults.setup.unwrap_or_default();
+        let dev_cmd = defaults.dev.unwrap_or_default();
+        content = Some(render_flow_toml(&setup_cmd, &dev_cmd, defaults.deps));
+        println!("Using detected defaults. Edit flow.toml if needed.");
     }
 
     let content = ensure_trailing_newline(content.unwrap_or_else(|| default_flow_template(project_root)));
 
-    println!("\nProposed flow.toml:\n");
-    println!("{}", content);
-
-    if !prompt_yes_no("Write flow.toml?", true)? {
-        bail!("aborted flow.toml creation");
+    if !used_ai_content || !streamed_ai_output {
+        println!("\nProposed flow.toml:\n");
+        println!("{}", content);
     }
-
     write_flow_toml(config_path, &content)?;
     Ok(())
 }
@@ -638,6 +666,12 @@ fn generate_flow_toml_with_agent(project_root: &Path, hint: Option<&str>) -> Res
     prompt.push_str("dependencies = [\"setup\"]\n");
     prompt.push_str("shortcuts = [\"d\"]\n\n");
 
+    if let Some(guidance) = project_guidance(project_root) {
+        prompt.push_str("Guidance:\n");
+        prompt.push_str(&guidance);
+        prompt.push('\n');
+    }
+
     let hints = project_hints(project_root);
     if !hints.is_empty() {
         prompt.push_str("Detected project hints:\n");
@@ -658,6 +692,65 @@ fn generate_flow_toml_with_agent(project_root: &Path, hint: Option<&str>) -> Res
     }
 
     agents::run_flow_agent_capture(&prompt)
+}
+
+fn generate_flow_toml_with_agent_streaming(
+    project_root: &Path,
+    hint: Option<&str>,
+) -> Result<String> {
+    let mut prompt = String::new();
+    prompt.push_str("Read the project and generate a minimal flow.toml with setup and dev tasks.\n");
+    prompt.push_str("Requirements:\n");
+    prompt.push_str("- Include only what is needed to make dev work reliably.\n");
+    prompt.push_str("- The dev task must depend on setup (dependencies = [\"setup\"]).\n");
+    prompt.push_str("- Add descriptions and shortcuts for setup (s) and dev (d).\n");
+    prompt.push_str("- Use [deps] for required binaries.\n");
+    prompt.push_str("- If a task prompts for input, set interactive = true.\n");
+    prompt.push_str("- Output ONLY the flow.toml content, no commentary.\n\n");
+    prompt.push_str("# flow.toml - Minimal spec\n\n");
+    prompt.push_str("[deps]\n");
+    prompt.push_str("mytool = \"rg\"\n");
+    prompt.push_str("node = [\"node\", \"npm\"]\n\n");
+    prompt.push_str("[[tasks]]\n");
+    prompt.push_str("name = \"setup\"\n");
+    prompt.push_str("command = \"cargo build --locked && npm ci\"\n");
+    prompt.push_str("description = \"Install all tools & dependencies\"\n");
+    prompt.push_str("activate_on_cd_to_root = true\n");
+    prompt.push_str("shortcuts = [\"s\"]\n");
+    prompt.push_str("dependencies = [\"rust\", \"node\"]\n\n");
+    prompt.push_str("[[tasks]]\n");
+    prompt.push_str("name = \"dev\"\n");
+    prompt.push_str("command = \"cargo watch -x 'run --bin myapp'\"\n");
+    prompt.push_str("description = \"Run development server with hot reload\"\n");
+    prompt.push_str("dependencies = [\"setup\"]\n");
+    prompt.push_str("shortcuts = [\"d\"]\n\n");
+
+    if let Some(guidance) = project_guidance(project_root) {
+        prompt.push_str("Guidance:\n");
+        prompt.push_str(&guidance);
+        prompt.push('\n');
+    }
+
+    let hints = project_hints(project_root);
+    if !hints.is_empty() {
+        prompt.push_str("Detected project hints:\n");
+        for hint in hints {
+            prompt.push_str("- ");
+            prompt.push_str(&hint);
+            prompt.push('\n');
+        }
+        prompt.push('\n');
+    }
+
+    if let Some(hint) = hint {
+        if !hint.trim().is_empty() {
+            prompt.push_str("User notes:\n");
+            prompt.push_str(hint.trim());
+            prompt.push('\n');
+        }
+    }
+
+    agents::run_flow_agent_capture_streaming(&prompt)
 }
 
 fn extract_flow_toml(raw: &str) -> Option<String> {
@@ -781,6 +874,65 @@ fn project_hints(project_root: &Path) -> Vec<String> {
     hints
 }
 
+fn project_guidance(project_root: &Path) -> Option<String> {
+    let has_cargo = project_root.join("Cargo.toml").exists();
+    let has_package = project_root.join("package.json").exists();
+
+    match (has_cargo, has_package) {
+        (true, false) => Some("Detected Rust project (Cargo.toml). Use cargo commands; avoid bun/npm/pnpm/yarn.".to_string()),
+        (false, true) => Some("Detected Node project (package.json). Use npm/pnpm/yarn/bun commands; avoid cargo.".to_string()),
+        (true, true) => Some("Detected Rust + Node (Cargo.toml + package.json). Use the right tool for each step.".to_string()),
+        _ => None,
+    }
+}
+
+fn ai_flow_toml_mismatch_reason(project_root: &Path, toml_content: &str) -> Option<String> {
+    let has_cargo = project_root.join("Cargo.toml").exists();
+    let has_package = project_root.join("package.json").exists();
+    let parsed: toml::Value = toml::from_str(toml_content).ok()?;
+
+    let tasks = parsed.get("tasks").and_then(toml::Value::as_array)?;
+
+    let mut uses_node = false;
+    let mut uses_cargo = false;
+
+    for task in tasks {
+        let command = match task.get("command").and_then(toml::Value::as_str) {
+            Some(cmd) => cmd,
+            None => continue,
+        };
+        uses_node |= command_uses_node_tool(command);
+        uses_cargo |= command_uses_cargo_tool(command);
+    }
+
+    if has_cargo && !has_package && uses_node {
+        return Some("AI suggested Node tooling (bun/npm/pnpm/yarn), but no package.json was found.".to_string());
+    }
+    if has_package && !has_cargo && uses_cargo {
+        return Some("AI suggested Cargo commands, but no Cargo.toml was found.".to_string());
+    }
+
+    None
+}
+
+fn command_uses_node_tool(command: &str) -> bool {
+    ["bun", "npm", "pnpm", "yarn"]
+        .iter()
+        .any(|tool| command_mentions_tool(command, tool))
+}
+
+fn command_uses_cargo_tool(command: &str) -> bool {
+    command_mentions_tool(command, "cargo")
+}
+
+fn command_mentions_tool(command: &str, tool: &str) -> bool {
+    command.split_whitespace().any(|part| {
+        let trimmed = part
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+        trimmed.eq_ignore_ascii_case(tool)
+    })
+}
+
 fn render_flow_toml(setup_cmd: &str, dev_cmd: &str, deps: Vec<DepSpec>) -> String {
     let setup_cmd = setup_cmd.trim();
     let dev_cmd = dev_cmd.trim();
@@ -879,6 +1031,9 @@ fn prompt_yes_no(message: &str, default_yes: bool) -> Result<bool> {
     let prompt = if default_yes { "[Y/n]" } else { "[y/N]" };
     print!("{message} {prompt}: ");
     io::stdout().flush()?;
+    if io::stdin().is_terminal() {
+        return read_yes_no_key(default_yes);
+    }
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     let answer = input.trim().to_ascii_lowercase();
@@ -910,6 +1065,44 @@ fn prompt_line(message: &str, default: Option<&str>) -> Result<String> {
         return Ok(default.unwrap_or("").to_string());
     }
     Ok(trimmed.to_string())
+}
+
+fn read_yes_no_key(default_yes: bool) -> Result<bool> {
+    enable_raw_mode().context("failed to enable raw mode")?;
+    let mut selection = default_yes;
+    let mut echo_char: Option<char> = None;
+    loop {
+        if let CEvent::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    selection = true;
+                    echo_char = Some('y');
+                    break;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    selection = false;
+                    echo_char = Some('n');
+                    break;
+                }
+                KeyCode::Enter => {
+                    break;
+                }
+                KeyCode::Esc => {
+                    selection = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    disable_raw_mode().context("failed to disable raw mode")?;
+    if let Some(ch) = echo_char {
+        println!("{ch}");
+    } else {
+        println!();
+    }
+    Ok(selection)
 }
 
 fn prompt_line_optional(message: &str, default: Option<&str>) -> Result<Option<String>> {
