@@ -232,11 +232,11 @@ pub enum Commands {
     )]
     Start,
     #[command(
-        about = "Invoke a kode AI subagent.",
-        long_about = "Run a kode subagent with a prompt. Available agents: codify (convert to code), explore (search codebase), general (multi-step tasks).",
+        about = "Invoke gen AI agents.",
+        long_about = "Run gen agents with prompts. Global agents: repos-health, repos-sync. Subagents: codify, explore, general. Special: flow (flow-aware).",
         alias = "a"
     )]
-    Agent(AgentCommand),
+    Agents(AgentsCommand),
     #[command(
         about = "Manage upstream fork workflow.",
         long_about = "Set up and manage upstream forks. Creates a local 'upstream' branch to cleanly track the original repo, making merges easier.",
@@ -248,6 +248,11 @@ pub enum Commands {
         long_about = "Deploy your project to a Linux host (via SSH), Cloudflare Workers, or Railway. Automatically detects platform from flow.toml [host], [cloudflare], or [railway] sections."
     )]
     Deploy(DeployCommand),
+    #[command(
+        about = "Run the project's release task.",
+        long_about = "Runs the task configured by flow.release_task in flow.toml. Falls back to a task named 'release' or 'release-build', then to flow.primary_task."
+    )]
+    Release(ReleaseOpts),
     #[command(
         about = "Publish project to GitHub.",
         long_about = "Create a new GitHub repository and push the current project. Infers repo name from folder, asks for public/private visibility."
@@ -1208,23 +1213,36 @@ pub enum ToolsAction {
 }
 
 #[derive(Args, Debug, Clone)]
-pub struct AgentCommand {
+#[command(args_conflicts_with_subcommands = true)]
+pub struct AgentsCommand {
     #[command(subcommand)]
-    pub action: Option<AgentAction>,
+    pub action: Option<AgentsAction>,
+    /// Run a global agent directly (e.g., `f agents os-health`).
+    #[arg(trailing_var_arg = true)]
+    pub agent: Vec<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub enum AgentAction {
+pub enum AgentsAction {
     /// List available agents.
     #[command(alias = "ls")]
     List,
     /// Run an agent with a prompt.
     Run {
-        /// Agent name (codify, explore, general).
+        /// Agent name (flow, codify, explore, general).
         agent: String,
         /// Prompt for the agent.
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
+    },
+    /// Run a global agent (repos-health, repos-sync, os-health).
+    #[command(alias = "g")]
+    Global {
+        /// Global agent name.
+        agent: String,
+        /// Optional custom prompt (uses default if not provided).
+        #[arg(trailing_var_arg = true)]
+        prompt: Option<Vec<String>>,
     },
 }
 
@@ -1342,6 +1360,16 @@ pub struct CommitsOpts {
 pub struct DeployCommand {
     #[command(subcommand)]
     pub action: Option<DeployAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReleaseOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+    /// Additional arguments passed to the release task command.
+    #[arg(value_name = "ARGS", trailing_var_arg = true)]
+    pub args: Vec<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]

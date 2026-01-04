@@ -7,6 +7,10 @@ edition = "2024"
 name = "f"
 path = "src/main.rs"
 
+[[bin]]
+name = "lin"
+path = "src/main.rs"
+
 [dependencies]
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

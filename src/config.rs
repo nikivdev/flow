@@ -116,6 +116,9 @@ pub struct FlowSettings {
     /// The primary task to run after code changes (e.g., "release", "deploy").
     #[serde(default, alias = "primary-task")]
     pub primary_task: Option<String>,
+    /// Task to run when invoking `f release`.
+    #[serde(default, rename = "release_task", alias = "release-task")]
+    pub release_task: Option<String>,
 }
 
 /// Global feature toggles.
@@ -889,6 +892,9 @@ fn merge_config(base: &mut Config, other: Config) {
     }
     if base.flow.primary_task.is_none() {
         base.flow.primary_task = other.flow.primary_task;
+    }
+    if base.flow.release_task.is_none() {
+        base.flow.release_task = other.flow.release_task;
     }
     base.options.merge(other.options);
     base.servers.extend(other.servers);

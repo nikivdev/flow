@@ -1,5 +1,8 @@
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -128,9 +131,22 @@ fn jazz_new(
 }
 
 pub(crate) fn create_jazz_worker_account(peer: &str, name: &str) -> Result<JazzCreateOutput> {
+    let redacted_peer = redact_peer(peer);
+    println!(
+        "Creating Jazz worker account '{}' via {} (this can take a minute)...",
+        name, redacted_peer
+    );
+
     let output = if let Some(path) = find_in_path("jazz-run") {
-        Command::new(path)
-            .args([
+        println!(
+            "Running: {} account create --peer {} --name {} --json",
+            path.display(),
+            redacted_peer,
+            name
+        );
+        {
+            let mut cmd = Command::new(path);
+            cmd.args([
                 "account",
                 "create",
                 "--peer",
@@ -138,12 +154,18 @@ pub(crate) fn create_jazz_worker_account(peer: &str, name: &str) -> Result<JazzC
                 "--name",
                 name,
                 "--json",
-            ])
-            .output()
-            .context("failed to spawn jazz-run")?
+            ]);
+            run_command_with_output(cmd)
+        }
+        .context("failed to spawn jazz-run")?
     } else {
-        Command::new("npx")
-            .args([
+        println!(
+            "Running: npx --yes jazz-run account create --peer {} --name {} --json",
+            redacted_peer, name
+        );
+        {
+            let mut cmd = Command::new("npx");
+            cmd.args([
                 "--yes",
                 "jazz-run",
                 "account",
@@ -153,9 +175,10 @@ pub(crate) fn create_jazz_worker_account(peer: &str, name: &str) -> Result<JazzC
                 "--name",
                 name,
                 "--json",
-            ])
-            .output()
-            .context("failed to spawn npx")?
+            ]);
+            run_command_with_output(cmd)
+        }
+        .context("failed to spawn npx")?
     };
 
     if !output.status.success() {
@@ -175,6 +198,75 @@ pub(crate) fn create_jazz_worker_account(peer: &str, name: &str) -> Result<JazzC
         serde_json::from_str(json).context("failed to parse jazz-run JSON output")?;
 
     Ok(creds)
+}
+
+fn run_command_with_output(mut cmd: Command) -> Result<Output> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture stdout"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture stderr"))?;
+
+    let stdout_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+
+    let start = Instant::now();
+    let mut next_log = Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= next_log {
+            println!(
+                "... still creating Jazz worker account ({}s)",
+                elapsed.as_secs()
+            );
+            next_log += Duration::from_secs(10);
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
+
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn redact_peer(peer: &str) -> String {
+    if let Some(idx) = peer.find("key=") {
+        let start = idx + 4;
+        let end = peer[start..]
+            .find('&')
+            .map(|offset| start + offset)
+            .unwrap_or(peer.len());
+        let mut redacted = peer.to_string();
+        if start < end && end <= redacted.len() {
+            redacted.replace_range(start..end, "***");
+        }
+        return redacted;
+    }
+    peer.to_string()
 }
 
 fn extract_json_object(output: &str) -> Option<&str> {

@@ -4,11 +4,11 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    agent, ai,
+    agents, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     commit, commits, daemon, deploy, docs, doctor, env, fixup, history, hub, init, init_tracing,
-    log_server, notify, palette, parallel, processes, projects, publish, repos, skills, start,
-    storage, task_match, tasks, todo, tools, upstream, deps,
+    log_server, notify, palette, parallel, processes, projects, publish, release, repos, skills,
+    start, storage, task_match, tasks, todo, tools, upstream, deps,
 };
 
 fn main() -> Result<()> {
@@ -188,14 +188,17 @@ fn main() -> Result<()> {
         Some(Commands::Start) => {
             start::run()?;
         }
-        Some(Commands::Agent(cmd)) => {
-            agent::run(cmd)?;
+        Some(Commands::Agents(cmd)) => {
+            agents::run(cmd)?;
         }
         Some(Commands::Upstream(cmd)) => {
             upstream::run(cmd)?;
         }
         Some(Commands::Deploy(cmd)) => {
             deploy::run(cmd)?;
+        }
+        Some(Commands::Release(opts)) => {
+            release::run(opts)?;
         }
         Some(Commands::Publish(opts)) => {
             publish::run(opts)?;

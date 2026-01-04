@@ -878,7 +878,7 @@ fn suspect_reason(value: &str) -> Option<&'static str> {
     None
 }
 
-fn discover_wrangler_configs(root: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn discover_wrangler_configs(root: &Path) -> Result<Vec<PathBuf>> {
     let walker = WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)

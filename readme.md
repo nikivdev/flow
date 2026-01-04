@@ -7,11 +7,31 @@ The goal of this CLI is to parse out `flow.toml` files like the one in [this rep
 ## Install
 
 > [!NOTE]
-> Below `curl ` seems to be breaking, unclear why so for now to use `flow`, build it from source. PRs welcome to fix the `curl ` command ♥️
+> Prebuilt darwin/arm64 tarballs are hosted; other platforms fall back to source builds automatically.
+
+<!-- FLOW_INSTALL_START -->
+```bash
+curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | \
+  FLOW_RELEASE_BASE=https://flow.yourdomain.com FLOW_VERSION=latest bash
+```
+<!-- FLOW_INSTALL_END -->
+
+## Release workflow (darwin/arm64 only)
+
+To serve a single macOS arm64 build from your own host and let other platforms build from source:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | bash
+# One-time: tell infra where your host is (Tailscale or public)
+infra host set root@100.114.156.47 -p 22
+
+# One-time: set [release] config in flow.toml
+# Then run the release task (builds + uploads + updates README snippet)
+f release
 ```
+
+Install from that host using the snippet in the Install section (auto-updated on release).
+
+Non-darwin/arm64 platforms will attempt the release download, then fall back to a source build.
 
 ## Short summary
 
