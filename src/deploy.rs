@@ -26,6 +26,11 @@ use crate::deploy_setup::{
 use crate::env::parse_env_file;
 use crate::tasks;
 
+const DEPLOY_HELPER_BIN: &str = "infra";
+const DEPLOY_HELPER_REPO_DEFAULT: &str = "/Users/nikiv/infra";
+const DEPLOY_HELPER_ENV_BIN: &str = "FLOW_DEPLOY_HELPER_BIN";
+const DEPLOY_HELPER_ENV_REPO: &str = "FLOW_DEPLOY_HELPER_REPO";
+
 #[derive(Debug, Deserialize)]
 struct InfraConfig {
     linux_host: Option<String>,
@@ -295,6 +300,7 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
 fn configure_deploy() -> Result<()> {
     println!("Deploy config (Linux host via SSH).");
 
+    let _ = ensure_deploy_helper();
     let existing = load_deploy_config()?.host;
     let infra_default = infra_linux_connection_string();
 
@@ -331,6 +337,66 @@ fn configure_deploy() -> Result<()> {
     println!("✓ Host set: {}@{}:{}", conn.user, conn.host, conn.port);
     println!("Next: run `f setup release` to scaffold host config, then `f deploy`.");
     Ok(())
+}
+
+pub fn ensure_deploy_helper() -> Result<Option<PathBuf>> {
+    if let Ok(bin_override) = std::env::var(DEPLOY_HELPER_ENV_BIN) {
+        let path = crate::config::expand_path(&bin_override);
+        if path.exists() {
+            return Ok(Some(path));
+        }
+    }
+
+    if let Ok(path) = which::which(DEPLOY_HELPER_BIN) {
+        return Ok(Some(path));
+    }
+
+    let repo = deploy_helper_repo();
+    if !repo.exists() {
+        println!(
+            "Deploy helper not found. Set {} or install it to continue.",
+            DEPLOY_HELPER_ENV_BIN
+        );
+        return Ok(None);
+    }
+
+    println!("Installing deploy helper...");
+    let status = Command::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(&repo)
+        .status()
+        .context("failed to build deploy helper")?;
+
+    if !status.success() {
+        bail!("deploy helper build failed");
+    }
+
+    let bin_path = repo.join("target/release").join(DEPLOY_HELPER_BIN);
+    let install_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local/bin");
+    fs::create_dir_all(&install_dir)
+        .with_context(|| format!("failed to create {}", install_dir.display()))?;
+    let install_path = install_dir.join(DEPLOY_HELPER_BIN);
+    fs::copy(&bin_path, &install_path)
+        .with_context(|| format!("failed to copy {}", install_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&install_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&install_path, perms)?;
+    }
+
+    println!("Deploy helper installed.");
+    Ok(Some(install_path))
+}
+
+fn deploy_helper_repo() -> PathBuf {
+    if let Ok(repo_override) = std::env::var(DEPLOY_HELPER_ENV_REPO) {
+        return crate::config::expand_path(&repo_override);
+    }
+    PathBuf::from(DEPLOY_HELPER_REPO_DEFAULT)
 }
 
 fn infra_linux_connection_string() -> Option<String> {
