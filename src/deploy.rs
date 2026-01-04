@@ -27,7 +27,7 @@ use crate::env::parse_env_file;
 use crate::tasks;
 
 const DEPLOY_HELPER_BIN: &str = "infra";
-const DEPLOY_HELPER_REPO_DEFAULT: &str = "/Users/nikiv/infra";
+const DEPLOY_HELPER_REPO_DEFAULT: &str = "~/infra";
 const DEPLOY_HELPER_ENV_BIN: &str = "FLOW_DEPLOY_HELPER_BIN";
 const DEPLOY_HELPER_ENV_REPO: &str = "FLOW_DEPLOY_HELPER_REPO";
 
@@ -396,7 +396,7 @@ fn deploy_helper_repo() -> PathBuf {
     if let Ok(repo_override) = std::env::var(DEPLOY_HELPER_ENV_REPO) {
         return crate::config::expand_path(&repo_override);
     }
-    PathBuf::from(DEPLOY_HELPER_REPO_DEFAULT)
+    crate::config::expand_path(DEPLOY_HELPER_REPO_DEFAULT)
 }
 
 fn infra_linux_connection_string() -> Option<String> {
