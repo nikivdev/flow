@@ -2,7 +2,8 @@ version = 1
 name = "flow"
 
 [flow]
-primary_task = "deploy-cli-release"
+primary_task = "deploy"
+deploy_task = "deploy"
 release_task = "release"
 
 [options]
@@ -55,6 +56,11 @@ description = "Ensure the hub daemon is running locally"
 
 [[tasks]]
 name = "deploy-cli-release"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh"
+description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
+
+[[tasks]]
+name = "deploy"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh"
 description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
 

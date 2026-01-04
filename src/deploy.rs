@@ -14,7 +14,8 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{DeployAction, DeployCommand, EnvAction};
+use crate::cli::{DeployAction, DeployCommand, EnvAction, TaskRunOpts};
+use crate::release;
 use crate::config::Config;
 use crate::deploy_setup::{
     CloudflareSetupDefaults,
@@ -23,6 +24,7 @@ use crate::deploy_setup::{
     run_cloudflare_setup,
 };
 use crate::env::parse_env_file;
+use crate::tasks;
 
 /// Host configuration stored globally at ~/.config/flow/deploy.json
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -208,8 +210,55 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
 
     match cmd.action {
         None => {
-            // Auto-detect platform from flow.toml
-            auto_deploy(&project_root, flow_config.as_ref())
+            // Auto-detect platform from flow.toml, or run deploy task if configured.
+            if let Some(cfg) = flow_config.as_ref() {
+                if let Some(task_name) = cfg.flow.deploy_task.as_deref() {
+                    if tasks::find_task(cfg, task_name).is_some() {
+                        return tasks::run(TaskRunOpts {
+                            config: config_path,
+                            delegate_to_hub: false,
+                            hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+                            hub_port: 9050,
+                            name: task_name.to_string(),
+                            args: Vec::new(),
+                        });
+                    }
+                    bail!(
+                        "deploy_task '{}' not found. Available tasks: {}",
+                        task_name,
+                        available_tasks(cfg)
+                    );
+                }
+
+                if cfg.host.is_some() || cfg.cloudflare.is_some() || cfg.railway.is_some() {
+                    return auto_deploy(&project_root, Some(cfg));
+                }
+                if tasks::find_task(cfg, "deploy").is_some() {
+                    return tasks::run(TaskRunOpts {
+                        config: config_path,
+                        delegate_to_hub: false,
+                        hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+                        hub_port: 9050,
+                        name: "deploy".to_string(),
+                        args: Vec::new(),
+                    });
+                }
+                bail!(
+                    "No deployment config found in flow.toml and no 'deploy' task is defined.\n\n\
+                    Add one of:\n\
+                    [host]\n\
+                    dest = \"/opt/myapp\"\n\
+                    run = \"./server\"\n\n\
+                    [cloudflare]\n\
+                    path = \"worker\"\n\n\
+                    [railway]\n\
+                    project = \"my-project\"\n\n\
+                    Or run:\n\
+                    f deploy setup"
+                );
+            }
+
+            bail!("No flow.toml found. Run `f setup` first.")
         }
         Some(DeployAction::Host { remote_build, setup }) => {
             deploy_host(&project_root, flow_config.as_ref(), remote_build, setup)
@@ -219,6 +268,7 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
         }
         Some(DeployAction::Setup) => setup_cloudflare(&project_root, flow_config.as_ref()),
         Some(DeployAction::Railway) => deploy_railway(&project_root, flow_config.as_ref()),
+        Some(DeployAction::Release(opts)) => release::run(opts),
         Some(DeployAction::Status) => show_status(&project_root, flow_config.as_ref()),
         Some(DeployAction::Logs { follow, lines }) => {
             show_logs(&project_root, flow_config.as_ref(), follow, lines)
@@ -232,6 +282,12 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
             check_health(&project_root, flow_config.as_ref(), url, status)
         }
     }
+}
+
+fn available_tasks(cfg: &crate::config::Config) -> String {
+    let mut names: Vec<_> = cfg.tasks.iter().map(|task| task.name.clone()).collect();
+    names.sort();
+    names.join(", ")
 }
 
 /// Auto-detect platform and deploy.
