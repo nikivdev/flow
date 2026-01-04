@@ -35,6 +35,7 @@ const SENSITIVE_PATTERNS: &[&str] = &[
     ".env.production",
     ".env.development",
     ".env.staging",
+    ".env.host",
     "credentials.json",
     "secrets.json",
     "service-account.json",
@@ -167,6 +168,11 @@ fn check_sensitive_files(repo_root: &Path) -> Vec<String> {
             .unwrap_or(file)
             .to_lowercase();
 
+        if file_name.starts_with(".env") {
+            sensitive.push(file.to_string());
+            continue;
+        }
+
         for pattern in SENSITIVE_PATTERNS {
             let pattern_lower = pattern.to_lowercase();
             // Check if filename matches or ends with pattern
@@ -189,6 +195,10 @@ fn warn_sensitive_files(files: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    if env::var("FLOW_ALLOW_SENSITIVE_COMMIT").ok().as_deref() == Some("1") {
+        return Ok(());
+    }
+
     println!("\n⚠️  Warning: Potentially sensitive files detected:");
     for file in files {
         println!("   - {}", file);
@@ -199,9 +209,7 @@ fn warn_sensitive_files(files: &[String]) -> Result<()> {
     println!("   - Using `git reset HEAD <file>` to unstage");
     println!();
 
-    // For now just warn, don't block
-    // In the future, could add --force flag to skip this check
-    Ok(())
+    bail!("Refusing to commit sensitive files. Set FLOW_ALLOW_SENSITIVE_COMMIT=1 to override.")
 }
 
 /// Threshold for "large" file changes (lines added + removed).
