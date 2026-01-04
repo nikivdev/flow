@@ -14,6 +14,7 @@ Complete documentation for all `f` (flow) commands.
 | [`env`](env.md) | Sync project environment and manage env vars |
 | [`tasks`](tasks.md) | List and run project tasks |
 | [`global`](global.md) | Run tasks from global flow config |
+| [`setup`](setup.md) | Print aliases or run setup task |
 | [`ai`](ai.md) | Manage AI coding sessions (Claude Code) |
 | [`daemon`](daemon.md) | Manage background daemons |
 | [`parallel`](parallel.md) | Run tasks in parallel |
@@ -48,6 +49,7 @@ f commit --help
 
 - **[tasks](tasks.md)** - List project tasks
 - **[global](global.md)** - Run tasks from ~/.config/flow/flow.toml
+- **[setup](setup.md)** - Print aliases or run setup task
 - **[run](run.md)** - Run a specific task
 - **[parallel](parallel.md)** - Run tasks in parallel
 - **[rerun](rerun.md)** - Re-run last task
@@ -72,7 +74,6 @@ f commit --help
 - **[env](env.md)** - Manage environment variables
 - **[init](init.md)** - Scaffold a new flow.toml
 - **[doctor](doctor.md)** - Verify tools and integrations
-- **[start](start.md)** - Bootstrap project with .ai/ folder
 
 ### Project Management
 

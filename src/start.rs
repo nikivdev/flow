@@ -29,6 +29,11 @@ pub mod checkpoints {
 /// Run the start command to bootstrap the project.
 pub fn run() -> Result<()> {
     let project_root = std::env::current_dir()?;
+    run_at(&project_root)
+}
+
+/// Bootstrap a project at the provided root path.
+pub fn run_at(project_root: &Path) -> Result<()> {
 
     // Create .ai/ folder structure
     if !has_checkpoint(&project_root, checkpoints::AI_FOLDER_CREATED) {
@@ -51,6 +56,11 @@ pub fn run() -> Result<()> {
         println!("✓ Created .ai/internal/db/ with schema");
     }
 
+    // Create flow.toml if missing
+    if create_flow_toml_if_missing(&project_root)? {
+        println!("✓ Created flow.toml");
+    }
+
     // Materialize .claude/ and .codex/ from .ai/
     materialize_tool_folders(&project_root)?;
 
@@ -68,6 +78,12 @@ pub fn run() -> Result<()> {
     println!("  .codex/           # Gitignored - symlinks to .ai/");
     println!("  .flox/            # Gitignored - symlinks to .ai/flox/");
     Ok(())
+}
+
+pub fn is_bootstrapped(project_root: &Path) -> bool {
+    has_checkpoint(project_root, checkpoints::AI_FOLDER_CREATED)
+        && has_checkpoint(project_root, checkpoints::GITIGNORE_UPDATED)
+        && has_checkpoint(project_root, checkpoints::DB_SCHEMA_CREATED)
 }
 
 /// Check if a checkpoint exists.
@@ -125,6 +141,7 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
         internal_dir.join("checkpoints"),
         internal_dir.join("sessions"),
         internal_dir.join("db"),
+        internal_dir.join("commits"),
     ];
 
     for dir in public_dirs.iter().chain(internal_dirs.iter()) {
@@ -132,6 +149,72 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+const DEFAULT_FLOW_TEMPLATE: &str = r#"# flow
+
+[[tasks]]
+name = "setup"
+command = ""
+description = "Project setup (fill me)"
+
+[[tasks]]
+name = "dev"
+command = ""
+description = "Start dev server (fill me)"
+"#;
+
+const RUST_FLOW_TEMPLATE: &str = r#"version = 1
+
+[[tasks]]
+name = "dev"
+command = "cargo run"
+description = "Run the default binary"
+dependencies = ["cargo"]
+
+[[tasks]]
+name = "build"
+command = "cargo build"
+description = "Build the project"
+dependencies = ["cargo"]
+
+[[tasks]]
+name = "test"
+command = "cargo test"
+description = "Run tests"
+dependencies = ["cargo"]
+
+[[tasks]]
+name = "fmt"
+command = "cargo fmt"
+description = "Format Rust code"
+dependencies = ["cargo"]
+
+[[tasks]]
+name = "clippy"
+command = "cargo clippy"
+description = "Lint with clippy"
+dependencies = ["cargo"]
+
+[deps]
+cargo = "cargo"
+"#;
+
+fn create_flow_toml_if_missing(project_root: &Path) -> Result<bool> {
+    let flow_path = project_root.join("flow.toml");
+    if flow_path.exists() {
+        return Ok(false);
+    }
+
+    let template = if project_root.join("Cargo.toml").exists() {
+        RUST_FLOW_TEMPLATE
+    } else {
+        DEFAULT_FLOW_TEMPLATE
+    };
+
+    fs::write(&flow_path, template)
+        .with_context(|| format!("failed to write {}", flow_path.display()))?;
+    Ok(true)
 }
 
 /// Materialize .claude/, .codex/, and .flox/ folders with symlinks to .ai/

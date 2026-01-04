@@ -221,6 +221,52 @@ pub fn log_review_result(
     }
 }
 
+/// Log commit review details for later analysis.
+pub fn log_commit_review(
+    project_path: &PathBuf,
+    commit_sha: &str,
+    branch: &str,
+    message: &str,
+    review_model: &str,
+    reviewer: &str,
+    issues_found: bool,
+    issues: &[String],
+    summary: Option<&str>,
+    timed_out: bool,
+    context_chars: usize,
+) {
+    let log_dir = project_path.join(".ai").join("internal").join("commits");
+    let log_path = log_dir.join("review-log.jsonl");
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let entry = json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "commit_sha": commit_sha,
+        "branch": branch,
+        "message": message,
+        "review": {
+            "model": review_model,
+            "reviewer": reviewer,
+            "issues_found": issues_found,
+            "issue_count": issues.len(),
+            "issues": issues,
+            "summary": summary,
+            "timed_out": timed_out,
+        },
+        "context_chars": context_chars,
+    });
+
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(file, "{}", entry);
+    }
+}
+
 /// Get AI session context since the last commit checkpoint.
 /// Returns all exchanges from the checkpoint timestamp to now.
 pub fn get_context_since_checkpoint() -> Result<Option<String>> {

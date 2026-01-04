@@ -365,7 +365,7 @@ fn trim_yaml_scalar(value: &str) -> String {
 }
 
 fn run_agent_optional(agent: &str, prompt: Option<Vec<String>>) -> Result<()> {
-    let mut prompt_args = match prompt {
+    let prompt_args = match prompt {
         Some(p) if !p.is_empty() => p,
         _ => prompt_for_agent_prompt(agent)?,
     };

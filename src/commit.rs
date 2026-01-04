@@ -1100,6 +1100,31 @@ pub fn run_with_check_sync(
     git_run(&args)?;
     println!("✓ Committed");
 
+    if let Ok(commit_sha) = git_capture_in(&repo_root, &["rev-parse", "HEAD"]) {
+        let branch = git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_else(|_| "unknown".to_string());
+        let reviewer = if review_selection.is_claude() {
+            "claude"
+        } else {
+            "codex"
+        };
+        ai::log_commit_review(
+            &repo_root,
+            commit_sha.trim(),
+            branch.trim(),
+            &full_message,
+            review_selection.model_label(),
+            reviewer,
+            review.issues_found,
+            &review.issues,
+            review.summary.as_deref(),
+            review.timed_out,
+            context_chars,
+        );
+    } else {
+        debug!("failed to capture commit SHA for review log");
+    }
+
     // Push if requested
     if push {
         print!("Pushing... ");
