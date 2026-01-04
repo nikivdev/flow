@@ -10,6 +10,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use crate::{
     agents,
     cli::{SetupOpts, SetupTarget, TaskRunOpts},
+    config,
     deploy,
     start,
     tasks::{self, load_project_config},
@@ -23,8 +24,14 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         start::run_at(&project_root)?;
     }
 
-    if matches!(opts.target, Some(SetupTarget::Deploy)) {
-        return setup_deploy(&project_root, &config_path);
+    match opts.target {
+        Some(SetupTarget::Deploy) => {
+            return setup_deploy(&project_root, &config_path);
+        }
+        Some(SetupTarget::Release) => {
+            return setup_release(&project_root, &config_path);
+        }
+        None => {}
     }
 
     if !config_path.exists() {
@@ -152,15 +159,15 @@ fn setup_deploy(project_root: &Path, config_path: &Path) -> Result<()> {
     };
 
     let domain = if is_tty {
-        prompt_line_optional("Domain (blank to skip)", None)?
+        prompt_line_optional("Domain (blank to skip)", defaults.domain.as_deref())?
     } else {
-        None
+        defaults.domain.clone()
     };
 
     let ssl = if is_tty && domain.is_some() {
-        prompt_yes_no("Enable SSL via Let's Encrypt?", true)?
+        prompt_yes_no("Enable SSL via Let's Encrypt?", defaults.ssl)?
     } else {
-        false
+        defaults.ssl && domain.is_some()
     };
 
     let port = if domain.is_some() {
@@ -196,6 +203,75 @@ fn setup_deploy(project_root: &Path, config_path: &Path) -> Result<()> {
         env_file,
         domain,
         ssl,
+    };
+
+    let host_section = render_host_section(&host_cfg);
+    flow_content = append_section(&flow_content, &host_section);
+    fs::write(config_path, flow_content)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    println!("Added [host] config to flow.toml.");
+    println!("Next: run `f deploy` to deploy.");
+    Ok(())
+}
+
+fn setup_release(project_root: &Path, config_path: &Path) -> Result<()> {
+    if !config_path.exists() {
+        create_flow_toml_interactive(project_root, config_path)?;
+    }
+
+    let mut flow_content = fs::read_to_string(config_path).unwrap_or_default();
+    if has_host_section(&flow_content) {
+        println!("flow.toml already includes [host] configuration.");
+        return Ok(());
+    }
+
+    let Some(reason) = detect_server_project(project_root) else {
+        println!("No server project detected. Add [host] manually or run `f setup deploy`.");
+        return Ok(());
+    };
+    println!("Detected server project: {reason}");
+
+    if io::stdin().is_terminal() && !prompt_yes_no("Configure Linux host deployment now?", true)? {
+        println!("Skipped host setup. Run `f setup deploy` or edit flow.toml later.");
+        return Ok(());
+    }
+
+    let template = load_server_setup_template();
+    if let Some(template) = template.as_ref() {
+        println!("Using server setup template from {}.", template.source);
+    }
+
+    let mut defaults = deploy_defaults(project_root);
+    apply_server_template(&mut defaults, template.as_ref());
+
+    if defaults.run.is_none() {
+        println!("Warning: no run command set; deploy will not create a systemd service.");
+    }
+
+    if let Some(content) = defaults.setup_script_content.as_deref() {
+        if !defaults.setup_path.trim().is_empty() {
+            ensure_setup_script(project_root, &defaults.setup_path, content)?;
+        }
+    }
+
+    if let Some(env_path) = defaults.env_file.as_ref() {
+        ensure_env_file(project_root, env_path, defaults.env_example.as_ref(), false)?;
+    }
+
+    if io::stdin().is_terminal() {
+        maybe_configure_deploy_host()?;
+    }
+
+    let host_cfg = HostSetupConfig {
+        dest: defaults.dest,
+        setup: normalize_optional(defaults.setup_path),
+        run: defaults.run,
+        port: defaults.port,
+        service: Some(defaults.service),
+        env_file: defaults.env_file,
+        domain: defaults.domain,
+        ssl: defaults.ssl,
     };
 
     let host_section = render_host_section(&host_cfg);
@@ -287,6 +363,8 @@ struct DeployDefaults {
     env_example: Option<PathBuf>,
     env_file: Option<String>,
     port: Option<u16>,
+    domain: Option<String>,
+    ssl: bool,
 }
 
 struct HostSetupConfig {
@@ -298,6 +376,11 @@ struct HostSetupConfig {
     env_file: Option<String>,
     domain: Option<String>,
     ssl: bool,
+}
+
+struct ServerSetupTemplate {
+    host: deploy::HostConfig,
+    source: String,
 }
 
 fn deploy_defaults(project_root: &Path) -> DeployDefaults {
@@ -312,6 +395,8 @@ fn deploy_defaults(project_root: &Path) -> DeployDefaults {
         .as_ref()
         .and_then(|path| strip_example_suffix(project_root, path));
     let port = Some(8080);
+    let domain = None;
+    let ssl = false;
 
     DeployDefaults {
         dest,
@@ -322,7 +407,112 @@ fn deploy_defaults(project_root: &Path) -> DeployDefaults {
         env_example,
         env_file,
         port,
+        domain,
+        ssl,
     }
+}
+
+fn load_server_setup_template() -> Option<ServerSetupTemplate> {
+    let mut host_config: Option<deploy::HostConfig> = None;
+    let mut source: Option<String> = None;
+
+    let global_path = config::default_config_path();
+    if global_path.exists() {
+        if let Ok(cfg) = config::load(&global_path) {
+            if let Some(setup) = cfg.setup {
+                if let Some(server) = setup.server {
+                    if let Some(template_path) = server.template {
+                        let path = config::expand_path(&template_path);
+                        if path.exists() {
+                            if let Ok(template_cfg) = config::load(&path) {
+                                if let Some(host) = template_cfg.host {
+                                    host_config = Some(host);
+                                    source = Some(path.display().to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(host) = server.host {
+                        host_config = Some(match host_config {
+                            Some(existing) => merge_host_config(existing, host),
+                            None => host,
+                        });
+                        source = Some(format!(
+                            "{} (inline)",
+                            global_path.display()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if host_config.is_none() {
+        let infra_path = PathBuf::from("/Users/nikiv/infra/flow.toml");
+        if infra_path.exists() {
+            if let Ok(cfg) = config::load(&infra_path) {
+                if let Some(host) = cfg.host {
+                    host_config = Some(host);
+                    source = Some(infra_path.display().to_string());
+                }
+            }
+        }
+    }
+
+    host_config.map(|host| ServerSetupTemplate {
+        host,
+        source: source.unwrap_or_else(|| "unknown".to_string()),
+    })
+}
+
+fn merge_host_config(
+    base: deploy::HostConfig,
+    overlay: deploy::HostConfig,
+) -> deploy::HostConfig {
+    deploy::HostConfig {
+        dest: overlay.dest.or(base.dest),
+        setup: overlay.setup.or(base.setup),
+        run: overlay.run.or(base.run),
+        port: overlay.port.or(base.port),
+        service: overlay.service.or(base.service),
+        env_file: overlay.env_file.or(base.env_file),
+        domain: overlay.domain.or(base.domain),
+        ssl: overlay.ssl || base.ssl,
+    }
+}
+
+fn apply_server_template(defaults: &mut DeployDefaults, template: Option<&ServerSetupTemplate>) {
+    let Some(template) = template else {
+        return;
+    };
+    let host = &template.host;
+
+    if let Some(setup) = host.setup.as_ref() {
+        if looks_like_inline_script(setup) {
+            defaults.setup_script_content = Some(setup.to_string());
+        } else {
+            defaults.setup_path = setup.to_string();
+            defaults.setup_script_content = None;
+        }
+    }
+
+    if let Some(env_file) = host.env_file.as_ref() {
+        defaults.env_file = Some(env_file.to_string());
+    }
+    if host.port.is_some() {
+        defaults.port = host.port;
+    }
+    if let Some(domain) = host.domain.as_ref() {
+        defaults.domain = Some(domain.to_string());
+    }
+    if host.ssl {
+        defaults.ssl = true;
+    }
+}
+
+fn looks_like_inline_script(value: &str) -> bool {
+    value.contains('\n') || value.trim_start().starts_with("#!") || value.contains("set -e")
 }
 
 fn render_host_section(cfg: &HostSetupConfig) -> String {
@@ -884,6 +1074,74 @@ fn project_guidance(project_root: &Path) -> Option<String> {
         (true, true) => Some("Detected Rust + Node (Cargo.toml + package.json). Use the right tool for each step.".to_string()),
         _ => None,
     }
+}
+
+fn detect_server_project(project_root: &Path) -> Option<String> {
+    if let Some(reason) = detect_rust_server(project_root) {
+        return Some(reason);
+    }
+    if let Some(reason) = detect_node_server(project_root) {
+        return Some(reason);
+    }
+    None
+}
+
+fn detect_rust_server(project_root: &Path) -> Option<String> {
+    let path = project_root.join("Cargo.toml");
+    let content = fs::read_to_string(&path).ok()?;
+    let value: toml::Value = toml::from_str(&content).ok()?;
+
+    let mut deps = std::collections::HashSet::new();
+    if let Some(table) = value.get("dependencies").and_then(toml::Value::as_table) {
+        deps.extend(table.keys().cloned());
+    }
+    if let Some(workspace) = value.get("workspace").and_then(toml::Value::as_table) {
+        if let Some(table) = workspace
+            .get("dependencies")
+            .and_then(toml::Value::as_table)
+        {
+            deps.extend(table.keys().cloned());
+        }
+    }
+
+    let server_deps = [
+        "axum",
+        "actix-web",
+        "warp",
+        "rocket",
+        "hyper",
+        "tower-http",
+        "tonic",
+    ];
+    for dep in server_deps {
+        if deps.contains(dep) {
+            return Some(format!("Rust server crate detected: {dep}"));
+        }
+    }
+
+    None
+}
+
+fn detect_node_server(project_root: &Path) -> Option<String> {
+    let path = project_root.join("package.json");
+    let content = fs::read_to_string(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let mut deps = std::collections::HashSet::new();
+    for key in ["dependencies", "devDependencies", "peerDependencies"] {
+        if let Some(table) = value.get(key).and_then(|v| v.as_object()) {
+            deps.extend(table.keys().cloned());
+        }
+    }
+
+    let server_deps = ["express", "fastify", "koa", "hono", "next", "remix", "nestjs"];
+    for dep in server_deps {
+        if deps.contains(dep) {
+            return Some(format!("Node server framework detected: {dep}"));
+        }
+    }
+
+    None
 }
 
 fn ai_flow_toml_mismatch_reason(project_root: &Path, toml_content: &str) -> Option<String> {

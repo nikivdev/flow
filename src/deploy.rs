@@ -26,6 +26,13 @@ use crate::deploy_setup::{
 use crate::env::parse_env_file;
 use crate::tasks;
 
+#[derive(Debug, Deserialize)]
+struct InfraConfig {
+    linux_host: Option<String>,
+    linux_port: Option<String>,
+    linux_user: Option<String>,
+}
+
 /// Host configuration stored globally at ~/.config/flow/deploy.json
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeployConfig {
@@ -268,6 +275,7 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
         }
         Some(DeployAction::Setup) => setup_cloudflare(&project_root, flow_config.as_ref()),
         Some(DeployAction::Railway) => deploy_railway(&project_root, flow_config.as_ref()),
+        Some(DeployAction::Config) => configure_deploy(),
         Some(DeployAction::Release(opts)) => release::run(opts),
         Some(DeployAction::Status) => show_status(&project_root, flow_config.as_ref()),
         Some(DeployAction::Logs { follow, lines }) => {
@@ -282,6 +290,85 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
             check_health(&project_root, flow_config.as_ref(), url, status)
         }
     }
+}
+
+fn configure_deploy() -> Result<()> {
+    println!("Deploy config (Linux host via SSH).");
+
+    let existing = load_deploy_config()?.host;
+    let infra_default = infra_linux_connection_string();
+
+    if let Some(conn) = existing.as_ref() {
+        println!(
+            "Current host: {}@{}:{}",
+            conn.user, conn.host, conn.port
+        );
+    }
+    if let Some(default_conn) = infra_default.as_ref() {
+        if existing.is_none() {
+            println!("Detected infra host: {default_conn}");
+        }
+    }
+
+    let default_conn = existing
+        .as_ref()
+        .map(|conn| format!("{}@{}:{}", conn.user, conn.host, conn.port))
+        .or(infra_default);
+
+    let prompt = "SSH host (user@host:port)";
+    let input = prompt_line(prompt, default_conn.as_deref())?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        println!("No changes.");
+        return Ok(());
+    }
+
+    let conn = HostConnection::parse(trimmed)?;
+    let mut cfg = load_deploy_config()?;
+    cfg.host = Some(conn.clone());
+    save_deploy_config(&cfg)?;
+
+    println!("✓ Host set: {}@{}:{}", conn.user, conn.host, conn.port);
+    println!("Next: run `f setup release` to scaffold host config, then `f deploy`.");
+    Ok(())
+}
+
+fn infra_linux_connection_string() -> Option<String> {
+    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    let paths = [
+        base.join("infra").join("config.json"),
+        crate::config::global_config_dir().join("infra/config.json"),
+    ];
+
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        let content = fs::read_to_string(&path).ok()?;
+        let cfg: InfraConfig = serde_json::from_str(&content).ok()?;
+        let user = cfg.linux_user?;
+        let host = cfg.linux_host?;
+        let port = cfg.linux_port.unwrap_or_else(|| "22".to_string());
+        return Some(format!("{}@{}:{}", user, host, port));
+    }
+
+    None
+}
+
+fn prompt_line(message: &str, default: Option<&str>) -> Result<String> {
+    if let Some(default) = default {
+        print!("{message} [{default}]: ");
+    } else {
+        print!("{message}: ");
+    }
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(default.unwrap_or("").to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn available_tasks(cfg: &crate::config::Config) -> String {
