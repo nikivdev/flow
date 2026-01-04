@@ -21,7 +21,8 @@ pub fn run(cmd: UpstreamCommand) -> Result<()> {
             setup_upstream(upstream_url.as_deref(), upstream_branch.as_deref())
         }
         UpstreamAction::Pull { branch } => pull_upstream(branch.as_deref()),
-        UpstreamAction::Sync { no_push } => sync_upstream(!no_push),
+        UpstreamAction::Sync { no_push, create_repo } => sync_upstream(!no_push, create_repo),
+        UpstreamAction::Open => open_upstream(),
     }
 }
 
@@ -79,6 +80,52 @@ fn show_status() -> Result<()> {
         println!("\nTo set up upstream:");
         println!("  f upstream setup --url <upstream-repo-url>");
         println!("  f upstream setup --url https://github.com/original/repo");
+    }
+
+    Ok(())
+}
+
+/// Open upstream repository URL in browser.
+fn open_upstream() -> Result<()> {
+    let upstream_url = git_capture(&["remote", "get-url", "upstream"])?;
+    let upstream_url = upstream_url.trim();
+
+    // Convert git URL to https URL if needed
+    let https_url = if upstream_url.starts_with("git@github.com:") {
+        upstream_url
+            .replace("git@github.com:", "https://github.com/")
+            .trim_end_matches(".git")
+            .to_string()
+    } else if upstream_url.starts_with("https://") {
+        upstream_url.trim_end_matches(".git").to_string()
+    } else {
+        upstream_url.to_string()
+    };
+
+    println!("Opening {}", https_url);
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&https_url)
+            .status()
+            .context("failed to open URL")?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&https_url)
+            .status()
+            .context("failed to open URL")?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", &https_url])
+            .status()
+            .context("failed to open URL")?;
     }
 
     Ok(())
@@ -307,7 +354,7 @@ fn pull_upstream(target_branch: Option<&str>) -> Result<()> {
 }
 
 /// Full sync: pull upstream, merge to dev, merge to main, push.
-fn sync_upstream(push: bool) -> Result<()> {
+fn sync_upstream(push: bool, create_repo: bool) -> Result<()> {
     // Check upstream remote exists
     if git_capture(&["remote", "get-url", "upstream"]).is_err() {
         bail!("No upstream remote. Run: f upstream setup --url <url>");
@@ -406,8 +453,8 @@ fn sync_upstream(push: bool) -> Result<()> {
 
         for branch in &branches_to_push {
             if let Err(e) = git_run(&["push", "origin", branch]) {
-                // Check if it's a repo-not-found error
-                if try_create_origin_repo()? {
+                // Only try to create repo if explicitly requested
+                if create_repo && try_create_origin_repo()? {
                     // Repo created, retry push
                     git_run(&["push", "-u", "origin", branch])?;
                 } else {

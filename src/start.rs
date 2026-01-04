@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::web;
+
 /// Checkpoint names for tracking completed actions.
 pub mod checkpoints {
     pub const AI_FOLDER_CREATED: &str = "ai_folder_created";
@@ -59,6 +61,8 @@ pub fn run_at(project_root: &Path) -> Result<()> {
     // Materialize .claude/ and .codex/ from .ai/
     materialize_tool_folders(&project_root)?;
 
+    web::ensure_web_ui(&project_root)?;
+
     println!("\n✓ Project ready");
     println!("\nStructure:");
     println!("  .ai/");
@@ -66,6 +70,7 @@ pub fn run_at(project_root: &Path) -> Result<()> {
     println!("  ├── skills/       # Tracked - shared skills");
     println!("  ├── tools/        # Tracked - shared tools");
     println!("  ├── flox/         # Tracked - flox manifest");
+    println!("  ├── web/          # Gitignored - AI web UI");
     println!("  ├── docs/         # Tracked - auto-generated docs");
     println!("  ├── agents.md     # Tracked - agent instructions");
     println!("  └── internal/     # Gitignored - private data");
@@ -127,6 +132,7 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
         ai_dir.join("skills"),
         ai_dir.join("tools"),
         ai_dir.join("flox"),
+        ai_dir.join("web"),
         ai_dir.join("docs"),
     ];
 
@@ -335,6 +341,7 @@ const DB_PACKAGE_TEMPLATE: &str = r#"{
 const FLOW_GITIGNORE_SECTION: &str = "\
 # flow
 .ai/internal/
+.ai/web/
 .claude/
 .codex/
 .flox/
@@ -350,18 +357,42 @@ fn update_gitignore(project_root: &Path) -> Result<()> {
         String::new()
     };
 
-    // Check if flow section already exists
+    let required_entries = [
+        ".ai/internal/",
+        ".ai/web/",
+        ".claude/",
+        ".codex/",
+        ".flox/",
+    ];
+
+    // If flow section already exists, make sure required entries are present.
     if content.contains("# flow") {
+        let mut new_content = content.clone();
+        let mut updated = false;
+        for entry in required_entries {
+            if !content.lines().any(|line| line.trim() == entry) {
+                if !new_content.ends_with('\n') {
+                    new_content.push('\n');
+                }
+                new_content.push_str(entry);
+                new_content.push('\n');
+                updated = true;
+            }
+        }
+        if updated {
+            fs::write(&gitignore_path, new_content)?;
+        }
         return Ok(());
     }
 
     // Also check if all patterns are already present (legacy)
     let has_ai_internal = content.lines().any(|l| l.trim() == ".ai/internal/");
+    let has_web = content.lines().any(|l| l.trim() == ".ai/web/");
     let has_claude = content.lines().any(|l| l.trim() == ".claude/");
     let has_codex = content.lines().any(|l| l.trim() == ".codex/");
     let has_flox = content.lines().any(|l| l.trim() == ".flox/");
 
-    if has_ai_internal && has_claude && has_codex && has_flox {
+    if has_ai_internal && has_web && has_claude && has_codex && has_flox {
         return Ok(());
     }
 
@@ -427,6 +458,7 @@ mod tests {
         let content = fs::read_to_string(root.join(".gitignore")).unwrap();
         assert!(content.contains("# flow"));
         assert!(content.contains(".ai/internal/"));
+        assert!(content.contains(".ai/web/"));
         assert!(content.contains(".claude/"));
         assert!(content.contains(".codex/"));
     }
@@ -444,6 +476,7 @@ mod tests {
         assert!(content.contains("node_modules/"));
         assert!(content.contains("# flow"));
         assert!(content.contains(".ai/internal/"));
+        assert!(content.contains(".ai/web/"));
         assert!(content.contains(".claude/"));
         assert!(content.contains(".codex/"));
     }
@@ -453,7 +486,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
-        fs::write(root.join(".gitignore"), "# flow\n.ai/internal/\n.claude/\n.codex/\n").unwrap();
+        fs::write(
+            root.join(".gitignore"),
+            "# flow\n.ai/internal/\n.ai/web/\n.claude/\n.codex/\n",
+        )
+        .unwrap();
 
         update_gitignore(root).unwrap();
 
@@ -461,5 +498,20 @@ mod tests {
         // Should not duplicate
         assert_eq!(content.matches("# flow").count(), 1);
         assert_eq!(content.matches(".ai/internal/").count(), 1);
+    }
+
+    #[test]
+    fn test_update_gitignore_adds_web_when_flow_section_exists() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join(".gitignore"), "# flow\n.ai/internal/\n.claude/\n.codex/\n").unwrap();
+
+        update_gitignore(root).unwrap();
+
+        let content = fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert!(content.contains("# flow"));
+        assert!(content.contains(".ai/internal/"));
+        assert!(content.contains(".ai/web/"));
     }
 }

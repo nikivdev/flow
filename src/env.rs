@@ -14,12 +14,12 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::cli::EnvAction;
+use crate::cli::{EnvAction, TokenAction};
 use crate::config;
 use crate::deploy;
 use crate::env_setup::{EnvSetupDefaults, run_env_setup};
 use crate::storage::{create_jazz_worker_account, get_project_name as storage_project_name, sanitize_name};
-use crate::sync;
+use crate::agent_setup;
 use uuid::Uuid;
 
 const DEFAULT_API_URL: &str = "https://1focus.ai";
@@ -433,7 +433,7 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
     };
 
     match action {
-        EnvAction::Sync => sync::run()?,
+        EnvAction::Sync => agent_setup::run()?,
         EnvAction::Unlock => unlock_env_read()?,
         EnvAction::Login => login()?,
         EnvAction::Pull { environment } => pull(&environment)?,
@@ -466,8 +466,8 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
         }
         EnvAction::Setup { env_file, environment } => setup(env_file, environment)?,
         EnvAction::List { environment } => list(&environment)?,
-        EnvAction::Set { pair, environment, description } => set_var(&pair, &environment, description.as_deref())?,
-        EnvAction::Delete { keys, environment } => delete_vars(&keys, &environment)?,
+        EnvAction::Set { pair, personal, environment, description } => set_var(&pair, personal, &environment, description.as_deref())?,
+        EnvAction::Delete { keys, personal, environment } => delete_vars(&keys, personal, &environment)?,
         EnvAction::Status => status()?,
         EnvAction::Get { keys, personal, environment, format } => {
             get_vars(&keys, personal, &environment, &format)?
@@ -475,8 +475,26 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
         EnvAction::Run { personal, environment, keys, command } => {
             run_with_env(personal, &environment, &keys, &command)?
         }
+        EnvAction::Token { action } => {
+            run_token_action(action)?
+        }
     }
 
+    Ok(())
+}
+
+fn run_token_action(action: TokenAction) -> Result<()> {
+    match action {
+        TokenAction::Create { name, permissions } => {
+            token_create(name.as_deref(), &permissions)?
+        }
+        TokenAction::List => {
+            token_list()?
+        }
+        TokenAction::Revoke { name } => {
+            token_revoke(&name)?
+        }
+    }
     Ok(())
 }
 
@@ -1240,7 +1258,7 @@ fn list(environment: &str) -> Result<()> {
 }
 
 /// Set a single env var.
-fn set_var(pair: &str, environment: &str, description: Option<&str>) -> Result<()> {
+fn set_var(pair: &str, personal: bool, environment: &str, description: Option<&str>) -> Result<()> {
     let (key, value) = pair
         .split_once('=')
         .ok_or_else(|| anyhow::anyhow!("Invalid format. Use KEY=VALUE"))?;
@@ -1248,7 +1266,58 @@ fn set_var(pair: &str, environment: &str, description: Option<&str>) -> Result<(
     let key = key.trim();
     let value = value.trim();
 
-    set_project_env_var_internal(key, value, environment, description)
+    if personal {
+        set_personal_env_var(key, value)
+    } else {
+        set_project_env_var_internal(key, value, environment, description)
+    }
+}
+
+/// Set a personal (global) env var.
+fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
+    let auth = load_auth_config()?;
+    let token = auth
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+
+    if key.is_empty() {
+        bail!("Key cannot be empty");
+    }
+
+    let api_url = get_api_url(&auth);
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let url = format!("{}/api/env/personal", api_url);
+    let mut vars = HashMap::new();
+    vars.insert(key.to_string(), value.to_string());
+
+    let body = serde_json::json!({
+        "vars": vars,
+    });
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to 1focus")?;
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    println!("✓ Set personal env var: {}", key);
+    Ok(())
 }
 
 pub fn set_project_env_var(
@@ -1329,7 +1398,7 @@ fn set_project_env_var_internal(
 }
 
 /// Delete env vars.
-fn delete_vars(keys: &[String], environment: &str) -> Result<()> {
+fn delete_vars(keys: &[String], personal: bool, environment: &str) -> Result<()> {
     let auth = load_auth_config()?;
     let token = auth
         .token
@@ -1340,18 +1409,27 @@ fn delete_vars(keys: &[String], environment: &str) -> Result<()> {
         bail!("No keys specified");
     }
 
-    let project = get_project_name()?;
     let api_url = get_api_url(&auth);
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/env/{}", api_url, project);
-    let body = serde_json::json!({
-        "keys": keys,
-        "environment": environment,
-    });
+    let (url, body) = if personal {
+        (
+            format!("{}/api/env/personal", api_url),
+            serde_json::json!({ "keys": keys }),
+        )
+    } else {
+        let project = get_project_name()?;
+        (
+            format!("{}/api/env/{}", api_url, project),
+            serde_json::json!({
+                "keys": keys,
+                "environment": environment,
+            }),
+        )
+    };
 
     let resp = client
         .delete(&url)
@@ -1366,7 +1444,11 @@ fn delete_vars(keys: &[String], environment: &str) -> Result<()> {
         bail!("API error {}: {}", status, body);
     }
 
-    println!("✓ Deleted {} key(s) from {}", keys.len(), environment);
+    if personal {
+        println!("✓ Deleted {} personal key(s)", keys.len());
+    } else {
+        println!("✓ Deleted {} key(s) from {}", keys.len(), environment);
+    }
 
     Ok(())
 }
@@ -1518,6 +1600,10 @@ pub fn fetch_project_env_vars(environment: &str, keys: &[String]) -> Result<Hash
     fetch_env_vars(false, environment, keys)
 }
 
+pub fn fetch_personal_env_vars(keys: &[String]) -> Result<HashMap<String, String>> {
+    fetch_env_vars(true, "production", keys)
+}
+
 /// Get specific env vars and print to stdout.
 fn get_vars(keys: &[String], personal: bool, environment: &str, format: &str) -> Result<()> {
     let vars = fetch_env_vars(personal, environment, keys)?;
@@ -1584,4 +1670,216 @@ fn run_with_env(
     let status = child.status().with_context(|| format!("failed to run '{}'", cmd))?;
 
     std::process::exit(status.code().unwrap_or(1));
+}
+
+// =============================================================================
+// Service Token Management
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+struct CreateTokenResponse {
+    #[allow(dead_code)]
+    success: bool,
+    token: String,
+    #[serde(rename = "projectName")]
+    project_name: String,
+    name: String,
+    permissions: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenEntry {
+    name: String,
+    #[serde(rename = "projectName")]
+    project_name: String,
+    permissions: String,
+    #[serde(rename = "createdAt")]
+    #[allow(dead_code)]
+    created_at: Option<String>,
+    #[serde(rename = "lastUsedAt")]
+    last_used_at: Option<String>,
+    revoked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListTokensResponse {
+    tokens: Vec<TokenEntry>,
+}
+
+/// Create a new service token for the current project.
+fn token_create(name: Option<&str>, permissions: &str) -> Result<()> {
+    let auth = load_auth_config()?;
+    let token = auth
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+
+    let project = get_project_name()?;
+    let default_name = format!("{}-service", project);
+    let token_name = name.unwrap_or(&default_name);
+    let api_url = get_api_url(&auth);
+
+    println!("Creating service token for '{}'...", project);
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let url = format!("{}/api/env/tokens", api_url);
+    let body = serde_json::json!({
+        "projectName": project,
+        "name": token_name,
+        "permissions": permissions,
+    });
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to 1focus")?;
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if resp.status() == 403 {
+        bail!("You don't own this project.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    let data: CreateTokenResponse = resp.json().context("failed to parse response")?;
+
+    println!();
+    println!("✓ Service token created!");
+    println!();
+    println!("Token:       {}", data.token);
+    println!("Project:     {}", data.project_name);
+    println!("Name:        {}", data.name);
+    println!("Permissions: {}", data.permissions);
+    println!();
+    println!("IMPORTANT: Save this token now. It won't be shown again.");
+    println!();
+    println!("This token can ONLY access env vars for '{}'.", data.project_name);
+    println!("If the host is compromised, revoke it with:");
+    println!("  f env token revoke {}", data.name);
+
+    Ok(())
+}
+
+/// List service tokens for the current user.
+fn token_list() -> Result<()> {
+    let auth = load_auth_config()?;
+    let token = auth
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+
+    let api_url = get_api_url(&auth);
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let url = format!("{}/api/env/tokens", api_url);
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .context("failed to connect to 1focus")?;
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    let data: ListTokensResponse = resp.json().context("failed to parse response")?;
+
+    if data.tokens.is_empty() {
+        println!("No service tokens found.");
+        println!();
+        println!("Create one with: f env token create");
+        return Ok(());
+    }
+
+    println!("Service Tokens");
+    println!("─────────────────────────────");
+
+    for entry in &data.tokens {
+        let status = if entry.revoked { " (revoked)" } else { "" };
+        println!(
+            "  {} → {} [{}]{}",
+            entry.name, entry.project_name, entry.permissions, status
+        );
+        if let Some(last_used) = &entry.last_used_at {
+            println!("    Last used: {}", last_used);
+        }
+    }
+
+    println!();
+    println!("{} token(s)", data.tokens.len());
+
+    Ok(())
+}
+
+/// Revoke a service token.
+fn token_revoke(name: &str) -> Result<()> {
+    let auth = load_auth_config()?;
+    let token = auth
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+
+    let project = get_project_name()?;
+    let api_url = get_api_url(&auth);
+
+    println!("Revoking token '{}' for project '{}'...", name, project);
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let url = format!("{}/api/env/tokens", api_url);
+    let body = serde_json::json!({
+        "name": name,
+        "projectName": project,
+    });
+
+    let resp = client
+        .delete(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to 1focus")?;
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if resp.status() == 404 {
+        bail!("Token '{}' not found for project '{}'.", name, project);
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    println!("✓ Token '{}' revoked.", name);
+    println!();
+    println!("Any host using this token will no longer be able to fetch env vars.");
+
+    Ok(())
 }

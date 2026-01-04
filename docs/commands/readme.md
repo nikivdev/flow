@@ -19,6 +19,7 @@ Complete documentation for all `f` (flow) commands.
 | [`daemon`](daemon.md) | Manage background daemons |
 | [`parallel`](parallel.md) | Run tasks in parallel |
 | [`docs`](docs.md) | Manage auto-generated documentation |
+| [`web`](web.md) | Open the Flow web UI for a project |
 
 ## Getting Started
 

@@ -1,196 +1,258 @@
-//! Auto-setup command for autonomous agent workflows.
+//! Git sync command - comprehensive repo synchronization.
+//!
+//! Provides a single command to sync a git repository:
+//! - Pull from origin (with rebase)
+//! - Sync upstream if configured (fetch, merge)
+//! - Push to origin
+
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
 
-use crate::config;
+use crate::cli::SyncCommand;
 
-/// Generate agents.md content with project-specific settings.
-fn generate_agents_md(project_name: &str, _primary_task: &str) -> String {
-    format!(
-        r#"# Autonomous Agent Instructions
-
-Project: {project_name}
-
-This project is configured for autonomous AI agent workflows with human-in-the-loop approval.
-
-## Response Format
-
-**Every response MUST end with exactly one of these signals on the final line:**
-
-### Success signals
-
-```
-done.
-```
-Use when task completed successfully with high certainty. No further action needed.
-
-```
-done: <message>
-```
-Use when task completed with context to share. Example: `done: Added login command with --token flag`
-
-### Needs human input
-
-```
-needsUpdate: <message>
-```
-Use when you need human decision or action. Example: `needsUpdate: Should I use OAuth or API key auth?`
-
-### Error signals
-
-```
-error: <message>
-```
-Use when task failed or cannot proceed. Example: `error: Build failed - missing dependency xyz`
-
-## Rules
-
-1. **Always end with a signal** - The last line must be one of the above
-2. **One signal only** - Never combine signals
-3. **Be specific** - Include actionable context in messages
-4. **No quotes** - Write signals exactly as shown, no wrapping quotes
-
-## Examples
-
-### Successful implementation
-```
-Added the new CLI command with all requested flags.
-
-done.
-```
-
-### Completed with context
-```
-Refactored the auth module to use the new token format.
-
-done: Auth now supports both JWT and API key methods
-```
-
-### Need human decision
-```
-Found two approaches for caching:
-1. Redis - better for distributed systems
-2. In-memory - simpler, faster for single instance
-
-needsUpdate: Which caching approach should I use?
-```
-
-### Error occurred
-```
-Attempted to run tests but encountered issues.
-
-error: Test suite requires DATABASE_URL environment variable
-```
-"#
-    )
-}
-
-/// Run the auto-setup command.
-pub fn run() -> Result<()> {
-    println!("Setting up autonomous agent workflow...\n");
-
-    // Check if Lin.app is running
-    print!("Checking Lin.app... ");
-    if !is_lin_running() {
-        println!("not running");
-        println!();
-        println!("Lin.app is required for autonomous agent workflows.");
-        println!("Please start Lin.app from /Applications/Lin.app");
-        bail!("Lin.app is not running");
-    }
-    println!("running ✓");
-
-    // Check if Lin.app exists
-    let lin_app = PathBuf::from("/Applications/Lin.app");
-    if !lin_app.exists() {
-        println!();
-        println!("Warning: Lin.app not found at /Applications/Lin.app");
-        println!("The autonomous workflow requires Lin.app to be installed.");
+/// Run the sync command.
+pub fn run(cmd: SyncCommand) -> Result<()> {
+    // Check we're in a git repo
+    if git_capture(&["rev-parse", "--git-dir"]).is_err() {
+        bail!("Not a git repository");
     }
 
-    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let current = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let current = current.trim();
 
-    // Load flow.toml to get project settings
-    let flow_toml = cwd.join("flow.toml");
-    let (project_name, primary_task) = if flow_toml.exists() {
-        let cfg = config::load(&flow_toml).unwrap_or_default();
-        let name = cfg
-            .project_name
-            .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "project".to_string());
-        let task = cfg
-            .flow
-            .primary_task
-            .unwrap_or_else(|| "deploy".to_string());
-        (name, task)
-    } else {
-        let name = cwd
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "project".to_string());
-        (name, "deploy".to_string())
-    };
+    // Check for uncommitted changes
+    let status = git_capture(&["status", "--porcelain"])?;
+    let has_changes = !status.trim().is_empty();
 
-    print!("Project: {} ", project_name);
-    println!("(primary task: {})", primary_task);
-
-    // Generate customized agents.md
-    let agents_content = generate_agents_md(&project_name, &primary_task);
-
-    // Create .claude directory if needed
-    let claude_dir = cwd.join(".claude");
-    fs::create_dir_all(&claude_dir).context("failed to create .claude directory")?;
-
-    // Write agents.md
-    let agents_path = claude_dir.join("agents.md");
-    let existed = agents_path.exists();
-
-    fs::write(&agents_path, &agents_content).context("failed to write agents.md")?;
-
-    if existed {
-        println!("Updated .claude/agents.md ✓");
-    } else {
-        println!("Created .claude/agents.md ✓");
+    if has_changes && !cmd.stash {
+        println!("You have uncommitted changes. Use --stash to auto-stash them.");
+        bail!("Uncommitted changes");
     }
 
-    // Also create for Codex (.codex/agents.md)
-    let codex_dir = cwd.join(".codex");
-    fs::create_dir_all(&codex_dir).context("failed to create .codex directory")?;
+    // Stash if needed
+    let mut stashed = false;
+    if has_changes && cmd.stash {
+        println!("==> Stashing local changes...");
+        let stash_count_before = git_capture(&["stash", "list"])
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
 
-    let codex_agents_path = codex_dir.join("agents.md");
-    let codex_existed = codex_agents_path.exists();
+        let _ = git_run(&["stash", "push", "-m", "f sync auto-stash"]);
 
-    fs::write(&codex_agents_path, &agents_content).context("failed to write .codex/agents.md")?;
-
-    if codex_existed {
-        println!("Updated .codex/agents.md ✓");
-    } else {
-        println!("Created .codex/agents.md ✓");
+        let stash_count_after = git_capture(&["stash", "list"])
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        stashed = stash_count_after > stash_count_before;
     }
 
-    println!();
-    println!("Autonomous agent workflow is ready!");
-    println!();
-    println!("Claude Code and Codex will now end responses with:");
-    println!("  done.              - Task completed successfully");
-    println!("  done: <msg>        - Completed with context");
-    println!("  needsUpdate: <msg> - Needs human decision");
-    println!("  error: <msg>       - Task failed");
-    println!();
-    println!("Lin.app will detect these signals and show appropriate widgets.");
+    // Check if we have an origin remote
+    let has_origin = git_capture(&["remote", "get-url", "origin"]).is_ok();
+    let has_upstream = git_capture(&["remote", "get-url", "upstream"]).is_ok();
+
+    // Check if origin remote is reachable (repo exists on remote)
+    let origin_reachable = has_origin && git_capture(&["ls-remote", "--exit-code", "-q", "origin"]).is_ok();
+
+    // Step 1: Pull from origin (if tracking branch exists and repo is reachable)
+    if has_origin && origin_reachable {
+        let tracking = git_capture(&["rev-parse", "--abbrev-ref", "@{upstream}"]);
+        if tracking.is_ok() {
+            println!("==> Pulling from origin...");
+            if cmd.rebase {
+                if let Err(e) = git_run(&["pull", "--rebase", "origin", current]) {
+                    restore_stash(stashed);
+                    return Err(e);
+                }
+            } else {
+                if let Err(e) = git_run(&["pull", "origin", current]) {
+                    restore_stash(stashed);
+                    return Err(e);
+                }
+            }
+        } else {
+            println!("==> No tracking branch, skipping pull");
+        }
+    } else if has_origin && !origin_reachable {
+        println!("==> Origin repo not found, skipping pull");
+    }
+
+    // Step 2: Sync upstream if it exists
+    if has_upstream {
+        println!("==> Syncing upstream...");
+        if let Err(e) = sync_upstream_internal(current) {
+            restore_stash(stashed);
+            return Err(e);
+        }
+    }
+
+    // Step 3: Push to origin
+    if has_origin && !cmd.no_push {
+        if !origin_reachable {
+            // Origin repo doesn't exist
+            if cmd.create_repo {
+                println!("==> Creating origin repo...");
+                if try_create_origin_repo()? {
+                    println!("==> Pushing to origin...");
+                    git_run(&["push", "-u", "origin", current])?;
+                } else {
+                    println!("  Could not create repo, skipping push");
+                }
+            } else {
+                println!("==> Origin repo not found, skipping push");
+                println!("  Use --create-repo to create it");
+            }
+        } else {
+            println!("==> Pushing to origin...");
+            if let Err(e) = git_run(&["push", "origin", current]) {
+                restore_stash(stashed);
+                return Err(e);
+            }
+        }
+    }
+
+    // Restore stash
+    restore_stash(stashed);
+
+    println!("\n✓ Sync complete!");
 
     Ok(())
 }
 
-/// Check if Lin.app is running.
-fn is_lin_running() -> bool {
-    let output = Command::new("pgrep").args(["-x", "Lin"]).output();
+/// Sync from upstream remote into current branch.
+fn sync_upstream_internal(current_branch: &str) -> Result<()> {
+    // Fetch upstream
+    git_run(&["fetch", "upstream", "--prune"])?;
 
-    match output {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
+    // Determine upstream branch
+    let upstream_branch = if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
+        merge_ref.trim().replace("refs/heads/", "")
+    } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
+        head_ref.trim().replace("refs/remotes/upstream/", "")
+    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
+        "main".to_string()
+    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
+        "master".to_string()
+    } else {
+        println!("  Cannot determine upstream branch, skipping upstream sync");
+        return Ok(());
+    };
+
+    let upstream_ref = format!("upstream/{}", upstream_branch);
+
+    // Update local upstream branch if it exists
+    let local_upstream_exists = git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
+    if local_upstream_exists {
+        git_run(&["branch", "-f", "upstream", &upstream_ref])?;
+    }
+
+    // Check if current branch is behind upstream
+    let behind = git_capture(&["rev-list", "--count", &format!("{}..{}", current_branch, upstream_ref)])
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
+    if behind > 0 {
+        println!("  Merging {} commits from upstream...", behind);
+
+        // Try fast-forward first
+        if git_run(&["merge", "--ff-only", &upstream_ref]).is_err() {
+            // Fall back to regular merge
+            if let Err(_) = git_run(&["merge", &upstream_ref, "--no-edit"]) {
+                bail!("Merge conflicts with upstream. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit");
+            }
+        }
+    } else {
+        println!("  Already up to date with upstream");
+    }
+
+    Ok(())
+}
+
+fn restore_stash(stashed: bool) {
+    if stashed {
+        println!("==> Restoring stashed changes...");
+        let _ = git_run(&["stash", "pop"]);
+    }
+}
+
+/// Run a git command and capture stdout.
+fn git_capture(args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .context("failed to run git")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git {} failed: {}", args.join(" "), stderr.trim());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run a git command with inherited stdio.
+fn git_run(args: &[&str]) -> Result<()> {
+    let status = Command::new("git")
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run git")?;
+
+    if !status.success() {
+        bail!("git {} failed", args.join(" "));
+    }
+
+    Ok(())
+}
+
+/// Try to create the origin repo on GitHub if it doesn't exist.
+fn try_create_origin_repo() -> Result<bool> {
+    let origin_url = match git_capture(&["remote", "get-url", "origin"]) {
+        Ok(url) => url.trim().to_string(),
+        Err(_) => return Ok(false),
+    };
+
+    let repo_path = if origin_url.starts_with("git@github.com:") {
+        origin_url
+            .strip_prefix("git@github.com:")
+            .and_then(|s| s.strip_suffix(".git").or(Some(s)))
+    } else if origin_url.contains("github.com/") {
+        origin_url
+            .split("github.com/")
+            .nth(1)
+            .and_then(|s| s.strip_suffix(".git").or(Some(s)))
+    } else {
+        None
+    };
+
+    let Some(repo_path) = repo_path else {
+        println!("Cannot parse origin URL for auto-creation: {}", origin_url);
+        return Ok(false);
+    };
+
+    println!("\nOrigin repo doesn't exist. Creating: {}", repo_path);
+
+    let status = Command::new("gh")
+        .args(["repo", "create", repo_path, "--private", "--source=."])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("✓ Created GitHub repo: {}", repo_path);
+            Ok(true)
+        }
+        Ok(_) => {
+            println!("Failed to create repo. Is `gh` installed and authenticated?");
+            Ok(false)
+        }
+        Err(e) => {
+            println!("Failed to run gh CLI: {}", e);
+            Ok(false)
+        }
     }
 }

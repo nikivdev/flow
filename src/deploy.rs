@@ -91,8 +91,20 @@ pub struct HostConfig {
     pub port: Option<u16>,
     /// Systemd service name.
     pub service: Option<String>,
-    /// Path to .env file for secrets.
+    /// Path to .env file for secrets (used when env_source is not set).
     pub env_file: Option<String>,
+    /// Env source for secrets ("1focus" or "file").
+    pub env_source: Option<String>,
+    /// Specific env keys to fetch when env_source = "1focus".
+    #[serde(default)]
+    pub env_keys: Vec<String>,
+    /// Fetch from personal (global) env vars instead of project-scoped.
+    #[serde(default)]
+    pub env_personal: bool,
+    /// Environment name for 1focus (defaults to "production").
+    pub environment: Option<String>,
+    /// Service token for fetching env vars on host (set via f env token create).
+    pub service_token: Option<String>,
     /// Public domain for nginx.
     pub domain: Option<String>,
     /// Enable SSL via Let's Encrypt.
@@ -511,8 +523,64 @@ fn deploy_host(
     println!("\n==> Syncing files...");
     rsync_upload(project_root, conn, dest)?;
 
-    // 2. Copy env file if specified
-    if let Some(env_file) = &host_cfg.env_file {
+    // 2. Handle env vars
+    let use_1focus = is_1focus_source(host_cfg.env_source.as_deref());
+    let has_service_token = host_cfg.service_token.is_some();
+
+    if use_1focus && has_service_token {
+        // Service token mode: install fetch script, host fetches env vars on startup
+        let service_token = host_cfg.service_token.as_ref().unwrap();
+        let env_name = host_cfg.environment.as_deref().unwrap_or("production");
+        let project_name = project_root.file_name().unwrap().to_str().unwrap();
+
+        println!("==> Installing env-fetch script (host will fetch on startup)...");
+        install_env_fetch_script(conn, dest, service_token, project_name, env_name, &host_cfg.env_keys)?;
+    } else if use_1focus {
+        // Deploy-time fetch mode: fetch now and copy to host
+        let env_name = host_cfg.environment.as_deref().unwrap_or("production");
+        let keys = &host_cfg.env_keys;
+        let use_personal = host_cfg.env_personal;
+
+        if !keys.is_empty() {
+            let source = if use_personal { "personal" } else { &format!("project/{}", env_name) };
+            println!("==> Fetching env vars from 1focus ({})...", source);
+
+            let result = if use_personal {
+                crate::env::fetch_personal_env_vars(keys)
+            } else {
+                crate::env::fetch_project_env_vars(env_name, keys)
+            };
+
+            match result {
+                Ok(vars) if !vars.is_empty() => {
+                    // Generate .env content
+                    let mut content = String::new();
+                    content.push_str(&format!("# Source: 1focus {} (fetched at deploy)\n", source));
+                    let mut sorted_keys: Vec<_> = vars.keys().collect();
+                    sorted_keys.sort();
+                    for key in sorted_keys {
+                        let value = &vars[key];
+                        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+                        content.push_str(&format!("{}=\"{}\"\n", key, escaped));
+                    }
+
+                    // Write to temp file and scp
+                    let temp_env = std::env::temp_dir().join(format!(".env.{}", std::process::id()));
+                    fs::write(&temp_env, &content)?;
+                    let remote_env = format!("{}/.env", dest);
+                    println!("==> Copying {} env vars to remote...", vars.len());
+                    scp_file(&temp_env, conn, &remote_env)?;
+                    let _ = fs::remove_file(&temp_env);
+                }
+                Ok(_) => {
+                    eprintln!("⚠ No env vars found in 1focus for {}", source);
+                }
+                Err(err) => {
+                    eprintln!("⚠ Failed to fetch env vars from 1focus: {}", err);
+                }
+            }
+        }
+    } else if let Some(env_file) = &host_cfg.env_file {
         let local_env = project_root.join(env_file);
         if local_env.exists() {
             println!("==> Copying {}...", env_file);
@@ -1292,6 +1360,87 @@ fn scp_file(local: &Path, conn: &HostConnection, remote: &str) -> Result<()> {
     Ok(())
 }
 
+/// Install the env-fetch script on the host.
+/// This script fetches env vars from 1focus using a service token on startup.
+fn install_env_fetch_script(
+    conn: &HostConnection,
+    dest: &str,
+    service_token: &str,
+    project_name: &str,
+    environment: &str,
+    keys: &[String],
+) -> Result<()> {
+    // Build the keys query parameter
+    let keys_param = if keys.is_empty() {
+        String::new()
+    } else {
+        format!("&keys={}", keys.join(","))
+    };
+
+    // Create the fetch script
+    // The script fetches env vars from 1focus API and writes to .env
+    let script = format!(
+        r##"#!/bin/bash
+# Auto-generated by flow - fetches env vars from 1focus on startup
+# This token can ONLY read env vars for project: {project_name}
+
+set -e
+
+TOKEN_FILE="{dest}/.1focus-token"
+ENV_FILE="{dest}/.env"
+API_URL="https://1focus.ai/api/env/{project_name}?environment={environment}{keys_param}"
+
+if [ ! -f "$TOKEN_FILE" ]; then
+    echo "ERROR: Service token not found at $TOKEN_FILE" >&2
+    exit 1
+fi
+
+TOKEN=$(cat "$TOKEN_FILE")
+
+# Fetch env vars from 1focus
+RESPONSE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API_URL")
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to fetch env vars from 1focus" >&2
+    exit 1
+fi
+
+# Parse JSON and write to .env file
+echo "# Environment: {environment} (fetched from 1focus)" > "$ENV_FILE"
+echo "$RESPONSE" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for k, v in sorted(data.get('env', {{}}).items()):
+    escaped = v.replace('\\', '\\\\').replace('\"', '\\\"')
+    print(f'{{{{k}}}}=\"{{{{escaped}}}}\"')
+" >> "$ENV_FILE"
+
+chmod 600 "$ENV_FILE"
+echo "Fetched env vars for {project_name} ({environment})"
+"##
+    );
+
+    // Write script to temp file and copy
+    let temp_script = std::env::temp_dir().join(format!("fetch-env-{}.sh", std::process::id()));
+    fs::write(&temp_script, &script)?;
+    scp_file(&temp_script, conn, &format!("{}/fetch-env.sh", dest))?;
+    let _ = fs::remove_file(&temp_script);
+
+    // Make executable
+    ssh_run(conn, &format!("chmod +x {}/fetch-env.sh", dest))?;
+
+    // Store the service token securely
+    let temp_token = std::env::temp_dir().join(format!(".1focus-token-{}", std::process::id()));
+    fs::write(&temp_token, service_token)?;
+    scp_file(&temp_token, conn, &format!("{}/.1focus-token", dest))?;
+    let _ = fs::remove_file(&temp_token);
+
+    // Secure the token file (only readable by root)
+    ssh_run(conn, &format!("chmod 600 {}/.1focus-token", dest))?;
+
+    Ok(())
+}
+
 /// Check if systemd service exists.
 fn service_exists(conn: &HostConnection, name: &str) -> Result<bool> {
     let output = ssh_capture(conn, &format!("systemctl list-unit-files {} 2>/dev/null | grep -c {} || true", name, name))?;
@@ -1307,8 +1456,20 @@ fn create_systemd_service(
     config: &HostConfig,
 ) -> Result<()> {
     let exec_start = normalize_exec_start(workdir, exec_start);
-    let env_file_line = if config.env_file.is_some() {
+
+    // Determine if we're using 1focus with service token (fetch on startup)
+    let use_1focus = is_1focus_source(config.env_source.as_deref());
+    let has_service_token = config.service_token.is_some();
+
+    let env_file_line = if use_1focus || config.env_file.is_some() {
         format!("EnvironmentFile={}/.env", workdir)
+    } else {
+        String::new()
+    };
+
+    // Add ExecStartPre to fetch env vars if using service token
+    let exec_start_pre = if use_1focus && has_service_token {
+        format!("ExecStartPre={}/fetch-env.sh", workdir)
     } else {
         String::new()
     };
@@ -1321,6 +1482,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory={workdir}
+{exec_start_pre}
 ExecStart={exec_start}
 Restart=always
 RestartSec=5

@@ -143,6 +143,11 @@ pub enum Commands {
     )]
     Server(ServerOpts),
     #[command(
+        about = "Open the Flow web UI for this project.",
+        long_about = "Serves the .ai/web UI and project metadata (including OpenAPI when available), then opens it in your browser."
+    )]
+    Web(WebOpts),
+    #[command(
         about = "Match a natural language query to a task using LM Studio.",
         long_about = "Uses a local LM Studio model to intelligently match your query to an available task. Requires LM Studio running on localhost:1234 (or custom port).",
         alias = "m"
@@ -237,6 +242,11 @@ pub enum Commands {
         alias = "a"
     )]
     Agents(AgentsCommand),
+    #[command(
+        about = "Sync git repo: pull, upstream merge, push.",
+        long_about = "Comprehensive git sync: pulls from origin, merges upstream changes if configured, and pushes. One command to keep your fork in sync."
+    )]
+    Sync(SyncCommand),
     #[command(
         about = "Manage upstream fork workflow.",
         long_about = "Set up and manage upstream forks. Creates a local 'upstream' branch to cleanly track the original repo, making merges easier.",
@@ -550,6 +560,16 @@ pub enum ServerAction {
     Foreground,
     #[command(about = "Stop the background server")]
     Stop,
+}
+
+#[derive(Args, Debug)]
+pub struct WebOpts {
+    /// Port to serve the web UI on.
+    #[arg(long, default_value_t = 9310)]
+    pub port: u16,
+    /// Host to bind the web UI server to.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -962,6 +982,9 @@ pub enum EnvAction {
     Set {
         /// KEY=VALUE pair to set.
         pair: String,
+        /// Store in personal/global storage (accessible by all projects).
+        #[arg(long)]
+        personal: bool,
         /// Environment to set in (dev, staging, production).
         #[arg(short, long, default_value = "production")]
         environment: String,
@@ -973,6 +996,9 @@ pub enum EnvAction {
     Delete {
         /// Key(s) to delete.
         keys: Vec<String>,
+        /// Store in personal/global storage.
+        #[arg(long)]
+        personal: bool,
         /// Environment to delete from (dev, staging, production).
         #[arg(short, long, default_value = "production")]
         environment: String,
@@ -1010,6 +1036,32 @@ pub enum EnvAction {
     },
     /// Show configured env keys from flow.toml.
     Keys,
+    /// Manage service tokens for host deployments.
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum TokenAction {
+    /// Create a new service token for a project.
+    Create {
+        /// Token name (e.g., "pulse-production").
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Permissions: read, write, or admin.
+        #[arg(short, long, default_value = "read")]
+        permissions: String,
+    },
+    /// List service tokens.
+    #[command(alias = "ls")]
+    List,
+    /// Revoke a service token.
+    Revoke {
+        /// Token name to revoke.
+        name: String,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1300,6 +1352,22 @@ pub struct ReposCloneOpts {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct SyncCommand {
+    /// Use rebase instead of merge when pulling.
+    #[arg(long, short)]
+    pub rebase: bool,
+    /// Skip pushing to origin.
+    #[arg(long)]
+    pub no_push: bool,
+    /// Auto-stash uncommitted changes.
+    #[arg(long, short)]
+    pub stash: bool,
+    /// Create origin repo on GitHub if it doesn't exist.
+    #[arg(long)]
+    pub create_repo: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct UpstreamCommand {
     #[command(subcommand)]
     pub action: Option<UpstreamAction>,
@@ -1329,7 +1397,12 @@ pub enum UpstreamAction {
         /// Skip pushing to origin.
         #[arg(long)]
         no_push: bool,
+        /// Create origin repo on GitHub if it doesn't exist.
+        #[arg(long)]
+        create_repo: bool,
     },
+    /// Open upstream repository URL in browser.
+    Open,
 }
 
 #[derive(Args, Debug, Clone)]

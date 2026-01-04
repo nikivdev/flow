@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -34,6 +34,16 @@ pub enum Provider {
 struct SessionIndex {
     /// Map of user-friendly names to session metadata
     sessions: HashMap<String, SavedSession>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WebSession {
+    pub id: String,
+    pub provider: String,
+    pub timestamp: Option<String>,
+    pub summary: Option<String>,
+    pub name: Option<String>,
+    pub content: Option<String>,
 }
 
 /// Commit checkpoint stored in .ai/commit-checkpoints.json
@@ -1091,6 +1101,163 @@ fn load_index() -> Result<SessionIndex> {
     let content =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     serde_json::from_str(&content).context("failed to parse index.json")
+}
+
+fn load_index_for_path(project_path: &Path) -> Result<SessionIndex> {
+    let path = project_path
+        .join(".ai")
+        .join("internal")
+        .join("sessions")
+        .join("claude")
+        .join("index.json");
+    if !path.exists() {
+        return Ok(SessionIndex::default());
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&content).context("failed to parse index.json")
+}
+
+pub fn get_sessions_for_web(project_path: &PathBuf) -> Result<Vec<WebSession>> {
+    let sessions = read_sessions_for_path(Provider::All, project_path)?;
+    if sessions.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let index = load_index_for_path(project_path).unwrap_or_default();
+    let mut output = Vec::with_capacity(sessions.len());
+
+    for session in sessions {
+        let provider = match session.provider {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+            Provider::All => "unknown",
+        };
+        let summary = session.first_message.clone().or(session.error_summary.clone());
+        let name = index
+            .sessions
+            .iter()
+            .find(|(_, saved)| saved.id == session.session_id && saved.provider == provider)
+            .map(|(name, _)| name.clone())
+            .filter(|name| !is_auto_generated_name(name));
+        let content = read_session_transcript_for_path(project_path, &session.session_id, session.provider)
+            .ok()
+            .and_then(truncate_session_text);
+
+        output.push(WebSession {
+            id: session.session_id,
+            provider: provider.to_string(),
+            timestamp: session.timestamp,
+            summary,
+            name,
+            content,
+        });
+    }
+
+    Ok(output)
+}
+
+fn read_session_transcript_for_path(
+    project_path: &Path,
+    session_id: &str,
+    provider: Provider,
+) -> Result<String> {
+    match provider {
+        Provider::Codex => read_codex_transcript(session_id),
+        Provider::Claude | Provider::All => read_claude_transcript_for_path(project_path, session_id),
+    }
+}
+
+fn read_claude_transcript_for_path(project_path: &Path, session_id: &str) -> Result<String> {
+    let path_str = project_path.to_string_lossy().to_string();
+    let project_folder = path_to_project_name(&path_str);
+    let session_file = get_claude_projects_dir()
+        .join(&project_folder)
+        .join(format!("{}.jsonl", session_id));
+
+    if !session_file.exists() {
+        bail!("Session file not found: {}", session_file.display());
+    }
+
+    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
+    let mut transcript = String::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) else {
+            continue;
+        };
+        let Some(ref msg) = entry.message else {
+            continue;
+        };
+        let Some(ref content_value) = msg.content else {
+            continue;
+        };
+        let content_text = match content_value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(arr) => arr
+                .iter()
+                .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => continue,
+        };
+        if content_text.trim().is_empty() {
+            continue;
+        }
+        if !transcript.is_empty() {
+            transcript.push_str("\n\n");
+        }
+        transcript.push_str(&content_text);
+    }
+
+    Ok(transcript)
+}
+
+fn read_codex_transcript(session_id: &str) -> Result<String> {
+    let session_file = find_codex_session_file(session_id)
+        .ok_or_else(|| anyhow::anyhow!("Codex session file not found"))?;
+    let (exchanges, _last_ts) = read_codex_exchanges(&session_file, None)?;
+
+    let mut transcript = String::new();
+    for (user_msg, assistant_msg, _ts) in exchanges {
+        if !user_msg.trim().is_empty() {
+            if !transcript.is_empty() {
+                transcript.push_str("\n\n");
+            }
+            transcript.push_str(&user_msg);
+        }
+        if !assistant_msg.trim().is_empty() {
+            if !transcript.is_empty() {
+                transcript.push_str("\n\n");
+            }
+            transcript.push_str(&assistant_msg);
+        }
+    }
+
+    Ok(transcript)
+}
+
+fn truncate_session_text(text: String) -> Option<String> {
+    const MAX_LINES: usize = 160;
+    const MAX_CHARS: usize = 4000;
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<&str> = text.lines().collect();
+    let trimmed = if lines.len() > MAX_LINES {
+        lines.truncate(MAX_LINES);
+        format!("{}\n... trimmed", lines.join("\n"))
+    } else if text.len() > MAX_CHARS {
+        format!("{}... trimmed", text.chars().take(MAX_CHARS).collect::<String>())
+    } else {
+        text
+    };
+
+    Some(trimmed)
 }
 
 /// Save the session index.
