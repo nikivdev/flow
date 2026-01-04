@@ -3,14 +3,17 @@
 //! Supports cloning repos into a structured local directory.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::cli::{ReposAction, ReposCloneOpts, ReposCommand};
 use crate::{config, upstream};
+
+const DEFAULT_REPOS_ROOT: &str = "~/repos";
 
 /// Run the repos subcommand.
 pub fn run(cmd: ReposCommand) -> Result<()> {
@@ -19,11 +22,140 @@ pub fn run(cmd: ReposCommand) -> Result<()> {
             clone_repo(opts)?;
             Ok(())
         }
-        None => {
-            println!("Usage: f repos clone <url>");
-            Ok(())
+        None => fuzzy_select_repo(),
+    }
+}
+
+/// Fuzzy search through repos in ~/repos and print the selected path.
+fn fuzzy_select_repo() -> Result<()> {
+    let root = config::expand_path(DEFAULT_REPOS_ROOT);
+    if !root.exists() {
+        println!("No repos directory found at {}", root.display());
+        println!("Clone a repo with: f repos clone <url>");
+        return Ok(());
+    }
+
+    let repos = discover_repos(&root)?;
+    if repos.is_empty() {
+        println!("No repositories found in {}", root.display());
+        println!("Clone a repo with: f repos clone <url>");
+        return Ok(());
+    }
+
+    if which::which("fzf").is_err() {
+        println!("fzf not found on PATH – install it to use fuzzy selection.");
+        println!("Available repositories:");
+        for repo in &repos {
+            println!("  {}", repo.display);
+        }
+        return Ok(());
+    }
+
+    if let Some(selected) = run_fzf(&repos)? {
+        Command::new("open")
+            .args(["-a", "/Applications/Zed.app"])
+            .arg(&selected.path)
+            .status()
+            .context("failed to open Zed")?;
+    }
+
+    Ok(())
+}
+
+struct RepoEntry {
+    display: String,
+    path: PathBuf,
+}
+
+/// Discover all repos in the root directory (owner/repo structure).
+fn discover_repos(root: &Path) -> Result<Vec<RepoEntry>> {
+    let mut repos = Vec::new();
+
+    let owners = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(repos),
+    };
+
+    for owner_entry in owners.flatten() {
+        let owner_path = owner_entry.path();
+        if !owner_path.is_dir() {
+            continue;
+        }
+
+        let owner_name = match owner_path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => continue,
+        };
+
+        // Skip hidden directories
+        if owner_name.starts_with('.') {
+            continue;
+        }
+
+        let repo_entries = match fs::read_dir(&owner_path) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for repo_entry in repo_entries.flatten() {
+            let repo_path = repo_entry.path();
+            if !repo_path.is_dir() {
+                continue;
+            }
+
+            let repo_name = match repo_path.file_name() {
+                Some(name) => name.to_string_lossy().to_string(),
+                None => continue,
+            };
+
+            // Skip hidden directories
+            if repo_name.starts_with('.') {
+                continue;
+            }
+
+            // Check if it's a git repo
+            if repo_path.join(".git").exists() {
+                repos.push(RepoEntry {
+                    display: format!("{}/{}", owner_name, repo_name),
+                    path: repo_path,
+                });
+            }
         }
     }
+
+    repos.sort_by(|a, b| a.display.cmp(&b.display));
+    Ok(repos)
+}
+
+fn run_fzf(entries: &[RepoEntry]) -> Result<Option<&RepoEntry>> {
+    let mut child = Command::new("fzf")
+        .arg("--prompt")
+        .arg("repo> ")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to spawn fzf")?;
+
+    {
+        let stdin = child.stdin.as_mut().context("failed to open fzf stdin")?;
+        for entry in entries {
+            writeln!(stdin, "{}", entry.display)?;
+        }
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let selection = String::from_utf8(output.stdout).context("fzf output was not valid UTF-8")?;
+    let selection = selection.trim();
+
+    if selection.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(entries.iter().find(|e| e.display == selection))
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +303,10 @@ fn run_git_clone(url: &str, target_dir: &Path, shallow: bool) -> Result<()> {
 
 fn resolve_upstream_url(repo_ref: &RepoRef) -> Result<Option<String>> {
     let output = match Command::new("gh")
-        .args(["api", &format!("repos/{}/{}", repo_ref.owner, repo_ref.repo)])
+        .args([
+            "api",
+            &format!("repos/{}/{}", repo_ref.owner, repo_ref.repo),
+        ])
         .output()
     {
         Ok(output) => output,
@@ -200,10 +335,7 @@ fn resolve_upstream_url(repo_ref: &RepoRef) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let parent = info
-        .parent
-        .or(info.source)
-        .map(|parent| parent.ssh_url);
+    let parent = info.parent.or(info.source).map(|parent| parent.ssh_url);
 
     Ok(parent)
 }
@@ -215,11 +347,7 @@ fn configure_upstream(repo_dir: &Path, upstream_url: &str, depth: Option<u32>) -
     std::env::set_current_dir(repo_dir)
         .with_context(|| format!("failed to enter {}", repo_dir.display()))?;
 
-    let result = upstream::setup_upstream_with_depth(
-        Some(upstream_url),
-        None,
-        depth,
-    );
+    let result = upstream::setup_upstream_with_depth(Some(upstream_url), None, depth);
 
     if let Err(err) = std::env::set_current_dir(&cwd) {
         println!("warning: failed to restore working directory: {}", err);

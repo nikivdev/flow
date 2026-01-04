@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as CEvent, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use serde::Deserialize;
 
 use crate::{
     agents,
@@ -112,73 +113,137 @@ fn setup_deploy(project_root: &Path, config_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let defaults = deploy_defaults(project_root);
     let is_tty = io::stdin().is_terminal();
+    let server_reason = detect_server_project(project_root);
+    let mut defaults = deploy_defaults(project_root);
 
-    let dest = if is_tty {
-        prompt_line("Remote deploy path", Some(&defaults.dest))?
-    } else {
-        defaults.dest.clone()
-    };
+    if let Some(reason) = server_reason.as_deref() {
+        println!("Detected server project: {reason}");
+        if is_tty && !prompt_yes_no("Configure Linux host deployment now?", true)? {
+            println!("Skipped host setup. Run `f setup deploy` later to configure.");
+            return Ok(());
+        }
 
-    let run = if is_tty {
-        let value = prompt_line("Run command", defaults.run.as_deref())?;
-        normalize_optional(value)
-    } else {
-        defaults.run.clone()
-    };
+        let _ = deploy::ensure_deploy_helper();
 
-    if run.is_none() {
-        println!("Warning: no run command set; deploy will not create a systemd service.");
+        let template = load_server_setup_template();
+        if let Some(template) = template.as_ref() {
+            println!("Using server setup template from {}.", template.source);
+        }
+        apply_server_template(&mut defaults, template.as_ref());
+
+        if is_tty && prompt_yes_no("Use AI to draft host config?", true)? {
+            println!("Generating host config with AI...");
+            io::stdout().flush()?;
+            let result = generate_host_config_with_agent_streaming(project_root, None);
+            match result {
+                Ok(text) => {
+                    if let Some(host_cfg) = extract_host_config(&text) {
+                        if let Some(reason) = host_config_mismatch_reason(project_root, &host_cfg) {
+                            println!("Warning: {}", reason);
+                            println!("Using detected defaults instead.");
+                        } else {
+                            apply_host_overrides(&mut defaults, &host_cfg);
+                        }
+                    } else {
+                        println!("Warning: AI output did not include [host] config.");
+                    }
+                }
+                Err(err) => {
+                    println!("Warning: AI generation failed: {}", err);
+                }
+            }
+        }
     }
 
-    let service = if is_tty {
-        let value = prompt_line("Systemd service name", Some(&defaults.service))?;
-        normalize_optional(value)
-    } else {
-        Some(defaults.service.clone())
-    };
-
-    let setup_script = if is_tty {
-        let value = prompt_line(
-            "Setup script path (relative to repo)",
-            Some(&defaults.setup_path),
-        )?;
-        normalize_optional(value)
-    } else {
-        Some(defaults.setup_path.clone())
-    };
-
-    let env_file = if is_tty {
-        prompt_line_optional(
-            "Env file to upload (copied to remote as .env)",
-            defaults.env_file.as_deref(),
-        )?
-    } else {
-        defaults.env_file.clone()
-    };
-
-    let domain = if is_tty {
-        prompt_line_optional("Domain (blank to skip)", defaults.domain.as_deref())?
-    } else {
-        defaults.domain.clone()
-    };
-
-    let ssl = if is_tty && domain.is_some() {
-        prompt_yes_no("Enable SSL via Let's Encrypt?", defaults.ssl)?
-    } else {
-        defaults.ssl && domain.is_some()
-    };
-
-    let port = if domain.is_some() {
-        if is_tty {
-            prompt_u16_optional("Service port for nginx", defaults.port)?
+    let (dest, run, service, setup_script, env_file, domain, ssl, port) =
+        if server_reason.is_some() {
+            (
+                defaults.dest.clone(),
+                defaults.run.clone(),
+                Some(defaults.service.clone()),
+                normalize_optional(defaults.setup_path.clone()),
+                defaults.env_file.clone(),
+                defaults.domain.clone(),
+                defaults.ssl && defaults.domain.is_some(),
+                if defaults.domain.is_some() {
+                    defaults.port
+                } else {
+                    None
+                },
+            )
         } else {
-            defaults.port
-        }
-    } else {
-        None
-    };
+            let dest = if is_tty {
+                prompt_line("Remote deploy path", Some(&defaults.dest))?
+            } else {
+                defaults.dest.clone()
+            };
+
+            let run = if is_tty {
+                let value = prompt_line("Run command", defaults.run.as_deref())?;
+                normalize_optional(value)
+            } else {
+                defaults.run.clone()
+            };
+
+            if run.is_none() {
+                println!("Warning: no run command set; deploy will not create a systemd service.");
+            }
+
+            let service = if is_tty {
+                let value = prompt_line("Systemd service name", Some(&defaults.service))?;
+                normalize_optional(value)
+            } else {
+                Some(defaults.service.clone())
+            };
+
+            let setup_script = if is_tty {
+                let value = prompt_line(
+                    "Setup script path (relative to repo)",
+                    Some(&defaults.setup_path),
+                )?;
+                normalize_optional(value)
+            } else {
+                Some(defaults.setup_path.clone())
+            };
+
+            let env_file = if is_tty {
+                prompt_line_optional(
+                    "Env file to upload (copied to remote as .env)",
+                    defaults.env_file.as_deref(),
+                )?
+            } else {
+                defaults.env_file.clone()
+            };
+
+            let domain = if is_tty {
+                prompt_line_optional("Domain (blank to skip)", defaults.domain.as_deref())?
+            } else {
+                defaults.domain.clone()
+            };
+
+            let ssl = if is_tty && domain.is_some() {
+                prompt_yes_no("Enable SSL via Let's Encrypt?", defaults.ssl)?
+            } else {
+                defaults.ssl && domain.is_some()
+            };
+
+            let port = if domain.is_some() {
+                if is_tty {
+                    prompt_u16_optional("Service port for nginx", defaults.port)?
+                } else {
+                    defaults.port
+                }
+            } else {
+                None
+            };
+
+            (dest, run, service, setup_script, env_file, domain, ssl, port)
+        };
+
+    if server_reason.is_some() && run.is_none() {
+        println!("Warning: no run command set; deploy will not create a systemd service.");
+    }
 
     if let Some(script_path) = setup_script.as_ref() {
         if let Some(content) = defaults.setup_script_content.as_deref() {
@@ -482,6 +547,49 @@ fn merge_host_config(
     }
 }
 
+fn apply_host_overrides(defaults: &mut DeployDefaults, host: &deploy::HostConfig) {
+    if let Some(dest) = host.dest.as_deref() {
+        defaults.dest = dest.to_string();
+    }
+
+    if let Some(run) = host.run.as_deref() {
+        defaults.run = Some(run.to_string());
+    }
+
+    if let Some(service) = host.service.as_deref() {
+        defaults.service = service.to_string();
+    }
+
+    if let Some(setup) = host.setup.as_deref() {
+        if looks_like_inline_script(setup) {
+            defaults.setup_script_content = Some(setup.to_string());
+        } else if !setup.trim().is_empty() {
+            defaults.setup_path = setup.to_string();
+            defaults.setup_script_content = None;
+        }
+    }
+
+    if let Some(env_file) = host.env_file.as_deref() {
+        if !env_file.trim().is_empty() {
+            defaults.env_file = Some(env_file.to_string());
+        }
+    }
+
+    if let Some(port) = host.port {
+        defaults.port = Some(port);
+    }
+
+    if let Some(domain) = host.domain.as_deref() {
+        if !domain.trim().is_empty() {
+            defaults.domain = Some(domain.to_string());
+        }
+    }
+
+    if host.ssl {
+        defaults.ssl = true;
+    }
+}
+
 fn apply_server_template(defaults: &mut DeployDefaults, template: Option<&ServerSetupTemplate>) {
     let Some(template) = template else {
         return;
@@ -497,8 +605,26 @@ fn apply_server_template(defaults: &mut DeployDefaults, template: Option<&Server
         }
     }
 
+    if defaults.dest.trim().is_empty() {
+        if let Some(dest) = host.dest.as_deref() {
+            defaults.dest = dest.to_string();
+        }
+    }
+    if defaults.run.is_none() {
+        if let Some(run) = host.run.as_deref() {
+            defaults.run = Some(run.to_string());
+        }
+    }
+    if defaults.service.trim().is_empty() {
+        if let Some(service) = host.service.as_deref() {
+            defaults.service = service.to_string();
+        }
+    }
+
     if let Some(env_file) = host.env_file.as_ref() {
-        defaults.env_file = Some(env_file.to_string());
+        if defaults.env_file.is_none() {
+            defaults.env_file = Some(env_file.to_string());
+        }
     }
     if host.port.is_some() {
         defaults.port = host.port;
@@ -967,6 +1093,155 @@ fn extract_fenced_block(raw: &str, tag: &str) -> Option<String> {
     let after = after.strip_prefix('\n').unwrap_or(after);
     let end = after.find("```")?;
     Some(after[..end].trim().to_string())
+}
+
+#[derive(Deserialize)]
+struct HostWrapper {
+    host: Option<deploy::HostConfig>,
+}
+
+fn generate_host_config_with_agent_streaming(
+    project_root: &Path,
+    hint: Option<&str>,
+) -> Result<String> {
+    let defaults = deploy_defaults(project_root);
+    let mut prompt = String::new();
+    prompt.push_str("Read the project and generate a minimal [host] config for flow.toml.\n");
+    prompt.push_str("Requirements:\n");
+    prompt.push_str("- Output ONLY TOML with a [host] section.\n");
+    prompt.push_str("- Use relative paths for setup/env_file.\n");
+    prompt.push_str("- Use a production run command (avoid dev servers).\n");
+    prompt.push_str("- Keep it minimal; omit fields you cannot infer.\n\n");
+
+    prompt.push_str("Suggested defaults:\n");
+    prompt.push_str(&format!("- dest: {}\n", defaults.dest));
+    if let Some(run) = defaults.run.as_deref() {
+        prompt.push_str(&format!("- run: {}\n", run));
+    }
+    prompt.push_str(&format!("- service: {}\n", defaults.service));
+    if !defaults.setup_path.trim().is_empty() {
+        prompt.push_str(&format!("- setup: {}\n", defaults.setup_path));
+    }
+    if let Some(env_file) = defaults.env_file.as_deref() {
+        prompt.push_str(&format!("- env_file: {}\n", env_file));
+    }
+    if let Some(env_example) = defaults.env_example.as_ref() {
+        prompt.push_str(&format!(
+            "- env example: {}\n",
+            display_relative(project_root, env_example)
+        ));
+    }
+    if let Some(port) = defaults.port {
+        prompt.push_str(&format!("- port: {}\n", port));
+    }
+    prompt.push('\n');
+
+    if let Some(guidance) = project_guidance(project_root) {
+        prompt.push_str("Guidance:\n");
+        prompt.push_str(&guidance);
+        prompt.push('\n');
+    }
+
+    let hints = project_hints(project_root);
+    if !hints.is_empty() {
+        prompt.push_str("Detected project hints:\n");
+        for hint in hints {
+            prompt.push_str("- ");
+            prompt.push_str(&hint);
+            prompt.push('\n');
+        }
+        prompt.push('\n');
+    }
+
+    if let Some(hint) = hint {
+        if !hint.trim().is_empty() {
+            prompt.push_str("User notes:\n");
+            prompt.push_str(hint.trim());
+            prompt.push('\n');
+        }
+    }
+
+    agents::run_flow_agent_capture_streaming(&prompt)
+}
+
+fn extract_host_config(raw: &str) -> Option<deploy::HostConfig> {
+    let content = extract_fenced_block(raw, "toml")
+        .or_else(|| extract_fenced_block(raw, ""))
+        .unwrap_or_else(|| raw.trim().to_string());
+
+    if content.trim().is_empty() {
+        return None;
+    }
+
+    if content.contains("[host]") {
+        if let Ok(wrapper) = toml::from_str::<HostWrapper>(&content) {
+            if let Some(host) = wrapper.host {
+                if host_has_values(&host) {
+                    return Some(host);
+                }
+            }
+        }
+    } else if let Ok(host) = toml::from_str::<deploy::HostConfig>(&content) {
+        if host_has_values(&host) {
+            return Some(host);
+        }
+    }
+
+    None
+}
+
+fn host_has_values(host: &deploy::HostConfig) -> bool {
+    host.dest.is_some()
+        || host.setup.is_some()
+        || host.run.is_some()
+        || host.port.is_some()
+        || host.service.is_some()
+        || host.env_file.is_some()
+        || host.domain.is_some()
+        || host.ssl
+}
+
+fn host_config_mismatch_reason(
+    project_root: &Path,
+    host_cfg: &deploy::HostConfig,
+) -> Option<String> {
+    let has_cargo = project_root.join("Cargo.toml").exists();
+    let has_package = project_root.join("package.json").exists();
+
+    let mut uses_node = false;
+    let mut uses_cargo = false;
+
+    if let Some(run) = host_cfg.run.as_deref() {
+        uses_node |= command_uses_node_tool(run);
+        uses_cargo |= command_uses_cargo_tool(run);
+    }
+
+    if let Some(setup) = host_cfg.setup.as_deref() {
+        if looks_like_inline_script(setup) {
+            uses_node |= command_uses_node_tool(setup);
+            uses_cargo |= command_uses_cargo_tool(setup);
+        } else {
+            let setup_path = project_root.join(setup);
+            if setup_path.exists() {
+                if let Ok(content) = fs::read_to_string(&setup_path) {
+                    uses_node |= command_uses_node_tool(&content);
+                    uses_cargo |= command_uses_cargo_tool(&content);
+                }
+            }
+        }
+    }
+
+    if has_cargo && !has_package && uses_node {
+        return Some(
+            "AI suggested Node tooling (bun/npm/pnpm/yarn), but no package.json was found."
+                .to_string(),
+        );
+    }
+    if has_package && !has_cargo && uses_cargo {
+        return Some("AI suggested Cargo commands, but no Cargo.toml was found.".to_string());
+    }
+
+    None
 }
 
 struct SuggestedCommands {
