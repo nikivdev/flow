@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -135,7 +135,7 @@ fn setup_deploy(project_root: &Path, config_path: &Path) -> Result<()> {
         if is_tty && prompt_yes_no("Use AI to draft host config?", true)? {
             println!("Generating host config with AI...");
             io::stdout().flush()?;
-            let result = generate_host_config_with_agent_streaming(project_root, None);
+            let result = generate_host_config_with_agent(project_root, None);
             match result {
                 Ok(text) => {
                     if let Some(host_cfg) = extract_host_config(&text) {
@@ -1100,15 +1100,13 @@ struct HostWrapper {
     host: Option<deploy::HostConfig>,
 }
 
-fn generate_host_config_with_agent_streaming(
-    project_root: &Path,
-    hint: Option<&str>,
-) -> Result<String> {
+fn generate_host_config_with_agent(project_root: &Path, hint: Option<&str>) -> Result<String> {
     let defaults = deploy_defaults(project_root);
     let mut prompt = String::new();
     prompt.push_str("Read the project and generate a minimal [host] config for flow.toml.\n");
     prompt.push_str("Requirements:\n");
     prompt.push_str("- Output ONLY TOML with a [host] section.\n");
+    prompt.push_str("- No explanations, no narration, no markdown fences.\n");
     prompt.push_str("- Use relative paths for setup/env_file.\n");
     prompt.push_str("- Use a production run command (avoid dev servers).\n");
     prompt.push_str("- Keep it minimal; omit fields you cannot infer.\n\n");
@@ -1161,7 +1159,7 @@ fn generate_host_config_with_agent_streaming(
         }
     }
 
-    agents::run_flow_agent_capture_streaming(&prompt)
+    agents::run_flow_agent_capture(&prompt)
 }
 
 fn extract_host_config(raw: &str) -> Option<deploy::HostConfig> {
@@ -1241,7 +1239,199 @@ fn host_config_mismatch_reason(
         return Some("AI suggested Cargo commands, but no Cargo.toml was found.".to_string());
     }
 
+    if let Some(reason) = host_config_name_mismatch(project_root, host_cfg) {
+        return Some(reason);
+    }
+
     None
+}
+
+fn host_config_name_mismatch(
+    project_root: &Path,
+    host_cfg: &deploy::HostConfig,
+) -> Option<String> {
+    let expected_names = expected_project_names(project_root);
+    if expected_names.is_empty() {
+        return None;
+    }
+
+    let tokens = host_name_tokens(host_cfg);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for token in tokens {
+        if expected_names.contains(&token) {
+            continue;
+        }
+        *counts.entry(token).or_insert(0) += 1;
+    }
+
+    let (token, count) = counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)?;
+    if count < 2 {
+        return None;
+    }
+
+    let project_name = guess_project_name(project_root);
+    Some(format!(
+        "AI suggested host config for '{}', but the project looks like '{}'.",
+        token, project_name
+    ))
+}
+
+fn expected_project_names(project_root: &Path) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let guessed = guess_project_name(project_root);
+    if !guessed.is_empty() {
+        names.insert(guessed.to_ascii_lowercase());
+    }
+    if let Some(name) = cargo_package_name(project_root) {
+        names.insert(name.to_ascii_lowercase());
+    }
+    if let Some(name) = package_json_name(project_root) {
+        names.insert(name.to_ascii_lowercase());
+    }
+    if let Some(folder) = project_root
+        .file_name()
+        .and_then(|name| name.to_str())
+    {
+        names.insert(folder.to_ascii_lowercase());
+    }
+    for name in cargo_bin_names(project_root) {
+        names.insert(name);
+    }
+    names
+}
+
+fn cargo_bin_names(project_root: &Path) -> Vec<String> {
+    let path = project_root.join("Cargo.toml");
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => return Vec::new(),
+    };
+    let value: toml::Value = match toml::from_str(&content) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut names = Vec::new();
+    if let Some(bins) = value.get("bin").and_then(toml::Value::as_array) {
+        for bin in bins {
+            if let Some(name) = bin.get("name").and_then(toml::Value::as_str) {
+                names.push(name.to_ascii_lowercase());
+            }
+        }
+    }
+    names
+}
+
+fn host_name_tokens(host: &deploy::HostConfig) -> Vec<String> {
+    let mut tokens = Vec::new();
+
+    if let Some(service) = host.service.as_deref() {
+        if let Some(token) = normalize_host_token(service) {
+            tokens.push(token);
+        }
+    }
+
+    if let Some(dest) = host.dest.as_deref() {
+        if let Some(seg) = Path::new(dest).file_name().and_then(|s| s.to_str()) {
+            if let Some(token) = normalize_host_token(seg) {
+                tokens.push(token);
+            }
+        }
+    }
+
+    if let Some(run) = host.run.as_deref() {
+        if let Some(bin) = extract_run_binary(run) {
+            if let Some(token) = normalize_host_token(&bin) {
+                tokens.push(token);
+            }
+        }
+    }
+
+    if let Some(env_file) = host.env_file.as_deref() {
+        if let Some(env_name) = extract_env_name(env_file) {
+            if let Some(token) = normalize_host_token(&env_name) {
+                tokens.push(token);
+            }
+        }
+    }
+
+    tokens
+}
+
+fn extract_run_binary(run: &str) -> Option<String> {
+    let first = run.trim().split_whitespace().next()?;
+    let trimmed = first.trim_matches(|c| c == '"' || c == '\'');
+    let name = Path::new(trimmed).file_name()?.to_string_lossy().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn extract_env_name(env_file: &str) -> Option<String> {
+    let file_name = Path::new(env_file).file_name()?.to_string_lossy();
+    if file_name.starts_with('.') {
+        return None;
+    }
+    let mut stem = Path::new(&*file_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())?;
+    if let Some(stripped) = stem.strip_suffix(".env") {
+        stem = stripped.to_string();
+    }
+    if stem.is_empty() {
+        None
+    } else {
+        Some(stem)
+    }
+}
+
+fn normalize_host_token(token: &str) -> Option<String> {
+    let trimmed = token
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+    if trimmed.len() < 2 {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if is_host_stop_token(&lower) {
+        None
+    } else {
+        Some(lower)
+    }
+}
+
+fn is_host_stop_token(token: &str) -> bool {
+    matches!(
+        token,
+        "app"
+            | "service"
+            | "server"
+            | "api"
+            | "web"
+            | "backend"
+            | "frontend"
+            | "bin"
+            | "target"
+            | "release"
+            | "debug"
+            | "dist"
+            | "build"
+            | "deploy"
+            | "env"
+            | "cargo"
+            | "bun"
+            | "npm"
+            | "pnpm"
+            | "yarn"
+            | "node"
+    )
 }
 
 struct SuggestedCommands {
