@@ -227,10 +227,10 @@ pub enum Commands {
     )]
     Commits(CommitsOpts),
     #[command(
-        about = "Bootstrap project with .ai/ folder and checkpoints.",
-        long_about = "Creates .ai/ folder structure with public (actions, skills, tools) and internal (sessions, db) folders. Adds .ai/internal/ to .gitignore. Safe to run multiple times."
+        about = "Print aliases or run setup task for the current project.",
+        long_about = "Outputs shell aliases from flow.toml or runs the 'setup' task if defined."
     )]
-    Start,
+    Setup(SetupOpts),
     #[command(
         about = "Invoke gen AI agents.",
         long_about = "Run gen agents with prompts. Supports project and global agents. Special: flow (flow-aware).",

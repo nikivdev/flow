@@ -32,6 +32,7 @@ pub mod publish;
 pub mod repos;
 pub mod release;
 pub mod running;
+pub mod setup;
 pub mod skills;
 pub mod storage;
 pub mod start;

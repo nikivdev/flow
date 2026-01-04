@@ -1,31 +1,44 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
 use crate::{
     cli::{SetupOpts, TaskRunOpts},
+    start,
     tasks::{self, load_project_config},
 };
 
 pub fn run(opts: SetupOpts) -> Result<()> {
-    let (config_path, cfg) = load_project_config(opts.config)?;
+    let (project_root, config_path) = resolve_project_root(&opts.config)?;
+
+    if !start::is_bootstrapped(&project_root) || !config_path.exists() {
+        start::run_at(&project_root)?;
+    }
+
+    if !config_path.exists() {
+        bail!("flow config not found at {}", config_path.display());
+    }
+
+    let (config_path, cfg) = load_project_config(config_path)?;
+
+    if tasks::find_task(&cfg, "setup").is_some() {
+        return tasks::run(TaskRunOpts {
+            config: config_path,
+            delegate_to_hub: false,
+            hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+            hub_port: 9050,
+            name: "setup".to_string(),
+            args: Vec::new(),
+        });
+    }
 
     if cfg.aliases.is_empty() {
-        if tasks::find_task(&cfg, "setup").is_some() {
-            return tasks::run(TaskRunOpts {
-                config: config_path,
-                delegate_to_hub: false,
-                hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
-                hub_port: 9050,
-                name: "setup".to_string(),
-                args: Vec::new(),
-            });
-        }
-
         println!(
-            "# No aliases defined in {}. Add an alias table like:",
+            "# No setup task or aliases defined in {}.",
             config_path.display()
         );
+        println!("# Add a setup task or an alias table like:");
         println!("#   [[alias]]");
         println!("#   fr = \"f run\"");
         return Ok(());
@@ -42,6 +55,20 @@ pub fn run(opts: SetupOpts) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_project_root(config_path: &PathBuf) -> Result<(PathBuf, PathBuf)> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let resolved = if config_path.is_absolute() {
+        config_path.clone()
+    } else {
+        cwd.join(config_path)
+    };
+    let root = resolved
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or(cwd);
+    Ok((root, resolved))
 }
 
 fn format_alias_lines(aliases: &std::collections::HashMap<String, String>) -> Vec<String> {
