@@ -19,11 +19,21 @@ const DEFAULT_REPOS_ROOT: &str = "~/repos";
 pub fn run(cmd: ReposCommand) -> Result<()> {
     match cmd.action {
         Some(ReposAction::Clone(opts)) => {
-            clone_repo(opts)?;
+            let path = clone_repo(opts)?;
+            open_in_zed(&path)?;
             Ok(())
         }
         None => fuzzy_select_repo(),
     }
+}
+
+fn open_in_zed(path: &std::path::Path) -> Result<()> {
+    std::process::Command::new("open")
+        .args(["-a", "/Applications/Zed.app"])
+        .arg(path)
+        .status()
+        .context("failed to open Zed")?;
+    Ok(())
 }
 
 /// Fuzzy search through repos in ~/repos and print the selected path.
@@ -52,11 +62,7 @@ fn fuzzy_select_repo() -> Result<()> {
     }
 
     if let Some(selected) = run_fzf(&repos)? {
-        Command::new("open")
-            .args(["-a", "/Applications/Zed.app"])
-            .arg(&selected.path)
-            .status()
-            .context("failed to open Zed")?;
+        open_in_zed(&selected.path)?;
     }
 
     Ok(())

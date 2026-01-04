@@ -41,9 +41,32 @@ pub struct WebSession {
     pub id: String,
     pub provider: String,
     pub timestamp: Option<String>,
-    pub summary: Option<String>,
     pub name: Option<String>,
-    pub content: Option<String>,
+    pub messages: Vec<WebSessionMessage>,
+    pub started_at: Option<String>,
+    pub last_message_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WebSessionMessage {
+    pub role: String,
+    pub content: String,
+}
+
+struct SessionMessages {
+    messages: Vec<WebSessionMessage>,
+    started_at: Option<String>,
+    last_message_at: Option<String>,
+}
+
+impl Default for SessionMessages {
+    fn default() -> Self {
+        Self {
+            messages: Vec::new(),
+            started_at: None,
+            last_message_at: None,
+        }
+    }
 }
 
 /// Commit checkpoint stored in .ai/commit-checkpoints.json
@@ -1133,42 +1156,67 @@ pub fn get_sessions_for_web(project_path: &PathBuf) -> Result<Vec<WebSession>> {
             Provider::Codex => "codex",
             Provider::All => "unknown",
         };
-        let summary = session.first_message.clone().or(session.error_summary.clone());
         let name = index
             .sessions
             .iter()
             .find(|(_, saved)| saved.id == session.session_id && saved.provider == provider)
             .map(|(name, _)| name.clone())
             .filter(|name| !is_auto_generated_name(name));
-        let content = read_session_transcript_for_path(project_path, &session.session_id, session.provider)
-            .ok()
-            .and_then(truncate_session_text);
+        let session_messages =
+            read_session_messages_for_path(project_path, &session.session_id, session.provider)
+                .unwrap_or_default();
+        let started_at = session_messages
+            .started_at
+            .clone()
+            .or_else(|| session.timestamp.clone());
+        let last_message_at = session_messages
+            .last_message_at
+            .clone()
+            .or_else(|| started_at.clone());
 
         output.push(WebSession {
             id: session.session_id,
             provider: provider.to_string(),
             timestamp: session.timestamp,
-            summary,
             name,
-            content,
+            messages: session_messages.messages,
+            started_at,
+            last_message_at,
         });
     }
+
+    output.sort_by(|a, b| {
+        let a_key = a
+            .last_message_at
+            .as_deref()
+            .or(a.started_at.as_deref())
+            .unwrap_or("");
+        let b_key = b
+            .last_message_at
+            .as_deref()
+            .or(b.started_at.as_deref())
+            .unwrap_or("");
+        b_key.cmp(a_key)
+    });
 
     Ok(output)
 }
 
-fn read_session_transcript_for_path(
+fn read_session_messages_for_path(
     project_path: &Path,
     session_id: &str,
     provider: Provider,
-) -> Result<String> {
+) -> Result<SessionMessages> {
     match provider {
-        Provider::Codex => read_codex_transcript(session_id),
-        Provider::Claude | Provider::All => read_claude_transcript_for_path(project_path, session_id),
+        Provider::Codex => read_codex_messages(session_id),
+        Provider::Claude | Provider::All => read_claude_messages_for_path(project_path, session_id),
     }
 }
 
-fn read_claude_transcript_for_path(project_path: &Path, session_id: &str) -> Result<String> {
+fn read_claude_messages_for_path(
+    project_path: &Path,
+    session_id: &str,
+) -> Result<SessionMessages> {
     let path_str = project_path.to_string_lossy().to_string();
     let project_folder = path_to_project_name(&path_str);
     let session_file = get_claude_projects_dir()
@@ -1180,7 +1228,9 @@ fn read_claude_transcript_for_path(project_path: &Path, session_id: &str) -> Res
     }
 
     let content = fs::read_to_string(&session_file).context("failed to read session file")?;
-    let mut transcript = String::new();
+    let mut messages = Vec::new();
+    let mut started_at: Option<String> = None;
+    let mut last_message_at: Option<String> = None;
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -1192,72 +1242,135 @@ fn read_claude_transcript_for_path(project_path: &Path, session_id: &str) -> Res
         let Some(ref msg) = entry.message else {
             continue;
         };
-        let Some(ref content_value) = msg.content else {
+        let role = msg.role.as_deref().unwrap_or("unknown");
+        if role != "user" && role != "assistant" {
             continue;
-        };
-        let content_text = match content_value {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Array(arr) => arr
-                .iter()
-                .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => continue,
+        }
+        let content_text = msg.content.as_ref().and_then(extract_message_text);
+        let Some(content_text) = content_text else {
+            continue;
         };
         if content_text.trim().is_empty() {
             continue;
         }
-        if !transcript.is_empty() {
-            transcript.push_str("\n\n");
+        push_message(&mut messages, role, &content_text);
+        if let Some(ts) = entry.timestamp.clone() {
+            if started_at.is_none() {
+                started_at = Some(ts.clone());
+            }
+            last_message_at = Some(ts);
         }
-        transcript.push_str(&content_text);
     }
 
-    Ok(transcript)
+    Ok(SessionMessages {
+        messages,
+        started_at,
+        last_message_at,
+    })
 }
 
-fn read_codex_transcript(session_id: &str) -> Result<String> {
+fn read_codex_messages(session_id: &str) -> Result<SessionMessages> {
     let session_file = find_codex_session_file(session_id)
         .ok_or_else(|| anyhow::anyhow!("Codex session file not found"))?;
-    let (exchanges, _last_ts) = read_codex_exchanges(&session_file, None)?;
+    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
+    let mut messages = Vec::new();
+    let mut started_at: Option<String> = None;
+    let mut last_message_at: Option<String> = None;
 
-    let mut transcript = String::new();
-    for (user_msg, assistant_msg, _ts) in exchanges {
-        if !user_msg.trim().is_empty() {
-            if !transcript.is_empty() {
-                transcript.push_str("\n\n");
-            }
-            transcript.push_str(&user_msg);
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
         }
-        if !assistant_msg.trim().is_empty() {
-            if !transcript.is_empty() {
-                transcript.push_str("\n\n");
+
+        let entry: CodexEntry = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let Some((role, text)) = extract_codex_message(&entry) else {
+            continue;
+        };
+        let clean_text = if role == "assistant" {
+            strip_thinking_blocks(&text)
+        } else {
+            text
+        };
+        if clean_text.trim().is_empty() {
+            continue;
+        }
+        push_message(&mut messages, &role, &clean_text);
+        if let Some(ts) = extract_codex_timestamp(&entry) {
+            if started_at.is_none() {
+                started_at = Some(ts.clone());
             }
-            transcript.push_str(&assistant_msg);
+            last_message_at = Some(ts);
         }
     }
 
-    Ok(transcript)
+    Ok(SessionMessages {
+        messages,
+        started_at,
+        last_message_at,
+    })
 }
 
-fn truncate_session_text(text: String) -> Option<String> {
-    const MAX_LINES: usize = 160;
-    const MAX_CHARS: usize = 4000;
-    if text.trim().is_empty() {
-        return None;
+fn extract_codex_timestamp(entry: &CodexEntry) -> Option<String> {
+    if let Some(ts) = entry.timestamp.as_deref() {
+        return Some(ts.to_string());
     }
+    entry
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("timestamp"))
+        .and_then(|value| value.as_str())
+        .map(|ts| ts.to_string())
+}
 
-    let mut lines: Vec<&str> = text.lines().collect();
-    let trimmed = if lines.len() > MAX_LINES {
-        lines.truncate(MAX_LINES);
-        format!("{}\n... trimmed", lines.join("\n"))
-    } else if text.len() > MAX_CHARS {
-        format!("{}... trimmed", text.chars().take(MAX_CHARS).collect::<String>())
-    } else {
-        text
-    };
+fn extract_message_text(content_value: &serde_json::Value) -> Option<String> {
+    match content_value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(arr) => {
+            let parts: Vec<String> = arr
+                .iter()
+                .filter_map(|item| {
+                    let item_type = item.get("type").and_then(|t| t.as_str());
+                    if item_type.is_some() && item_type != Some("text") {
+                        return None;
+                    }
+                    item.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|text| text.to_string())
+                })
+                .filter(|text| !text.trim().is_empty())
+                .collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            if let Some(text) = obj.get("text").and_then(|t| t.as_str()) {
+                return Some(text.to_string());
+            }
+            None
+        }
+        _ => None,
+    }
+}
 
-    Some(trimmed)
+fn push_message(messages: &mut Vec<WebSessionMessage>, role: &str, content: &str) {
+    if let Some(last) = messages.last_mut() {
+        if last.role == role {
+            last.content.push_str("\n\n");
+            last.content.push_str(content);
+            return;
+        }
+    }
+    messages.push(WebSessionMessage {
+        role: role.to_string(),
+        content: content.to_string(),
+    });
 }
 
 /// Save the session index.

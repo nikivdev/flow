@@ -98,9 +98,9 @@ pub struct HostConfig {
     /// Specific env keys to fetch when env_source = "1focus".
     #[serde(default)]
     pub env_keys: Vec<String>,
-    /// Fetch from personal (global) env vars instead of project-scoped.
+    /// Fetch from project-scoped env vars instead of personal (default).
     #[serde(default)]
-    pub env_personal: bool,
+    pub env_project: bool,
     /// Environment name for 1focus (defaults to "production").
     pub environment: Option<String>,
     /// Service token for fetching env vars on host (set via f env token create).
@@ -539,16 +539,16 @@ fn deploy_host(
         // Deploy-time fetch mode: fetch now and copy to host
         let env_name = host_cfg.environment.as_deref().unwrap_or("production");
         let keys = &host_cfg.env_keys;
-        let use_personal = host_cfg.env_personal;
+        let use_project = host_cfg.env_project;
 
         if !keys.is_empty() {
-            let source = if use_personal { "personal" } else { &format!("project/{}", env_name) };
+            let source = if use_project { &format!("project/{}", env_name) } else { "personal" };
             println!("==> Fetching env vars from 1focus ({})...", source);
 
-            let result = if use_personal {
-                crate::env::fetch_personal_env_vars(keys)
-            } else {
+            let result = if use_project {
                 crate::env::fetch_project_env_vars(env_name, keys)
+            } else {
+                crate::env::fetch_personal_env_vars(keys)
             };
 
             match result {

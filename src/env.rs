@@ -14,7 +14,7 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{EnvAction, TokenAction};
+use crate::cli::{EnvAction, TokenAction, ProjectEnvAction};
 use crate::config;
 use crate::deploy;
 use crate::env_setup::{EnvSetupDefaults, run_env_setup};
@@ -421,13 +421,89 @@ pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
     Ok(data.env.get(key).cloned())
 }
 
+/// Fuzzy search personal env vars and copy selected value to clipboard.
+fn fuzzy_select_env() -> Result<()> {
+    require_env_read_unlock()?;
+
+    // Fetch all personal env vars
+    let vars = fetch_env_vars(true, "production", &[])?;
+    if vars.is_empty() {
+        println!("No personal env vars found.");
+        println!("Set one with: f env set KEY=VALUE");
+        return Ok(());
+    }
+
+    // Format for fzf: KEY=VALUE (showing first 40 chars of value)
+    let mut lines: Vec<String> = vars
+        .iter()
+        .map(|(k, v)| {
+            let preview = if v.len() > 40 {
+                format!("{}...", &v[..40])
+            } else {
+                v.clone()
+            };
+            format!("{}\t{}", k, preview)
+        })
+        .collect();
+    lines.sort();
+
+    let input = lines.join("\n");
+
+    // Run fzf
+    let mut child = Command::new("fzf")
+        .args(["--height=40%", "--reverse", "--delimiter=\t", "--with-nth=1"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to run fzf. Is it installed?")?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin.write_all(input.as_bytes())?;
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        // User cancelled
+        return Ok(());
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout);
+    let selected = selected.trim();
+    if selected.is_empty() {
+        return Ok(());
+    }
+
+    // Extract key from selection
+    let key = selected.split('\t').next().unwrap_or(selected);
+
+    // Get the full value
+    if let Some(value) = vars.get(key) {
+        // Copy to clipboard
+        let mut pbcopy = Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to run pbcopy")?;
+
+        if let Some(stdin) = pbcopy.stdin.as_mut() {
+            use std::io::Write;
+            stdin.write_all(value.as_bytes())?;
+        }
+        pbcopy.wait()?;
+
+        println!("Copied {} to clipboard", key);
+    }
+
+    Ok(())
+}
+
 /// Run the env subcommand.
 pub fn run(action: Option<EnvAction>) -> Result<()> {
-    // No action = list env vars (or show status if not logged in)
+    // No action = fuzzy search personal envs and copy value
     let Some(action) = action else {
         let auth = load_auth_config()?;
         if auth.token.is_some() {
-            return list("production");
+            return fuzzy_select_env();
         }
         return status();
     };
@@ -466,8 +542,9 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
         }
         EnvAction::Setup { env_file, environment } => setup(env_file, environment)?,
         EnvAction::List { environment } => list(&environment)?,
-        EnvAction::Set { pair, personal, environment, description } => set_var(&pair, personal, &environment, description.as_deref())?,
-        EnvAction::Delete { keys, personal, environment } => delete_vars(&keys, personal, &environment)?,
+        EnvAction::Set { pair } => set_personal_env_var_from_pair(&pair)?,
+        EnvAction::Delete { keys } => delete_personal_env_vars(&keys)?,
+        EnvAction::Project { action } => run_project_env_action(action)?,
         EnvAction::Status => status()?,
         EnvAction::Get { keys, personal, environment, format } => {
             get_vars(&keys, personal, &environment, &format)?
@@ -495,6 +572,111 @@ fn run_token_action(action: TokenAction) -> Result<()> {
             token_revoke(&name)?
         }
     }
+    Ok(())
+}
+
+fn run_project_env_action(action: ProjectEnvAction) -> Result<()> {
+    match action {
+        ProjectEnvAction::Set { pair, environment } => {
+            set_project_env_var_from_pair(&pair, &environment)?
+        }
+        ProjectEnvAction::Delete { keys, environment } => {
+            delete_project_env_vars(&keys, &environment)?
+        }
+        ProjectEnvAction::List { environment } => {
+            list(&environment)?
+        }
+    }
+    Ok(())
+}
+
+fn set_personal_env_var_from_pair(pair: &str) -> Result<()> {
+    let (key, value) = pair
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("Invalid format. Use KEY=VALUE"))?;
+    set_personal_env_var(key.trim(), value.trim())
+}
+
+fn set_project_env_var_from_pair(pair: &str, environment: &str) -> Result<()> {
+    let (key, value) = pair
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("Invalid format. Use KEY=VALUE"))?;
+    set_project_env_var_internal(key.trim(), value.trim(), environment, None)
+}
+
+fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
+    let auth = load_auth_config()?;
+    let token = auth
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+
+    if keys.is_empty() {
+        bail!("No keys specified");
+    }
+
+    let api_url = get_api_url(&auth);
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let url = format!("{}/api/env/personal", api_url);
+    let body = serde_json::json!({ "keys": keys });
+
+    let resp = client
+        .delete(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to 1focus")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    println!("✓ Deleted {} key(s)", keys.len());
+    Ok(())
+}
+
+fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
+    let auth = load_auth_config()?;
+    let token = auth
+        .token
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+
+    if keys.is_empty() {
+        bail!("No keys specified");
+    }
+
+    let project = get_project_name()?;
+    let api_url = get_api_url(&auth);
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let url = format!("{}/api/env/{}", api_url, project);
+    let body = serde_json::json!({
+        "keys": keys,
+        "environment": environment,
+    });
+
+    let resp = client
+        .delete(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to 1focus")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    println!("✓ Deleted {} key(s) from {} ({})", keys.len(), project, environment);
     Ok(())
 }
 
@@ -1257,22 +1439,6 @@ fn list(environment: &str) -> Result<()> {
     Ok(())
 }
 
-/// Set a single env var.
-fn set_var(pair: &str, personal: bool, environment: &str, description: Option<&str>) -> Result<()> {
-    let (key, value) = pair
-        .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("Invalid format. Use KEY=VALUE"))?;
-
-    let key = key.trim();
-    let value = value.trim();
-
-    if personal {
-        set_personal_env_var(key, value)
-    } else {
-        set_project_env_var_internal(key, value, environment, description)
-    }
-}
-
 /// Set a personal (global) env var.
 fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
     let auth = load_auth_config()?;
@@ -1392,62 +1558,6 @@ fn set_project_env_var_internal(
         println!("✓ Set {}={} ({}) - {}", key, masked, environment, desc);
     } else {
         println!("✓ Set {}={} ({})", key, masked, environment);
-    }
-
-    Ok(())
-}
-
-/// Delete env vars.
-fn delete_vars(keys: &[String], personal: bool, environment: &str) -> Result<()> {
-    let auth = load_auth_config()?;
-    let token = auth
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
-
-    if keys.is_empty() {
-        bail!("No keys specified");
-    }
-
-    let api_url = get_api_url(&auth);
-
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-
-    let (url, body) = if personal {
-        (
-            format!("{}/api/env/personal", api_url),
-            serde_json::json!({ "keys": keys }),
-        )
-    } else {
-        let project = get_project_name()?;
-        (
-            format!("{}/api/env/{}", api_url, project),
-            serde_json::json!({
-                "keys": keys,
-                "environment": environment,
-            }),
-        )
-    };
-
-    let resp = client
-        .delete(&url)
-        .header("Authorization", format!("Bearer {}", token))
-        .json(&body)
-        .send()
-        .context("failed to connect to 1focus")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        bail!("API error {}: {}", status, body);
-    }
-
-    if personal {
-        println!("✓ Deleted {} personal key(s)", keys.len());
-    } else {
-        println!("✓ Deleted {} key(s) from {}", keys.len(), environment);
     }
 
     Ok(())
