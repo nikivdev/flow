@@ -688,7 +688,7 @@ fn merge_host_config(
         } else {
             overlay.env_keys
         },
-        env_personal: overlay.env_personal || base.env_personal,
+        env_project: overlay.env_project || base.env_project,
         environment: overlay.environment.or(base.environment),
         service_token: overlay.service_token.or(base.service_token),
         domain: overlay.domain.or(base.domain),

@@ -978,30 +978,20 @@ pub enum EnvAction {
         #[arg(short, long, default_value = "production")]
         environment: String,
     },
-    /// Set a single env var.
+    /// Set a personal env var (default storage).
     Set {
         /// KEY=VALUE pair to set.
         pair: String,
-        /// Store in personal/global storage (accessible by all projects).
-        #[arg(long)]
-        personal: bool,
-        /// Environment to set in (dev, staging, production).
-        #[arg(short, long, default_value = "production")]
-        environment: String,
-        /// Optional description for this env var.
-        #[arg(short, long)]
-        description: Option<String>,
     },
-    /// Delete env var(s).
+    /// Delete personal env var(s).
     Delete {
         /// Key(s) to delete.
         keys: Vec<String>,
-        /// Store in personal/global storage.
-        #[arg(long)]
-        personal: bool,
-        /// Environment to delete from (dev, staging, production).
-        #[arg(short, long, default_value = "production")]
-        environment: String,
+    },
+    /// Manage project-scoped env vars.
+    Project {
+        #[command(subcommand)]
+        action: ProjectEnvAction,
     },
     /// Show current auth status.
     Status,
@@ -1061,6 +1051,33 @@ pub enum TokenAction {
     Revoke {
         /// Token name to revoke.
         name: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProjectEnvAction {
+    /// Set a project-scoped env var.
+    Set {
+        /// KEY=VALUE pair to set.
+        pair: String,
+        /// Environment (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+    },
+    /// Delete project-scoped env var(s).
+    Delete {
+        /// Key(s) to delete.
+        keys: Vec<String>,
+        /// Environment (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
+    },
+    /// List project env vars.
+    #[command(alias = "ls")]
+    List {
+        /// Environment (dev, staging, production).
+        #[arg(short, long, default_value = "production")]
+        environment: String,
     },
 }
 
