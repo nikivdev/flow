@@ -109,10 +109,11 @@ impl ClaudeModel {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub enum ReviewSelection {
     Codex(CodexModel),
     Claude(ClaudeModel),
+    Opencode { model: String },
 }
 
 impl ReviewSelection {
@@ -124,19 +125,25 @@ impl ReviewSelection {
         matches!(self, ReviewSelection::Codex(_))
     }
 
+    fn is_opencode(&self) -> bool {
+        matches!(self, ReviewSelection::Opencode { .. })
+    }
+
     fn review_model_arg(&self) -> Option<ReviewModelArg> {
         match self {
             ReviewSelection::Codex(CodexModel::High) => Some(ReviewModelArg::CodexHigh),
             ReviewSelection::Codex(CodexModel::Mini) => Some(ReviewModelArg::CodexMini),
             ReviewSelection::Claude(ClaudeModel::Opus) => Some(ReviewModelArg::ClaudeOpus),
             ReviewSelection::Claude(ClaudeModel::Sonnet) => None,
+            ReviewSelection::Opencode { .. } => None,
         }
     }
 
-    fn model_label(&self) -> &'static str {
+    fn model_label(&self) -> String {
         match self {
-            ReviewSelection::Codex(model) => model.as_codex_arg(),
-            ReviewSelection::Claude(model) => model.as_claude_arg(),
+            ReviewSelection::Codex(model) => model.as_codex_arg().to_string(),
+            ReviewSelection::Claude(model) => model.as_claude_arg().to_string(),
+            ReviewSelection::Opencode { model } => model.clone(),
         }
     }
 }
@@ -274,10 +281,46 @@ fn warn_large_diffs(files: &[(String, usize)]) -> Result<()> {
     Ok(())
 }
 
+/// Check TypeScript config for commit settings first.
+pub fn resolve_review_selection_from_config() -> Option<ReviewSelection> {
+    let ts_config = config::load_ts_config()?;
+    let commit_config = ts_config.flow?.commit?;
+
+    let tool = commit_config.tool.as_deref()?;
+    let model = commit_config.model.clone();
+
+    match tool {
+        "opencode" => {
+            let model = model.unwrap_or_else(|| "opencode/minimax-m2.1-free".to_string());
+            Some(ReviewSelection::Opencode { model })
+        }
+        "claude" => {
+            let model_enum = match model.as_deref() {
+                Some("opus") | Some("claude-opus") => ClaudeModel::Opus,
+                _ => ClaudeModel::Sonnet,
+            };
+            Some(ReviewSelection::Claude(model_enum))
+        }
+        "codex" => {
+            let model_enum = match model.as_deref() {
+                Some("mini") | Some("codex-mini") => CodexModel::Mini,
+                _ => CodexModel::High,
+            };
+            Some(ReviewSelection::Codex(model_enum))
+        }
+        _ => None,
+    }
+}
+
 pub fn resolve_review_selection(
     use_claude: bool,
     override_model: Option<ReviewModelArg>,
 ) -> ReviewSelection {
+    // Check TypeScript config first
+    if let Some(selection) = resolve_review_selection_from_config() {
+        return selection;
+    }
+
     if let Some(model) = override_model {
         return match model {
             ReviewModelArg::ClaudeOpus => ReviewSelection::Claude(ClaudeModel::Opus),
@@ -298,6 +341,11 @@ pub fn resolve_review_selection_v2(
     use_codex: bool,
     override_model: Option<ReviewModelArg>,
 ) -> ReviewSelection {
+    // Check TypeScript config first
+    if let Some(selection) = resolve_review_selection_from_config() {
+        return selection;
+    }
+
     if let Some(model) = override_model {
         return match model {
             ReviewModelArg::ClaudeOpus => ReviewSelection::Claude(ClaudeModel::Opus),
@@ -912,9 +960,11 @@ pub fn run_with_check_sync(
     // Get custom review instructions from [commit] config
     let review_instructions = get_review_instructions(&repo_root);
 
-    // Run code review (Codex or Claude)
+    // Run code review
     if review_selection.is_claude() {
         println!("\nRunning Claude code review...");
+    } else if review_selection.is_opencode() {
+        println!("\nRunning opencode review...");
     } else {
         println!("\nRunning Codex code review...");
     }
@@ -927,12 +977,15 @@ pub fn run_with_check_sync(
     }
     println!("────────────────────────────────────────");
 
-    let review = match review_selection {
+    let review = match &review_selection {
         ReviewSelection::Claude(model) => {
-            run_claude_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, model)
+            run_claude_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, *model)
         }
         ReviewSelection::Codex(model) => {
-            run_codex_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, model)
+            run_codex_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, *model)
+        }
+        ReviewSelection::Opencode { model } => {
+            run_opencode_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, model)
         }
     };
     let review = match review {
@@ -1113,7 +1166,7 @@ pub fn run_with_check_sync(
             commit_sha.trim(),
             branch.trim(),
             &full_message,
-            review_selection.model_label(),
+            &review_selection.model_label(),
             reviewer,
             review.issues_found,
             &review.issues,
@@ -1687,6 +1740,94 @@ fn run_claude_review(
             })
         }
     }
+}
+
+/// Run opencode to review staged changes for bugs and performance issues.
+fn run_opencode_review(
+    diff: &str,
+    session_context: Option<&str>,
+    review_instructions: Option<&str>,
+    workdir: &std::path::Path,
+    model: &str,
+) -> Result<ReviewResult> {
+    use std::io::{BufRead, BufReader};
+
+    let (diff_for_prompt, _truncated) = truncate_diff(diff);
+
+    // Build review prompt
+    let mut prompt = String::from(
+        "Review this git diff for bugs, security issues, and performance problems. \
+         Return a JSON object with this exact format: \
+         {\"issues_found\": true/false, \"issues\": [\"issue 1\", \"issue 2\"], \"summary\": \"brief summary\"}\n\n",
+    );
+
+    if let Some(instructions) = review_instructions {
+        prompt.push_str(&format!("Additional review instructions:\n{}\n\n", instructions));
+    }
+
+    if let Some(context) = session_context {
+        prompt.push_str(&format!("Context:\n{}\n\n", context));
+    }
+
+    prompt.push_str(&format!("```diff\n{}\n```", diff_for_prompt));
+
+    // Run opencode with the specified model
+    let mut child = Command::new("opencode")
+        .args(["run", "--model", model, &prompt])
+        .current_dir(workdir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to run opencode - is it installed?")?;
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    // Read output with timeout
+    let reader = BufReader::new(stdout);
+    let mut output_lines = Vec::new();
+    for line in reader.lines().flatten() {
+        print!("{}\n", line);
+        output_lines.push(line);
+    }
+
+    // Also capture stderr
+    let stderr_reader = BufReader::new(stderr);
+    for line in stderr_reader.lines().flatten() {
+        debug!("opencode stderr: {}", line);
+    }
+
+    let status = child.wait()?;
+    if !status.success() {
+        debug!("opencode exited with non-zero status: {:?}", status.code());
+    }
+
+    let output = output_lines.join("\n");
+
+    // Try to parse JSON from output
+    let review_json = parse_review_json(&output);
+    let (issues_found, issues) = if let Some(ref json) = review_json {
+        (json.issues_found, json.issues.clone())
+    } else {
+        // Fallback: check for issue keywords
+        let lowered = output.to_lowercase();
+        let has_issues = lowered.contains("bug")
+            || lowered.contains("issue")
+            || lowered.contains("error")
+            || lowered.contains("problem")
+            || lowered.contains("security")
+            || lowered.contains("vulnerability")
+            || lowered.contains("performance issue")
+            || lowered.contains("memory leak");
+        (has_issues, Vec::new())
+    };
+
+    Ok(ReviewResult {
+        issues_found,
+        issues,
+        summary: review_json.and_then(|r| r.summary),
+        timed_out: false,
+    })
 }
 
 fn ensure_git_repo() -> Result<()> {

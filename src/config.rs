@@ -84,6 +84,40 @@ pub struct CommitConfig {
     /// File path to load review instructions from.
     #[serde(default)]
     pub review_instructions_file: Option<String>,
+    /// Tool to use for commit review: "claude", "codex", "opencode"
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// Model to use for commit review (tool-specific)
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// TypeScript config loaded from ~/.config/flow/config.ts
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TsConfig {
+    #[serde(default)]
+    pub flow: Option<TsFlowConfig>,
+}
+
+/// Flow section from TypeScript config.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TsFlowConfig {
+    #[serde(default)]
+    pub commit: Option<TsCommitConfig>,
+}
+
+/// Commit settings from TypeScript config.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TsCommitConfig {
+    /// Tool to use: "claude", "codex", "opencode"
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// Model identifier (e.g., "opencode/minimax-m2.1-free")
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Custom review instructions
+    #[serde(default)]
+    pub review_instructions: Option<String>,
 }
 
 impl Default for Config {
@@ -737,6 +771,59 @@ pub fn load_global_secrets() {
             let mut dummy = Config::default();
             merge_secrets(&mut dummy, secrets);
             tracing::debug!(path = %secrets_path.display(), "loaded global secrets");
+        }
+    }
+}
+
+/// Path to TypeScript config: ~/.config/flow/config.ts
+pub fn ts_config_path() -> PathBuf {
+    global_config_dir().join("config.ts")
+}
+
+/// Load TypeScript config from ~/.config/flow/config.ts using bun.
+/// Returns None if config.ts doesn't exist or fails to load.
+pub fn load_ts_config() -> Option<TsConfig> {
+    let config_path = ts_config_path();
+    if !config_path.exists() {
+        return None;
+    }
+
+    // Use bun to evaluate the TypeScript and output JSON
+    let loader_script = format!(
+        r#"const config = await import("{}"); console.log(JSON.stringify(config.default || config));"#,
+        config_path.display()
+    );
+
+    let mut child = std::process::Command::new("bun")
+        .args(["run", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(loader_script.as_bytes());
+    }
+
+    let output = child.wait_with_output().ok()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("failed to load config.ts: {}", stderr.trim());
+        return None;
+    }
+
+    let json = String::from_utf8_lossy(&output.stdout);
+    match serde_json::from_str::<TsConfig>(json.trim()) {
+        Ok(config) => {
+            tracing::debug!(path = %config_path.display(), "loaded TypeScript config");
+            Some(config)
+        }
+        Err(err) => {
+            tracing::warn!("failed to parse config.ts output: {}", err);
+            None
         }
     }
 }
