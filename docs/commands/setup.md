@@ -8,6 +8,9 @@ Bootstrap the project if needed, generate a `flow.toml` if missing, then run the
 # Bootstrap if missing, generate flow.toml if missing, then run setup task or print aliases
 f setup
 
+# Configure host deployment (Linux)
+f setup deploy
+
 # Use a specific config file
 f setup --config ./flow.toml
 ```
@@ -18,9 +21,11 @@ f setup --config ./flow.toml
 - If `flow.toml` is missing, it prompts to generate `setup` + `dev` tasks (AI via `gen` if available, otherwise manual prompts).
 - If `flow.toml` defines a `setup` task, `f setup` runs that task.
 - Otherwise, it prints shell aliases from `[alias]` in `flow.toml`.
+- `f setup deploy` adds a `[host]` section, creates a remote setup script, copies env templates, and optionally stores the deploy host.
 
 ## Options
 
 | Option | Description |
 |--------|-------------|
 | `--config <PATH>` | Path to `flow.toml` (default: `./flow.toml`) |
+| `TARGET` | Optional setup target (e.g., `deploy`) |

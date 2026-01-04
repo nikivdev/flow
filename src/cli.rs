@@ -249,11 +249,6 @@ pub enum Commands {
     )]
     Deploy(DeployCommand),
     #[command(
-        about = "Run the project's release task.",
-        long_about = "Runs the task configured by flow.release_task in flow.toml. Falls back to a task named 'release' or 'release-build', then to flow.primary_task."
-    )]
-    Release(ReleaseOpts),
-    #[command(
         about = "Publish project to GitHub.",
         long_about = "Create a new GitHub repository and push the current project. Infers repo name from folder, asks for public/private visibility."
     )]
@@ -698,11 +693,19 @@ pub enum SecretsFormat {
     Dotenv,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SetupTarget {
+    Deploy,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct SetupOpts {
     /// Path to the project flow config (flow.toml).
     #[arg(long, default_value = "flow.toml")]
     pub config: PathBuf,
+    /// Optional setup target (e.g., deploy).
+    #[arg(value_enum, value_name = "TARGET")]
+    pub target: Option<SetupTarget>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1398,6 +1401,8 @@ pub enum DeployAction {
     Setup,
     /// Deploy to Railway.
     Railway,
+    /// Run the project's release task.
+    Release(ReleaseOpts),
     /// Show deployment status.
     Status,
     /// View deployment logs.

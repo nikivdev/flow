@@ -10,12 +10,17 @@ The `deploy` command handles deployment to multiple platforms:
 - **Railway**
 
 Auto-detects the platform from your `flow.toml` configuration.
+If `[flow].deploy_task` is set, `f deploy` runs that task first.
+If no deployment config exists but a `deploy` task is defined, `f deploy` runs that task.
 
 ## Quick Start
 
 ```bash
 # Auto-deploy based on flow.toml config
 f deploy
+
+# Run the project's release task (flow.release_task or fallback)
+f deploy release
 
 # Deploy to specific platform
 f deploy host
@@ -31,6 +36,7 @@ f deploy railway
 | `cloudflare` | `cf` | Deploy to Cloudflare Workers |
 | `setup` | | Interactive deploy setup (Cloudflare) |
 | `railway` | | Deploy to Railway |
+| `release` | | Run the project's release task |
 | `status` | | Show deployment status |
 | `logs` | | View deployment logs |
 | `restart` | | Restart the deployed service |
@@ -55,6 +61,9 @@ Deploy to any Linux server with SSH access. Flow handles:
 Add to `flow.toml`:
 
 ```toml
+[flow]
+deploy_task = "deploy-cli-release"
+
 [host]
 dest = "/opt/myapp"           # Remote destination path
 run = "./server"              # Command to run the service
@@ -65,6 +74,8 @@ env_file = ".env.production"  # Path to .env file for secrets (optional)
 domain = "myapp.example.com"  # Public domain for nginx (optional)
 ssl = true                    # Enable SSL via Let's Encrypt (optional)
 ```
+
+Tip: `f setup deploy` can scaffold the `[host]` section and create a remote setup script.
 
 ### Setup Host
 

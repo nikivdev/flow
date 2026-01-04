@@ -116,9 +116,12 @@ pub struct FlowSettings {
     /// The primary task to run after code changes (e.g., "release", "deploy").
     #[serde(default, alias = "primary-task")]
     pub primary_task: Option<String>,
-    /// Task to run when invoking `f release`.
+    /// Task to run when invoking `f deploy release`.
     #[serde(default, rename = "release_task", alias = "release-task")]
     pub release_task: Option<String>,
+    /// Task to run when invoking `f deploy` with no subcommand.
+    #[serde(default, rename = "deploy_task", alias = "deploy-task")]
+    pub deploy_task: Option<String>,
 }
 
 /// Global feature toggles.

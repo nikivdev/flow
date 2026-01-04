@@ -26,7 +26,7 @@ infra host set root@100.114.156.47 -p 22
 
 # One-time: set [release] config in flow.toml
 # Then run the release task (builds + uploads + updates README snippet)
-f release
+f deploy release
 ```
 
 Install from that host using the snippet in the Install section (auto-updated on release).
