@@ -19,26 +19,14 @@ use crate::discover;
 /// Default gen repository location.
 const GEN_REPO: &str = "/Users/nikiv/org/gen/gen";
 
-/// Global agents that can be invoked from anywhere.
-const GLOBAL_AGENTS: &[(&str, &str)] = &[
-    ("repos-health", "Ensure all ~/repos have proper upstream configuration"),
-    ("repos-sync", "Sync all ~/repos with upstream, resolve conflicts"),
-    ("os-health", "Identify high-CPU or hanging processes and clean safely"),
-];
-
-const BUILTIN_SUBAGENTS: &[(&str, &str)] = &[
-    ("flow", "Flow-aware agent with full context about flow.toml, tasks, and CLI"),
-    ("explore", "Fast codebase exploration: find files, search code, answer questions"),
-    ("codify", "Convert scripts/sessions to reusable TypeScript for Bun"),
-    ("general", "Multi-step autonomous tasks, parallel execution"),
-];
+const FLOW_AGENT_NAME: &str = "flow";
 
 /// Run the agents subcommand.
 pub fn run(cmd: AgentsCommand) -> Result<()> {
     match cmd.action {
         Some(AgentsAction::List) => list_agents(),
         Some(AgentsAction::Run { agent, prompt }) => run_agent(&agent, prompt),
-        Some(AgentsAction::Global { agent, prompt }) => run_global_agent(&agent, prompt),
+        Some(AgentsAction::Global { agent, prompt }) => run_agent_optional(&agent, prompt),
         None => {
             if cmd.agent.is_empty() {
                 run_fuzzy_agents()
@@ -49,7 +37,7 @@ pub fn run(cmd: AgentsCommand) -> Result<()> {
                 } else {
                     None
                 };
-                run_global_agent(agent, prompt)
+                run_agent_optional(agent, prompt)
             }
         }
     }
@@ -94,61 +82,35 @@ enum GenLocation {
 
 /// List available agents.
 fn list_agents() -> Result<()> {
-    println!("Global agents:\n");
-    for (name, desc) in GLOBAL_AGENTS {
-        println!("  {:<14} - {}", name, desc);
-    }
-    println!();
-
     println!("Flow agents:\n");
     println!("  flow          - Flow-aware agent with full context about flow.toml, tasks, and CLI");
     println!("                  Knows schema, best practices, and can create/modify tasks");
     println!();
 
-    println!("Subagents (via Task tool):\n");
-    println!("  explore       - Fast codebase exploration: find files, search code, answer questions");
-    println!("  codify        - Convert scripts/sessions to reusable TypeScript for Bun");
-    println!("  general       - Multi-step autonomous tasks, parallel execution");
-    println!();
-
-    println!("Primary agents (standalone modes):\n");
-    println!("  build         - Default coding/building agent (full permissions)");
-    println!("  plan          - Planning mode with read-only restrictions");
-    println!();
-
-    println!("Usage:");
-    println!("  f agents global repos-health       # Check all ~/repos have upstream");
-    println!("  f agents global repos-sync         # Sync all ~/repos with upstream");
-    println!("  f agents global os-health          # Identify high-CPU or hanging processes");
-    println!("  f agents run flow \"add a deploy task\"");
-    println!("  f agents run explore \"find all API endpoints\"");
-    println!("  f agents os-health                 # Shortcut for global agents");
-    println!("  f agents os-health clean           # Cleanup non-system offenders");
-    println!();
-
-    match find_gen() {
-        Some(GenLocation::Binary(p)) => println!("Using: {}", p.display()),
-        Some(GenLocation::Repo(p)) => println!("Using repo: {}", p.display()),
-        None => {
-            println!("⚠ gen not found. Install with:");
-            println!("  cd {} && f install", GEN_REPO);
-            println!("  # or set GEN_REPO environment variable");
+    println!("Gen agents (project + global config):\n");
+    if let Some(gen_loc) = find_gen() {
+        if let Err(err) = list_gen_agents(&gen_loc) {
+            println!("⚠ failed to list gen agents: {err}");
         }
+    } else {
+        println!("⚠ gen not found. Install with:");
+        println!("  cd {} && f install", GEN_REPO);
+        println!("  # or set GEN_REPO environment variable");
     }
 
-    Ok(())
-}
+    println!();
+    println!("Usage:");
+    println!("  f agents                    # Fuzzy search agents");
+    println!("  f agents run <agent> \"prompt\"");
+    println!("  f agents <agent>            # Run agent (prompts for input)");
+    println!();
 
-#[derive(Debug, Clone, Copy)]
-enum AgentKind {
-    Global,
-    Subagent,
+    Ok(())
 }
 
 struct AgentEntry {
     name: String,
     display: String,
-    kind: AgentKind,
 }
 
 struct FzfAgentResult<'a> {
@@ -175,25 +137,13 @@ fn run_fuzzy_agents() -> Result<()> {
         } else {
             Vec::new()
         };
-
-        match result.entry.kind {
-            AgentKind::Global => {
-                if prompt_args.is_empty() {
-                    run_global_agent(&result.entry.name, None)?;
-                } else {
-                    run_global_agent(&result.entry.name, Some(prompt_args))?;
-                }
-            }
-            AgentKind::Subagent => {
-                if prompt_args.is_empty() {
-                    prompt_args = prompt_for_agent_prompt(&result.entry.name)?;
-                }
-                if prompt_args.is_empty() {
-                    bail!("No prompt provided.");
-                }
-                run_agent(&result.entry.name, prompt_args)?;
-            }
+        if prompt_args.is_empty() {
+            prompt_args = prompt_for_agent_prompt(&result.entry.name)?;
         }
+        if prompt_args.is_empty() {
+            bail!("No prompt provided.");
+        }
+        run_agent(&result.entry.name, prompt_args)?;
     }
 
     Ok(())
@@ -260,27 +210,20 @@ fn prompt_for_agent_prompt(agent_name: &str) -> Result<Vec<String>> {
 fn build_agent_entries() -> Result<Vec<AgentEntry>> {
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
+    let flow_display = "[flow] flow - Flow-aware agent for flow.toml tasks and CLI";
+    seen.insert(flow_display.to_string());
+    entries.push(AgentEntry {
+        name: FLOW_AGENT_NAME.to_string(),
+        display: flow_display.to_string(),
+    });
 
-    for (name, desc) in GLOBAL_AGENTS {
-        let display = format!("[global] {} - {}", name, desc);
-        if seen.insert(display.clone()) {
-            entries.push(AgentEntry {
-                name: (*name).to_string(),
-                display,
-                kind: AgentKind::Global,
-            });
+    if let Ok(gen_entries) = fetch_gen_agent_entries() {
+        for entry in gen_entries {
+            if seen.insert(entry.display.clone()) {
+                entries.push(entry);
+            }
         }
-    }
-
-    for (name, desc) in BUILTIN_SUBAGENTS {
-        let display = format!("[builtin] {} - {}", name, desc);
-        if seen.insert(display.clone()) {
-            entries.push(AgentEntry {
-                name: (*name).to_string(),
-                display,
-                kind: AgentKind::Subagent,
-            });
-        }
+        return Ok(entries);
     }
 
     if let Some(project_root) = find_project_root() {
@@ -326,6 +269,15 @@ fn find_project_root() -> Option<PathBuf> {
     None
 }
 
+fn apply_project_config_env(cmd: &mut Command) {
+    if let Some(root) = find_project_root() {
+        let opencode_dir = root.join(".opencode");
+        if opencode_dir.exists() {
+            cmd.env("OPENCODE_CONFIG_DIR", opencode_dir);
+        }
+    }
+}
+
 fn collect_agent_entries(
     root: &Path,
     label: &str,
@@ -367,7 +319,6 @@ fn collect_agent_entries(
             entries.push(AgentEntry {
                 name,
                 display,
-                kind: AgentKind::Subagent,
             });
         }
     }
@@ -413,23 +364,56 @@ fn trim_yaml_scalar(value: &str) -> String {
         .to_string()
 }
 
-/// Run a global agent (repos-health, repos-sync, etc.)
-fn run_global_agent(agent: &str, prompt: Option<Vec<String>>) -> Result<()> {
-    // Validate it's a known global agent
-    let agent_desc = GLOBAL_AGENTS
-        .iter()
-        .find(|(name, _)| *name == agent)
-        .map(|(_, desc)| *desc);
+fn run_agent_optional(agent: &str, prompt: Option<Vec<String>>) -> Result<()> {
+    let mut prompt_args = match prompt {
+        Some(p) if !p.is_empty() => p,
+        _ => prompt_for_agent_prompt(agent)?,
+    };
 
-    if agent_desc.is_none() {
-        let available: Vec<_> = GLOBAL_AGENTS.iter().map(|(n, _)| *n).collect();
-        bail!(
-            "Unknown global agent: '{}'\nAvailable: {}",
-            agent,
-            available.join(", ")
-        );
+    if prompt_args.is_empty() {
+        bail!("No prompt provided.");
     }
 
+    run_agent(agent, prompt_args)
+}
+
+fn list_gen_agents(gen_loc: &GenLocation) -> Result<()> {
+    let status = match gen_loc {
+        GenLocation::Binary(path) => Command::new(path)
+            .args(["agent", "list"])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("failed to run gen agent list")?,
+        GenLocation::Repo(repo) => {
+            let mut cmd = Command::new("bun");
+            cmd.args([
+                "run",
+                "--cwd",
+                &repo.join("packages/opencode").to_string_lossy(),
+                "--conditions=browser",
+                "src/index.ts",
+                "agent",
+                "list",
+            ])
+            .env("GEN_MODE", "1")
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+            apply_project_config_env(&mut cmd);
+            cmd.status().context("failed to run gen agent list")?
+        }
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("gen agent list failed");
+    }
+}
+
+fn fetch_gen_agent_entries() -> Result<Vec<AgentEntry>> {
     let gen_loc = find_gen().ok_or_else(|| {
         anyhow::anyhow!(
             "gen not found. Install with:\n  cd {} && f install\n  # or set GEN_REPO env var",
@@ -437,77 +421,75 @@ fn run_global_agent(agent: &str, prompt: Option<Vec<String>>) -> Result<()> {
         )
     })?;
 
-    // Build prompt - use custom if provided, otherwise default for the agent
-    let full_prompt = match prompt {
-        Some(p) if !p.is_empty() => {
-            if agent == "os-health" && is_os_health_clean_request(&p) {
-                build_os_health_clean_prompt()
-            } else {
-                format!(
-                    "Use the Task tool with subagent_type='{}' to: {}",
-                    agent,
-                    p.join(" ")
-                )
-            }
+    let output = match gen_loc {
+        GenLocation::Binary(ref path) => Command::new(path)
+            .args(["agent", "list"])
+            .output()
+            .context("failed to run gen agent list")?,
+        GenLocation::Repo(ref repo) => {
+            let mut cmd = Command::new("bun");
+            cmd.args([
+                "run",
+                "--cwd",
+                &repo.join("packages/opencode").to_string_lossy(),
+                "--conditions=browser",
+                "src/index.ts",
+                "agent",
+                "list",
+            ])
+            .env("GEN_MODE", "1");
+            apply_project_config_env(&mut cmd);
+            cmd.output().context("failed to run gen agent list")?
         }
-        _ => build_global_agent_prompt(agent),
     };
 
-    println!("Invoking {} agent...\n", agent);
-
-    let status = invoke_gen(&gen_loc, &full_prompt)?;
-
-    if !status.success() {
-        bail!("Agent exited with status: {}", status);
+    if !output.status.success() {
+        bail!(
+            "gen agent list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
-    Ok(())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_gen_agent_list(&stdout))
 }
 
-/// Build default prompt for global agents.
-fn build_global_agent_prompt(agent: &str) -> String {
-    match agent {
-        "repos-health" => format!(
-            "Use the Task tool with subagent_type='repos-health' to: \
-             Check all repositories in ~/repos and ensure they have proper upstream configuration. \
-             For repos missing upstream, run 'f upstream setup --url <origin-url>'. \
-             Report health status for each repo."
-        ),
-        "repos-sync" => format!(
-            "Use the Task tool with subagent_type='repos-sync' to: \
-             Sync all repositories in ~/repos with their upstream remotes. \
-             For each repo, run 'f upstream sync' and resolve any merge conflicts \
-             by preserving features from both sides. Report progress for each repo."
-        ),
-        "os-health" => format!(
-            "Use the Task tool with subagent_type='os-health' to: \
-             Identify high-CPU or hanging processes on macOS and report offenders. \
-             Then ask: \"Proceed with cleanup? (y/n)\". \
-             If the user answers \"y\", terminate non-system offenders with TERM, \
-             recheck, and only use KILL if needed. \
-             Do not terminate system processes; report them and ask before any action."
-        ),
-        _ => format!("Use the Task tool with subagent_type='{}' to complete the task.", agent),
+fn parse_gen_agent_list(stdout: &str) -> Vec<AgentEntry> {
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((name, mode)) = parse_agent_list_line(line) {
+            if mode == "primary" {
+                continue;
+            }
+            let display = format!("[gen] {} ({})", name, mode);
+            entries.push(AgentEntry { name, display });
+        }
     }
+    entries
 }
 
-fn is_os_health_clean_request(prompt: &[String]) -> bool {
-    if prompt.len() != 1 {
-        return false;
+fn parse_agent_list_line(line: &str) -> Option<(String, String)> {
+    if line.starts_with('{')
+        || line.starts_with('"')
+        || line.starts_with('[')
+        || line.starts_with("}")
+    {
+        return None;
     }
-    matches!(
-        prompt[0].to_lowercase().as_str(),
-        "clean" | "cleanup"
-    )
-}
-
-fn build_os_health_clean_prompt() -> String {
-    "Use the Task tool with subagent_type='os-health' to: \
-     Identify high-CPU or hanging processes on macOS and report offenders. \
-     Ask \"Proceed with cleanup? (y/n)\" and if the user answers \"y\", \
-     terminate non-system offenders with TERM, recheck, and only use KILL if needed. \
-     Do not terminate system processes; report them and ask before any action."
-        .to_string()
+    let end = line.strip_suffix(')')?;
+    let (name, mode) = end.rsplit_once(" (")?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    let mode = mode.trim();
+    if !matches!(mode, "subagent" | "all" | "primary") {
+        return None;
+    }
+    Some((name.trim().to_string(), mode.to_string()))
 }
 
 /// Run an agent with a prompt.
@@ -528,7 +510,7 @@ fn run_agent(agent: &str, prompt: Vec<String>) -> Result<()> {
     }
 
     // Build the full prompt based on agent type
-    let full_prompt = if agent == "flow" {
+    let full_prompt = if agent == FLOW_AGENT_NAME {
         build_flow_prompt(&prompt_str)?
     } else {
         // Regular subagent - use Task tool
@@ -560,8 +542,9 @@ fn invoke_gen(location: &GenLocation, prompt: &str) -> Result<std::process::Exit
             .status()
             .context("failed to run gen"),
 
-        GenLocation::Repo(repo) => Command::new("bun")
-            .args([
+        GenLocation::Repo(repo) => {
+            let mut cmd = Command::new("bun");
+            cmd.args([
                 "run",
                 "--cwd",
                 &repo.join("packages/opencode").to_string_lossy(),
@@ -573,9 +556,10 @@ fn invoke_gen(location: &GenLocation, prompt: &str) -> Result<std::process::Exit
             .env("GEN_MODE", "1")
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("failed to run gen from repo"),
+            .stderr(Stdio::inherit());
+            apply_project_config_env(&mut cmd);
+            cmd.status().context("failed to run gen from repo")
+        }
     }
 }
 

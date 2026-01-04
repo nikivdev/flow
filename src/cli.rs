@@ -233,7 +233,7 @@ pub enum Commands {
     Start,
     #[command(
         about = "Invoke gen AI agents.",
-        long_about = "Run gen agents with prompts. Global agents: repos-health, repos-sync, os-health. Subagents: codify, explore, general. Special: flow (flow-aware).",
+        long_about = "Run gen agents with prompts. Supports project and global agents. Special: flow (flow-aware).",
         alias = "a"
     )]
     Agents(AgentsCommand),
@@ -1217,7 +1217,7 @@ pub enum ToolsAction {
 pub struct AgentsCommand {
     #[command(subcommand)]
     pub action: Option<AgentsAction>,
-    /// Run a global agent directly (e.g., `f agents os-health`).
+    /// Run a global agent directly (e.g., `f agents explore`).
     #[arg(trailing_var_arg = true)]
     pub agent: Vec<String>,
 }
@@ -1235,7 +1235,7 @@ pub enum AgentsAction {
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
     },
-    /// Run a global agent (repos-health, repos-sync, os-health).
+    /// Run a global agent (prompt optional).
     #[command(alias = "g")]
     Global {
         /// Global agent name.
