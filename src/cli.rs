@@ -227,8 +227,8 @@ pub enum Commands {
     )]
     Commits(CommitsOpts),
     #[command(
-        about = "Print aliases or run setup task for the current project.",
-        long_about = "Outputs shell aliases from flow.toml or runs the 'setup' task if defined."
+        about = "Bootstrap project and run setup task or aliases.",
+        long_about = "Bootstraps the project if needed, creates flow.toml when missing, then runs the 'setup' task or prints shell aliases."
     )]
     Setup(SetupOpts),
     #[command(

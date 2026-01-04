@@ -29,7 +29,7 @@ pub fn run(cmd: DocsCommand) -> Result<()> {
 /// List all documentation files.
 fn list_docs(docs_dir: &Path) -> Result<()> {
     if !docs_dir.exists() {
-        println!("No docs directory. Run `f start` to create .ai/docs/");
+        println!("No docs directory. Run `f setup` to create .ai/docs/");
         return Ok(());
     }
 
@@ -74,7 +74,7 @@ fn list_docs(docs_dir: &Path) -> Result<()> {
 /// Show documentation status.
 fn show_status(project_root: &Path, docs_dir: &Path) -> Result<()> {
     if !docs_dir.exists() {
-        println!("No docs directory. Run `f start` to create .ai/docs/");
+        println!("No docs directory. Run `f setup` to create .ai/docs/");
         return Ok(());
     }
 
@@ -128,7 +128,7 @@ fn show_status(project_root: &Path, docs_dir: &Path) -> Result<()> {
 /// Sync documentation with recent commits.
 fn sync_docs(project_root: &Path, docs_dir: &Path, commits: usize, dry: bool) -> Result<()> {
     if !docs_dir.exists() {
-        bail!("No docs directory. Run `f start` to create .ai/docs/");
+        bail!("No docs directory. Run `f setup` to create .ai/docs/");
     }
 
     // Get recent commit messages and diffs

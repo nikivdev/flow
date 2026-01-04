@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
+use serde_json::Value;
 use shell_words;
 
 use crate::cli::{AgentsAction, AgentsCommand};
@@ -531,6 +532,23 @@ fn run_agent(agent: &str, prompt: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// Run the flow agent and capture the final text output.
+pub fn run_flow_agent_capture(prompt: &str) -> Result<String> {
+    let gen_loc = find_gen().ok_or_else(|| {
+        anyhow::anyhow!(
+            "gen not found. Install with:\n  cd {} && f install\n  # or set GEN_REPO env var",
+            GEN_REPO
+        )
+    })?;
+
+    if prompt.trim().is_empty() {
+        bail!("No prompt provided for flow agent.");
+    }
+
+    let full_prompt = build_flow_prompt(prompt)?;
+    invoke_gen_capture(&gen_loc, &full_prompt)
+}
+
 /// Invoke gen with a prompt.
 fn invoke_gen(location: &GenLocation, prompt: &str) -> Result<std::process::ExitStatus> {
     match location {
@@ -561,6 +579,75 @@ fn invoke_gen(location: &GenLocation, prompt: &str) -> Result<std::process::Exit
             cmd.status().context("failed to run gen from repo")
         }
     }
+}
+
+fn invoke_gen_capture(location: &GenLocation, prompt: &str) -> Result<String> {
+    let output = match location {
+        GenLocation::Binary(path) => Command::new(path)
+            .args(["run", "--format", "json", prompt])
+            .stdin(Stdio::null())
+            .output()
+            .context("failed to run gen"),
+
+        GenLocation::Repo(repo) => {
+            let mut cmd = Command::new("bun");
+            cmd.args([
+                "run",
+                "--cwd",
+                &repo.join("packages/opencode").to_string_lossy(),
+                "--conditions=browser",
+                "src/index.ts",
+                "run",
+                "--format",
+                "json",
+                prompt,
+            ])
+            .env("GEN_MODE", "1")
+            .stdin(Stdio::null());
+            apply_project_config_env(&mut cmd);
+            cmd.output().context("failed to run gen from repo")
+        }
+    }?;
+
+    if !output.status.success() {
+        bail!("gen exited with status: {}", output.status);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(text) = extract_text_from_gen_output(&stdout) {
+        return Ok(text);
+    }
+
+    let trimmed = stdout.trim();
+    if !trimmed.is_empty() {
+        return Ok(trimmed.to_string());
+    }
+
+    bail!("gen returned no output");
+}
+
+fn extract_text_from_gen_output(stdout: &str) -> Option<String> {
+    let mut last_text: Option<String> = None;
+    for line in stdout.lines() {
+        let value: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let event_type = value.get("type").and_then(|t| t.as_str());
+        if event_type != Some("text") {
+            continue;
+        }
+        let text = value
+            .get("part")
+            .and_then(|part| part.get("text"))
+            .and_then(|t| t.as_str());
+        if let Some(text) = text {
+            if !text.trim().is_empty() {
+                last_text = Some(text.to_string());
+            }
+        }
+    }
+    last_text
 }
 
 /// Build a flow-aware prompt with full context.
@@ -651,7 +738,7 @@ const FLOW_CLI_CONTEXT: &str = r#"
 - `f tasks` - List all tasks
 - `f run <task> [args]` - Run task with args
 - `f init` - Create flow.toml scaffold
-- `f start` - Bootstrap .ai/ folder structure
+- `f setup` - Bootstrap project or run setup task
 - `f commit` - AI-assisted git commit
 - `f agents run <type> "prompt"` - Run AI agent
 - `f agents global <agent>` - Run global agent
