@@ -701,6 +701,17 @@ pub fn run_with_check_with_gitedit(
 }
 
 fn commit_with_check_async_enabled() -> bool {
+    // Check TypeScript config first
+    if let Some(ts_config) = config::load_ts_config() {
+        if let Some(flow) = ts_config.flow {
+            if let Some(commit) = flow.commit {
+                if let Some(async_enabled) = commit.async_enabled {
+                    return async_enabled;
+                }
+            }
+        }
+    }
+
     let cwd = std::env::current_dir().ok();
 
     if let Some(cwd) = cwd {
@@ -1082,10 +1093,14 @@ pub fn run_with_check_sync(
     // Truncate diff if needed
     let (diff_for_prompt, truncated) = truncate_diff(&diff);
 
-    // Generate commit message
+    // Generate commit message (use opencode if that's the review tool)
     print!("Generating commit message... ");
     io::stdout().flush()?;
-    let message = generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?;
+    let message = if let ReviewSelection::Opencode { ref model } = review_selection {
+        generate_commit_message_opencode(&diff_for_prompt, &status, truncated, model)?
+    } else {
+        generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?
+    };
     println!("done\n");
 
     let mut gitedit_sessions: Vec<ai::GitEditSessionData> = Vec::new();
@@ -1968,6 +1983,58 @@ fn truncate_context(context: &str, max_chars: usize) -> String {
             end
         )
     }
+}
+
+/// Generate commit message using opencode with a specified model.
+fn generate_commit_message_opencode(
+    diff: &str,
+    status: &str,
+    truncated: bool,
+    model: &str,
+) -> Result<String> {
+    let mut prompt = String::from(
+        "You are an expert software engineer. Write a clear, concise git commit message for these changes.\n\n\
+         Guidelines:\n\
+         - Use imperative mood (\"Add feature\" not \"Added feature\")\n\
+         - First line: concise summary of WHAT and WHY (under 72 chars)\n\
+         - Focus on the semantic meaning and purpose, not just listing changed files/functions\n\
+         - If multiple logical changes, use bullet points in body\n\
+         - Never include secrets or sensitive data\n\n\
+         Git diff:\n",
+    );
+    prompt.push_str(diff);
+
+    if truncated {
+        prompt.push_str("\n\n[Diff truncated]");
+    }
+
+    let status = status.trim();
+    if !status.is_empty() {
+        prompt.push_str("\n\nGit status:\n");
+        prompt.push_str(status);
+    }
+
+    prompt.push_str("\n\nWrite only the commit message, nothing else:");
+
+    let output = Command::new("opencode")
+        .args(["run", "--model", model, &prompt])
+        .output()
+        .context("failed to run opencode for commit message")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("opencode failed: {}", stderr.trim());
+    }
+
+    let message = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_string();
+
+    if message.is_empty() {
+        bail!("opencode returned empty commit message");
+    }
+
+    Ok(trim_quotes(&message))
 }
 
 fn generate_commit_message(

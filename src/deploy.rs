@@ -1306,6 +1306,7 @@ fn create_systemd_service(
     exec_start: &str,
     config: &HostConfig,
 ) -> Result<()> {
+    let exec_start = normalize_exec_start(workdir, exec_start);
     let env_file_line = if config.env_file.is_some() {
         format!("EnvironmentFile={}/.env", workdir)
     } else {
@@ -1338,6 +1339,38 @@ WantedBy=multi-user.target
 
     ssh_run(conn, &cmd)?;
     Ok(())
+}
+
+fn normalize_exec_start(workdir: &str, exec_start: &str) -> String {
+    let trimmed = exec_start.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut parts =
+        shell_words::split(trimmed).unwrap_or_else(|_| trimmed.split_whitespace().map(|s| s.to_string()).collect());
+    if parts.is_empty() {
+        return trimmed.to_string();
+    }
+
+    let cmd = parts[0].as_str();
+    if cmd.starts_with('/') {
+        return trimmed.to_string();
+    }
+
+    if cmd.starts_with("./") || cmd.starts_with("../") || cmd.contains('/') {
+        let abs = Path::new(workdir)
+            .join(cmd)
+            .to_string_lossy()
+            .to_string();
+        parts[0] = abs;
+        return shell_words::join(parts);
+    }
+
+    let mut env_parts = Vec::with_capacity(parts.len() + 1);
+    env_parts.push("/usr/bin/env".to_string());
+    env_parts.extend(parts);
+    shell_words::join(env_parts)
 }
 
 /// Set up nginx reverse proxy.
