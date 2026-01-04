@@ -26,6 +26,9 @@ f deploy release
 f deploy host
 f deploy cloudflare
 f deploy railway
+
+# Configure deployment defaults
+f deploy config
 ```
 
 ## Subcommands
@@ -36,6 +39,7 @@ f deploy railway
 | `cloudflare` | `cf` | Deploy to Cloudflare Workers |
 | `setup` | | Interactive deploy setup (Cloudflare) |
 | `railway` | | Deploy to Railway |
+| `config` | | Configure deployment defaults (Linux host) |
 | `release` | | Run the project's release task |
 | `status` | | Show deployment status |
 | `logs` | | View deployment logs |
@@ -86,6 +90,9 @@ First, configure your SSH connection:
 f deploy set-host user@host:port
 f deploy set-host deploy@myserver.com:22
 f deploy set-host root@192.168.1.100
+
+# Interactive config (prefills from ~/.config/infra/config.json if present)
+f deploy config
 
 # Verify connection
 f deploy shell

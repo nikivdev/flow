@@ -696,6 +696,7 @@ pub enum SecretsFormat {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum SetupTarget {
     Deploy,
+    Release,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1401,6 +1402,8 @@ pub enum DeployAction {
     Setup,
     /// Deploy to Railway.
     Railway,
+    /// Configure deployment defaults (Linux host).
+    Config,
     /// Run the project's release task.
     Release(ReleaseOpts),
     /// Show deployment status.

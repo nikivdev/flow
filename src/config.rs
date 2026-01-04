@@ -65,6 +65,9 @@ pub struct Config {
     /// Commit workflow config (fixers, review instructions).
     #[serde(default)]
     pub commit: Option<CommitConfig>,
+    /// Setup defaults (global or project-level).
+    #[serde(default)]
+    pub setup: Option<SetupConfig>,
 }
 
 /// Configuration for commit workflow.
@@ -106,6 +109,7 @@ impl Default for Config {
             cloudflare: None,
             railway: None,
             commit: None,
+            setup: None,
         }
     }
 }
@@ -122,6 +126,22 @@ pub struct FlowSettings {
     /// Task to run when invoking `f deploy` with no subcommand.
     #[serde(default, rename = "deploy_task", alias = "deploy-task")]
     pub deploy_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SetupConfig {
+    /// Server setup defaults (used by f setup release).
+    #[serde(default)]
+    pub server: Option<SetupServerConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SetupServerConfig {
+    /// Optional template flow.toml path to pull [host] defaults from.
+    pub template: Option<String>,
+    /// Optional inline [host] defaults.
+    #[serde(default)]
+    pub host: Option<crate::deploy::HostConfig>,
 }
 
 /// Global feature toggles.
@@ -898,6 +918,25 @@ fn merge_config(base: &mut Config, other: Config) {
     }
     if base.flow.release_task.is_none() {
         base.flow.release_task = other.flow.release_task;
+    }
+    if base.flow.deploy_task.is_none() {
+        base.flow.deploy_task = other.flow.deploy_task;
+    }
+    if base.setup.is_none() {
+        base.setup = other.setup;
+    } else if let (Some(base_setup), Some(other_setup)) = (base.setup.as_mut(), other.setup) {
+        if base_setup.server.is_none() {
+            base_setup.server = other_setup.server;
+        } else if let (Some(base_server), Some(other_server)) =
+            (base_setup.server.as_mut(), other_setup.server)
+        {
+            if base_server.template.is_none() {
+                base_server.template = other_server.template;
+            }
+            if base_server.host.is_none() {
+                base_server.host = other_server.host;
+            }
+        }
     }
     base.options.merge(other.options);
     base.servers.extend(other.servers);
