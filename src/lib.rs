@@ -1,4 +1,4 @@
-pub mod agent;
+pub mod agents;
 pub mod ai;
 pub mod cli;
 pub mod commit;
@@ -30,6 +30,7 @@ pub mod processes;
 pub mod projects;
 pub mod publish;
 pub mod repos;
+pub mod release;
 pub mod running;
 pub mod skills;
 pub mod storage;

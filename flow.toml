@@ -3,6 +3,7 @@ name = "flow"
 
 [flow]
 primary_task = "deploy-cli-release"
+release_task = "release"
 
 [options]
 # Enable gitedit.dev mirroring for commits
@@ -11,6 +12,14 @@ gitedit_mirror = true
 commit_with_check_gitedit_mirror = true
 gitedit_url = "https://gitedit.dev"
 commit_with_check_review_url = "http://100.114.156.47:3000/review"
+
+[release]
+# Set these to your release host values.
+domain = "flow.yourdomain.com"
+base_url = "https://flow.yourdomain.com"
+root = "/var/www/flow"
+caddyfile = "/etc/caddy/Caddyfile"
+readme = "readme.md"
 
 [flox]
 [flox.install]
@@ -48,6 +57,26 @@ description = "Ensure the hub daemon is running locally"
 name = "deploy-cli-release"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh"
 description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
+
+[[tasks]]
+name = "release-build"
+command = "bash ./scripts/package-release.sh"
+description = "Build signed release artifacts into dist/ (set FLOW_VERSION, CODESIGN_IDENTITY env vars as needed)"
+
+[[tasks]]
+name = "release"
+command = "./scripts/release.sh"
+description = "Build darwin/arm64 release, publish to host, update install snippet"
+
+[[tasks]]
+name = "release-host-setup"
+command = "infra release setup --path ."
+description = "Install Caddy and configure a release host (uses infra host set + [release])"
+
+[[tasks]]
+name = "release-publish"
+command = "bash -c 'tarball=$(ls -t dist/flow_*_darwin_arm64.tar.gz | head -n1) && infra release publish \"$tarball\" --path .'"
+description = "Upload the latest darwin/arm64 release tarball to the release host"
 
 [[tasks]]
 name = "test-flow-task-tracing"

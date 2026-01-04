@@ -4,7 +4,7 @@ Clone repositories into a structured local directory.
 
 ## Overview
 
-`f repos clone` clones GitHub repositories into `~/repos/<owner>/<repo>` using SSH URLs. By default it does a shallow clone for speed, then fetches full history in the background. If the repo is a fork and `gh` is available, it automatically sets up an `upstream` remote and local tracking branch.
+`f repos clone` clones GitHub repositories into `~/repos/<owner>/<repo>` using SSH URLs. By default it does a shallow clone for speed, then fetches full history in the background. It always sets up an `upstream` remote and local tracking branch unless you pass `--no-upstream`.
 
 ## Quick Start
 
@@ -31,18 +31,18 @@ f repos clone owner/repo --full
 | `<URL>` | | Repository URL or `owner/repo` |
 | `--root <PATH>` | | Root directory for clones (default: `~/repos`) |
 | `--full` | | Full clone (skip shallow clone + background history fetch) |
-| `--no-upstream` | | Skip upstream auto-setup for forks |
+| `--no-upstream` | | Skip upstream setup |
 | `--upstream-url <URL>` | `-u` | Upstream URL override (skips GitHub lookup) |
 
 ## Upstream Automation
 
-When cloning a fork, flow will:
+Flow will:
 
 1. Query GitHub via `gh api repos/<owner>/<repo>`
 2. Detect the parent repository
 3. Run `f upstream setup --url <parent>` inside the cloned repo
 
-If `gh` is not installed or authenticated, flow prints a warning and skips auto-setup.
+If the repo is not a fork (or `gh` is unavailable), flow sets `upstream` to the `origin` URL.
 
 ## Background History Fetch
 

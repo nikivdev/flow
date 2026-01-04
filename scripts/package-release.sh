@@ -63,7 +63,7 @@ resolve_version() {
 
 codesign_if_requested() {
     local bin="$1"
-    if [[ "${OS_NAME}" != "macos" ]]; then
+    if [[ "${OS_NAME}" != "darwin" ]]; then
         return
     fi
     if [[ -z "${CODESIGN_IDENTITY:-}" ]]; then

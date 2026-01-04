@@ -78,26 +78,20 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
         resolve_upstream_url(&repo_ref)?
     };
 
-    let Some(upstream_url) = upstream_url else {
-        println!("Upstream not configured. If this is a fork, run:");
-        println!("  f upstream setup --url <original-repo-url>");
-        if shallow {
-            spawn_background_history_fetch(&target_dir, false)?;
+    let (upstream_url, upstream_is_origin) = match upstream_url {
+        Some(url) => {
+            let is_origin = url.trim() == clone_url.as_str();
+            (url, is_origin)
         }
-        return Ok(target_dir);
+        None => {
+            println!("No fork detected; using origin as upstream.");
+            (clone_url.clone(), true)
+        }
     };
-
-    if upstream_url.trim() == clone_url {
-        println!("Upstream matches origin; skipping upstream setup.");
-        if shallow {
-            spawn_background_history_fetch(&target_dir, false)?;
-        }
-        return Ok(target_dir);
-    }
 
     configure_upstream(&target_dir, &upstream_url, fetch_depth)?;
     if shallow {
-        spawn_background_history_fetch(&target_dir, true)?;
+        spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
     }
 
     Ok(target_dir)

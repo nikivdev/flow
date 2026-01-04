@@ -16,7 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::{DeployAction, DeployCommand, EnvAction};
 use crate::config::Config;
-use crate::deploy_setup::{CloudflareSetupDefaults, CloudflareSetupResult, run_cloudflare_setup};
+use crate::deploy_setup::{
+    CloudflareSetupDefaults,
+    CloudflareSetupResult,
+    discover_wrangler_configs,
+    run_cloudflare_setup,
+};
 use crate::env::parse_env_file;
 
 /// Host configuration stored globally at ~/.config/flow/deploy.json
@@ -370,13 +375,27 @@ fn deploy_cloudflare(
 
     let onefocus_env = env_name.unwrap_or("production");
     let mut onefocus_vars: HashMap<String, String> = HashMap::new();
+    let mut onefocus_loaded = false;
 
     if use_1focus {
         let keys = collect_cloudflare_env_keys(cf_cfg);
+        if !cf_cfg.env_defaults.is_empty() {
+            for key in &keys {
+                if let Some(value) = cf_cfg.env_defaults.get(key) {
+                    if !value.trim().is_empty() {
+                        onefocus_vars.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+
         if !keys.is_empty() {
             match crate::env::fetch_project_env_vars(onefocus_env, &keys) {
                 Ok(vars) => {
-                    onefocus_vars = vars;
+                    if !vars.is_empty() {
+                        onefocus_loaded = true;
+                    }
+                    onefocus_vars.extend(vars);
                 }
                 Err(err) => {
                     if env_apply_mode == EnvApplyMode::Auto {
@@ -388,7 +407,7 @@ fn deploy_cloudflare(
                             eprintln!("⚠ Env sync skipped: {err}");
                         }
                     } else if env_apply_mode == EnvApplyMode::Always {
-                        return Err(err);
+                        eprintln!("⚠ Env sync skipped: {err}");
                     } else {
                         eprintln!("⚠ Env sync skipped: {err}");
                     }
@@ -399,11 +418,11 @@ fn deploy_cloudflare(
 
     if should_apply {
         if use_1focus {
-            if !onefocus_vars.is_empty() {
+            if onefocus_loaded {
                 apply_cloudflare_env_map(project_root, cf_cfg, &onefocus_vars)?;
             } else if env_apply_mode == EnvApplyMode::Always {
-                bail!(
-                    "No env vars found in 1focus for environment '{}'",
+                eprintln!(
+                    "⚠ No env vars found in 1focus for environment '{}' (using defaults only).",
                     onefocus_env
                 );
             }
@@ -643,6 +662,60 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
     let cf_cfg = config
         .and_then(|c| c.cloudflare.as_ref())
         .unwrap_or(&default_cf);
+
+    if is_1focus_source(cf_cfg.env_source.as_deref()) {
+        let worker_path = if let Some(path) = cf_cfg.path.as_ref() {
+            project_root.join(path)
+        } else {
+            let workers = discover_wrangler_configs(project_root)?;
+            if workers.is_empty() {
+                println!("No Cloudflare Worker config found (wrangler.toml/json).");
+                println!("Run `wrangler init` first, then try: f deploy setup");
+                return Ok(());
+            }
+            if workers.len() > 1 {
+                bail!(
+                    "Multiple Cloudflare worker configs found. Set [cloudflare].path in flow.toml."
+                );
+            }
+            workers[0].clone()
+        };
+
+        ensure_wrangler_config(&worker_path)?;
+        println!("Using Cloudflare worker: {}", worker_path.display());
+
+        if !cf_cfg.bootstrap_secrets.is_empty() {
+            println!("==> Bootstrapping secrets (optional)...");
+            crate::env::run(Some(EnvAction::Bootstrap))?;
+        }
+
+        let env_name = cf_cfg
+            .environment
+            .clone()
+            .unwrap_or_else(|| "production".to_string());
+        let keys = collect_cloudflare_env_keys(cf_cfg);
+        let env_store_ok = if keys.is_empty() {
+            true
+        } else {
+            match crate::env::fetch_project_env_vars(&env_name, &keys) {
+                Ok(vars) => !vars.is_empty(),
+                Err(err) => {
+                    eprintln!("⚠ Env store unavailable: {err}");
+                    false
+                }
+            }
+        };
+
+        if env_store_ok {
+            crate::env::run(Some(EnvAction::Guide { environment: env_name }))?;
+            crate::env::run(Some(EnvAction::Apply))?;
+        } else {
+            eprintln!("⚠ Skipping env guide/apply (1focus unavailable).");
+        }
+
+        println!("\n✓ Cloudflare deploy setup complete.");
+        return Ok(());
+    }
 
     let defaults = CloudflareSetupDefaults {
         worker_path: cf_cfg
