@@ -1725,6 +1725,7 @@ enum DepSpec {
 }
 
 fn suggested_commands(project_root: &Path) -> SuggestedCommands {
+    // Check root level first
     let cargo = project_root.join("Cargo.toml").exists();
     if cargo {
         return SuggestedCommands {
@@ -1736,45 +1737,67 @@ fn suggested_commands(project_root: &Path) -> SuggestedCommands {
 
     let package_json = project_root.join("package.json").exists();
     if package_json {
-        if project_root.join("pnpm-lock.yaml").exists() {
-            return SuggestedCommands {
-                setup: Some("pnpm install".to_string()),
-                dev: Some("pnpm dev".to_string()),
-                deps: vec![DepSpec::Single("pnpm", "pnpm")],
-            };
-        }
-        if project_root.join("yarn.lock").exists() {
-            return SuggestedCommands {
-                setup: Some("yarn install".to_string()),
-                dev: Some("yarn dev".to_string()),
-                deps: vec![DepSpec::Single("yarn", "yarn")],
-            };
-        }
-        if project_root.join("bun.lockb").exists() {
-            return SuggestedCommands {
-                setup: Some("bun install".to_string()),
-                dev: Some("bun dev".to_string()),
-                deps: vec![DepSpec::Single("bun", "bun")],
-            };
-        }
-        if project_root.join("package-lock.json").exists() {
-            return SuggestedCommands {
-                setup: Some("npm ci".to_string()),
-                dev: Some("npm run dev".to_string()),
-                deps: vec![DepSpec::Multiple("node", &["node", "npm"])],
-            };
-        }
+        return suggest_node_commands(project_root, None);
+    }
+
+    // Check subdirectories for project files
+    let (subdir_cargo, subdir_package) = find_subdir_projects(project_root);
+
+    if let Some(subdir) = subdir_cargo {
         return SuggestedCommands {
-            setup: Some("npm install".to_string()),
-            dev: Some("npm run dev".to_string()),
-            deps: vec![DepSpec::Multiple("node", &["node", "npm"])],
+            setup: Some(format!("cd {subdir} && cargo build --locked")),
+            dev: Some(format!("cd {subdir} && cargo run")),
+            deps: vec![DepSpec::Single("cargo", "cargo")],
         };
+    }
+
+    if let Some(subdir) = subdir_package {
+        let subdir_path = project_root.join(&subdir);
+        return suggest_node_commands(&subdir_path, Some(&subdir));
     }
 
     SuggestedCommands {
         setup: None,
         dev: None,
         deps: Vec::new(),
+    }
+}
+
+fn suggest_node_commands(project_path: &Path, subdir: Option<&str>) -> SuggestedCommands {
+    let prefix = subdir.map(|s| format!("cd {s} && ")).unwrap_or_default();
+
+    if project_path.join("pnpm-lock.yaml").exists() {
+        return SuggestedCommands {
+            setup: Some(format!("{prefix}pnpm install")),
+            dev: Some(format!("{prefix}pnpm dev")),
+            deps: vec![DepSpec::Single("pnpm", "pnpm")],
+        };
+    }
+    if project_path.join("yarn.lock").exists() {
+        return SuggestedCommands {
+            setup: Some(format!("{prefix}yarn install")),
+            dev: Some(format!("{prefix}yarn dev")),
+            deps: vec![DepSpec::Single("yarn", "yarn")],
+        };
+    }
+    if project_path.join("bun.lockb").exists() {
+        return SuggestedCommands {
+            setup: Some(format!("{prefix}bun install")),
+            dev: Some(format!("{prefix}bun dev")),
+            deps: vec![DepSpec::Single("bun", "bun")],
+        };
+    }
+    if project_path.join("package-lock.json").exists() {
+        return SuggestedCommands {
+            setup: Some(format!("{prefix}npm ci")),
+            dev: Some(format!("{prefix}npm run dev")),
+            deps: vec![DepSpec::Multiple("node", &["node", "npm"])],
+        };
+    }
+    SuggestedCommands {
+        setup: Some(format!("{prefix}npm install")),
+        dev: Some(format!("{prefix}npm run dev")),
+        deps: vec![DepSpec::Multiple("node", &["node", "npm"])],
     }
 }
 
@@ -1805,6 +1828,26 @@ fn project_hints(project_root: &Path) -> Vec<String> {
             hints.push(format!("{name}"));
         }
     }
+
+    // Check for project files in immediate subdirectories
+    if let Ok(entries) = fs::read_dir(project_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let subdir_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) if !name.starts_with('.') => name,
+                _ => continue,
+            };
+            for name in ["Cargo.toml", "package.json"] {
+                if path.join(name).exists() {
+                    hints.push(format!("{subdir_name}/{name}"));
+                }
+            }
+        }
+    }
+
     hints
 }
 
@@ -1812,12 +1855,60 @@ fn project_guidance(project_root: &Path) -> Option<String> {
     let has_cargo = project_root.join("Cargo.toml").exists();
     let has_package = project_root.join("package.json").exists();
 
-    match (has_cargo, has_package) {
-        (true, false) => Some("Detected Rust project (Cargo.toml). Use cargo commands; avoid bun/npm/pnpm/yarn.".to_string()),
-        (false, true) => Some("Detected Node project (package.json). Use npm/pnpm/yarn/bun commands; avoid cargo.".to_string()),
-        (true, true) => Some("Detected Rust + Node (Cargo.toml + package.json). Use the right tool for each step.".to_string()),
+    // Check for project files in subdirectories
+    let (subdir_cargo, subdir_package) = find_subdir_projects(project_root);
+
+    let cargo_found = has_cargo || subdir_cargo.is_some();
+    let package_found = has_package || subdir_package.is_some();
+
+    match (cargo_found, package_found, &subdir_cargo, &subdir_package) {
+        (true, false, Some(subdir), _) => Some(format!(
+            "Detected Rust project in {subdir}/. Run cargo commands from that directory (cd {subdir} && cargo build). Avoid bun/npm/pnpm/yarn."
+        )),
+        (true, false, None, _) => Some("Detected Rust project (Cargo.toml). Use cargo commands; avoid bun/npm/pnpm/yarn.".to_string()),
+        (false, true, _, Some(subdir)) => Some(format!(
+            "Detected Node project in {subdir}/. Run npm/pnpm/yarn/bun commands from that directory. Avoid cargo."
+        )),
+        (false, true, _, None) => Some("Detected Node project (package.json). Use npm/pnpm/yarn/bun commands; avoid cargo.".to_string()),
+        (true, true, _, _) => Some("Detected Rust + Node. Use the right tool for each step.".to_string()),
         _ => None,
     }
+}
+
+/// Find Cargo.toml or package.json in immediate subdirectories.
+/// Returns (cargo_subdir, package_subdir) with the first match found.
+fn find_subdir_projects(project_root: &Path) -> (Option<String>, Option<String>) {
+    let mut cargo_subdir = None;
+    let mut package_subdir = None;
+
+    let entries = match fs::read_dir(project_root) {
+        Ok(entries) => entries,
+        Err(_) => return (None, None),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let subdir_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) if !name.starts_with('.') => name.to_string(),
+            _ => continue,
+        };
+
+        if cargo_subdir.is_none() && path.join("Cargo.toml").exists() {
+            cargo_subdir = Some(subdir_name.clone());
+        }
+        if package_subdir.is_none() && path.join("package.json").exists() {
+            package_subdir = Some(subdir_name);
+        }
+
+        if cargo_subdir.is_some() && package_subdir.is_some() {
+            break;
+        }
+    }
+
+    (cargo_subdir, package_subdir)
 }
 
 fn detect_server_project(project_root: &Path) -> Option<String> {
@@ -1891,6 +1982,12 @@ fn detect_node_server(project_root: &Path) -> Option<String> {
 fn ai_flow_toml_mismatch_reason(project_root: &Path, toml_content: &str) -> Option<String> {
     let has_cargo = project_root.join("Cargo.toml").exists();
     let has_package = project_root.join("package.json").exists();
+
+    // Also check subdirectories
+    let (subdir_cargo, subdir_package) = find_subdir_projects(project_root);
+    let cargo_found = has_cargo || subdir_cargo.is_some();
+    let package_found = has_package || subdir_package.is_some();
+
     let parsed: toml::Value = toml::from_str(toml_content).ok()?;
 
     let tasks = parsed.get("tasks").and_then(toml::Value::as_array)?;
@@ -1907,10 +2004,10 @@ fn ai_flow_toml_mismatch_reason(project_root: &Path, toml_content: &str) -> Opti
         uses_cargo |= command_uses_cargo_tool(command);
     }
 
-    if has_cargo && !has_package && uses_node {
+    if cargo_found && !package_found && uses_node {
         return Some("AI suggested Node tooling (bun/npm/pnpm/yarn), but no package.json was found.".to_string());
     }
-    if has_package && !has_cargo && uses_cargo {
+    if package_found && !cargo_found && uses_cargo {
         return Some("AI suggested Cargo commands, but no Cargo.toml was found.".to_string());
     }
 
