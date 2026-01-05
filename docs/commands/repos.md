@@ -1,10 +1,11 @@
 # f repos
 
-Clone repositories into a structured local directory.
+Clone repositories into a structured local directory or create new ones.
 
 ## Overview
 
 `f repos clone` clones GitHub repositories into `~/repos/<owner>/<repo>` using SSH URLs. By default it does a shallow clone for speed, then fetches full history in the background. It always sets up an `upstream` remote and local tracking branch unless you pass `--no-upstream`.
+`f repos create` creates a GitHub repository from the current folder and pushes it.
 
 ## Quick Start
 
@@ -20,6 +21,9 @@ f repos clone owner/repo --no-upstream
 
 # Full clone (skip background history fetch)
 f repos clone owner/repo --full
+
+# Create a new repo from the current folder (prompts for name/visibility)
+f repos create
 ```
 
 ## Options
@@ -33,6 +37,16 @@ f repos clone owner/repo --full
 | `--full` | | Full clone (skip shallow clone + background history fetch) |
 | `--no-upstream` | | Skip upstream setup |
 | `--upstream-url <URL>` | `-u` | Upstream URL override (skips GitHub lookup) |
+
+### f repos create
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--name <NAME>` | `-n` | Repository name (defaults to current folder) |
+| `--public` | | Create as public repository |
+| `--private` | | Create as private repository |
+| `--description <TEXT>` | `-d` | Description for the repository |
+| `--yes` | `-y` | Skip confirmation prompts |
 
 ## Upstream Automation
 

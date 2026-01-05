@@ -1,9 +1,11 @@
 //! Publish projects to GitHub.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use crossterm::event::{self, Event as CEvent, KeyCode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::cli::PublishOpts;
 
@@ -74,12 +76,7 @@ pub fn run(opts: PublishOpts) -> Result<()> {
     } else if opts.yes {
         false // Default to private if -y is passed
     } else {
-        print!("Visibility (public/private) [private]: ");
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim().to_lowercase();
-        input == "public" || input == "pub" || input == "p"
+        prompt_public_choice()?
     };
 
     let visibility = if is_public { "public" } else { "private" };
@@ -219,6 +216,62 @@ pub fn run(opts: PublishOpts) -> Result<()> {
     println!("✓ Published to https://github.com/{}", full_name);
 
     Ok(())
+}
+
+fn prompt_public_choice() -> Result<bool> {
+    let default_public = false;
+    print!("Public? [y/N]: ");
+    io::stdout().flush()?;
+
+    if io::stdin().is_terminal() {
+        return read_yes_no_key(default_public);
+    }
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    if answer.is_empty() {
+        return Ok(default_public);
+    }
+    Ok(matches!(answer.as_str(), "y" | "yes" | "public" | "pub" | "p"))
+}
+
+fn read_yes_no_key(default_yes: bool) -> Result<bool> {
+    enable_raw_mode().context("failed to enable raw mode")?;
+    let mut selection = default_yes;
+    let mut echo_char: Option<char> = None;
+    loop {
+        if let CEvent::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    selection = true;
+                    echo_char = Some('y');
+                    break;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    selection = false;
+                    echo_char = Some('n');
+                    break;
+                }
+                KeyCode::Enter => {
+                    break;
+                }
+                KeyCode::Esc => {
+                    selection = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    disable_raw_mode().context("failed to disable raw mode")?;
+    if let Some(ch) = echo_char {
+        println!("{ch}");
+    } else {
+        println!();
+    }
+    Ok(selection)
 }
 
 fn push_to_origin() -> Result<()> {

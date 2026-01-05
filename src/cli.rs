@@ -1348,6 +1348,8 @@ pub struct ReposCommand {
 pub enum ReposAction {
     /// Clone a repository into ~/repos/<owner>/<repo>.
     Clone(ReposCloneOpts),
+    /// Create a GitHub repository from the current folder and push it.
+    Create(PublishOpts),
 }
 
 #[derive(Args, Debug, Clone)]

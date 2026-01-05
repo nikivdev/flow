@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::cli::{ReposAction, ReposCloneOpts, ReposCommand};
-use crate::{config, upstream};
+use crate::{config, publish, upstream};
 
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
 
@@ -22,6 +22,9 @@ pub fn run(cmd: ReposCommand) -> Result<()> {
             let path = clone_repo(opts)?;
             open_in_zed(&path)?;
             Ok(())
+        }
+        Some(ReposAction::Create(opts)) => {
+            publish::run(opts)
         }
         None => fuzzy_select_repo(),
     }
