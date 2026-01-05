@@ -190,7 +190,8 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     let target_dir = owner_dir.join(&repo_ref.repo);
 
     if target_dir.exists() {
-        bail!("target already exists: {}", target_dir.display());
+        println!("Already cloned: {}", target_dir.display());
+        return Ok(target_dir);
     }
 
     fs::create_dir_all(&owner_dir)
