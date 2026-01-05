@@ -85,6 +85,11 @@ command = "bash -c 'tarball=$(ls -t dist/flow_*_darwin_arm64.tar.gz | head -n1) 
 description = "Upload the latest darwin/arm64 release tarball to the release host"
 
 [[tasks]]
+name = "desktop"
+command = "cd desktop && [ -d node_modules ] || bun install && bash scripts/tauri-dev.sh"
+description = "Run the Flow desktop app (Tauri + Vite) with a free port"
+
+[[tasks]]
 name = "test-flow-task-tracing"
 command = "bun i-run.ts"
 

@@ -35,3 +35,4 @@ private
 .npm-cache
 /test-data
 testing/
+desktop/.tauri-dev.json
