@@ -18,6 +18,42 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
         bail!("Not a git repository");
     }
 
+    // Check for in-progress rebase/merge and handle it
+    if is_rebase_in_progress() {
+        println!("==> Rebase in progress, attempting to resolve...");
+        let should_fix = cmd.fix || prompt_for_rebase_action()?;
+        if should_fix {
+            if try_resolve_rebase_conflicts()? {
+                println!("  ✓ Rebase completed");
+            } else {
+                println!("  Could not auto-resolve. Aborting rebase...");
+                let _ = Command::new("git").args(["rebase", "--abort"]).output();
+            }
+        } else {
+            println!("  Aborting rebase...");
+            let _ = Command::new("git").args(["rebase", "--abort"]).output();
+        }
+    }
+
+    // Check for in-progress merge
+    if is_merge_in_progress() {
+        println!("==> Merge in progress, attempting to resolve...");
+        let should_fix = cmd.fix || prompt_for_auto_fix()?;
+        if should_fix {
+            if try_resolve_conflicts()? {
+                let _ = git_run(&["add", "-A"]);
+                let _ = Command::new("git").args(["commit", "--no-edit"]).output();
+                println!("  ✓ Merge completed");
+            } else {
+                println!("  Could not auto-resolve. Aborting merge...");
+                let _ = Command::new("git").args(["merge", "--abort"]).output();
+            }
+        } else {
+            println!("  Aborting merge...");
+            let _ = Command::new("git").args(["merge", "--abort"]).output();
+        }
+    }
+
     let current = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     let current = current.trim();
 
@@ -59,14 +95,49 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
         if tracking.is_ok() {
             println!("==> Pulling from origin...");
             if cmd.rebase {
-                if let Err(e) = git_run(&["pull", "--rebase", "origin", current]) {
-                    restore_stash(stashed);
-                    return Err(e);
+                if let Err(_) = git_run(&["pull", "--rebase", "origin", current]) {
+                    // Check if we're in a rebase conflict
+                    if is_rebase_in_progress() {
+                        let should_fix = cmd.fix || prompt_for_auto_fix()?;
+                        if should_fix {
+                            if try_resolve_rebase_conflicts()? {
+                                println!("  ✓ Rebase conflicts auto-resolved");
+                            } else {
+                                restore_stash(stashed);
+                                bail!("Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue");
+                            }
+                        } else {
+                            restore_stash(stashed);
+                            bail!("Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue");
+                        }
+                    } else {
+                        restore_stash(stashed);
+                        bail!("git pull --rebase failed");
+                    }
                 }
             } else {
-                if let Err(e) = git_run(&["pull", "origin", current]) {
-                    restore_stash(stashed);
-                    return Err(e);
+                if let Err(_) = git_run(&["pull", "origin", current]) {
+                    // Check for merge conflicts
+                    let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+                    if !conflicts.trim().is_empty() {
+                        let should_fix = cmd.fix || prompt_for_auto_fix()?;
+                        if should_fix {
+                            if try_resolve_conflicts()? {
+                                let _ = git_run(&["add", "-A"]);
+                                let _ = Command::new("git").args(["commit", "--no-edit"]).output();
+                                println!("  ✓ Merge conflicts auto-resolved");
+                            } else {
+                                restore_stash(stashed);
+                                bail!("Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit");
+                            }
+                        } else {
+                            restore_stash(stashed);
+                            bail!("Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit");
+                        }
+                    } else {
+                        restore_stash(stashed);
+                        bail!("git pull failed");
+                    }
                 }
             }
         } else {
@@ -79,7 +150,7 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
     // Step 2: Sync upstream if it exists
     if has_upstream {
         println!("==> Syncing upstream...");
-        if let Err(e) = sync_upstream_internal(current) {
+        if let Err(e) = sync_upstream_internal(current, cmd.fix) {
             restore_stash(stashed);
             return Err(e);
         }
@@ -103,7 +174,8 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
             }
         } else {
             println!("==> Pushing to origin...");
-            if let Err(e) = git_run(&["push", "origin", current]) {
+            let push_result = push_with_autofix(current, cmd.fix, cmd.max_fix_attempts);
+            if let Err(e) = push_result {
                 restore_stash(stashed);
                 return Err(e);
             }
@@ -119,7 +191,7 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
 }
 
 /// Sync from upstream remote into current branch.
-fn sync_upstream_internal(current_branch: &str) -> Result<()> {
+fn sync_upstream_internal(current_branch: &str, auto_fix: bool) -> Result<()> {
     // Fetch upstream
     git_run(&["fetch", "upstream", "--prune"])?;
 
@@ -158,6 +230,20 @@ fn sync_upstream_internal(current_branch: &str) -> Result<()> {
         if git_run(&["merge", "--ff-only", &upstream_ref]).is_err() {
             // Fall back to regular merge
             if let Err(_) = git_run(&["merge", &upstream_ref, "--no-edit"]) {
+                // Merge failed - check for conflicts
+                let should_fix = auto_fix || prompt_for_auto_fix()?;
+                if should_fix {
+                    println!("  Attempting auto-fix...");
+                    if try_resolve_conflicts()? {
+                        // Conflicts resolved, commit
+                        let _ = git_run(&["add", "-A"]);
+                        let _ = Command::new("git")
+                            .args(["commit", "--no-edit"])
+                            .output();
+                        println!("  ✓ Conflicts auto-resolved");
+                        return Ok(());
+                    }
+                }
                 bail!("Merge conflicts with upstream. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit");
             }
         }
@@ -166,6 +252,284 @@ fn sync_upstream_internal(current_branch: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Check if a rebase is in progress.
+fn is_rebase_in_progress() -> bool {
+    let git_dir = git_capture(&["rev-parse", "--git-dir"]).unwrap_or_else(|_| ".git".to_string());
+    let git_dir = git_dir.trim();
+    std::path::Path::new(&format!("{}/rebase-merge", git_dir)).exists()
+        || std::path::Path::new(&format!("{}/rebase-apply", git_dir)).exists()
+}
+
+/// Check if a merge is in progress.
+fn is_merge_in_progress() -> bool {
+    let git_dir = git_capture(&["rev-parse", "--git-dir"]).unwrap_or_else(|_| ".git".to_string());
+    let git_dir = git_dir.trim();
+    std::path::Path::new(&format!("{}/MERGE_HEAD", git_dir)).exists()
+}
+
+/// Prompt user for rebase action.
+fn prompt_for_rebase_action() -> Result<bool> {
+    let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+    let conflicted_files: Vec<&str> = conflicts.lines().filter(|l| !l.is_empty()).collect();
+
+    if !conflicted_files.is_empty() {
+        println!("\n  Conflicted files:");
+        for file in &conflicted_files {
+            println!("    - {}", file);
+        }
+        println!();
+    }
+
+    print!("  Try auto-fix with Claude? [y/N] (N = abort rebase) ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
+}
+
+/// Try to resolve rebase conflicts and continue.
+fn try_resolve_rebase_conflicts() -> Result<bool> {
+    loop {
+        // Get conflicted files
+        let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"])?;
+        let conflicted_files: Vec<&str> = conflicts.lines().filter(|l| !l.is_empty()).collect();
+
+        if conflicted_files.is_empty() {
+            // No more conflicts, try to continue rebase
+            let result = Command::new("git")
+                .args(["rebase", "--continue"])
+                .env("GIT_EDITOR", "true") // Skip commit message editing
+                .output();
+
+            match result {
+                Ok(out) if out.status.success() => return Ok(true),
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    // Check if rebase is complete
+                    if stderr.contains("No rebase in progress") || !is_rebase_in_progress() {
+                        return Ok(true);
+                    }
+                    // Still conflicts, continue loop
+                }
+                Err(_) => return Ok(false),
+            }
+            continue;
+        }
+
+        println!("  Resolving {} conflicted files...", conflicted_files.len());
+
+        // Try to resolve each conflict
+        let mut all_resolved = true;
+        for file in &conflicted_files {
+            if !try_resolve_single_conflict(file)? {
+                all_resolved = false;
+                println!("  ✗ Could not resolve {}", file);
+            }
+        }
+
+        if !all_resolved {
+            return Ok(false);
+        }
+
+        // Stage resolved files
+        let _ = git_run(&["add", "-A"]);
+
+        // Try to continue rebase
+        let result = Command::new("git")
+            .args(["rebase", "--continue"])
+            .env("GIT_EDITOR", "true")
+            .output();
+
+        match result {
+            Ok(out) if out.status.success() => return Ok(true),
+            Ok(_) => {
+                // More conflicts from next commit, continue loop
+                if !is_rebase_in_progress() {
+                    return Ok(true);
+                }
+            }
+            Err(_) => return Ok(false),
+        }
+    }
+}
+
+/// Try to resolve a single conflicted file.
+fn try_resolve_single_conflict(file: &str) -> Result<bool> {
+    let filename = file.rsplit('/').next().unwrap_or(file);
+
+    // Auto-generated files - accept theirs (upstream/incoming)
+    let auto_generated = [
+        "STATS.md", "stats.md", "CHANGELOG.md", "changelog.md",
+        "package-lock.json", "yarn.lock", "bun.lock", "pnpm-lock.yaml",
+        "Cargo.lock", "Gemfile.lock", "poetry.lock", "composer.lock",
+    ];
+
+    if auto_generated.iter().any(|&ag| filename.eq_ignore_ascii_case(ag)) {
+        println!("  Auto-resolving {} (accepting theirs)", file);
+        let _ = Command::new("git").args(["checkout", "--theirs", file]).output();
+        let _ = Command::new("git").args(["add", file]).output();
+        return Ok(true);
+    }
+
+    // Try Claude for code conflicts
+    let content = std::fs::read_to_string(file).unwrap_or_default();
+    if content.contains("<<<<<<<") {
+        println!("  Trying Claude for {}...", file);
+        let prompt = format!(
+            "This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
+            if content.len() > 8000 { &content[..8000] } else { &content }
+        );
+
+        let output = Command::new("claude")
+            .args(["--print", "--dangerously-skip-permissions", &prompt])
+            .output();
+
+        if let Ok(out) = output {
+            if out.status.success() {
+                let resolved = String::from_utf8_lossy(&out.stdout);
+                if !resolved.contains("<<<<<<<") && !resolved.contains(">>>>>>>") {
+                    if std::fs::write(file, resolved.as_ref()).is_ok() {
+                        let _ = Command::new("git").args(["add", file]).output();
+                        println!("  ✓ Resolved {}", file);
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+/// Prompt user to try auto-fix for push failures.
+fn prompt_for_push_fix() -> Result<bool> {
+    println!();
+    print!("  Try auto-fix with Claude? [y/N] ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
+}
+
+/// Prompt user to try auto-fix for conflicts.
+fn prompt_for_auto_fix() -> Result<bool> {
+    // Get list of conflicted files
+    let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"])?;
+    let conflicted_files: Vec<&str> = conflicts.lines().filter(|l| !l.is_empty()).collect();
+
+    if conflicted_files.is_empty() {
+        return Ok(false);
+    }
+
+    println!("\n  Conflicted files:");
+    for file in &conflicted_files {
+        println!("    - {}", file);
+    }
+    println!();
+
+    print!("  Try auto-fix with Claude? [y/N] ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
+}
+
+/// Try to resolve merge conflicts automatically.
+fn try_resolve_conflicts() -> Result<bool> {
+    // Get list of conflicted files
+    let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"])?;
+    let conflicted_files: Vec<&str> = conflicts.lines().filter(|l| !l.is_empty()).collect();
+
+    if conflicted_files.is_empty() {
+        return Ok(true);
+    }
+
+    println!("  Conflicted files: {}", conflicted_files.join(", "));
+
+    // Auto-generated files - accept theirs (upstream)
+    let auto_generated = [
+        "STATS.md",
+        "stats.md",
+        "CHANGELOG.md",
+        "changelog.md",
+        "package-lock.json",
+        "yarn.lock",
+        "bun.lock",
+        "pnpm-lock.yaml",
+        "Cargo.lock",
+        "Gemfile.lock",
+        "poetry.lock",
+        "composer.lock",
+    ];
+
+    let mut resolved_count = 0;
+    let mut needs_claude = Vec::new();
+
+    for file in &conflicted_files {
+        let filename = file.rsplit('/').next().unwrap_or(file);
+
+        if auto_generated.iter().any(|&ag| filename.eq_ignore_ascii_case(ag)) {
+            // Accept theirs for auto-generated files
+            println!("  Auto-resolving {} (accepting upstream)", file);
+            let _ = Command::new("git")
+                .args(["checkout", "--theirs", file])
+                .output();
+            let _ = Command::new("git")
+                .args(["add", file])
+                .output();
+            resolved_count += 1;
+        } else {
+            needs_claude.push(*file);
+        }
+    }
+
+    // If all conflicts were auto-generated files, we're done
+    if needs_claude.is_empty() {
+        return Ok(true);
+    }
+
+    // Try Claude for remaining conflicts
+    println!("  Trying Claude for {} remaining conflicts...", needs_claude.len());
+
+    for file in &needs_claude {
+        let content = std::fs::read_to_string(file).unwrap_or_default();
+        if content.contains("<<<<<<<") {
+            let prompt = format!(
+                "This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
+                if content.len() > 8000 { &content[..8000] } else { &content }
+            );
+
+            let output = Command::new("claude")
+                .args(["--print", "--dangerously-skip-permissions", &prompt])
+                .output();
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let resolved = String::from_utf8_lossy(&out.stdout);
+                    // Only use if it doesn't contain conflict markers
+                    if !resolved.contains("<<<<<<<") && !resolved.contains(">>>>>>>") {
+                        if std::fs::write(file, resolved.as_ref()).is_ok() {
+                            let _ = Command::new("git").args(["add", file]).output();
+                            resolved_count += 1;
+                            println!("  ✓ Resolved {}", file);
+                            continue;
+                        }
+                    }
+                }
+            }
+            println!("  ✗ Could not resolve {}", file);
+        }
+    }
+
+    Ok(resolved_count == conflicted_files.len())
 }
 
 fn restore_stash(stashed: bool) {
@@ -205,6 +569,110 @@ fn git_run(args: &[&str]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Push to origin with optional auto-fix on failure.
+fn push_with_autofix(branch: &str, auto_fix: bool, max_attempts: u32) -> Result<()> {
+    let mut attempts = 0;
+
+    loop {
+        // Try push and capture output
+        let output = Command::new("git")
+            .args(["push", "origin", branch])
+            .output()
+            .context("failed to run git push")?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        attempts += 1;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("{}\n{}", stdout, stderr);
+
+        // Check if this looks like a pre-push hook failure
+        let is_hook_failure = combined.contains("pre-push")
+            || combined.contains("husky")
+            || combined.contains("typecheck")
+            || combined.contains("error TS")
+            || combined.contains("eslint")
+            || combined.contains("error:")
+            || combined.contains("failed to push");
+
+        // Prompt user if not already in auto-fix mode
+        let should_fix = if auto_fix {
+            true
+        } else if is_hook_failure && attempts == 1 {
+            println!("{}", combined);
+            prompt_for_push_fix()?
+        } else {
+            false
+        };
+
+        if !should_fix || attempts > max_attempts {
+            if !should_fix {
+                println!("{}", combined);
+            }
+            bail!("git push origin {} failed", branch);
+        }
+
+        println!("\n==> Push failed (attempt {}/{}), attempting auto-fix with Claude...", attempts, max_attempts);
+
+        // Run Claude to fix the errors
+        if !try_claude_fix(&combined)? {
+            println!("{}", combined);
+            bail!("Auto-fix failed. Run manually:\n  claude 'fix these errors: ...'");
+        }
+
+        // Stage and commit the fix
+        let status = git_capture(&["status", "--porcelain"])?;
+        if !status.trim().is_empty() {
+            println!("==> Committing auto-fix...");
+            let _ = git_run(&["add", "-A"]);
+            let commit_msg = format!("fix: auto-fix sync errors (attempt {})", attempts);
+            let _ = Command::new("git")
+                .args(["commit", "-m", &commit_msg, "--no-verify"])
+                .output();
+        }
+
+        println!("==> Retrying push...");
+    }
+}
+
+/// Try to fix errors using Claude CLI.
+fn try_claude_fix(error_output: &str) -> Result<bool> {
+    // Check if claude is available
+    let claude_check = Command::new("which")
+        .arg("claude")
+        .output();
+
+    if claude_check.is_err() || !claude_check.unwrap().status.success() {
+        println!("  Claude CLI not found. Install with: npm i -g @anthropic-ai/claude-code");
+        return Ok(false);
+    }
+
+    // Build a focused prompt
+    let prompt = format!(
+        "Fix these errors so the code compiles/passes checks. Make minimal changes. Do not explain, just fix:\n\n{}",
+        // Truncate if too long
+        if error_output.len() > 4000 {
+            &error_output[error_output.len() - 4000..]
+        } else {
+            error_output
+        }
+    );
+
+    // Run claude with the fix prompt
+    let status = Command::new("claude")
+        .args(["--print", "--dangerously-skip-permissions", &prompt])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run claude")?;
+
+    Ok(status.success())
 }
 
 /// Try to create the origin repo on GitHub if it doesn't exist.

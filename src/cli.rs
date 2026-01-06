@@ -1378,12 +1378,18 @@ pub struct SyncCommand {
     /// Skip pushing to origin.
     #[arg(long)]
     pub no_push: bool,
-    /// Auto-stash uncommitted changes.
-    #[arg(long, short)]
+    /// Auto-stash uncommitted changes (default: true).
+    #[arg(long, short, default_value = "true")]
     pub stash: bool,
     /// Create origin repo on GitHub if it doesn't exist.
     #[arg(long)]
     pub create_repo: bool,
+    /// Auto-fix errors using Claude Code when push fails.
+    #[arg(long, short)]
+    pub fix: bool,
+    /// Maximum fix attempts before giving up.
+    #[arg(long, default_value = "3")]
+    pub max_fix_attempts: u32,
 }
 
 #[derive(Args, Debug, Clone)]
