@@ -1766,6 +1766,7 @@ fn suggested_commands(project_root: &Path) -> SuggestedCommands {
 fn suggest_node_commands(project_path: &Path, subdir: Option<&str>) -> SuggestedCommands {
     let prefix = subdir.map(|s| format!("cd {s} && ")).unwrap_or_default();
 
+    // Check lock files first (most reliable indicator)
     if project_path.join("pnpm-lock.yaml").exists() {
         return SuggestedCommands {
             setup: Some(format!("{prefix}pnpm install")),
@@ -1794,11 +1795,120 @@ fn suggest_node_commands(project_path: &Path, subdir: Option<&str>) -> Suggested
             deps: vec![DepSpec::Multiple("node", &["node", "npm"])],
         };
     }
+
+    // No lock file - check package.json for hints
+    if let Some(pm) = detect_package_manager_from_json(project_path) {
+        return match pm.as_str() {
+            "pnpm" => SuggestedCommands {
+                setup: Some(format!("{prefix}pnpm install")),
+                dev: Some(format!("{prefix}pnpm dev")),
+                deps: vec![DepSpec::Single("pnpm", "pnpm")],
+            },
+            "yarn" => SuggestedCommands {
+                setup: Some(format!("{prefix}yarn install")),
+                dev: Some(format!("{prefix}yarn dev")),
+                deps: vec![DepSpec::Single("yarn", "yarn")],
+            },
+            "bun" => SuggestedCommands {
+                setup: Some(format!("{prefix}bun install")),
+                dev: Some(format!("{prefix}bun dev")),
+                deps: vec![DepSpec::Single("bun", "bun")],
+            },
+            _ => SuggestedCommands {
+                setup: Some(format!("{prefix}npm install")),
+                dev: Some(format!("{prefix}npm run dev")),
+                deps: vec![DepSpec::Multiple("node", &["node", "npm"])],
+            },
+        };
+    }
+
     SuggestedCommands {
         setup: Some(format!("{prefix}npm install")),
         dev: Some(format!("{prefix}npm run dev")),
         deps: vec![DepSpec::Multiple("node", &["node", "npm"])],
     }
+}
+
+/// Detect package manager from package.json content.
+/// Checks: packageManager field, catalog: protocol usage, script commands.
+fn detect_package_manager_from_json(project_path: &Path) -> Option<String> {
+    let path = project_path.join("package.json");
+    let content = fs::read_to_string(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    // 1. Check packageManager field (e.g., "pnpm@9.0.0", "yarn@4.0.0", "bun@1.0.0")
+    if let Some(pm) = value.get("packageManager").and_then(|v| v.as_str()) {
+        let pm_lower = pm.to_lowercase();
+        if pm_lower.starts_with("pnpm") {
+            return Some("pnpm".to_string());
+        }
+        if pm_lower.starts_with("yarn") {
+            return Some("yarn".to_string());
+        }
+        if pm_lower.starts_with("bun") {
+            return Some("bun".to_string());
+        }
+        if pm_lower.starts_with("npm") {
+            return Some("npm".to_string());
+        }
+    }
+
+    // 2. Check for catalog: protocol in dependencies (pnpm workspace feature)
+    let has_catalog = has_catalog_protocol(&value);
+    if has_catalog {
+        return Some("pnpm".to_string());
+    }
+
+    // 3. Check scripts for package manager hints
+    if let Some(scripts) = value.get("scripts").and_then(|v| v.as_object()) {
+        let scripts_str = scripts
+            .values()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Check for explicit package manager usage in scripts
+        if scripts_str.contains("pnpm ") || scripts_str.contains("pnpm run") {
+            return Some("pnpm".to_string());
+        }
+        if scripts_str.contains("bun run") || scripts_str.contains("bun ") {
+            return Some("bun".to_string());
+        }
+        if scripts_str.contains("yarn ") {
+            return Some("yarn".to_string());
+        }
+    }
+
+    None
+}
+
+/// Check if package.json uses catalog: protocol in any dependency field.
+fn has_catalog_protocol(value: &serde_json::Value) -> bool {
+    let dep_fields = [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ];
+
+    for field in dep_fields {
+        if let Some(deps) = value.get(field).and_then(|v| v.as_object()) {
+            for version in deps.values() {
+                if let Some(v) = version.as_str() {
+                    if v.starts_with("catalog:") {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check workspaces.catalog (pnpm/yarn workspace catalog definition)
+    if value.get("workspaces").and_then(|v| v.get("catalog")).is_some() {
+        return true;
+    }
+
+    false
 }
 
 fn default_flow_template(project_root: &Path) -> String {
