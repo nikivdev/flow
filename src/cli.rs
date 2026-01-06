@@ -1505,6 +1505,12 @@ pub enum DeployAction {
         /// Follow logs in real-time.
         #[arg(long, short)]
         follow: bool,
+        /// Show logs since the last successful deploy (default).
+        #[arg(long, default_value_t = true)]
+        since_deploy: bool,
+        /// Show full log history (ignores --since-deploy).
+        #[arg(long)]
+        all: bool,
         /// Number of lines to show.
         #[arg(long, short = 'n', default_value_t = 100)]
         lines: usize,

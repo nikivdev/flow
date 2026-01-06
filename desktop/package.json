@@ -14,7 +14,9 @@
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tauri-apps/plugin-http": "^2.0.0",
     "@tauri-apps/plugin-opener": "^2.0.0",
+    "lucide-react": "^0.540.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "streamdown": "^1.6.10"

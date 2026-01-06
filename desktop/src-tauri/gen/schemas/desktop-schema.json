@@ -140,6 +140,132 @@
                   "identifier": {
                     "anyOf": [
                       {
+                        "description": "This permission set configures what kind of\nfetch operations are available from the http plugin.\n\nThis enables all fetch operations but does not\nallow explicitly any origins to be fetched. This needs to\nbe manually configured before usage.\n\n#### Granted Permissions\n\nAll fetch operations are enabled.\n\n\n#### This default permission set includes:\n\n- `allow-fetch`\n- `allow-fetch-cancel`\n- `allow-fetch-read-body`\n- `allow-fetch-send`",
+                        "type": "string",
+                        "const": "http:default",
+                        "markdownDescription": "This permission set configures what kind of\nfetch operations are available from the http plugin.\n\nThis enables all fetch operations but does not\nallow explicitly any origins to be fetched. This needs to\nbe manually configured before usage.\n\n#### Granted Permissions\n\nAll fetch operations are enabled.\n\n\n#### This default permission set includes:\n\n- `allow-fetch`\n- `allow-fetch-cancel`\n- `allow-fetch-read-body`\n- `allow-fetch-send`"
+                      },
+                      {
+                        "description": "Enables the fetch command without any pre-configured scope.",
+                        "type": "string",
+                        "const": "http:allow-fetch",
+                        "markdownDescription": "Enables the fetch command without any pre-configured scope."
+                      },
+                      {
+                        "description": "Enables the fetch_cancel command without any pre-configured scope.",
+                        "type": "string",
+                        "const": "http:allow-fetch-cancel",
+                        "markdownDescription": "Enables the fetch_cancel command without any pre-configured scope."
+                      },
+                      {
+                        "description": "Enables the fetch_read_body command without any pre-configured scope.",
+                        "type": "string",
+                        "const": "http:allow-fetch-read-body",
+                        "markdownDescription": "Enables the fetch_read_body command without any pre-configured scope."
+                      },
+                      {
+                        "description": "Enables the fetch_send command without any pre-configured scope.",
+                        "type": "string",
+                        "const": "http:allow-fetch-send",
+                        "markdownDescription": "Enables the fetch_send command without any pre-configured scope."
+                      },
+                      {
+                        "description": "Denies the fetch command without any pre-configured scope.",
+                        "type": "string",
+                        "const": "http:deny-fetch",
+                        "markdownDescription": "Denies the fetch command without any pre-configured scope."
+                      },
+                      {
+                        "description": "Denies the fetch_cancel command without any pre-configured scope.",
+                        "type": "string",
+                        "const": "http:deny-fetch-cancel",
+                        "markdownDescription": "Denies the fetch_cancel command without any pre-configured scope."
+                      },
+                      {
+                        "description": "Denies the fetch_read_body command without any pre-configured scope.",
+                        "type": "string",
+                        "const": "http:deny-fetch-read-body",
+                        "markdownDescription": "Denies the fetch_read_body command without any pre-configured scope."
+                      },
+                      {
+                        "description": "Denies the fetch_send command without any pre-configured scope.",
+                        "type": "string",
+                        "const": "http:deny-fetch-send",
+                        "markdownDescription": "Denies the fetch_send command without any pre-configured scope."
+                      }
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "allow": {
+                    "items": {
+                      "title": "HttpScopeEntry",
+                      "description": "HTTP scope entry.",
+                      "anyOf": [
+                        {
+                          "description": "A URL that can be accessed by the webview when using the HTTP APIs. Wildcards can be used following the URL pattern standard.\n\nSee [the URL Pattern spec](https://urlpattern.spec.whatwg.org/) for more information.\n\nExamples:\n\n- \"https://*\" : allows all HTTPS origin on port 443\n\n- \"https://*:*\" : allows all HTTPS origin on any port\n\n- \"https://*.github.com/tauri-apps/tauri\": allows any subdomain of \"github.com\" with the \"tauri-apps/api\" path\n\n- \"https://myapi.service.com/users/*\": allows access to any URLs that begins with \"https://myapi.service.com/users/\"",
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "url"
+                          ],
+                          "properties": {
+                            "url": {
+                              "description": "A URL that can be accessed by the webview when using the HTTP APIs. Wildcards can be used following the URL pattern standard.\n\nSee [the URL Pattern spec](https://urlpattern.spec.whatwg.org/) for more information.\n\nExamples:\n\n- \"https://*\" : allows all HTTPS origin on port 443\n\n- \"https://*:*\" : allows all HTTPS origin on any port\n\n- \"https://*.github.com/tauri-apps/tauri\": allows any subdomain of \"github.com\" with the \"tauri-apps/api\" path\n\n- \"https://myapi.service.com/users/*\": allows access to any URLs that begins with \"https://myapi.service.com/users/\"",
+                              "type": "string"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "deny": {
+                    "items": {
+                      "title": "HttpScopeEntry",
+                      "description": "HTTP scope entry.",
+                      "anyOf": [
+                        {
+                          "description": "A URL that can be accessed by the webview when using the HTTP APIs. Wildcards can be used following the URL pattern standard.\n\nSee [the URL Pattern spec](https://urlpattern.spec.whatwg.org/) for more information.\n\nExamples:\n\n- \"https://*\" : allows all HTTPS origin on port 443\n\n- \"https://*:*\" : allows all HTTPS origin on any port\n\n- \"https://*.github.com/tauri-apps/tauri\": allows any subdomain of \"github.com\" with the \"tauri-apps/api\" path\n\n- \"https://myapi.service.com/users/*\": allows access to any URLs that begins with \"https://myapi.service.com/users/\"",
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "url"
+                          ],
+                          "properties": {
+                            "url": {
+                              "description": "A URL that can be accessed by the webview when using the HTTP APIs. Wildcards can be used following the URL pattern standard.\n\nSee [the URL Pattern spec](https://urlpattern.spec.whatwg.org/) for more information.\n\nExamples:\n\n- \"https://*\" : allows all HTTPS origin on port 443\n\n- \"https://*:*\" : allows all HTTPS origin on any port\n\n- \"https://*.github.com/tauri-apps/tauri\": allows any subdomain of \"github.com\" with the \"tauri-apps/api\" path\n\n- \"https://myapi.service.com/users/*\": allows access to any URLs that begins with \"https://myapi.service.com/users/\"",
+                              "type": "string"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              "properties": {
+                "identifier": {
+                  "description": "Identifier of the permission or permission set.",
+                  "allOf": [
+                    {
+                      "$ref": "#/definitions/Identifier"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "identifier": {
+                    "anyOf": [
+                      {
                         "description": "This permission set allows opening `mailto:`, `tel:`, `https://` and `http://` urls using their default application\nas well as reveal file in directories using default file explorer\n#### This default permission set includes:\n\n- `allow-open-url`\n- `allow-reveal-item-in-dir`\n- `allow-default-urls`",
                         "type": "string",
                         "const": "opener:default",
@@ -2377,6 +2503,60 @@
           "type": "string",
           "const": "dialog:deny-save",
           "markdownDescription": "Denies the save command without any pre-configured scope."
+        },
+        {
+          "description": "This permission set configures what kind of\nfetch operations are available from the http plugin.\n\nThis enables all fetch operations but does not\nallow explicitly any origins to be fetched. This needs to\nbe manually configured before usage.\n\n#### Granted Permissions\n\nAll fetch operations are enabled.\n\n\n#### This default permission set includes:\n\n- `allow-fetch`\n- `allow-fetch-cancel`\n- `allow-fetch-read-body`\n- `allow-fetch-send`",
+          "type": "string",
+          "const": "http:default",
+          "markdownDescription": "This permission set configures what kind of\nfetch operations are available from the http plugin.\n\nThis enables all fetch operations but does not\nallow explicitly any origins to be fetched. This needs to\nbe manually configured before usage.\n\n#### Granted Permissions\n\nAll fetch operations are enabled.\n\n\n#### This default permission set includes:\n\n- `allow-fetch`\n- `allow-fetch-cancel`\n- `allow-fetch-read-body`\n- `allow-fetch-send`"
+        },
+        {
+          "description": "Enables the fetch command without any pre-configured scope.",
+          "type": "string",
+          "const": "http:allow-fetch",
+          "markdownDescription": "Enables the fetch command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the fetch_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "http:allow-fetch-cancel",
+          "markdownDescription": "Enables the fetch_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the fetch_read_body command without any pre-configured scope.",
+          "type": "string",
+          "const": "http:allow-fetch-read-body",
+          "markdownDescription": "Enables the fetch_read_body command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the fetch_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "http:allow-fetch-send",
+          "markdownDescription": "Enables the fetch_send command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the fetch command without any pre-configured scope.",
+          "type": "string",
+          "const": "http:deny-fetch",
+          "markdownDescription": "Denies the fetch command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the fetch_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "http:deny-fetch-cancel",
+          "markdownDescription": "Denies the fetch_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the fetch_read_body command without any pre-configured scope.",
+          "type": "string",
+          "const": "http:deny-fetch-read-body",
+          "markdownDescription": "Denies the fetch_read_body command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the fetch_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "http:deny-fetch-send",
+          "markdownDescription": "Denies the fetch_send command without any pre-configured scope."
         },
         {
           "description": "This permission set allows opening `mailto:`, `tel:`, `https://` and `http://` urls using their default application\nas well as reveal file in directories using default file explorer\n#### This default permission set includes:\n\n- `allow-open-url`\n- `allow-reveal-item-in-dir`\n- `allow-default-urls`",

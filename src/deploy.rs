@@ -10,6 +10,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,7 @@ const DEPLOY_HELPER_BIN: &str = "infra";
 const DEPLOY_HELPER_REPO_DEFAULT: &str = "~/infra";
 const DEPLOY_HELPER_ENV_BIN: &str = "FLOW_DEPLOY_HELPER_BIN";
 const DEPLOY_HELPER_ENV_REPO: &str = "FLOW_DEPLOY_HELPER_REPO";
+const DEPLOY_LOG_STATE_FILE: &str = ".flow/deploy-log.json";
 
 #[derive(Debug, Deserialize)]
 struct InfraConfig {
@@ -50,6 +52,11 @@ pub struct HostConnection {
     pub user: String,
     pub host: String,
     pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DeployLogState {
+    last_deploy_unix: Option<i64>,
 }
 
 impl HostConnection {
@@ -222,6 +229,40 @@ pub fn save_deploy_config(config: &DeployConfig) -> Result<()> {
     Ok(())
 }
 
+fn deploy_log_state_path(project_root: &Path) -> PathBuf {
+    project_root.join(DEPLOY_LOG_STATE_FILE)
+}
+
+fn load_deploy_log_state(project_root: &Path) -> DeployLogState {
+    let path = deploy_log_state_path(project_root);
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(state) = serde_json::from_str::<DeployLogState>(&content) {
+            return state;
+        }
+    }
+    DeployLogState::default()
+}
+
+fn save_deploy_log_state(project_root: &Path, state: &DeployLogState) -> Result<()> {
+    let path = deploy_log_state_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(state)?;
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn record_deploy_marker(project_root: &Path) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut state = load_deploy_log_state(project_root);
+    state.last_deploy_unix = Some(now);
+    save_deploy_log_state(project_root, &state)
+}
+
 /// Run the deploy command.
 pub fn run(cmd: DeployCommand) -> Result<()> {
     let project_root = std::env::current_dir()?;
@@ -295,9 +336,19 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
         Some(DeployAction::Config) => configure_deploy(),
         Some(DeployAction::Release(opts)) => release::run(opts),
         Some(DeployAction::Status) => show_status(&project_root, flow_config.as_ref()),
-        Some(DeployAction::Logs { follow, lines }) => {
-            show_logs(&project_root, flow_config.as_ref(), follow, lines)
-        }
+        Some(DeployAction::Logs {
+            follow,
+            since_deploy,
+            all,
+            lines,
+        }) => show_logs(
+            &project_root,
+            flow_config.as_ref(),
+            follow,
+            since_deploy,
+            all,
+            lines,
+        ),
         Some(DeployAction::Restart) => restart_service(&project_root, flow_config.as_ref()),
         Some(DeployAction::Stop) => stop_service(&project_root, flow_config.as_ref()),
         Some(DeployAction::Shell) => open_shell(),
@@ -619,6 +670,10 @@ fn deploy_host(
     if let Some(domain) = &host_cfg.domain {
         let scheme = if host_cfg.ssl { "https" } else { "http" };
         println!("  URL: {}://{}", scheme, domain);
+    }
+
+    if let Err(err) = record_deploy_marker(project_root) {
+        eprintln!("⚠ Failed to record deploy timestamp: {err}");
     }
 
     Ok(())
@@ -1127,7 +1182,14 @@ fn show_status(_project_root: &Path, config: Option<&Config>) -> Result<()> {
 }
 
 /// Show deployment logs.
-fn show_logs(project_root: &Path, config: Option<&Config>, follow: bool, lines: usize) -> Result<()> {
+fn show_logs(
+    project_root: &Path,
+    config: Option<&Config>,
+    follow: bool,
+    since_deploy: bool,
+    all: bool,
+    lines: usize,
+) -> Result<()> {
     if let Some(cf_cfg) = config.and_then(|c| c.cloudflare.as_ref()) {
         return show_cloudflare_logs(project_root, cf_cfg, follow, lines);
     }
@@ -1143,10 +1205,22 @@ fn show_logs(project_root: &Path, config: Option<&Config>, follow: bool, lines: 
         .and_then(|h| h.service.as_ref())
         .context("No service name in [host] config")?;
 
+    let use_since_deploy = since_deploy && !all;
+    let since_flag = if use_since_deploy {
+        let state = load_deploy_log_state(project_root);
+        if let Some(ts) = state.last_deploy_unix {
+            format!("--since '@{}'", ts)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     let follow_flag = if follow { "-f" } else { "" };
     let cmd = format!(
-        "journalctl -u {} -n {} {} --no-pager",
-        service, lines, follow_flag
+        "journalctl -u {} -n {} {} {} --no-pager",
+        service, lines, follow_flag, since_flag
     );
 
     ssh_run(conn, &cmd)?;

@@ -16,8 +16,8 @@
         "title": "",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "width": 1200,
-        "height": 800,
+        "width": 1280,
+        "height": 820,
         "minWidth": 900,
         "minHeight": 600,
         "center": true,
@@ -33,6 +33,7 @@
   },
   "plugins": {
     "dialog": null,
+    "http": null,
     "opener": null
   }
 }
