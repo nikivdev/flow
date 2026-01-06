@@ -8,6 +8,7 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use crossterm::{terminal, event::{self, Event, KeyCode, KeyEventKind}};
 
 use crate::cli::SyncCommand;
 
@@ -18,10 +19,13 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
         bail!("Not a git repository");
     }
 
+    // Determine if auto-fix is enabled (--fix is default, --no-fix disables)
+    let auto_fix = cmd.fix && !cmd.no_fix;
+
     // Check for in-progress rebase/merge and handle it
     if is_rebase_in_progress() {
         println!("==> Rebase in progress, attempting to resolve...");
-        let should_fix = cmd.fix || prompt_for_rebase_action()?;
+        let should_fix = auto_fix || prompt_for_rebase_action()?;
         if should_fix {
             if try_resolve_rebase_conflicts()? {
                 println!("  ✓ Rebase completed");
@@ -38,7 +42,7 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
     // Check for in-progress merge
     if is_merge_in_progress() {
         println!("==> Merge in progress, attempting to resolve...");
-        let should_fix = cmd.fix || prompt_for_auto_fix()?;
+        let should_fix = auto_fix || prompt_for_auto_fix()?;
         if should_fix {
             if try_resolve_conflicts()? {
                 let _ = git_run(&["add", "-A"]);
@@ -98,7 +102,7 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
                 if let Err(_) = git_run(&["pull", "--rebase", "origin", current]) {
                     // Check if we're in a rebase conflict
                     if is_rebase_in_progress() {
-                        let should_fix = cmd.fix || prompt_for_auto_fix()?;
+                        let should_fix = auto_fix || prompt_for_auto_fix()?;
                         if should_fix {
                             if try_resolve_rebase_conflicts()? {
                                 println!("  ✓ Rebase conflicts auto-resolved");
@@ -120,7 +124,7 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
                     // Check for merge conflicts
                     let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
                     if !conflicts.trim().is_empty() {
-                        let should_fix = cmd.fix || prompt_for_auto_fix()?;
+                        let should_fix = auto_fix || prompt_for_auto_fix()?;
                         if should_fix {
                             if try_resolve_conflicts()? {
                                 let _ = git_run(&["add", "-A"]);
@@ -150,7 +154,7 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
     // Step 2: Sync upstream if it exists
     if has_upstream {
         println!("==> Syncing upstream...");
-        if let Err(e) = sync_upstream_internal(current, cmd.fix) {
+        if let Err(e) = sync_upstream_internal(current, auto_fix) {
             restore_stash(stashed);
             return Err(e);
         }
@@ -158,7 +162,15 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
 
     // Step 3: Push to origin
     if has_origin && !cmd.no_push {
-        if !origin_reachable {
+        // Check if origin == upstream (read-only clone, no fork)
+        let origin_url = git_capture(&["remote", "get-url", "origin"]).unwrap_or_default();
+        let upstream_url = git_capture(&["remote", "get-url", "upstream"]).unwrap_or_default();
+        let is_read_only = has_upstream && normalize_git_url(&origin_url) == normalize_git_url(&upstream_url);
+
+        if is_read_only {
+            println!("==> Skipping push (origin == upstream, read-only clone)");
+            println!("  To push, create a fork first: gh repo fork --remote");
+        } else if !origin_reachable {
             // Origin repo doesn't exist
             if cmd.create_repo {
                 println!("==> Creating origin repo...");
@@ -174,7 +186,7 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
             }
         } else {
             println!("==> Pushing to origin...");
-            let push_result = push_with_autofix(current, cmd.fix, cmd.max_fix_attempts);
+            let push_result = push_with_autofix(current, auto_fix, cmd.max_fix_attempts);
             if let Err(e) = push_result {
                 restore_stash(stashed);
                 return Err(e);
@@ -269,6 +281,27 @@ fn is_merge_in_progress() -> bool {
     std::path::Path::new(&format!("{}/MERGE_HEAD", git_dir)).exists()
 }
 
+/// Read a single keypress (y/n) without waiting for Enter.
+fn read_yes_no() -> Result<bool> {
+    terminal::enable_raw_mode()?;
+    let result = loop {
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => break Ok(true),
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter | KeyCode::Esc => break Ok(false),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    };
+    terminal::disable_raw_mode()?;
+    println!(); // Move to next line after keypress
+    result
+}
+
 /// Prompt user for rebase action.
 fn prompt_for_rebase_action() -> Result<bool> {
     let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
@@ -282,13 +315,10 @@ fn prompt_for_rebase_action() -> Result<bool> {
         println!();
     }
 
-    print!("  Try auto-fix with Claude? [y/N] (N = abort rebase) ");
+    print!("  Try auto-fix with Claude? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-
-    Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
+    read_yes_no()
 }
 
 /// Try to resolve rebase conflicts and continue.
@@ -410,11 +440,7 @@ fn prompt_for_push_fix() -> Result<bool> {
     println!();
     print!("  Try auto-fix with Claude? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-
-    Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
+    read_yes_no()
 }
 
 /// Prompt user to try auto-fix for conflicts.
@@ -435,11 +461,7 @@ fn prompt_for_auto_fix() -> Result<bool> {
 
     print!("  Try auto-fix with Claude? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-
-    Ok(input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes"))
+    read_yes_no()
 }
 
 /// Try to resolve merge conflicts automatically.
@@ -537,6 +559,21 @@ fn restore_stash(stashed: bool) {
         println!("==> Restoring stashed changes...");
         let _ = git_run(&["stash", "pop"]);
     }
+}
+
+/// Normalize a git URL for comparison (handle ssh vs https, trailing .git).
+fn normalize_git_url(url: &str) -> String {
+    let url = url.trim();
+    // Convert SSH to HTTPS format for comparison
+    let url = if url.starts_with("git@github.com:") {
+        url.replace("git@github.com:", "github.com/")
+    } else if url.starts_with("https://github.com/") {
+        url.replace("https://github.com/", "github.com/")
+    } else {
+        url.to_string()
+    };
+    // Remove trailing .git
+    url.trim_end_matches(".git").to_lowercase()
 }
 
 /// Run a git command and capture stdout.

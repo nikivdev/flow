@@ -2727,6 +2727,7 @@ const GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta/m
 const DEFAULT_GEMINI_MODEL: &str = "gemini-1.5-flash";
 const DEFAULT_SUMMARY_AGE_MINUTES: i64 = 45;
 const DEFAULT_SUMMARY_MAX_CHARS: usize = 12_000;
+const DEFAULT_HANDOFF_MAX_CHARS: usize = 6_000;
 
 fn get_session_summaries_path(project_path: &PathBuf) -> PathBuf {
     project_path
@@ -2795,6 +2796,13 @@ fn summary_max_chars() -> usize {
         .unwrap_or(DEFAULT_SUMMARY_MAX_CHARS)
 }
 
+fn handoff_max_chars() -> usize {
+    std::env::var("FLOW_SESSIONS_HANDOFF_MAX_CHARS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_HANDOFF_MAX_CHARS)
+}
+
 fn gemini_model() -> String {
     std::env::var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_GEMINI_MODEL.to_string())
 }
@@ -2827,6 +2835,15 @@ fn get_gemini_api_key() -> Result<String> {
 
 fn truncate_for_summary(context: &str) -> String {
     let max_chars = summary_max_chars();
+    if context.chars().count() <= max_chars {
+        return context.to_string();
+    }
+    let start = context.chars().count().saturating_sub(max_chars);
+    context.chars().skip(start).collect()
+}
+
+fn truncate_for_handoff(context: &str) -> String {
+    let max_chars = handoff_max_chars();
     if context.chars().count() <= max_chars {
         return context.to_string();
     }
@@ -2913,6 +2930,76 @@ chapters: array of 3-8 items, each with title (3-8 words) and summary (1-2 sente
         model,
         updated_at: chrono::Utc::now().to_rfc3339(),
     })
+}
+
+fn summarize_handoff_with_gemini(context: &str) -> Result<String> {
+    let api_key = get_gemini_api_key()?;
+    let model = gemini_model();
+
+    let prompt = format!(
+        "Create a concise handoff for another coding agent. Plain text only.\n\
+Include these sections:\n\
+- Goal\n\
+- Current state\n\
+- Key files/paths\n\
+- Pending tasks / next steps\n\
+- Gotchas / blockers\n\
+Keep it brief (<= 12 lines). No preamble.\n\
+\nSession:\n{}",
+        truncate_for_handoff(context)
+    );
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("failed to create HTTP client")?;
+
+    let url = format!(
+        "{}/{}:generateContent?key={}",
+        GEMINI_API_URL, model, api_key
+    );
+    let payload = json!({
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    { "text": prompt }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 600,
+            "responseMimeType": "text/plain"
+        }
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .context("failed to call Gemini API")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        bail!("Gemini API error {}: {}", status, text);
+    }
+
+    let parsed: GeminiResponse = resp.json().context("failed to parse Gemini response")?;
+    let content = parsed
+        .candidates
+        .get(0)
+        .and_then(|c| c.content.parts.get(0))
+        .and_then(|p| p.text.as_deref())
+        .unwrap_or("")
+        .trim();
+
+    if content.is_empty() {
+        bail!("Gemini returned empty handoff");
+    }
+
+    Ok(content.to_string())
 }
 
 fn parse_summary_response(content: &str) -> Result<SessionSummaryResponse> {
@@ -3665,13 +3752,25 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
         return Ok(());
     }
 
-    // Copy to clipboard
-    copy_to_clipboard(&context)?;
+    let output = if opts.handoff {
+        summarize_handoff_with_gemini(&context)?
+    } else {
+        context
+    };
 
-    let line_count = context.lines().count();
+    // Copy to clipboard
+    copy_to_clipboard(&output)?;
+
+    let explains = if opts.handoff {
+        "handoff summary"
+    } else {
+        "context"
+    };
+
+    let line_count = output.lines().count();
     println!(
-        "Copied context from {} ({} lines) to clipboard",
-        session.project_name, line_count
+        "Copied {} from {} ({} lines) to clipboard",
+        explains, session.project_name, line_count
     );
 
     // Save consumed checkpoint
