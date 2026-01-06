@@ -540,6 +540,9 @@ pub struct SessionsOpts {
     /// Generate summaries for stale sessions (uses Gemini).
     #[arg(long)]
     pub summarize: bool,
+    /// Condense the selected session into a handoff summary (uses Gemini).
+    #[arg(long)]
+    pub handoff: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1384,9 +1387,12 @@ pub struct SyncCommand {
     /// Create origin repo on GitHub if it doesn't exist.
     #[arg(long)]
     pub create_repo: bool,
-    /// Auto-fix errors using Claude Code when push fails.
-    #[arg(long, short)]
+    /// Auto-fix conflicts and errors using Claude (default: true).
+    #[arg(long, short, default_value = "true", action = clap::ArgAction::Set)]
     pub fix: bool,
+    /// Disable auto-fix (same as --fix=false).
+    #[arg(long, overrides_with = "fix")]
+    pub no_fix: bool,
     /// Maximum fix attempts before giving up.
     #[arg(long, default_value = "3")]
     pub max_fix_attempts: u32,

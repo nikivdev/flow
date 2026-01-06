@@ -310,14 +310,30 @@ pub(crate) fn sanitize_name(name: &str) -> String {
     }
 }
 
+fn find_flow_toml(start: &PathBuf) -> Option<PathBuf> {
+    let mut current = start.clone();
+    loop {
+        let candidate = current.join("flow.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
 pub(crate) fn get_project_name() -> Result<String> {
     let cwd = std::env::current_dir()?;
-    let flow_toml = cwd.join("flow.toml");
-
-    if flow_toml.exists() {
-        if let Ok(cfg) = config::load(&flow_toml) {
+    if let Some(flow_path) = find_flow_toml(&cwd) {
+        if let Ok(cfg) = config::load(&flow_path) {
             if let Some(name) = cfg.project_name {
                 return Ok(name);
+            }
+            if let Some(parent) = flow_path.parent() {
+                if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
+                    return Ok(dir_name.to_string());
+                }
             }
         }
     }

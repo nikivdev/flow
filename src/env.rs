@@ -336,23 +336,45 @@ fn require_env_read_unlock() -> Result<()> {
 /// Get the project name from flow.toml.
 fn get_project_name() -> Result<String> {
     let cwd = std::env::current_dir()?;
-    let flow_toml = cwd.join("flow.toml");
-
-    if flow_toml.exists() {
-        let cfg = config::load(&flow_toml)?;
+    if let Some(flow_path) = find_flow_toml(&cwd) {
+        let cfg = config::load(&flow_path)?;
         if let Some(name) = cfg.project_name {
             return Ok(name);
+        }
+        if let Some(parent) = flow_path.parent() {
+            if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
+                return Ok(dir_name.to_string());
+            }
         }
     }
 
     // Fall back to directory name
-    let name = cwd
+    Ok(cwd
         .file_name()
         .and_then(|n| n.to_str())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| "unnamed".to_string());
+        .unwrap_or_else(|| "unnamed".to_string()))
+}
 
-    Ok(name)
+fn resolve_env_file_path() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+
+    if let Some(flow_path) = find_flow_toml(&cwd) {
+        let project_root = flow_path.parent().unwrap_or(&cwd);
+        let cfg = config::load(&flow_path)?;
+        if let Some(cf_cfg) = cfg.cloudflare {
+            if let Some(env_file) = cf_cfg.env_file {
+                let env_file = env_file.trim();
+                if !env_file.is_empty() {
+                    let expanded = config::expand_path(env_file);
+                    return Ok(project_root.join(expanded));
+                }
+            }
+        }
+        return Ok(project_root.join(".env"));
+    }
+
+    Ok(cwd.join(".env"))
 }
 
 /// Get API URL from config or default.
@@ -802,19 +824,26 @@ fn pull(environment: &str) -> Result<()> {
         content.push_str(&format!("{}=\"{}\"\n", key, escaped));
     }
 
-    let env_path = std::env::current_dir()?.join(".env");
+    let env_path = resolve_env_file_path()?;
+    if let Some(parent) = env_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     fs::write(&env_path, &content)?;
 
-    println!("✓ Wrote {} env vars to .env", data.env.len());
+    println!(
+        "✓ Wrote {} env vars to {}",
+        data.env.len(),
+        env_path.display()
+    );
 
     Ok(())
 }
 
 /// Push local .env to 1focus.
 fn push(environment: &str) -> Result<()> {
-    let env_path = std::env::current_dir()?.join(".env");
+    let env_path = resolve_env_file_path()?;
     if !env_path.exists() {
-        bail!(".env file not found");
+        bail!("env file not found: {}", env_path.display());
     }
 
     let content = fs::read_to_string(&env_path)?;
