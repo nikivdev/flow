@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PORT=${FLOW_DESKTOP_PORT:-}
 
+if [[ ! -d "${ROOT_DIR}/node_modules" || ! -d "${ROOT_DIR}/node_modules/@tauri-apps/plugin-http" || ! -d "${ROOT_DIR}/node_modules/lucide-react" ]]; then
+  (cd "$ROOT_DIR" && bun install)
+fi
+
 if [[ -z "$PORT" ]]; then
   PORT=$(python - <<'PY'
 import socket

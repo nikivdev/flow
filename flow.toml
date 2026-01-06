@@ -86,7 +86,7 @@ description = "Upload the latest darwin/arm64 release tarball to the release hos
 
 [[tasks]]
 name = "desktop"
-command = "cd desktop && [ -d node_modules ] || bun install && bash scripts/tauri-dev.sh"
+command = "cd desktop && bash scripts/tauri-dev.sh"
 description = "Run the Flow desktop app (Tauri + Vite) with a free port"
 
 [[tasks]]

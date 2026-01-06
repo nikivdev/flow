@@ -1,12 +1,29 @@
-import { Children, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Children, type ReactNode, memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { open as openDialog } from "@tauri-apps/plugin-dialog"
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http"
 import { openPath } from "@tauri-apps/plugin-opener"
 import type { PluggableList } from "unified"
+import {
+  AlertTriangle,
+  Clock,
+  Copy,
+  Download,
+  Power,
+  PowerOff,
+  Radio,
+  RefreshCw,
+  RotateCcw,
+  Terminal as TerminalIcon,
+  Trash2,
+} from "lucide-react"
 import { Streamdown, defaultRehypePlugins, defaultRemarkPlugins } from "streamdown"
 
 const TOOL_LINE_PREFIXES = ["[tool_use]", "[tool_result]", "[thinking]"]
 const ROOTS_STORAGE_KEY = "flow.desktop.roots"
+const LIN_BASE_URL = "http://127.0.0.1:9050"
+const MAX_SERVER_LOGS = 500
+const SERVER_POLL_MS = 2000
 
 const safeRehypePlugins = Object.entries(
   defaultRehypePlugins as Record<string, PluggableList[number]>,
@@ -64,6 +81,27 @@ type LogEntry = {
 type StoredLogEntry = {
   id: number
   entry: LogEntry
+}
+
+type ServerSnapshot = {
+  name: string
+  command: string
+  args: string[]
+  port?: number
+  working_dir?: string
+  autostart: boolean
+  status: string
+  pid?: number
+  exit_code?: number
+  started_at?: number
+  log_count?: number
+}
+
+type ServerLogEntry = {
+  server: string
+  timestamp_ms: number
+  stream: "stdout" | "stderr" | string
+  line: string
 }
 
 const normalizeRole = (role: string | undefined) => {
@@ -195,6 +233,174 @@ const shortenPath = (value: string, max = 42) => {
   return `${start}…${end}`
 }
 
+const formatServerStatus = (status: string, exitCode?: number) => {
+  const normalized = status.toLowerCase()
+  if (normalized.includes("exit")) {
+    if (exitCode === undefined || exitCode === null) return "stopped"
+    if (exitCode === 0) return "stopped"
+    return `failed (${exitCode})`
+  }
+  return status
+}
+
+const statusTone = (status: string, exitCode?: number) => {
+  const normalized = status.toLowerCase()
+  if (normalized.includes("running")) return "status-running"
+  if (normalized.includes("starting")) return "status-starting"
+  if (normalized.includes("exit")) {
+    if (exitCode === 0) return "status-stopped"
+    return "status-error"
+  }
+  if (normalized.includes("failed") || normalized.includes("error")) return "status-error"
+  return "status-idle"
+}
+
+const formatUptime = (startedAt?: number) => {
+  if (!startedAt) return "-"
+  const ms = Date.now() - startedAt
+  const seconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(seconds / 60)
+  const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
+
+  if (days > 0) return `${days}d ${hours % 24}h`
+  if (hours > 0) return `${hours}h ${minutes % 60}m`
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`
+  return `${seconds}s`
+}
+
+const formatTime = (ms?: number | string) => {
+  if (ms === undefined || ms === null) return ""
+  const num = typeof ms === "string" ? Number(ms) : ms
+  if (!Number.isFinite(num)) return ""
+  try {
+    return new Date(num).toLocaleTimeString()
+  } catch {
+    return ""
+  }
+}
+
+const isRunning = (status: string) => status.toLowerCase().includes("running")
+
+const getLastErrorOrExit = (logs: ServerLogEntry[]): string | null => {
+  const recentLogs = logs.slice(-20).reverse()
+  const errorPatterns = [
+    /error[:\s]/i,
+    /failed[:\s]/i,
+    /exception[:\s]/i,
+    /panic[:\s]/i,
+    /EADDRINUSE/i,
+    /port.*already in use/i,
+    /cannot find/i,
+    /not found/i,
+    /permission denied/i,
+    /EACCES/i,
+    /ENOENT/i,
+  ]
+
+  for (const log of recentLogs) {
+    if (log.stream === "stderr" && log.line.trim()) {
+      for (const pattern of errorPatterns) {
+        if (pattern.test(log.line)) {
+          return log.line.trim()
+        }
+      }
+    }
+  }
+
+  for (const log of recentLogs) {
+    if (log.line.trim()) {
+      for (const pattern of errorPatterns) {
+        if (pattern.test(log.line)) {
+          return log.line.trim()
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+const toLogEntries = (data: unknown, fallbackServer: string): ServerLogEntry[] => {
+  const entries: ServerLogEntry[] = []
+  const fallback = fallbackServer || "unknown"
+
+  const coerceEntry = (item: unknown) => {
+    if (item === null || item === undefined) return
+
+    if (Array.isArray(item)) {
+      for (const nested of item) coerceEntry(nested)
+      return
+    }
+
+    if (typeof item === "string") {
+      for (const line of item.split("\n")) {
+        if (line === undefined) continue
+        entries.push({
+          server: fallback,
+          timestamp_ms: Date.now(),
+          stream: "stdout",
+          line,
+        })
+      }
+      return
+    }
+
+    if (typeof item === "object") {
+      const obj = item as Record<string, unknown>
+      const server = typeof obj.server === "string" ? obj.server : fallback
+      const tsCandidate =
+        typeof obj.timestamp_ms === "number"
+          ? obj.timestamp_ms
+          : typeof obj.timestamp_ms === "string"
+            ? Number(obj.timestamp_ms)
+            : typeof obj.timestamp === "number"
+              ? obj.timestamp
+              : typeof obj.timestamp === "string"
+                ? Number(obj.timestamp)
+                : Date.now()
+      const ts = Number.isFinite(tsCandidate) ? (tsCandidate as number) : Date.now()
+      const stream = typeof obj.stream === "string" ? obj.stream : "stdout"
+      const line =
+        typeof obj.line === "string"
+          ? obj.line
+          : obj.line === null || obj.line === undefined
+            ? ""
+            : JSON.stringify(obj.line ?? obj.message ?? obj.data ?? obj)
+      entries.push({ server, timestamp_ms: ts, stream, line })
+      return
+    }
+
+    entries.push({
+      server: fallback,
+      timestamp_ms: Date.now(),
+      stream: "stdout",
+      line: String(item),
+    })
+  }
+
+  if (Array.isArray((data as Record<string, unknown>)?.logs)) {
+    for (const item of (data as Record<string, unknown>).logs as unknown[]) coerceEntry(item)
+    return entries
+  }
+
+  if (Array.isArray((data as Record<string, unknown>)?.lines)) {
+    for (const item of (data as Record<string, unknown>).lines as unknown[]) coerceEntry(item)
+    return entries
+  }
+
+  coerceEntry(data)
+  return entries
+}
+
+const parseStreamPayload = (data: string, fallbackServer: string): ServerLogEntry[] => {
+  try {
+    return toLogEntries(JSON.parse(data), fallbackServer)
+  } catch {
+    return toLogEntries(data, fallbackServer)
+  }
+}
+
 type CommandAction = {
   id: string
   label: string
@@ -305,21 +511,302 @@ const CommandPalette = ({
   )
 }
 
+const ServerTile = memo(({
+  server,
+  logs,
+  baseUrl,
+  onRefresh,
+  onError,
+  onFocus,
+  onCopied,
+  followLive,
+  fetchWithCorsBypass,
+}: {
+  server: ServerSnapshot
+  logs: ServerLogEntry[]
+  baseUrl: string
+  onRefresh: () => void
+  onError: (message: string) => void
+  onFocus?: () => void
+  onCopied?: (label: string) => void
+  followLive: boolean
+  fetchWithCorsBypass: (url: string, init?: RequestInit) => Promise<Response>
+}) => {
+  const [controlling, setControlling] = useState(false)
+  const logsEndRef = useRef<HTMLDivElement>(null)
+  const running = isRunning(server.status)
+
+  const lastError = useMemo(() => {
+    if (running) return null
+    return getLastErrorOrExit(logs)
+  }, [running, logs])
+
+  const startServer = async () => {
+    setControlling(true)
+    try {
+      const res = await fetchWithCorsBypass(
+        `${baseUrl}/servers/${encodeURIComponent(server.name)}/start`,
+        { method: "POST" },
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      onRefresh()
+    } catch (error) {
+      onError(
+        `Failed to start ${server.name}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    } finally {
+      setControlling(false)
+    }
+  }
+
+  const stopServer = async () => {
+    setControlling(true)
+    try {
+      const res = await fetchWithCorsBypass(
+        `${baseUrl}/servers/${encodeURIComponent(server.name)}/stop`,
+        { method: "POST" },
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      onRefresh()
+    } catch (error) {
+      onError(
+        `Failed to stop ${server.name}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    } finally {
+      setControlling(false)
+    }
+  }
+
+  const restartServer = async () => {
+    setControlling(true)
+    try {
+      const res = await fetchWithCorsBypass(
+        `${baseUrl}/servers/${encodeURIComponent(server.name)}/restart`,
+        { method: "POST" },
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      onRefresh()
+    } catch (error) {
+      onError(
+        `Failed to restart ${server.name}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    } finally {
+      setControlling(false)
+    }
+  }
+
+  const clearLogs = async () => {
+    try {
+      const res = await fetchWithCorsBypass(
+        `${baseUrl}/servers/${encodeURIComponent(server.name)}/logs/clear`,
+        { method: "POST" },
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      onRefresh()
+    } catch (error) {
+      onError(`Failed to clear logs: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const copyLogs = () => {
+    const text = logs
+      .map(
+        (line) =>
+          `[${line.stream.toUpperCase()}] ${new Date(line.timestamp_ms).toISOString()} ${line.line}`,
+      )
+      .join("\n")
+    navigator.clipboard.writeText(text)
+    onCopied?.(server.name)
+  }
+
+  const exportLogs = () => {
+    const text = logs
+      .map(
+        (line) =>
+          `[${line.stream.toUpperCase()}] ${new Date(line.timestamp_ms).toISOString()} ${line.line}`,
+      )
+      .join("\n")
+    const blob = new Blob([text], { type: "text/plain" })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement("a")
+    anchor.href = url
+    anchor.download = `${server.name}-${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.txt`
+    document.body.appendChild(anchor)
+    anchor.click()
+    document.body.removeChild(anchor)
+    URL.revokeObjectURL(url)
+  }
+
+  useEffect(() => {
+    if (!followLive) return
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [logs.length, followLive])
+
+  return (
+    <div className="server-tile" onDoubleClick={onFocus}>
+      <div className="server-tile-header">
+        <div className="server-header-left">
+          <span className="server-name">{server.name}</span>
+          <span className={`server-status-pill ${statusTone(server.status, server.exit_code)}`}>
+            {formatServerStatus(server.status, server.exit_code)}
+          </span>
+        </div>
+        <div className="server-controls">
+          {running ? (
+            <>
+              <button
+                className="icon-button"
+                onClick={stopServer}
+                disabled={controlling}
+                title="Stop server"
+              >
+                {controlling ? <RefreshCw size={12} className="spin" /> : <PowerOff size={12} />}
+              </button>
+              <button
+                className="icon-button"
+                onClick={restartServer}
+                disabled={controlling}
+                title="Restart server"
+              >
+                <RotateCcw size={12} />
+              </button>
+            </>
+          ) : (
+            <button
+              className="icon-button"
+              onClick={startServer}
+              disabled={controlling}
+              title="Start server"
+            >
+              {controlling ? <RefreshCw size={12} className="spin" /> : <Power size={12} />}
+            </button>
+          )}
+          <button className="icon-button" onClick={clearLogs} title="Clear logs">
+            <Trash2 size={12} />
+          </button>
+          <button
+            className="icon-button"
+            onClick={copyLogs}
+            disabled={logs.length === 0}
+            title="Copy logs"
+          >
+            <Copy size={12} />
+          </button>
+          <button
+            className="icon-button"
+            onClick={exportLogs}
+            disabled={logs.length === 0}
+            title="Download logs"
+          >
+            <Download size={12} />
+          </button>
+        </div>
+      </div>
+      <div className="server-tile-info">
+        <span className="info-pill">
+          <TerminalIcon size={10} />
+          {server.command} {server.args.join(" ")}
+        </span>
+        {server.port ? <span className="info-pill">:{server.port}</span> : null}
+        {server.pid ? <span className="info-pill">pid {server.pid}</span> : null}
+        {server.exit_code !== undefined && server.exit_code !== null ? (
+          <span className="info-pill warning">exit {server.exit_code}</span>
+        ) : null}
+        {server.started_at ? (
+          <span className="info-pill">
+            <Clock size={9} />
+            {formatUptime(server.started_at)}
+          </span>
+        ) : null}
+      </div>
+      {!running && lastError ? (
+        <div className="server-error">
+          <AlertTriangle size={12} />
+          <span>{lastError}</span>
+        </div>
+      ) : null}
+      <div className="server-tile-logs mono">
+        {logs.length === 0 ? (
+          <div className="server-log-empty">No logs yet</div>
+        ) : (
+          logs.map((log, index) => (
+            <div key={`${log.timestamp_ms}-${index}`} className="server-log-row">
+              <span className="server-log-time">{formatTime(log.timestamp_ms)}</span>
+              <span className={`server-log-badge ${log.stream === "stderr" ? "err" : "out"}`}>
+                {log.stream === "stderr" ? "err" : "out"}
+              </span>
+              <span className="server-log-message">{log.line}</span>
+            </div>
+          ))
+        )}
+        <div ref={logsEndRef} />
+      </div>
+    </div>
+  )
+})
+
 const App = () => {
   const [projects, setProjects] = useState<DesktopProject[]>([])
   const [roots, setRoots] = useState<string[]>([])
   const [selectedProjectRoot, setSelectedProjectRoot] = useState<string | null>(null)
   const [sessions, setSessions] = useState<SessionWithProject[]>([])
   const [logs, setLogs] = useState<StoredLogEntry[]>([])
-  const [view, setView] = useState<"sessions" | "logs">("sessions")
+  const [view, setView] = useState<"sessions" | "logs" | "servers">("sessions")
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set())
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [loadingLogs, setLoadingLogs] = useState(false)
+  const [servers, setServers] = useState<ServerSnapshot[]>([])
+  const [serverLogs, setServerLogs] = useState<Record<string, ServerLogEntry[]>>({})
+  const [loadingServers, setLoadingServers] = useState(false)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [daemonStatus, setDaemonStatus] = useState<"unknown" | "up" | "down">("unknown")
+  const [lastServerUpdate, setLastServerUpdate] = useState<number | null>(null)
+  const [followLive, setFollowLive] = useState(true)
+  const [focusedServerIndex, setFocusedServerIndex] = useState<number | null>(null)
+  const [copyToast, setCopyToast] = useState<string | null>(null)
+  const streamRefs = useRef<Map<string, EventSource>>(new Map())
+  const prevServerNamesRef = useRef<string>("")
+  const pendingLogsRef = useRef<Map<string, ServerLogEntry[]>>(new Map())
+  const flushTimerRef = useRef<number | null>(null)
 
   const selectedProject = useMemo(() => {
     return projects.find((project) => project.project_root === selectedProjectRoot) ?? null
   }, [projects, selectedProjectRoot])
+
+  const normalizedLinBaseUrl = useMemo(() => LIN_BASE_URL.replace(/\/+$/, ""), [])
+  const isTauri = useMemo(() => {
+    if (typeof window === "undefined") return false
+    const w = window as Window & { __TAURI_IPC__?: unknown; __TAURI__?: unknown }
+    return Boolean(w.__TAURI_IPC__ || w.__TAURI__ || navigator.userAgent.includes("Tauri"))
+  }, [])
+
+  const fetchWithCorsBypass = useCallback(
+    async (url: string, init?: RequestInit) => {
+      if (isTauri) {
+        return tauriFetch(url, init as Parameters<typeof tauriFetch>[1])
+      }
+      return fetch(url, init)
+    },
+    [isTauri],
+  )
+
+  const scheduleLogFlush = useCallback(() => {
+    if (flushTimerRef.current !== null) return
+    flushTimerRef.current = window.setTimeout(() => {
+      setServerLogs((prev) => {
+        const next = { ...prev }
+        for (const [name, entries] of pendingLogsRef.current) {
+          const existing = next[name] ?? []
+          const merged = [...existing, ...entries].slice(-MAX_SERVER_LOGS)
+          next[name] = merged
+        }
+        pendingLogsRef.current.clear()
+        return next
+      })
+      flushTimerRef.current = null
+    }, 200)
+  }, [])
 
   useEffect(() => {
     const stored = localStorage.getItem(ROOTS_STORAGE_KEY)
@@ -440,6 +927,56 @@ const App = () => {
     }
   }, [selectedProject, selectedProjectRoot])
 
+  const fetchServers = useCallback(async () => {
+    setLoadingServers(true)
+    setServerError(null)
+    try {
+      const res = await fetchWithCorsBypass(`${normalizedLinBaseUrl}/servers`)
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`)
+      }
+      const data = (await res.json()) as ServerSnapshot[]
+      setServers(data)
+      setDaemonStatus("up")
+      setLastServerUpdate(Date.now())
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      setServerError(`Failed to load servers: ${msg}`)
+      setDaemonStatus("down")
+      setServers([])
+    } finally {
+      setLoadingServers(false)
+    }
+  }, [fetchWithCorsBypass, normalizedLinBaseUrl])
+
+  const fetchServerLogs = useCallback(
+    async (serverName: string) => {
+      const path = `${normalizedLinBaseUrl}/servers/${encodeURIComponent(serverName)}/logs?limit=${MAX_SERVER_LOGS}`
+      try {
+        const res = await fetchWithCorsBypass(path)
+        if (!res.ok) return
+        const data = await res.json()
+        const entries = toLogEntries(data, serverName)
+        setServerLogs((prev) => ({
+          ...prev,
+          [serverName]: entries.slice(-MAX_SERVER_LOGS),
+        }))
+      } catch {
+        // Ignore log fetch errors per server.
+      }
+    },
+    [fetchWithCorsBypass, normalizedLinBaseUrl],
+  )
+
+  const fetchAllServerLogs = useCallback(
+    async (serverList: ServerSnapshot[]) => {
+      for (const server of serverList) {
+        await fetchServerLogs(server.name)
+      }
+    },
+    [fetchServerLogs],
+  )
+
   useEffect(() => {
     if (view !== "sessions") return
     loadSessions()
@@ -453,6 +990,84 @@ const App = () => {
   }, [view, loadLogs])
 
   useEffect(() => {
+    if (view !== "servers") return
+    fetchServers()
+    const interval = window.setInterval(fetchServers, SERVER_POLL_MS)
+    return () => window.clearInterval(interval)
+  }, [view, fetchServers])
+
+  useEffect(() => {
+    if (view !== "servers") return
+    if (servers.length === 0) return
+    const currentNames = servers.map((server) => server.name).join(",")
+    if (!currentNames || currentNames === prevServerNamesRef.current) return
+    prevServerNamesRef.current = currentNames
+    fetchAllServerLogs(servers)
+  }, [view, servers, fetchAllServerLogs])
+
+  useEffect(() => {
+    if (view !== "servers") {
+      for (const source of streamRefs.current.values()) {
+        source.close()
+      }
+      streamRefs.current.clear()
+      pendingLogsRef.current.clear()
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
+      return
+    }
+    if (!followLive) {
+      for (const source of streamRefs.current.values()) {
+        source.close()
+      }
+      streamRefs.current.clear()
+      pendingLogsRef.current.clear()
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
+      return
+    }
+
+    const names = servers.map((server) => server.name)
+    for (const [name, source] of streamRefs.current) {
+      if (!names.includes(name)) {
+        source.close()
+        streamRefs.current.delete(name)
+      }
+    }
+
+    for (const name of names) {
+      if (streamRefs.current.has(name)) continue
+      const streamPath = `${normalizedLinBaseUrl}/servers/${encodeURIComponent(name)}/logs/stream`
+      const source = new EventSource(streamPath)
+      streamRefs.current.set(name, source)
+
+      source.onmessage = (event) => {
+        const entries = parseStreamPayload(event.data, name)
+        if (entries.length === 0) return
+        const pending = pendingLogsRef.current.get(name) ?? []
+        pendingLogsRef.current.set(name, [...pending, ...entries])
+        scheduleLogFlush()
+      }
+
+      source.onerror = () => {
+        source.close()
+        streamRefs.current.delete(name)
+      }
+    }
+
+    return () => {
+      for (const source of streamRefs.current.values()) {
+        source.close()
+      }
+      streamRefs.current.clear()
+    }
+  }, [view, followLive, servers, normalizedLinBaseUrl, scheduleLogFlush])
+
+  useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault()
@@ -462,6 +1077,17 @@ const App = () => {
     window.addEventListener("keydown", handleKey)
     return () => window.removeEventListener("keydown", handleKey)
   }, [])
+
+  useEffect(() => {
+    if (view !== "servers") return
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setFocusedServerIndex(null)
+      }
+    }
+    window.addEventListener("keydown", handleEscape)
+    return () => window.removeEventListener("keydown", handleEscape)
+  }, [view])
 
   const toggleSession = (sessionKey: string) => {
     setExpandedSessions((prev) => {
@@ -500,6 +1126,11 @@ const App = () => {
         run: () => setView("logs"),
       },
       {
+        id: "view-servers",
+        label: "Show servers",
+        run: () => setView("servers"),
+      },
+      {
         id: "view-all",
         label: "View all projects",
         hint: "Aggregate sessions and logs",
@@ -527,6 +1158,15 @@ const App = () => {
 
     return actions
   }, [addRoot, refreshProjects, selectedProject, projects])
+
+  const headerTitle =
+    view === "servers" ? "Servers" : selectedProject?.name ?? "All projects"
+  const headerMeta =
+    view === "servers"
+      ? `Lin daemon: ${normalizedLinBaseUrl}`
+      : selectedProject
+        ? shortenPath(selectedProject.project_root)
+        : "Watching every flow.toml you added"
 
   return (
     <div className="app">
@@ -573,10 +1213,8 @@ const App = () => {
       <main className="main">
         <header className="header">
           <div>
-            <h2>{selectedProject?.name ?? "All projects"}</h2>
-            <div className="meta">
-              {selectedProject ? shortenPath(selectedProject.project_root) : "Watching every flow.toml you added"}
-            </div>
+            <h2>{headerTitle}</h2>
+            <div className="meta">{headerMeta}</div>
           </div>
           <div className="tabs">
             <button
@@ -590,6 +1228,12 @@ const App = () => {
               onClick={() => setView("logs")}
             >
               Logs
+            </button>
+            <button
+              className={`tab ${view === "servers" ? "active" : ""}`}
+              onClick={() => setView("servers")}
+            >
+              Servers
             </button>
           </div>
         </header>
@@ -657,7 +1301,7 @@ const App = () => {
                 )
               })}
             </div>
-          ) : (
+          ) : view === "logs" ? (
             <div className="logs-panel">
               {loadingLogs ? <div className="empty-state">Loading logs…</div> : null}
               {!loadingLogs && logs.length === 0 ? (
@@ -677,6 +1321,114 @@ const App = () => {
                   </div>
                 </div>
               ))}
+            </div>
+          ) : (
+            <div className="servers-view">
+              <div className="servers-topbar">
+                <div className="servers-status">
+                  <span className={`daemon-pill ${daemonStatus}`}>
+                    <Radio size={10} />
+                    {daemonStatus === "up"
+                      ? "daemon running"
+                      : daemonStatus === "down"
+                        ? "daemon down"
+                        : "daemon"}
+                  </span>
+                  {focusedServerIndex !== null && servers[focusedServerIndex] ? (
+                    <button
+                      className="focused-pill"
+                      onClick={() => setFocusedServerIndex(null)}
+                    >
+                      Focused: {servers[focusedServerIndex].name}
+                      <span>(Esc)</span>
+                    </button>
+                  ) : null}
+                  {lastServerUpdate ? (
+                    <span className="servers-updated">
+                      Updated {new Date(lastServerUpdate).toLocaleTimeString()}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="servers-actions">
+                  <button className="ghost-button" onClick={fetchServers} disabled={loadingServers}>
+                    <RefreshCw size={12} className={loadingServers ? "spin" : ""} />
+                    <span>Refresh</span>
+                  </button>
+                  <button
+                    className={`ghost-button ${followLive ? "active" : ""}`}
+                    onClick={() => setFollowLive(!followLive)}
+                  >
+                    <span>{followLive ? "Live" : "Paused"}</span>
+                  </button>
+                </div>
+              </div>
+
+              {serverError ? (
+                <div className="server-error-banner">
+                  <AlertTriangle size={12} />
+                  <div>{serverError}</div>
+                </div>
+              ) : null}
+
+              <div className="servers-grid">
+                {servers.length === 0 ? (
+                  <div className="empty-state">
+                    <div className="empty-title">No servers configured</div>
+                    <div className="empty-subtitle">
+                      Make sure the lin daemon is running: <code>lin daemon</code>
+                    </div>
+                  </div>
+                ) : focusedServerIndex !== null && servers[focusedServerIndex] ? (
+                  <ServerTile
+                    key={servers[focusedServerIndex].name}
+                    server={servers[focusedServerIndex]}
+                    logs={serverLogs[servers[focusedServerIndex].name] || []}
+                    baseUrl={normalizedLinBaseUrl}
+                    followLive={followLive}
+                    onRefresh={() => {
+                      fetchServers()
+                      fetchServerLogs(servers[focusedServerIndex].name)
+                    }}
+                    onError={setServerError}
+                    onCopied={(label) => {
+                      setCopyToast(label)
+                      setTimeout(() => setCopyToast(null), 2000)
+                    }}
+                    onFocus={() => setFocusedServerIndex(null)}
+                    fetchWithCorsBypass={fetchWithCorsBypass}
+                  />
+                ) : (
+                  <div className={`server-tile-grid ${servers.length === 1 ? "single" : ""}`}>
+                    {servers.map((server, index) => (
+                      <ServerTile
+                        key={server.name}
+                        server={server}
+                        logs={serverLogs[server.name] || []}
+                        baseUrl={normalizedLinBaseUrl}
+                        followLive={followLive}
+                        onRefresh={() => {
+                          fetchServers()
+                          fetchServerLogs(server.name)
+                        }}
+                        onError={setServerError}
+                        onCopied={(label) => {
+                          setCopyToast(label)
+                          setTimeout(() => setCopyToast(null), 2000)
+                        }}
+                        onFocus={() => setFocusedServerIndex(index)}
+                        fetchWithCorsBypass={fetchWithCorsBypass}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {copyToast ? (
+                <div className="copy-toast">
+                  <Copy size={12} />
+                  Copied output of {copyToast}
+                </div>
+              ) : null}
             </div>
           )}
         </section>

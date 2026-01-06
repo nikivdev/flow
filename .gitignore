@@ -4,6 +4,8 @@
 .claude/
 .codex/
 .flox/
+.flow/
+.flow_diff_review.tmp
 
 # core
 .DS_Store

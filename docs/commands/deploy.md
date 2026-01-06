@@ -125,9 +125,10 @@ f deploy host --remote-build
 
 ```bash
 # View logs
-f deploy logs
-f deploy logs -f         # Follow in real-time
-f deploy logs -n 500     # Show last 500 lines
+f deploy logs                 # Since last deploy (host only)
+f deploy logs -f              # Follow in real-time (since last deploy)
+f deploy logs --all           # Full history (ignore deploy marker)
+f deploy logs --all -n 500    # Show last 500 lines without deploy filter
 
 # Restart/stop
 f deploy restart
@@ -144,6 +145,8 @@ f deploy health
 f deploy health --url https://myapp.example.com/health
 f deploy health --status 204  # Expect specific status code
 ```
+
+Note: For host deploys, Flow records the last successful deploy time in `.flow/deploy-log.json` and uses it to scope `f deploy logs` output. Use `--all` to ignore it.
 
 ---
 

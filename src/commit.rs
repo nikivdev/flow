@@ -1765,30 +1765,37 @@ fn run_opencode_review(
     workdir: &std::path::Path,
     model: &str,
 ) -> Result<ReviewResult> {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Write};
 
     let (diff_for_prompt, _truncated) = truncate_diff(diff);
 
-    // Build review prompt
+    // Write diff to a temp file in the working directory to avoid /tmp permission issues
+    let diff_file = workdir.join(".flow_diff_review.tmp");
+    {
+        let mut f = std::fs::File::create(&diff_file)
+            .context("failed to create temp diff file")?;
+        f.write_all(diff_for_prompt.as_bytes())
+            .context("failed to write temp diff file")?;
+    }
+
+    // Build review prompt - explicitly say to output to stdout only
     let mut prompt = String::from(
-        "Review this git diff for bugs, security issues, and performance problems. \
-         Return a JSON object with this exact format: \
-         {\"issues_found\": true/false, \"issues\": [\"issue 1\", \"issue 2\"], \"summary\": \"brief summary\"}\n\n",
+        "Review the attached git diff file for bugs, security issues, and performance problems. \
+         Output ONLY a JSON object to stdout with this exact format (do not write any files): \
+         {\"issues_found\": true/false, \"issues\": [\"issue 1\", \"issue 2\"], \"summary\": \"brief summary\"}",
     );
 
     if let Some(instructions) = review_instructions {
-        prompt.push_str(&format!("Additional review instructions:\n{}\n\n", instructions));
+        prompt.push_str(&format!("\n\nAdditional review instructions:\n{}", instructions));
     }
 
     if let Some(context) = session_context {
-        prompt.push_str(&format!("Context:\n{}\n\n", context));
+        prompt.push_str(&format!("\n\nContext:\n{}", context));
     }
 
-    prompt.push_str(&format!("```diff\n{}\n```", diff_for_prompt));
-
-    // Run opencode with the specified model
+    // Run opencode with the diff as an attached file
     let mut child = Command::new("opencode")
-        .args(["run", "--model", model, &prompt])
+        .args(["run", "--model", model, "-f", diff_file.to_str().unwrap(), &prompt])
         .current_dir(workdir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1836,6 +1843,9 @@ fn run_opencode_review(
             || lowered.contains("memory leak");
         (has_issues, Vec::new())
     };
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&diff_file);
 
     Ok(ReviewResult {
         issues_found,
