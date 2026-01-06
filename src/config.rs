@@ -104,6 +104,9 @@ pub struct TsConfig {
 pub struct TsFlowConfig {
     #[serde(default)]
     pub commit: Option<TsCommitConfig>,
+    /// Enable gitedit.dev hash in commit messages. Default false.
+    #[serde(default)]
+    pub gitedit: Option<bool>,
 }
 
 /// Commit settings from TypeScript config.

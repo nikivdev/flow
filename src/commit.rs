@@ -634,7 +634,7 @@ pub fn run_sync(push: bool) -> Result<()> {
 
     // Sync to gitedit if enabled
     let cwd = std::env::current_dir().unwrap_or_default();
-    if gitedit_mirror_enabled() {
+    if gitedit_globally_enabled() && gitedit_mirror_enabled() {
         sync_to_gitedit(&cwd, "commit", &[], None, None);
     }
 
@@ -1107,7 +1107,7 @@ pub fn run_with_check_sync(
     let mut gitedit_session_hash: Option<String> = None;
 
     let gitedit_enabled =
-        force_gitedit || gitedit_mirror_enabled_for_commit_with_check(&repo_root);
+        force_gitedit || (gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit_with_check(&repo_root));
 
     if gitedit_enabled {
         match ai::get_sessions_for_gitedit(&repo_root) {
@@ -2264,6 +2264,20 @@ fn should_show_review_context() -> bool {
         .unwrap_or(false)
 }
 
+/// Check if gitedit is globally enabled in ~/.config/flow/config.ts.
+/// Returns true by default if not specified (opt-out).
+fn gitedit_globally_enabled() -> bool {
+    if let Some(ts_config) = config::load_ts_config() {
+        if let Some(flow) = ts_config.flow {
+            if let Some(enabled) = flow.gitedit {
+                return enabled;
+            }
+        }
+    }
+    // Default to false (opt-in) - gitedit not working well currently
+    false
+}
+
 /// Check if gitedit mirroring is enabled in flow.toml.
 fn gitedit_mirror_enabled() -> bool {
     let cwd = std::env::current_dir().ok();
@@ -2711,6 +2725,11 @@ fn delegate_to_hub_with_check(
 
 /// Generate gitedit URL early from session IDs (before full data load).
 fn generate_early_gitedit_url(repo_root: &std::path::Path) -> Option<String> {
+    // Check if gitedit is globally enabled
+    if !gitedit_globally_enabled() {
+        return None;
+    }
+
     // Get owner/repo
     let (owner, repo) = get_gitedit_project(repo_root)?;
 
