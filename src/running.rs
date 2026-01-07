@@ -42,10 +42,7 @@ pub struct RunningProcesses {
 
 /// Returns ~/.config/flow/running.json
 pub fn running_processes_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/flow/running.json")
+    crate::config::global_state_dir().join("running.json")
 }
 
 /// Load running processes, validating that PIDs are still alive
@@ -81,7 +78,7 @@ pub fn load_running_processes() -> Result<RunningProcesses> {
 /// Atomically save running processes (write to temp, then rename)
 pub fn save_running_processes(processes: &RunningProcesses) -> Result<()> {
     let path = running_processes_path();
-    let _ = crate::config::ensure_global_config_dir()
+    let _ = crate::config::ensure_global_state_dir()
         .with_context(|| format!("failed to create {}", path.display()))?;
 
     let temp_path = path.with_extension("json.tmp");

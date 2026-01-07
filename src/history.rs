@@ -59,7 +59,7 @@ impl InvocationRecord {
 
 pub fn record(invocation: InvocationRecord) -> Result<()> {
     let path = history_path();
-    let _ = config::ensure_global_config_dir()
+    let _ = config::ensure_global_state_dir()
         .with_context(|| format!("failed to create history dir {}", path.display()))?;
 
     let mut file = OpenOptions::new()
@@ -194,12 +194,7 @@ pub fn load_last_record_for_project(project_root: &Path) -> Result<Option<Invoca
 }
 
 fn history_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config")
-        .join("flow")
-        .join("history.jsonl")
+    config::global_state_dir().join("history.jsonl")
 }
 
 fn now_ms() -> u128 {
