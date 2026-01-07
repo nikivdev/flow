@@ -4,6 +4,16 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use crate::config;
 
+pub fn prefer_ssh() -> bool {
+    if env_truthy("FLOW_FORCE_HTTPS") {
+        return false;
+    }
+    if env_truthy("FLOW_FORCE_SSH") {
+        return true;
+    }
+    has_agent_socket()
+}
+
 pub fn ensure_ssh_env() {
     let env_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
     let env_sock_valid = env_sock.as_ref().map(|p| p.exists()).unwrap_or(false);
@@ -18,19 +28,22 @@ pub fn ensure_ssh_env() {
         return;
     };
 
-    if !env_sock_valid {
-        std::env::set_var("SSH_AUTH_SOCK", &sock);
-    }
+    // SAFETY: We're setting env vars at startup before spawning threads
+    unsafe {
+        if !env_sock_valid {
+            std::env::set_var("SSH_AUTH_SOCK", &sock);
+        }
 
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        let escaped = shell_escape(&sock);
-        std::env::set_var(
-            "GIT_SSH_COMMAND",
-            format!(
-                "ssh -o IdentityAgent={} -o IdentitiesOnly=yes -o BatchMode=yes",
-                escaped
-            ),
-        );
+        if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+            let escaped = shell_escape(&sock);
+            std::env::set_var(
+                "GIT_SSH_COMMAND",
+                format!(
+                    "ssh -o IdentityAgent={} -o IdentitiesOnly=yes -o BatchMode=yes",
+                    escaped
+                ),
+            );
+        }
     }
 }
 
@@ -58,6 +71,14 @@ pub fn ensure_git_ssh_command() -> Result<bool> {
     Ok(true)
 }
 
+fn has_agent_socket() -> bool {
+    let env_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
+    if env_sock.as_ref().map(|p| p.exists()).unwrap_or(false) {
+        return true;
+    }
+    find_1password_sock().is_some()
+}
+
 fn find_1password_sock() -> Option<PathBuf> {
     let candidates = [
         "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",
@@ -72,6 +93,14 @@ fn find_1password_sock() -> Option<PathBuf> {
     }
 
     None
+}
+
+fn env_truthy(key: &str) -> bool {
+    let Some(value) = std::env::var_os(key) else {
+        return false;
+    };
+    let value = value.to_string_lossy().to_lowercase();
+    matches!(value.as_str(), "1" | "true" | "yes" | "on")
 }
 
 fn git_config_get(key: &str) -> Result<Option<String>> {

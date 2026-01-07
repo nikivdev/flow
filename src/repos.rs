@@ -184,10 +184,13 @@ struct RepoInfo {
 struct RepoParent {
     #[serde(rename = "ssh_url")]
     ssh_url: String,
+    #[serde(default)]
+    clone_url: Option<String>,
 }
 
 pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     ssh::ensure_ssh_env();
+    let prefer_ssh = ssh::prefer_ssh();
     let repo_ref = parse_github_repo(&opts.url)?;
     let root = normalize_root(&opts.root)?;
     let owner_dir = root.join(&repo_ref.owner);
@@ -201,7 +204,11 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     fs::create_dir_all(&owner_dir)
         .with_context(|| format!("failed to create {}", owner_dir.display()))?;
 
-    let clone_url = format!("git@github.com:{}/{}.git", repo_ref.owner, repo_ref.repo);
+    let clone_url = if prefer_ssh {
+        format!("git@github.com:{}/{}.git", repo_ref.owner, repo_ref.repo)
+    } else {
+        format!("https://github.com/{}/{}.git", repo_ref.owner, repo_ref.repo)
+    };
     let shallow = !opts.full;
     let fetch_depth = if shallow { Some(1) } else { None };
     run_git_clone(&clone_url, &target_dir, shallow)?;
@@ -218,7 +225,7 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     let upstream_url = if let Some(url) = opts.upstream_url {
         Some(url)
     } else {
-        resolve_upstream_url(&repo_ref)?
+        resolve_upstream_url(&repo_ref, prefer_ssh)?
     };
 
     let (upstream_url, upstream_is_origin) = match upstream_url {
@@ -312,7 +319,7 @@ fn run_git_clone(url: &str, target_dir: &Path, shallow: bool) -> Result<()> {
     Ok(())
 }
 
-fn resolve_upstream_url(repo_ref: &RepoRef) -> Result<Option<String>> {
+fn resolve_upstream_url(repo_ref: &RepoRef, prefer_ssh: bool) -> Result<Option<String>> {
     let output = match Command::new("gh")
         .args([
             "api",
@@ -346,7 +353,15 @@ fn resolve_upstream_url(repo_ref: &RepoRef) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let parent = info.parent.or(info.source).map(|parent| parent.ssh_url);
+    let parent = info.parent.or(info.source).map(|parent| {
+        if prefer_ssh {
+            parent.ssh_url
+        } else {
+            parent
+                .clone_url
+                .unwrap_or_else(|| parent.ssh_url)
+        }
+    });
 
     Ok(parent)
 }
