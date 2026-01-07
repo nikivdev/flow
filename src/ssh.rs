@@ -1,7 +1,10 @@
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
 use crate::config;
 
 pub fn prefer_ssh() -> bool {
@@ -20,6 +23,8 @@ pub fn ensure_ssh_env() {
 
     let sock = if env_sock_valid {
         env_sock.clone()
+    } else if let Some(flow_sock) = flow_agent_status() {
+        Some(flow_sock)
     } else {
         find_1password_sock()
     };
@@ -48,7 +53,7 @@ pub fn ensure_ssh_env() {
 }
 
 pub fn ensure_git_ssh_command() -> Result<bool> {
-    let Some(sock) = find_1password_sock() else {
+    let Some(sock) = preferred_agent_sock() else {
         return Ok(false);
     };
 
@@ -71,6 +76,25 @@ pub fn ensure_git_ssh_command() -> Result<bool> {
     Ok(true)
 }
 
+pub fn ensure_git_ssh_command_for_sock(sock: &Path, force: bool) -> Result<bool> {
+    let desired = format!(
+        "ssh -o IdentityAgent={} -o IdentitiesOnly=yes",
+        shell_escape(sock)
+    );
+
+    if !force {
+        if let Some(current) = git_config_get("core.sshCommand")? {
+            let current = current.trim();
+            if !current.is_empty() && !current.contains("IdentityAgent=") {
+                return Ok(false);
+            }
+        }
+    }
+
+    git_config_set("core.sshCommand", &desired)?;
+    Ok(true)
+}
+
 pub fn ensure_git_https_insteadof() -> Result<bool> {
     let desired = ["git@github.com:", "ssh://git@github.com/"];
     let mut changed = false;
@@ -85,9 +109,164 @@ pub fn ensure_git_https_insteadof() -> Result<bool> {
     Ok(changed)
 }
 
+pub fn clear_git_https_insteadof() -> Result<bool> {
+    let desired = ["git@github.com:", "ssh://git@github.com/"];
+    let mut changed = false;
+
+    if remove_url_rewrite("url.https://github.com/.insteadOf", &desired)? {
+        changed = true;
+    }
+    if remove_url_rewrite("url.https://github.com/.pushInsteadOf", &desired)? {
+        changed = true;
+    }
+
+    Ok(changed)
+}
+
+pub fn ensure_flow_agent() -> Result<PathBuf> {
+    if let Some(sock) = flow_agent_status() {
+        return Ok(sock);
+    }
+
+    let sock = flow_agent_sock();
+    if sock.exists() {
+        if probe_agent(&sock) {
+            return Ok(sock);
+        }
+        let _ = fs::remove_file(&sock);
+    }
+    let state_path = flow_agent_state_path();
+    if let Some(parent) = state_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let output = Command::new("ssh-agent")
+        .args(["-a", sock.to_string_lossy().as_ref(), "-s"])
+        .output()
+        .context("failed to start ssh-agent")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("ssh-agent failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid = parse_agent_output(&stdout, "SSH_AGENT_PID")
+        .and_then(|val| val.parse::<u32>().ok())
+        .context("failed to parse ssh-agent pid")?;
+    let sock_path = parse_agent_output(&stdout, "SSH_AUTH_SOCK")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| sock.clone());
+
+    let state = FlowAgentState {
+        pid,
+        sock: sock_path.clone(),
+    };
+    let content = serde_json::to_string_pretty(&state)?;
+    fs::write(&state_path, content)?;
+
+    Ok(sock_path)
+}
+
+pub fn flow_agent_status() -> Option<PathBuf> {
+    let sock = flow_agent_sock();
+    if !sock.exists() {
+        return None;
+    }
+
+    if let Some(state) = load_flow_agent_state() {
+        if !pid_alive(state.pid) {
+            return None;
+        }
+        return Some(state.sock);
+    }
+
+    if probe_agent(&sock) {
+        return Some(sock);
+    }
+
+    None
+}
+
+fn preferred_agent_sock() -> Option<PathBuf> {
+    let env_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
+    if env_sock.as_ref().map(|p| p.exists()).unwrap_or(false) {
+        return env_sock;
+    }
+    if let Some(flow_sock) = flow_agent_status() {
+        return Some(flow_sock);
+    }
+    find_1password_sock()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FlowAgentState {
+    pid: u32,
+    sock: PathBuf,
+}
+
+fn flow_agent_sock() -> PathBuf {
+    config::global_config_dir()
+        .join("ssh")
+        .join("agent.sock")
+}
+
+fn flow_agent_state_path() -> PathBuf {
+    config::global_config_dir()
+        .join("ssh")
+        .join("agent.json")
+}
+
+fn load_flow_agent_state() -> Option<FlowAgentState> {
+    let path = flow_agent_state_path();
+    let content = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn parse_agent_output(stdout: &str, key: &str) -> Option<String> {
+    for part in stdout.split(&[';', '\n'][..]) {
+        let trimmed = part.trim();
+        let needle = format!("{}=", key);
+        if let Some(rest) = trimmed.strip_prefix(&needle) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+fn probe_agent(sock: &Path) -> bool {
+    let status = match Command::new("ssh-add")
+        .args(["-l"])
+        .env("SSH_AUTH_SOCK", sock)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => status,
+        Err(_) => return false,
+    };
+
+    match status.code() {
+        Some(2) | None => false,
+        _ => true,
+    }
+}
+
 fn has_agent_socket() -> bool {
     let env_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
     if env_sock.as_ref().map(|p| p.exists()).unwrap_or(false) {
+        return true;
+    }
+    if flow_agent_status().is_some() {
         return true;
     }
     find_1password_sock().is_some()
@@ -178,6 +357,19 @@ fn git_config_add(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn git_config_unset_all(key: &str, value: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["config", "--global", "--unset-all", key, value])
+        .status()
+        .context("failed to run git config")?;
+
+    if !status.success() {
+        anyhow::bail!("git config --global --unset-all {} failed", key);
+    }
+
+    Ok(())
+}
+
 fn add_url_rewrite(key: &str, desired: &[&str]) -> Result<bool> {
     let existing = git_config_get_all(key)?;
     let mut changed = false;
@@ -188,6 +380,20 @@ fn add_url_rewrite(key: &str, desired: &[&str]) -> Result<bool> {
         }
         git_config_add(key, value)?;
         changed = true;
+    }
+
+    Ok(changed)
+}
+
+fn remove_url_rewrite(key: &str, desired: &[&str]) -> Result<bool> {
+    let existing = git_config_get_all(key)?;
+    let mut changed = false;
+
+    for value in desired {
+        if existing.iter().any(|val| val == value) {
+            git_config_unset_all(key, value)?;
+            changed = true;
+        }
     }
 
     Ok(changed)

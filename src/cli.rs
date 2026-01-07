@@ -201,6 +201,11 @@ pub enum Commands {
     )]
     Env(EnvCommand),
     #[command(
+        about = "Manage SSH keys via 1focus.",
+        long_about = "Generate, store, and unlock SSH keys stored in 1focus personal env vars, then wire git to use the Flow SSH agent."
+    )]
+    Ssh(SshCommand),
+    #[command(
         about = "Manage project todos.",
         long_about = "Create, list, edit, and complete lightweight todos stored in .ai/todos/todos.json."
     )]
@@ -980,6 +985,12 @@ pub struct EnvCommand {
     pub action: Option<EnvAction>,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct SshCommand {
+    #[command(subcommand)]
+    pub action: Option<SshAction>,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum EnvAction {
     /// Sync project settings and set up autonomous agent workflow.
@@ -1078,6 +1089,34 @@ pub enum EnvAction {
     Token {
         #[command(subcommand)]
         action: TokenAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SshAction {
+    /// Generate a new SSH keypair and store it in 1focus personal env vars.
+    Setup {
+        /// Optional key name (default: "default").
+        #[arg(long, default_value = "default")]
+        name: String,
+        /// Skip automatically unlocking the key after setup.
+        #[arg(long)]
+        no_unlock: bool,
+    },
+    /// Unlock the SSH key from 1focus and load it into the Flow SSH agent.
+    Unlock {
+        /// Optional key name (default: "default").
+        #[arg(long, default_value = "default")]
+        name: String,
+        /// TTL for ssh-agent in hours (default: 24).
+        #[arg(long, default_value = "24")]
+        ttl_hours: u64,
+    },
+    /// Show whether the Flow SSH agent and key are available.
+    Status {
+        /// Optional key name (default: "default").
+        #[arg(long, default_value = "default")]
+        name: String,
     },
 }
 

@@ -41,6 +41,7 @@ pub mod start;
 pub mod tools;
 pub mod todo;
 pub mod ssh;
+pub mod ssh_keys;
 pub mod upstream;
 pub mod sync;
 pub mod task_match;
