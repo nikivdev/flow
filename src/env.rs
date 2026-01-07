@@ -1469,7 +1469,7 @@ fn list(environment: &str) -> Result<()> {
 }
 
 /// Set a personal (global) env var.
-fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
+pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
     let auth = load_auth_config()?;
     let token = auth
         .token
