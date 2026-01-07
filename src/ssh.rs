@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use anyhow::{Context, Result};
 use crate::config;
 
 pub fn ensure_ssh_env() {
@@ -32,6 +34,30 @@ pub fn ensure_ssh_env() {
     }
 }
 
+pub fn ensure_git_ssh_command() -> Result<bool> {
+    let Some(sock) = find_1password_sock() else {
+        return Ok(false);
+    };
+
+    let desired = format!(
+        "ssh -o IdentityAgent={} -o IdentitiesOnly=yes",
+        shell_escape(&sock)
+    );
+
+    if let Some(current) = git_config_get("core.sshCommand")? {
+        let current = current.trim();
+        if current == desired {
+            return Ok(false);
+        }
+        if !current.is_empty() && !current.contains("IdentityAgent=") {
+            return Ok(false);
+        }
+    }
+
+    git_config_set("core.sshCommand", &desired)?;
+    Ok(true)
+}
+
 fn find_1password_sock() -> Option<PathBuf> {
     let candidates = [
         "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",
@@ -46,6 +72,36 @@ fn find_1password_sock() -> Option<PathBuf> {
     }
 
     None
+}
+
+fn git_config_get(key: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["config", "--global", "--get", key])
+        .output()
+        .context("failed to run git config")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(value))
+}
+
+fn git_config_set(key: &str, value: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["config", "--global", key, value])
+        .status()
+        .context("failed to run git config")?;
+
+    if !status.success() {
+        anyhow::bail!("git config --global {} failed", key);
+    }
+
+    Ok(())
 }
 
 fn shell_escape(path: &Path) -> String {

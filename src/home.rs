@@ -48,6 +48,11 @@ struct HomeConfigSection {
 
 pub fn run(opts: HomeOpts) -> Result<()> {
     ssh::ensure_ssh_env();
+    match ssh::ensure_git_ssh_command() {
+        Ok(true) => println!("Configured git to use 1Password SSH agent."),
+        Ok(false) => {}
+        Err(err) => println!("warning: failed to configure git ssh: {}", err),
+    }
     let home = dirs::home_dir().context("Could not find home directory")?;
     let config_dir = home.join("config");
     let repo = parse_repo_input(&opts.repo)?;
