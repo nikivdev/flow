@@ -8,6 +8,8 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::config;
+
 #[derive(Serialize, Deserialize)]
 pub struct InvocationRecord {
     pub timestamp_ms: u128,
@@ -57,10 +59,8 @@ impl InvocationRecord {
 
 pub fn record(invocation: InvocationRecord) -> Result<()> {
     let path = history_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create history dir {}", parent.display()))?;
-    }
+    let _ = config::ensure_global_config_dir()
+        .with_context(|| format!("failed to create history dir {}", path.display()))?;
 
     let mut file = OpenOptions::new()
         .create(true)
