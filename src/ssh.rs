@@ -14,7 +14,10 @@ pub fn prefer_ssh() -> bool {
     if env_truthy("FLOW_FORCE_SSH") {
         return true;
     }
-    has_agent_socket()
+    if let Some(sock) = preferred_agent_sock() {
+        return agent_has_identities(&sock);
+    }
+    false
 }
 
 pub fn ensure_ssh_env() {
@@ -261,15 +264,20 @@ fn probe_agent(sock: &Path) -> bool {
     }
 }
 
-fn has_agent_socket() -> bool {
-    let env_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
-    if env_sock.as_ref().map(|p| p.exists()).unwrap_or(false) {
-        return true;
-    }
-    if flow_agent_status().is_some() {
-        return true;
-    }
-    find_1password_sock().is_some()
+fn agent_has_identities(sock: &Path) -> bool {
+    let status = match Command::new("ssh-add")
+        .args(["-l"])
+        .env("SSH_AUTH_SOCK", sock)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => status,
+        Err(_) => return false,
+    };
+
+    matches!(status.code(), Some(0))
 }
 
 fn find_1password_sock() -> Option<PathBuf> {
