@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use regex::Regex;
 use serde::Deserialize;
 
 use crate::cli::{HomeOpts, ReposCloneOpts};
@@ -71,10 +72,162 @@ pub fn run(opts: HomeOpts) -> Result<()> {
         );
     }
 
+    let archived = archive_existing_configs(&config_dir)?;
     apply_config(&config_dir)?;
     ensure_kar_repo(&flow_bin)?;
 
+    if !archived.is_empty() {
+        println!("\nMoved existing config files to ~/flow-archive:");
+        for path in archived {
+            println!("  {}", path.display());
+        }
+        println!("Restore any file by moving it back to its original path.");
+    }
+
     Ok(())
+}
+
+fn archive_existing_configs(config_dir: &Path) -> Result<Vec<PathBuf>> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    let archive_root = home.join("flow-archive");
+    let mappings = load_link_mappings(config_dir)?;
+    let mut moved = Vec::new();
+
+    for (source_rel, dest_rel) in mappings {
+        let source = config_dir.join(&source_rel);
+        if !source.exists() {
+            continue;
+        }
+
+        let dest_rel = normalize_dest_rel(&dest_rel)?;
+        let dest = home.join(&dest_rel);
+        if !dest.exists() {
+            continue;
+        }
+
+        if is_symlink_to(&dest, &source) {
+            continue;
+        }
+
+        let mut archive_path = archive_root.join(&dest_rel);
+        if archive_path.exists() {
+            archive_path = archive_path.with_extension(format!(
+                "bak-{}",
+                chrono::Utc::now().timestamp()
+            ));
+        }
+
+        if let Some(parent) = archive_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        fs::rename(&dest, &archive_path).with_context(|| {
+            format!(
+                "failed to move {} to {}",
+                dest.display(),
+                archive_path.display()
+            )
+        })?;
+        moved.push(archive_path);
+    }
+
+    Ok(moved)
+}
+
+fn normalize_dest_rel(dest: &Path) -> Result<PathBuf> {
+    let dest_str = dest.to_string_lossy();
+    if let Some(stripped) = dest_str.strip_prefix("~/") {
+        return Ok(PathBuf::from(stripped));
+    }
+    if dest.is_absolute() {
+        bail!("absolute paths are not supported in sync links: {}", dest.display());
+    }
+    Ok(dest.to_path_buf())
+}
+
+fn is_symlink_to(link: &Path, expected: &Path) -> bool {
+    let meta = match fs::symlink_metadata(link) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if !meta.file_type().is_symlink() {
+        return false;
+    }
+
+    let target = match fs::read_link(link) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let resolved = if target.is_absolute() {
+        target
+    } else {
+        link.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    };
+
+    let expected = match fs::canonicalize(expected) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let resolved = match fs::canonicalize(resolved) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    resolved == expected
+}
+
+fn load_link_mappings(config_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let sync_file = config_dir.join("sync").join("src").join("main.ts");
+    if sync_file.exists() {
+        let raw = fs::read_to_string(&sync_file)
+            .with_context(|| format!("failed to read {}", sync_file.display()))?;
+        let re = Regex::new(r#""([^"]+)"\s*:\s*"([^"]+)""#)
+            .context("failed to compile link regex")?;
+        let mut links = Vec::new();
+        let mut in_links = false;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("const LINKS") {
+                in_links = true;
+                continue;
+            }
+            if in_links && trimmed.starts_with('}') {
+                break;
+            }
+            if !in_links {
+                continue;
+            }
+            if let Some(caps) = re.captures(trimmed) {
+                let src = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                let dst = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+                if !src.is_empty() && !dst.is_empty() {
+                    links.push((PathBuf::from(src), PathBuf::from(dst)));
+                }
+            }
+        }
+        if !links.is_empty() {
+            return Ok(links);
+        }
+    }
+
+    Ok(default_link_mappings())
+}
+
+fn default_link_mappings() -> Vec<(PathBuf, PathBuf)> {
+    vec![
+        ("fish/config.fish", ".config/fish/config.fish"),
+        ("fish/fn.fish", ".config/fish/fn.fish"),
+        ("i/karabiner/karabiner.edn", ".config/karabiner.edn"),
+        ("i/kar", ".config/kar"),
+        ("i/git/.gitconfig", ".gitconfig"),
+        ("i/ssh/config", ".ssh/config"),
+        ("i/ghost/ghost.toml", ".config/ghost/ghost.toml"),
+        ("i/flow", ".config/flow"),
+    ]
+    .into_iter()
+    .map(|(src, dst)| (PathBuf::from(src), PathBuf::from(dst)))
+    .collect()
 }
 
 fn apply_config(config_dir: &Path) -> Result<()> {
@@ -86,12 +239,14 @@ fn apply_config(config_dir: &Path) -> Result<()> {
                 &[sync_script.to_string_lossy().as_ref(), "link"],
                 Some(config_dir),
             )?;
+            ensure_link_targets(config_dir)?;
             return Ok(());
         }
     }
 
     if which::which("sync").is_ok() {
         run_command("sync", &["link"], Some(config_dir))?;
+        ensure_link_targets(config_dir)?;
         return Ok(());
     }
 
@@ -111,13 +266,68 @@ fn apply_config(config_dir: &Path) -> Result<()> {
                 Some(config_dir),
             )?;
         }
+        ensure_link_targets(config_dir)?;
         return Ok(());
     }
 
-    bail!(
-        "sync tool not available; install bun or build the sync CLI in {}",
+    println!(
+        "sync tool not available; applying symlinks directly from {}",
         config_dir.display()
-    )
+    );
+    ensure_link_targets(config_dir)
+}
+
+fn ensure_link_targets(config_dir: &Path) -> Result<()> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    let mappings = load_link_mappings(config_dir)?;
+
+    for (source_rel, dest_rel) in mappings {
+        let source = config_dir.join(&source_rel);
+        if !source.exists() {
+            continue;
+        }
+
+        let dest_rel = normalize_dest_rel(&dest_rel)?;
+        let dest = home.join(&dest_rel);
+
+        if is_symlink_to(&dest, &source) {
+            continue;
+        }
+
+        if let Ok(meta) = fs::symlink_metadata(&dest) {
+            if meta.file_type().is_dir() {
+                fs::remove_dir_all(&dest)
+                    .with_context(|| format!("failed to remove {}", dest.display()))?;
+            } else {
+                fs::remove_file(&dest)
+                    .with_context(|| format!("failed to remove {}", dest.display()))?;
+            }
+        }
+
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+        }
+
+        create_symlink(&source, &dest)?;
+    }
+
+    Ok(())
+}
+
+fn create_symlink(source: &Path, dest: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source, dest)
+            .with_context(|| format!("failed to symlink {} -> {}", dest.display(), source.display()))?;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        bail!("symlinks are only supported on unix-like systems");
+    }
 }
 
 fn ensure_kar_repo(flow_bin: &Path) -> Result<()> {
