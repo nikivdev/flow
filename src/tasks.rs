@@ -31,7 +31,7 @@ use crate::{
     discover,
     flox::{self, FloxEnv},
     history::{self, InvocationRecord},
-    hub, projects, task_match,
+    hub, init, projects, task_match,
     running::{self, RunningProcess},
 };
 
@@ -556,6 +556,16 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
 
 pub(crate) fn load_project_config(path: PathBuf) -> Result<(PathBuf, Config)> {
     let config_path = resolve_path(path)?;
+    if !config_path.exists() {
+        let is_default = config_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some("flow.toml");
+        if is_default {
+            init::write_template(&config_path)?;
+            println!("Created starter flow.toml at {}", config_path.display());
+        }
+    }
     let cfg = config::load(&config_path).with_context(|| {
         format!(
             "failed to load flow tasks configuration at {}",
