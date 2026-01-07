@@ -167,6 +167,7 @@ impl Default for Config {
             railway: None,
             commit: None,
             setup: None,
+            ssh: None,
         }
     }
 }
