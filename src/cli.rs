@@ -290,6 +290,17 @@ pub enum Commands {
         long_about = "AI-maintained documentation that stays in sync with the codebase. Docs are stored in .ai/docs/ and can be updated based on recent commits."
     )]
     Docs(DocsCommand),
+    #[command(
+        about = "Upgrade flow to the latest version.",
+        long_about = "Download and install the latest version of flow from GitHub releases. Checks for newer versions and replaces the current executable."
+    )]
+    Upgrade(UpgradeOpts),
+    #[command(
+        about = "Manage GitHub releases.",
+        long_about = "Create, list, and manage GitHub releases. Supports uploading release assets (binaries, tarballs) and generating release notes.",
+        alias = "rel"
+    )]
+    Release(GhReleaseCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1653,6 +1664,92 @@ pub struct ParallelCommand {
 pub struct DocsCommand {
     #[command(subcommand)]
     pub action: Option<DocsAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UpgradeOpts {
+    /// Upgrade to a specific version (e.g., "0.2.0" or "v0.2.0").
+    #[arg(value_name = "VERSION")]
+    pub version: Option<String>,
+    /// Print what would happen without making changes.
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
+    /// Force upgrade even if already on the latest version.
+    #[arg(long, short)]
+    pub force: bool,
+    /// Download to a specific path instead of replacing the current executable.
+    #[arg(long, short)]
+    pub output: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GhReleaseCommand {
+    #[command(subcommand)]
+    pub action: Option<GhReleaseAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum GhReleaseAction {
+    /// Create a new GitHub release.
+    Create(GhReleaseCreateOpts),
+    /// List recent releases.
+    #[command(alias = "ls")]
+    List {
+        /// Number of releases to show.
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
+    /// Delete a release.
+    Delete {
+        /// Release tag to delete.
+        tag: String,
+        /// Skip confirmation.
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Download release assets.
+    Download {
+        /// Release tag (defaults to latest).
+        #[arg(short, long)]
+        tag: Option<String>,
+        /// Output directory.
+        #[arg(short, long, default_value = ".")]
+        output: String,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GhReleaseCreateOpts {
+    /// Version tag (e.g., "v0.1.0"). Auto-detected from Cargo.toml if not provided.
+    #[arg(value_name = "TAG")]
+    pub tag: Option<String>,
+    /// Release title (defaults to tag name).
+    #[arg(short, long)]
+    pub title: Option<String>,
+    /// Release notes (reads from stdin or file if not provided).
+    #[arg(short, long)]
+    pub notes: Option<String>,
+    /// Read release notes from a file.
+    #[arg(long)]
+    pub notes_file: Option<String>,
+    /// Generate release notes automatically from commits.
+    #[arg(long)]
+    pub generate_notes: bool,
+    /// Create as draft release.
+    #[arg(long)]
+    pub draft: bool,
+    /// Mark as prerelease.
+    #[arg(long)]
+    pub prerelease: bool,
+    /// Asset files to upload (can be specified multiple times).
+    #[arg(short, long, value_name = "FILE")]
+    pub asset: Vec<String>,
+    /// Target commit/branch for the release tag.
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Skip confirmation prompts.
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]

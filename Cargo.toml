@@ -44,6 +44,10 @@ uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 ctrlc = "3.4"
 rpassword = "7"
+atty = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 mockito = "1.7"
