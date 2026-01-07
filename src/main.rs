@@ -6,10 +6,9 @@ use clap::{Parser, error::ErrorKind};
 use flowd::{
     agents, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    commit, commits, daemon, deploy, docs, doctor, env, fixup, history, home, hub, init, init_tracing,
-    log_server, notify, palette, parallel, processes, projects, publish, repos, setup, ssh_keys,
-    skills, storage, sync, task_match, tasks, todo, tools, upstream, deps,
-    web,
+    commit, commits, daemon, deploy, docs, doctor, env, fixup, gh_release, history, home, hub, init,
+    init_tracing, log_server, notify, palette, parallel, processes, projects, publish, repos, setup,
+    ssh_keys, skills, storage, sync, task_match, tasks, todo, tools, upgrade, upstream, deps, web,
 };
 
 fn main() -> Result<()> {
@@ -221,6 +220,12 @@ fn main() -> Result<()> {
         }
         Some(Commands::Docs(cmd)) => {
             docs::run(cmd)?;
+        }
+        Some(Commands::Upgrade(opts)) => {
+            upgrade::run(opts)?;
+        }
+        Some(Commands::Release(cmd)) => {
+            gh_release::run(cmd)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
