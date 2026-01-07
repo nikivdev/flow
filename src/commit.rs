@@ -671,7 +671,7 @@ pub fn run_with_check(
     )
 }
 
-/// Run commitWithCheck and always sync AI sessions to GitEdit (ignores config).
+/// Run commitWithCheck, honoring the global gitedit setting for sync/hash.
 pub fn run_with_check_with_gitedit(
     push: bool,
     include_context: bool,
@@ -679,6 +679,7 @@ pub fn run_with_check_with_gitedit(
     author_message: Option<&str>,
     max_tokens: usize,
 ) -> Result<()> {
+    let force_gitedit = gitedit_globally_enabled();
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
         return delegate_to_hub_with_check(
             "commit",  // CLI command name
@@ -696,7 +697,7 @@ pub fn run_with_check_with_gitedit(
         review_selection,
         author_message,
         max_tokens,
-        true,
+        force_gitedit,
     )
 }
 

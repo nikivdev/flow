@@ -154,8 +154,8 @@ pub enum Commands {
     )]
     Match(MatchOpts),
     #[command(
-        about = "AI-powered commit with code review and GitEdit sync.",
-        long_about = "Stages all changes, runs code review for bugs/security, generates commit message, commits, pushes, and syncs AI sessions to gitedit.dev.",
+        about = "AI-powered commit with code review and optional GitEdit sync.",
+        long_about = "Stages all changes, runs code review for bugs/security, generates commit message, commits, pushes, and syncs AI sessions to gitedit.dev when enabled in global config.",
         alias = "c"
     )]
     Commit(CommitOpts),
@@ -167,8 +167,8 @@ pub enum Commands {
     )]
     CommitSimple(CommitOpts),
     #[command(
-        about = "AI commit with code review (no GitEdit sync).",
-        long_about = "Like 'commit' but without syncing to gitedit.dev.",
+        about = "AI commit with code review (GitEdit sync honors config).",
+        long_about = "Like 'commit' but without forcing gitedit.dev sync; respects the global gitedit setting.",
         alias = "cc",
         visible_alias = "commitWithCheck",
         hide = true
