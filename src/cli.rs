@@ -211,10 +211,11 @@ pub enum Commands {
     )]
     Deps(DepsCommand),
     #[command(
-        about = "Manage storage providers (e.g., Jazz).",
-        long_about = "Provision storage backends and populate environment variables for services like Jazz."
+        name = "db",
+        about = "Manage databases (Jazz, Postgres).",
+        long_about = "Provision database backends and run database workflows (Jazz worker accounts, Postgres migrations). Defaults are tuned for Planetscale Postgres."
     )]
-    Storage(StorageCommand),
+    Db(DbCommand),
     #[command(
         about = "Manage AI tools (.ai/tools/*.ts).",
         long_about = "Create, list, and run TypeScript tools via Bun. Tools are fast, reusable scripts stored in .ai/tools/. Use 'codify' to generate tools from natural language.",
@@ -645,11 +646,11 @@ pub struct SecretsPullOpts {
     #[arg(long, default_value = "flow.toml")]
     pub config: PathBuf,
 
-    /// Environment name defined in the storage config.
+    /// Environment name defined in the secrets config.
     #[arg(value_name = "ENV")]
     pub env: String,
 
-    /// Optional override for the storage hub URL (default flow.1focus.ai).
+    /// Optional override for the secrets hub URL (default flow.1focus.ai).
     #[arg(long)]
     pub hub: Option<String>,
 
@@ -663,15 +664,17 @@ pub struct SecretsPullOpts {
 }
 
 #[derive(Args, Debug, Clone)]
-pub struct StorageCommand {
+pub struct DbCommand {
     #[command(subcommand)]
-    pub action: StorageAction,
+    pub action: DbAction,
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub enum StorageAction {
+pub enum DbAction {
     /// Jazz worker accounts and env wiring.
     Jazz(JazzStorageCommand),
+    /// Postgres workflows (migrations/generation).
+    Postgres(PostgresCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -706,8 +709,36 @@ pub enum JazzStorageAction {
 pub enum JazzStorageKind {
     /// Mirror worker account (gitedit-style mirror sync).
     Mirror,
-    /// Env store worker account (1focus env storage).
+    /// Env store worker account (1focus env store).
     EnvStore,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PostgresCommand {
+    #[command(subcommand)]
+    pub action: PostgresAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PostgresAction {
+    /// Generate Drizzle migrations for the configured Postgres project.
+    Generate {
+        /// Override the Postgres project directory (defaults to ~/org/la/la/server).
+        #[arg(long)]
+        project: Option<PathBuf>,
+    },
+    /// Apply Drizzle migrations for the configured Postgres project.
+    Migrate {
+        /// Override the Postgres project directory (defaults to ~/org/la/la/server).
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Explicit DATABASE_URL (falls back to env/.env/Planetscale env vars).
+        #[arg(long)]
+        database_url: Option<String>,
+        /// Generate migrations before applying them.
+        #[arg(long, default_value_t = false)]
+        generate: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -981,7 +1012,7 @@ pub enum EnvAction {
         #[arg(short, long, default_value = "production")]
         environment: String,
     },
-    /// Set a personal env var (default storage).
+    /// Set a personal env var (default backend).
     Set {
         /// KEY=VALUE pair to set.
         pair: String,
