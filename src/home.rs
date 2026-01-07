@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::cli::{HomeOpts, ReposCloneOpts};
-use crate::repos;
+use crate::cli::HomeOpts;
+use crate::config;
 
 const KAR_REPO_URL: &str = "https://github.com/nikivdev/kar";
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
@@ -52,7 +52,7 @@ pub fn run(opts: HomeOpts) -> Result<()> {
     let repo = parse_repo_input(&opts.repo)?;
     let flow_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("f"));
 
-    ensure_repo(&config_dir, Some(&repo.clone_url), "config")?;
+    ensure_repo(&config_dir, Some(&repo.clone_url), "config", false)?;
 
     let internal_url = if let Some(internal) = opts.internal.as_deref() {
         Some(internal.to_string())
@@ -62,9 +62,9 @@ pub fn run(opts: HomeOpts) -> Result<()> {
 
     let internal_dir = config_dir.join("i");
     if internal_dir.exists() {
-        ensure_repo(&internal_dir, internal_url.as_deref(), "config/i")?;
+        ensure_repo(&internal_dir, internal_url.as_deref(), "config/i", false)?;
     } else if let Some(url) = internal_url.as_deref() {
-        ensure_repo(&internal_dir, Some(url), "config/i")?;
+        ensure_repo(&internal_dir, Some(url), "config/i", false)?;
     } else {
         println!(
             "No internal repo configured; skipping {} (use --internal or add home.toml)",
@@ -331,15 +331,12 @@ fn create_symlink(source: &Path, dest: &Path) -> Result<()> {
 }
 
 fn ensure_kar_repo(flow_bin: &Path) -> Result<()> {
-    let opts = ReposCloneOpts {
-        url: KAR_REPO_URL.to_string(),
-        root: DEFAULT_REPOS_ROOT.to_string(),
-        full: false,
-        no_upstream: false,
-        upstream_url: None,
-    };
-    let repo_path = repos::clone_repo(opts)?;
-    update_repo(&repo_path)?;
+    let repo = parse_repo_input(KAR_REPO_URL)?;
+    let root = config::expand_path(DEFAULT_REPOS_ROOT);
+    let owner_dir = root.join(&repo.owner);
+    let repo_path = owner_dir.join(&repo.repo);
+
+    ensure_repo(&repo_path, Some(&repo.clone_url), "kar", true)?;
 
     let flow_toml = repo_path.join("flow.toml");
     if !flow_toml.exists() {
@@ -355,7 +352,7 @@ fn ensure_kar_repo(flow_bin: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_repo(dest: &Path, repo_url: Option<&str>, label: &str) -> Result<()> {
+fn ensure_repo(dest: &Path, repo_url: Option<&str>, label: &str, allow_origin_reset: bool) -> Result<()> {
     if dest.exists() {
         if !dest.join(".git").exists() {
             bail!(
@@ -368,12 +365,20 @@ fn ensure_repo(dest: &Path, repo_url: Option<&str>, label: &str) -> Result<()> {
         if let Some(expected) = repo_url {
             if let Ok(actual) = git_capture(dest, &["remote", "get-url", "origin"]) {
                 if !urls_match(expected, actual.trim()) {
+                    if allow_origin_reset {
+                        run_command(
+                            "git",
+                            &["remote", "set-url", "origin", expected],
+                            Some(dest),
+                        )?;
+                    } else {
                     bail!(
                         "{} origin mismatch: expected {}, got {}",
                         label,
                         expected,
                         actual.trim()
                     );
+                    }
                 }
             }
         }
