@@ -791,29 +791,37 @@ pub fn global_config_dir() -> PathBuf {
 /// Ensure the global config directory exists (moves aside files that block it).
 pub fn ensure_global_config_dir() -> Result<PathBuf> {
     let dir = global_config_dir();
-    if dir.exists() {
-        if dir.is_dir() {
-            return Ok(dir);
+    if let Some(parent) = dir.parent() {
+        ensure_dir(parent)?;
+    }
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
+fn ensure_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        if path.is_dir() {
+            return Ok(());
         }
 
-        let backup = backup_path(&dir);
-        fs::rename(&dir, &backup).with_context(|| {
+        let backup = backup_path(path);
+        fs::rename(path, &backup).with_context(|| {
             format!(
                 "failed to move existing {} to {}",
-                dir.display(),
+                path.display(),
                 backup.display()
             )
         })?;
         tracing::warn!(
             "moved blocking path {} to {}",
-            dir.display(),
+            path.display(),
             backup.display()
         );
     }
 
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
-    Ok(dir)
+    fs::create_dir_all(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    Ok(())
 }
 
 fn backup_path(path: &Path) -> PathBuf {
