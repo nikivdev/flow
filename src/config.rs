@@ -799,9 +799,18 @@ pub fn ensure_global_config_dir() -> Result<PathBuf> {
 }
 
 fn ensure_dir(path: &Path) -> Result<()> {
-    if path.exists() {
-        if path.is_dir() {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        let is_dir = meta.is_dir();
+        let is_symlink = meta.file_type().is_symlink();
+        if is_dir {
             return Ok(());
+        }
+        if is_symlink {
+            if let Ok(target_meta) = fs::metadata(path) {
+                if target_meta.is_dir() {
+                    return Ok(());
+                }
+            }
         }
 
         let backup = backup_path(path);
