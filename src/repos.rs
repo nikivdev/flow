@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::cli::{ReposAction, ReposCloneOpts, ReposCommand};
-use crate::{config, publish, upstream};
+use crate::{config, publish, ssh, upstream};
 
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
 
@@ -187,6 +187,7 @@ struct RepoParent {
 }
 
 pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
+    ssh::ensure_ssh_env();
     let repo_ref = parse_github_repo(&opts.url)?;
     let root = normalize_root(&opts.root)?;
     let owner_dir = root.join(&repo_ref.owner);
