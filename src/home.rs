@@ -11,7 +11,8 @@ use serde::Deserialize;
 use crate::cli::HomeOpts;
 use crate::{config, ssh};
 
-const KAR_REPO_URL: &str = "git@github.com:nikivdev/kar.git";
+const KAR_REPO_URL_HTTPS: &str = "https://github.com/nikivdev/kar.git";
+const KAR_REPO_URL_SSH: &str = "git@github.com:nikivdev/kar.git";
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
 
 #[derive(Debug, Clone)]
@@ -48,6 +49,7 @@ struct HomeConfigSection {
 
 pub fn run(opts: HomeOpts) -> Result<()> {
     ssh::ensure_ssh_env();
+    let prefer_ssh = ssh::prefer_ssh();
     match ssh::ensure_git_ssh_command() {
         Ok(true) => println!("Configured git to use 1Password SSH agent."),
         Ok(false) => {}
@@ -55,15 +57,17 @@ pub fn run(opts: HomeOpts) -> Result<()> {
     }
     let home = dirs::home_dir().context("Could not find home directory")?;
     let config_dir = home.join("config");
-    let repo = parse_repo_input(&opts.repo)?;
+    let repo = coerce_repo_scheme(parse_repo_input(&opts.repo)?, prefer_ssh);
     let flow_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("f"));
 
     ensure_repo(&config_dir, Some(&repo.clone_url), "config", false)?;
 
     let internal_url = if let Some(internal) = opts.internal.as_deref() {
-        Some(internal.to_string())
+        Some(coerce_repo_url(internal, prefer_ssh))
     } else {
-        read_internal_repo(&config_dir)?.or_else(|| derive_internal_repo(&repo))
+        read_internal_repo(&config_dir)?
+            .map(|url| coerce_repo_url(&url, prefer_ssh))
+            .or_else(|| derive_internal_repo(&repo))
     };
 
     let internal_dir = config_dir.join("i");
@@ -80,7 +84,7 @@ pub fn run(opts: HomeOpts) -> Result<()> {
 
     let archived = archive_existing_configs(&config_dir)?;
     apply_config(&config_dir)?;
-    ensure_kar_repo(&flow_bin)?;
+    ensure_kar_repo(&flow_bin, prefer_ssh)?;
 
     if !archived.is_empty() {
         println!("\nMoved existing config files to ~/flow-archive:");
@@ -336,8 +340,13 @@ fn create_symlink(source: &Path, dest: &Path) -> Result<()> {
     }
 }
 
-fn ensure_kar_repo(flow_bin: &Path) -> Result<()> {
-    let repo = parse_repo_input(KAR_REPO_URL)?;
+fn ensure_kar_repo(flow_bin: &Path, prefer_ssh: bool) -> Result<()> {
+    let repo_url = if prefer_ssh {
+        KAR_REPO_URL_SSH
+    } else {
+        KAR_REPO_URL_HTTPS
+    };
+    let repo = parse_repo_input(repo_url)?;
     let root = config::expand_path(DEFAULT_REPOS_ROOT);
     let owner_dir = root.join(&repo.owner);
     let repo_path = owner_dir.join(&repo.repo);
@@ -612,6 +621,36 @@ fn parse_owner_repo(raw: &str, scheme: RepoScheme) -> Result<RepoInput> {
         clone_url,
         scheme,
     })
+}
+
+fn coerce_repo_scheme(repo: RepoInput, prefer_ssh: bool) -> RepoInput {
+    let desired = if prefer_ssh {
+        RepoScheme::Ssh
+    } else {
+        RepoScheme::Https
+    };
+    if repo.scheme == desired {
+        return repo;
+    }
+
+    let clone_url = match desired {
+        RepoScheme::Https => format!("https://github.com/{}/{}.git", repo.owner, repo.repo),
+        RepoScheme::Ssh => format!("git@github.com:{}/{}.git", repo.owner, repo.repo),
+    };
+
+    RepoInput {
+        owner: repo.owner,
+        repo: repo.repo,
+        clone_url,
+        scheme: desired,
+    }
+}
+
+fn coerce_repo_url(raw: &str, prefer_ssh: bool) -> String {
+    match parse_repo_input(raw) {
+        Ok(repo) => coerce_repo_scheme(repo, prefer_ssh).clone_url,
+        Err(_) => raw.to_string(),
+    }
 }
 
 fn urls_match(a: &str, b: &str) -> bool {
