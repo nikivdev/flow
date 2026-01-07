@@ -71,6 +71,20 @@ pub fn ensure_git_ssh_command() -> Result<bool> {
     Ok(true)
 }
 
+pub fn ensure_git_https_insteadof() -> Result<bool> {
+    let desired = ["git@github.com:", "ssh://git@github.com/"];
+    let mut changed = false;
+
+    if add_url_rewrite("url.https://github.com/.insteadOf", &desired)? {
+        changed = true;
+    }
+    if add_url_rewrite("url.https://github.com/.pushInsteadOf", &desired)? {
+        changed = true;
+    }
+
+    Ok(changed)
+}
+
 fn has_agent_socket() -> bool {
     let env_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
     if env_sock.as_ref().map(|p| p.exists()).unwrap_or(false) {
@@ -120,6 +134,24 @@ fn git_config_get(key: &str) -> Result<Option<String>> {
     Ok(Some(value))
 }
 
+fn git_config_get_all(key: &str) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["config", "--global", "--get-all", key])
+        .output()
+        .context("failed to run git config")?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
 fn git_config_set(key: &str, value: &str) -> Result<()> {
     let status = Command::new("git")
         .args(["config", "--global", key, value])
@@ -131,6 +163,34 @@ fn git_config_set(key: &str, value: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn git_config_add(key: &str, value: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["config", "--global", "--add", key, value])
+        .status()
+        .context("failed to run git config")?;
+
+    if !status.success() {
+        anyhow::bail!("git config --global --add {} failed", key);
+    }
+
+    Ok(())
+}
+
+fn add_url_rewrite(key: &str, desired: &[&str]) -> Result<bool> {
+    let existing = git_config_get_all(key)?;
+    let mut changed = false;
+
+    for value in desired {
+        if existing.iter().any(|val| val == value) {
+            continue;
+        }
+        git_config_add(key, value)?;
+        changed = true;
+    }
+
+    Ok(changed)
 }
 
 fn shell_escape(path: &Path) -> String {
