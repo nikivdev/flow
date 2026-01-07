@@ -15,13 +15,23 @@ const KEY_PRIVATE: &str = "SSH_PRIVATE_KEY_B64";
 const KEY_PUBLIC: &str = "SSH_PUBLIC_KEY";
 const KEY_FINGERPRINT: &str = "SSH_FINGERPRINT";
 
+pub(crate) const DEFAULT_KEY_NAME: &str = "default";
+
 pub fn run(action: Option<SshAction>) -> Result<()> {
     match action {
         Some(SshAction::Setup { name, no_unlock }) => setup(&name, !no_unlock),
         Some(SshAction::Unlock { name, ttl_hours }) => unlock(&name, ttl_hours),
         Some(SshAction::Status { name }) => status(&name),
-        None => status("default"),
+        None => status(DEFAULT_KEY_NAME),
     }
+}
+
+pub(crate) fn ensure_default_identity(ttl_hours: u64) -> Result<()> {
+    if ssh::has_identities() {
+        return Ok(());
+    }
+
+    unlock(DEFAULT_KEY_NAME, ttl_hours)
 }
 
 fn setup(name: &str, unlock_after: bool) -> Result<()> {
