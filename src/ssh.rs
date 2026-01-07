@@ -7,13 +7,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::config;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshMode {
+    Auto,
+    Force,
+    Https,
+}
+
 pub fn prefer_ssh() -> bool {
+    match ssh_mode() {
+        SshMode::Https => false,
+        SshMode::Force => true,
+        SshMode::Auto => has_identities(),
+    }
+}
+
+pub fn ssh_mode() -> SshMode {
     if env_truthy("FLOW_FORCE_HTTPS") {
-        return false;
+        return SshMode::Https;
     }
     if env_truthy("FLOW_FORCE_SSH") {
-        return true;
+        return SshMode::Force;
     }
+    if let Some(mode) = std::env::var_os("FLOW_SSH_MODE") {
+        if let Some(parsed) = parse_mode(&mode.to_string_lossy()) {
+            return parsed;
+        }
+    }
+
+    if let Some(parsed) = ssh_mode_from_config() {
+        return parsed;
+    }
+
+    SshMode::Auto
+}
+
+pub fn has_identities() -> bool {
     if let Some(sock) = preferred_agent_sock() {
         return agent_has_identities(&sock);
     }
@@ -200,6 +229,28 @@ fn preferred_agent_sock() -> Option<PathBuf> {
         return Some(flow_sock);
     }
     find_1password_sock()
+}
+
+fn ssh_mode_from_config() -> Option<SshMode> {
+    let path = config::default_config_path();
+    if !path.exists() {
+        return None;
+    }
+
+    let cfg = config::load(&path).ok()?;
+    let ssh = cfg.ssh?;
+    ssh.mode
+        .as_deref()
+        .and_then(parse_mode)
+}
+
+fn parse_mode(raw: &str) -> Option<SshMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(SshMode::Auto),
+        "force" | "ssh" => Some(SshMode::Force),
+        "https" => Some(SshMode::Https),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -481,6 +532,18 @@ mod tests {
             let _https = EnvVarGuard::set("FLOW_FORCE_HTTPS", "0");
             let _ssh = EnvVarGuard::set("FLOW_FORCE_SSH", "1");
             assert!(prefer_ssh());
+        }
+    }
+
+    #[test]
+    fn ssh_mode_parses_env_override() {
+        {
+            let _https = EnvVarGuard::set("FLOW_SSH_MODE", "https");
+            assert_eq!(ssh_mode(), SshMode::Https);
+        }
+        {
+            let _force = EnvVarGuard::set("FLOW_SSH_MODE", "force");
+            assert_eq!(ssh_mode(), SshMode::Force);
         }
     }
 

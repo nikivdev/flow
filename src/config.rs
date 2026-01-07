@@ -68,6 +68,23 @@ pub struct Config {
     /// Setup defaults (global or project-level).
     #[serde(default)]
     pub setup: Option<SetupConfig>,
+    /// SSH defaults (global or project-level).
+    #[serde(default)]
+    pub ssh: Option<SshConfig>,
+}
+
+/// SSH config (mode, key name, etc.).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SshConfig {
+    /// ssh mode: "auto", "force", or "https"
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// default key name to unlock (defaults to "default").
+    #[serde(default)]
+    pub key_name: Option<String>,
+    /// auto-unlock ssh keys when needed (default: true).
+    #[serde(default)]
+    pub auto_unlock: Option<bool>,
 }
 
 /// Configuration for commit workflow.

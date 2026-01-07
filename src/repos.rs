@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::cli::{ReposAction, ReposCloneOpts, ReposCommand};
-use crate::{config, publish, ssh, upstream};
+use crate::{config, publish, ssh, ssh_keys, upstream};
 
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
 
@@ -190,6 +190,18 @@ struct RepoParent {
 
 pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     ssh::ensure_ssh_env();
+    let mode = ssh::ssh_mode();
+    if matches!(mode, ssh::SshMode::Force) && !ssh::has_identities() {
+        match ssh_keys::ensure_default_identity(24) {
+            Ok(()) => {}
+            Err(err) => {
+                bail!(
+                    "SSH mode is forced but no key is available. Run `f ssh setup` or `f ssh unlock` (error: {})",
+                    err
+                );
+            }
+        }
+    }
     let prefer_ssh = ssh::prefer_ssh();
     let repo_ref = parse_github_repo(&opts.url)?;
     let root = normalize_root(&opts.root)?;

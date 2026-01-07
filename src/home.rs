@@ -9,7 +9,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::cli::HomeOpts;
-use crate::{config, ssh};
+use crate::{config, ssh, ssh_keys};
 
 const KAR_REPO_URL_HTTPS: &str = "https://github.com/nikivdev/kar.git";
 const KAR_REPO_URL_SSH: &str = "git@github.com:nikivdev/kar.git";
@@ -49,6 +49,16 @@ struct HomeConfigSection {
 
 pub fn run(opts: HomeOpts) -> Result<()> {
     ssh::ensure_ssh_env();
+    let mode = ssh::ssh_mode();
+    if matches!(mode, ssh::SshMode::Force) && !ssh::has_identities() {
+        match ssh_keys::ensure_default_identity(24) {
+            Ok(()) => {}
+            Err(err) => println!(
+                "warning: SSH mode is forced but no key is available ({}). Run `f ssh setup` or `f ssh unlock`.",
+                err
+            ),
+        }
+    }
     let prefer_ssh = ssh::prefer_ssh();
     match ssh::ensure_git_ssh_command() {
         Ok(true) => println!("Configured git to use 1Password SSH agent."),
