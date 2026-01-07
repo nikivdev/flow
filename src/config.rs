@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -785,6 +786,46 @@ pub fn global_config_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config/flow")
+}
+
+/// Ensure the global config directory exists (moves aside files that block it).
+pub fn ensure_global_config_dir() -> Result<PathBuf> {
+    let dir = global_config_dir();
+    if dir.exists() {
+        if dir.is_dir() {
+            return Ok(dir);
+        }
+
+        let backup = backup_path(&dir);
+        fs::rename(&dir, &backup).with_context(|| {
+            format!(
+                "failed to move existing {} to {}",
+                dir.display(),
+                backup.display()
+            )
+        })?;
+        tracing::warn!(
+            "moved blocking path {} to {}",
+            dir.display(),
+            backup.display()
+        );
+    }
+
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("flow");
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    path.with_file_name(format!("{}-archive-{}", name, ts))
 }
 
 /// Load global secrets from ~/.config/flow/secrets.toml

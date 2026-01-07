@@ -81,9 +81,8 @@ pub fn load_running_processes() -> Result<RunningProcesses> {
 /// Atomically save running processes (write to temp, then rename)
 pub fn save_running_processes(processes: &RunningProcesses) -> Result<()> {
     let path = running_processes_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let _ = crate::config::ensure_global_config_dir()
+        .with_context(|| format!("failed to create {}", path.display()))?;
 
     let temp_path = path.with_extension("json.tmp");
     let contents = serde_json::to_string_pretty(processes)?;
