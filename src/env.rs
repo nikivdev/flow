@@ -626,7 +626,7 @@ fn set_project_env_var_from_pair(pair: &str, environment: &str) -> Result<()> {
     set_project_env_var_internal(key.trim(), value.trim(), environment, None)
 }
 
-fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
+pub(crate) fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
     let auth = load_auth_config()?;
     let token = auth
         .token
