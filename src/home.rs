@@ -55,6 +55,13 @@ pub fn run(opts: HomeOpts) -> Result<()> {
         Ok(false) => {}
         Err(err) => println!("warning: failed to configure git ssh: {}", err),
     }
+    if !prefer_ssh {
+        match ssh::ensure_git_https_insteadof() {
+            Ok(true) => println!("Configured git to use HTTPS when SSH isn't available."),
+            Ok(false) => {}
+            Err(err) => println!("warning: failed to configure git https rewrites: {}", err),
+        }
+    }
     let home = dirs::home_dir().context("Could not find home directory")?;
     let config_dir = home.join("config");
     let repo = coerce_repo_scheme(parse_repo_input(&opts.repo)?, prefer_ssh);
