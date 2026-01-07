@@ -85,6 +85,9 @@ pub fn ensure_ssh_env() {
 }
 
 pub fn ensure_git_ssh_command() -> Result<bool> {
+    if !git_config_writable() {
+        return Ok(false);
+    }
     let Some(sock) = preferred_agent_sock() else {
         return Ok(false);
     };
@@ -128,6 +131,9 @@ pub fn ensure_git_ssh_command_for_sock(sock: &Path, force: bool) -> Result<bool>
 }
 
 pub fn ensure_git_https_insteadof() -> Result<bool> {
+    if !git_config_writable() {
+        return Ok(false);
+    }
     let desired = ["git@github.com:", "ssh://git@github.com/"];
     let mut changed = false;
 
@@ -142,6 +148,9 @@ pub fn ensure_git_https_insteadof() -> Result<bool> {
 }
 
 pub fn clear_git_https_insteadof() -> Result<bool> {
+    if !git_config_writable() {
+        return Ok(false);
+    }
     let desired = ["git@github.com:", "ssh://git@github.com/"];
     let mut changed = false;
 
@@ -370,6 +379,33 @@ fn git_config_get(key: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(value))
+}
+
+fn git_config_writable() -> bool {
+    let home = match std::env::var_os("HOME") {
+        Some(val) => PathBuf::from(val),
+        None => return false,
+    };
+    if !home.is_dir() {
+        return false;
+    }
+
+    let path = home.join(".gitconfig");
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(_) => return true,
+    };
+    if meta.is_dir() {
+        return false;
+    }
+    if meta.file_type().is_symlink() {
+        match fs::metadata(&path) {
+            Ok(target_meta) => target_meta.is_file(),
+            Err(_) => false,
+        }
+    } else {
+        true
+    }
 }
 
 fn git_config_get_all(key: &str) -> Result<Vec<String>> {

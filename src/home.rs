@@ -60,18 +60,6 @@ pub fn run(opts: HomeOpts) -> Result<()> {
         }
     }
     let prefer_ssh = ssh::prefer_ssh();
-    match ssh::ensure_git_ssh_command() {
-        Ok(true) => println!("Configured git to use 1Password SSH agent."),
-        Ok(false) => {}
-        Err(err) => println!("warning: failed to configure git ssh: {}", err),
-    }
-    if !prefer_ssh {
-        match ssh::ensure_git_https_insteadof() {
-            Ok(true) => println!("Configured git to use HTTPS when SSH isn't available."),
-            Ok(false) => {}
-            Err(err) => println!("warning: failed to configure git https rewrites: {}", err),
-        }
-    }
     let home = dirs::home_dir().context("Could not find home directory")?;
     let config_dir = home.join("config");
     let repo = coerce_repo_scheme(parse_repo_input(&opts.repo)?, prefer_ssh);
@@ -101,6 +89,19 @@ pub fn run(opts: HomeOpts) -> Result<()> {
 
     let archived = archive_existing_configs(&config_dir)?;
     apply_config(&config_dir)?;
+
+    match ssh::ensure_git_ssh_command() {
+        Ok(true) => println!("Configured git to use 1Password SSH agent."),
+        Ok(false) => {}
+        Err(err) => println!("warning: failed to configure git ssh: {}", err),
+    }
+    if !prefer_ssh {
+        match ssh::ensure_git_https_insteadof() {
+            Ok(true) => println!("Configured git to use HTTPS when SSH isn't available."),
+            Ok(false) => {}
+            Err(err) => println!("warning: failed to configure git https rewrites: {}", err),
+        }
+    }
     ensure_kar_repo(&flow_bin, prefer_ssh)?;
 
     if !archived.is_empty() {
