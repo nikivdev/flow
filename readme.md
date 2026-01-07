@@ -1,37 +1,33 @@
 # flow
 
-> Project level config for insanely fast feedback loops
+> Project-level config for insanely fast feedback loops
 
-The goal of this CLI is to parse out `flow.toml` files like the one in [this repo](flow.toml).
+CLI that parses `flow.toml` files to define and run project tasks with AI-assisted workflows.
 
 ## Install
 
-> [!NOTE]
-> Prebuilt darwin/arm64 tarballs are hosted; other platforms fall back to source builds automatically.
-
-<!-- FLOW_INSTALL_START -->
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | \
-  FLOW_RELEASE_BASE=https://flow.yourdomain.com FLOW_VERSION=latest bash
-```
-<!-- FLOW_INSTALL_END -->
-
-## Release workflow (darwin/arm64 only)
-
-To serve a single macOS arm64 build from your own host and let other platforms build from source:
-
-```bash
-# One-time: tell infra where your host is (Tailscale or public)
-infra host set root@100.114.156.47 -p 22
-
-# One-time: set [release] config in flow.toml
-# Then run the release task (builds + uploads + updates README snippet)
-f deploy release
+curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | bash
 ```
 
-Install from that host using the snippet in the Install section (auto-updated on release).
+This downloads prebuilt binaries from GitHub releases. Falls back to building from source if no binary is available for your platform.
 
-Non-darwin/arm64 platforms will attempt the release download, then fall back to a source build.
+**Environment variables:**
+- `FLOW_VERSION=v0.1.0` - Install specific version
+- `FLOW_BIN_DIR=/custom/path` - Custom install location (default: `~/.local/bin`)
+
+After install, add to your PATH if needed:
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+## Upgrade
+
+```bash
+f upgrade              # Upgrade to latest version
+f upgrade --dry-run    # Check what would be upgraded
+f upgrade v0.2.0       # Install specific version
+```
 
 ## Short summary
 
@@ -78,67 +74,91 @@ Below readme is mostly generated with AI so feel free to ignore.
 
 I also use `flow` CLI to manage [hubs](#hub) but its experimental as the hub implementation I am running is closed code. The big idea is that `flow` just keeps the hub alive and that's it.
 
-## Building (does not work..)
-
-- macOS/Linux. Needs `curl` + `tar`. Installs `f` and a `flow` symlink to `~/.local/bin` (set `FLOW_BIN_DIR=/usr/local/bin` to change).
-- Defaults to the latest GoReleaser binary; only falls back to building from source if a release isn’t found.
-- Optional envs: `FLOW_VERSION=vX.Y.Z` (pin), `FLOW_INSTALL_LIN=0` (skip lin), `FLOW_NO_RELEASE=1` (force source build).
-- Add the bin dir to PATH if needed (e.g. `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile`), then run `f --version`.
-
-Manual build remains available:
+## Building from Source
 
 ```bash
-cargo build --bin f
-# Optional: build the bundled lin watcher/hub helper if you don't already have lin installed
-cargo build --bin lin
+# Clone the repo
+git clone https://github.com/nikivdev/flow.git
+cd flow
+
+# Build
+cargo build --release --bin f --bin lin
+
+# Install
+cp target/release/f ~/.local/bin/
+cp target/release/lin ~/.local/bin/
+ln -sf ~/.local/bin/f ~/.local/bin/flow
 ```
 
-## Release builds (GoReleaser) (does not work..)
+## Creating Releases
 
-- One-time deps: `brew install goreleaser zig` (or get binaries), `cargo install --locked cargo-zigbuild`, `rustup default stable`.
-- Quick local dry run: `goreleaser release --snapshot --clean`
-- Publish a tag: `git tag v0.1.0 && git push origin v0.1.0` then `GITHUB_TOKEN=... goreleaser release --clean` (or let CI run on the tag).
-- Outputs `flow_<version>_<os>_<arch>.tar.gz` + checksums for darwin/linux (amd64/arm64); installer pulls these by default.
+For maintainers to create new releases:
 
-Once you have `f` (also available as `flow`) CLI, create `flow.toml` in some project with tasks like:
+```bash
+# Build release binary
+cargo build --release --bin f --bin lin
 
+# Create tarball (adjust os/arch as needed)
+mkdir -p dist
+cd target/release
+tar -czvf ../../dist/flow_v0.2.0_darwin_arm64.tar.gz f lin
+
+# Create GitHub release with assets
+f release create v0.2.0 -a dist/flow_v0.2.0_darwin_arm64.tar.gz --generate-notes
 ```
+
+Or use the `gh` CLI directly:
+```bash
+gh release create v0.2.0 --generate-notes dist/flow_v0.2.0_darwin_arm64.tar.gz
+```
+
+## Configuration
+
+Once you have `f` (also available as `flow`) CLI, create `flow.toml` in your project:
+
+```toml
 version = 1
-
-[deps]
-fast = "fast"  # single-command dependency; use ["cmd1", "cmd2"] for multiples
-
-# Optional: Flox install set to keep tools reproducible (parsed for future integration)
-[flox]
-[flox.install]
-eza.pkg-path = "eza"
-bat.pkg-path = "bat"
-edgedb.pkg-path = "edgedb"
-coreutils.pkg-path = "coreutils"
-parallel.pkg-path = "parallel"
-nil.pkg-path = "nil"
-nixfmt.pkg-path = "nixfmt"
-nixd.pkg-path = "nixd"
-deploy-rs.pkg-path = "deploy-rs"
-nixos-rebuild.pkg-path = "nixos-rebuild"
-nix-index.pkg-path = "nix-index"
-xcpretty.pkg-path = "xcpretty"
+name = "myproject"
 
 [[tasks]]
-name = "deploy-cli-local"
-command = "./scripts/deploy.sh"
-description = "Build the CLI/daemon and copy the binary to ~/.local/bin/flow"
+name = "setup"
+command = "npm install"
+description = "Install dependencies"
+
+[[tasks]]
+name = "dev"
+command = "npm run dev"
+description = "Start development server"
+
+[[tasks]]
+name = "test"
+command = "npm test"
 ```
 
-And if you run `f` in the project it will fuzzy search through all tasks you can run. You can also run tasks with `f <task>`.
+Run `f` in your project to fuzzy search through tasks, or `f <task>` to run directly.
 
 ## Commands
 
-- `f init` — scaffold a starter `flow.toml` in the current directory with stub `setup`/`dev` tasks.
-- `f tasks` — list tasks from the current `flow.toml` (name + description).
-- `f` (or `f <task>`) — interactive picker / direct task execution when a local `flow.toml` exists.
-- `f search` / `f s` — fuzzy search global commands/tasks (falls back to `~/.config/flow/flow.toml` if present).
-- `f hub start|stop` — ensure the `lin` hub is running (or stop it). Use `f hub --help` for flags.
+**Tasks:**
+- `f` — Interactive fuzzy picker for tasks
+- `f <task>` — Run a specific task
+- `f tasks` — List all tasks from `flow.toml`
+- `f init` — Scaffold a starter `flow.toml`
+- `f rerun` — Re-run the last task
+
+**Git & Publishing:**
+- `f commit` / `f c` — AI-powered commit with code review
+- `f sync` — Pull, merge upstream, push
+- `f publish` — Create GitHub repository from current folder
+- `f release create` — Create GitHub release with assets
+
+**Self-management:**
+- `f upgrade` — Upgrade to latest version
+- `f doctor` — Check system dependencies
+
+**Other:**
+- `f search` / `f s` — Fuzzy search global tasks
+- `f hub start|stop` — Manage the lin hub daemon
 
 ## Hub
 
