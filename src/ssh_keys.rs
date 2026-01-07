@@ -16,6 +16,7 @@ const KEY_PUBLIC: &str = "SSH_PUBLIC_KEY";
 const KEY_FINGERPRINT: &str = "SSH_FINGERPRINT";
 
 pub(crate) const DEFAULT_KEY_NAME: &str = "default";
+const DEFAULT_SSH_MODE: &str = "force";
 
 pub fn run(action: Option<SshAction>) -> Result<()> {
     match action {
@@ -31,7 +32,8 @@ pub(crate) fn ensure_default_identity(ttl_hours: u64) -> Result<()> {
         return Ok(());
     }
 
-    unlock(DEFAULT_KEY_NAME, ttl_hours)
+    let key_name = configured_key_name();
+    unlock(&key_name, ttl_hours)
 }
 
 fn setup(name: &str, unlock_after: bool) -> Result<()> {
@@ -82,6 +84,7 @@ fn setup(name: &str, unlock_after: bool) -> Result<()> {
     println!("Stored SSH key in 1focus as '{}'.", key_name);
     println!("Public key:\n{}", public_key.trim());
     println!("Add it to GitHub: https://github.com/settings/keys");
+    ensure_global_ssh_config(&key_name)?;
 
     if unlock_after {
         unlock(&key_name, DEFAULT_TTL_HOURS)?;
@@ -168,6 +171,121 @@ fn status(name: &str) -> Result<()> {
         None => println!("Flow SSH agent: not running"),
     }
     Ok(())
+}
+
+fn ensure_global_ssh_config(key_name: &str) -> Result<()> {
+    let config_path = config::default_config_path();
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let contents = if config_path.exists() {
+        fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?
+    } else {
+        String::new()
+    };
+
+    let updated = upsert_ssh_block(&contents, DEFAULT_SSH_MODE, key_name);
+    if updated != contents {
+        fs::write(&config_path, updated)
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+        println!(
+            "Configured Flow to use SSH keys from 1focus (mode={}, key={}).",
+            DEFAULT_SSH_MODE, key_name
+        );
+    }
+
+    Ok(())
+}
+
+fn upsert_ssh_block(input: &str, mode: &str, key_name: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_ssh = false;
+    let mut saw_ssh = false;
+    let mut saw_mode = false;
+    let mut saw_key = false;
+    let ends_with_newline = input.ends_with('\n');
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_ssh {
+                if !saw_mode {
+                    out.push(format!("mode = \"{}\"", mode));
+                    saw_mode = true;
+                }
+                if !saw_key {
+                    out.push(format!("key_name = \"{}\"", key_name));
+                    saw_key = true;
+                }
+            }
+
+            in_ssh = trimmed == "[ssh]";
+            if in_ssh {
+                saw_ssh = true;
+            }
+            out.push(line.to_string());
+            continue;
+        }
+
+        if in_ssh {
+            if trimmed.starts_with("mode") && trimmed.contains('=') {
+                out.push(format!("mode = \"{}\"", mode));
+                saw_mode = true;
+                continue;
+            }
+            if trimmed.starts_with("key_name") && trimmed.contains('=') {
+                out.push(format!("key_name = \"{}\"", key_name));
+                saw_key = true;
+                continue;
+            }
+        }
+
+        out.push(line.to_string());
+    }
+
+    if in_ssh {
+        if !saw_mode {
+            out.push(format!("mode = \"{}\"", mode));
+        }
+        if !saw_key {
+            out.push(format!("key_name = \"{}\"", key_name));
+        }
+    }
+
+    if !saw_ssh {
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        out.push("[ssh]".to_string());
+        out.push(format!("mode = \"{}\"", mode));
+        out.push(format!("key_name = \"{}\"", key_name));
+    }
+
+    let mut rendered = out.join("\n");
+    if ends_with_newline || rendered.is_empty() {
+        rendered.push('\n');
+    }
+    rendered
+}
+
+fn configured_key_name() -> String {
+    let config_path = config::default_config_path();
+    if config_path.exists() {
+        if let Ok(cfg) = config::load(&config_path) {
+            if let Some(ssh_cfg) = cfg.ssh {
+                if let Some(name) = ssh_cfg.key_name {
+                    if !name.trim().is_empty() {
+                        return name;
+                    }
+                }
+            }
+        }
+    }
+
+    DEFAULT_KEY_NAME.to_string()
 }
 
 fn key_env_keys(name: &str) -> (String, String, String) {
@@ -283,5 +401,23 @@ mod tests {
             let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn upsert_ssh_block_adds_when_missing() {
+        let updated = upsert_ssh_block("", "force", "default");
+        assert!(updated.contains("[ssh]"));
+        assert!(updated.contains("mode = \"force\""));
+        assert!(updated.contains("key_name = \"default\""));
+    }
+
+    #[test]
+    fn upsert_ssh_block_updates_existing_values() {
+        let input = "[ssh]\nmode = \"auto\"\nkey_name = \"work\"\n";
+        let updated = upsert_ssh_block(input, "force", "default");
+        assert!(updated.contains("mode = \"force\""));
+        assert!(updated.contains("key_name = \"default\""));
+        assert!(!updated.contains("mode = \"auto\""));
+        assert!(!updated.contains("key_name = \"work\""));
     }
 }
