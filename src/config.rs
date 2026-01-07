@@ -798,6 +798,26 @@ pub fn ensure_global_config_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Global state directory for runtime data.
+pub fn global_state_dir() -> PathBuf {
+    let config_dir = global_config_dir();
+    if is_dir_path(&config_dir) {
+        return config_dir;
+    }
+
+    config_dir.with_file_name("flow-state")
+}
+
+/// Ensure the global state directory exists.
+pub fn ensure_global_state_dir() -> Result<PathBuf> {
+    let dir = global_state_dir();
+    if let Some(parent) = dir.parent() {
+        ensure_dir(parent)?;
+    }
+    ensure_dir(&dir)?;
+    Ok(dir)
+}
+
 fn ensure_dir(path: &Path) -> Result<()> {
     if let Ok(meta) = fs::symlink_metadata(path) {
         let is_dir = meta.is_dir();
@@ -831,6 +851,20 @@ fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)
         .with_context(|| format!("failed to create {}", path.display()))?;
     Ok(())
+}
+
+fn is_dir_path(path: &Path) -> bool {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.is_dir() {
+            return true;
+        }
+        if meta.file_type().is_symlink() {
+            if let Ok(target_meta) = fs::metadata(path) {
+                return target_meta.is_dir();
+            }
+        }
+    }
+    false
 }
 
 fn backup_path(path: &Path) -> PathBuf {
