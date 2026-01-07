@@ -413,3 +413,86 @@ fn shell_escape(path: &Path) -> String {
     escaped.push('\'');
     escaped
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn env_truthy_matches_expected_values() {
+        let _guard = EnvVarGuard::set("FLOW_TEST_BOOL", "true");
+        assert!(env_truthy("FLOW_TEST_BOOL"));
+        drop(_guard);
+
+        for value in ["1", "yes", "on", "TRUE"] {
+            let _guard = EnvVarGuard::set("FLOW_TEST_BOOL", value);
+            assert!(env_truthy("FLOW_TEST_BOOL"), "value {}", value);
+        }
+
+        let _guard = EnvVarGuard::set("FLOW_TEST_BOOL", "0");
+        assert!(!env_truthy("FLOW_TEST_BOOL"));
+    }
+
+    #[test]
+    fn prefer_ssh_respects_force_flags() {
+        {
+            let _https = EnvVarGuard::set("FLOW_FORCE_HTTPS", "1");
+            let _ssh = EnvVarGuard::set("FLOW_FORCE_SSH", "1");
+            assert!(!prefer_ssh());
+        }
+        {
+            let _https = EnvVarGuard::set("FLOW_FORCE_HTTPS", "0");
+            let _ssh = EnvVarGuard::set("FLOW_FORCE_SSH", "1");
+            assert!(prefer_ssh());
+        }
+    }
+
+    #[test]
+    fn shell_escape_handles_single_quotes() {
+        let path = Path::new("/tmp/has'quote");
+        let escaped = shell_escape(path);
+        assert_eq!(escaped, "'/tmp/has'\\''quote'");
+    }
+
+    #[test]
+    fn parse_agent_output_reads_values() {
+        let sample = "SSH_AUTH_SOCK=/tmp/agent.sock; export SSH_AUTH_SOCK;\nSSH_AGENT_PID=4242; export SSH_AGENT_PID;\n";
+        assert_eq!(
+            parse_agent_output(sample, "SSH_AUTH_SOCK"),
+            Some("/tmp/agent.sock".to_string())
+        );
+        assert_eq!(
+            parse_agent_output(sample, "SSH_AGENT_PID"),
+            Some("4242".to_string())
+        );
+    }
+}

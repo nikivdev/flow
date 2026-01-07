@@ -226,3 +226,52 @@ fn compute_fingerprint(public_key_path: &PathBuf) -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout.split_whitespace().nth(1).map(|s| s.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_name_defaults_to_default() {
+        assert_eq!(normalize_name(""), "default");
+        assert_eq!(normalize_name("   "), "default");
+        assert_eq!(normalize_name("work"), "work");
+    }
+
+    #[test]
+    fn sanitize_env_suffix_normalizes() {
+        assert_eq!(sanitize_env_suffix("dev-ops"), "DEV_OPS");
+        assert_eq!(sanitize_env_suffix("aB9"), "AB9");
+        assert_eq!(sanitize_env_suffix("with space"), "WITH_SPACE");
+    }
+
+    #[test]
+    fn key_env_keys_uses_expected_prefixes() {
+        let (priv_key, pub_key, fp) = key_env_keys("default");
+        assert_eq!(priv_key, "FLOW_SSH_PRIVATE_KEY_B64");
+        assert_eq!(pub_key, "FLOW_SSH_PUBLIC_KEY");
+        assert_eq!(fp, "FLOW_SSH_FINGERPRINT");
+
+        let (priv_key, pub_key, fp) = key_env_keys("work");
+        assert_eq!(priv_key, "FLOW_SSH_PRIVATE_KEY_B64_WORK");
+        assert_eq!(pub_key, "FLOW_SSH_PUBLIC_KEY_WORK");
+        assert_eq!(fp, "FLOW_SSH_FINGERPRINT_WORK");
+    }
+
+    #[test]
+    fn write_private_key_sets_permissions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("id_ed25519_test");
+        write_private_key(&path, b"PRIVATE").expect("write key");
+
+        let content = fs::read_to_string(&path).expect("read key");
+        assert_eq!(content, "PRIVATE");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+}
