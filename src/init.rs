@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::{Path, PathBuf}};
 
 use anyhow::{Context, Result, bail};
 
@@ -17,21 +17,26 @@ command = ""
 description = "Start dev server (fill me)"
 "#;
 
-pub fn run(opts: InitOpts) -> Result<()> {
-    let target = resolve_path(opts.path);
-    if target.exists() {
-        bail!("{} already exists; refusing to overwrite", target.display());
-    }
-
-    if let Some(parent) = target.parent() {
+pub(crate) fn write_template(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create directory {}", parent.display()))?;
         }
     }
 
-    fs::write(&target, TEMPLATE)
-        .with_context(|| format!("failed to write {}", target.display()))?;
+    fs::write(path, TEMPLATE)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+pub fn run(opts: InitOpts) -> Result<()> {
+    let target = resolve_path(opts.path);
+    if target.exists() {
+        bail!("{} already exists; refusing to overwrite", target.display());
+    }
+
+    write_template(&target)?;
     println!("created {}", target.display());
     Ok(())
 }
