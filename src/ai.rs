@@ -116,6 +116,8 @@ struct AiSession {
     timestamp: Option<String>,
     /// Last message timestamp
     last_message_at: Option<String>,
+    /// Last user/assistant message text
+    last_message: Option<String>,
     /// First user message (as summary)
     first_message: Option<String>,
     /// First error summary (for sessions that never produced a user message)
@@ -1582,6 +1584,7 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
 
     let mut timestamp = None;
     let mut last_message_at = None;
+    let mut last_message = None;
     let mut first_message = None;
     let mut error_summary = None;
 
@@ -1601,7 +1604,13 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
                 if role == Some("user") || role == Some("assistant") {
                     if let Some(ref content) = msg.content {
                         if let Some(text) = extract_message_text(content) {
-                            if !text.trim().is_empty() {
+                            let clean_text = if role == Some("assistant") {
+                                strip_thinking_blocks(&text)
+                            } else {
+                                text
+                            };
+                            if !clean_text.trim().is_empty() {
+                                last_message = Some(clean_text);
                                 if let Some(ts) = entry.timestamp.clone() {
                                     last_message_at = Some(ts);
                                 }
@@ -1644,6 +1653,7 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
         provider,
         timestamp,
         last_message_at,
+        last_message,
         first_message,
         error_summary,
     })
@@ -1657,6 +1667,7 @@ fn parse_codex_session_file(
 
     let mut timestamp = None;
     let mut last_message_at = None;
+    let mut last_message = None;
     let mut first_message = None;
     let mut error_summary = None;
     let mut session_id = None;
@@ -1683,6 +1694,7 @@ fn parse_codex_session_file(
                 text
             };
             if !clean_text.trim().is_empty() {
+                last_message = Some(clean_text);
                 if let Some(ts) = extract_codex_timestamp(&entry) {
                     last_message_at = Some(ts);
                 }
@@ -1730,6 +1742,7 @@ fn parse_codex_session_file(
         provider: Provider::Codex,
         timestamp,
         last_message_at,
+        last_message,
         first_message,
         error_summary,
     };
@@ -1826,6 +1839,7 @@ fn list_sessions(provider: Provider) -> Result<()> {
         // Skip sessions without timestamps or content
         if session.timestamp.is_none()
             && session.last_message_at.is_none()
+            && session.last_message.is_none()
             && session.first_message.is_none()
             && session.error_summary.is_none()
         {
@@ -1848,11 +1862,13 @@ fn list_sessions(provider: Provider) -> Result<()> {
             .filter(|name| !is_auto_generated_name(name));
 
         let summary = session
-            .first_message
+            .last_message
             .as_deref()
+            .or(session.first_message.as_deref())
             .or(session.error_summary.as_deref())
             .unwrap_or("");
         let summary_clean = clean_summary(summary);
+        let id_short = &session.session_id[..8.min(session.session_id.len())];
 
         // Add provider indicator when showing all
         let provider_tag = if provider == Provider::All {
@@ -1877,10 +1893,11 @@ fn list_sessions(provider: Provider) -> Result<()> {
         } else {
             // For other sessions, show: [provider] time | summary
             format!(
-                "{}{} | {}",
+                "{}{} | {} | {}",
                 provider_tag,
                 relative_time,
-                truncate_str(&summary_clean, 60)
+                truncate_str(&summary_clean, 60),
+                id_short
             )
         };
 
@@ -2033,6 +2050,8 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
 
         for session in &sessions {
             if session.timestamp.is_none()
+                && session.last_message_at.is_none()
+                && session.last_message.is_none()
                 && session.first_message.is_none()
                 && session.error_summary.is_none()
             {
@@ -2040,8 +2059,9 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
             }
 
             let relative_time = session
-                .timestamp
+                .last_message_at
                 .as_deref()
+                .or(session.timestamp.as_deref())
                 .map(format_relative_time)
                 .unwrap_or_else(|| "".to_string());
 
@@ -2053,11 +2073,13 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
                 .filter(|name| !is_auto_generated_name(name));
 
             let summary = session
-                .first_message
+                .last_message
                 .as_deref()
+                .or(session.first_message.as_deref())
                 .or(session.error_summary.as_deref())
                 .unwrap_or("");
             let summary_clean = clean_summary(summary);
+            let id_short = &session.session_id[..8.min(session.session_id.len())];
 
             // Add provider indicator when showing all
             let provider_tag = if provider == Provider::All {
@@ -2080,10 +2102,11 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
                 )
             } else {
                 format!(
-                    "{}{} | {}",
+                    "{}{} | {} | {}",
                     provider_tag,
                     relative_time,
-                    truncate_str(&summary_clean, 60)
+                    truncate_str(&summary_clean, 60),
+                    id_short
                 )
             };
 
@@ -2268,6 +2291,8 @@ fn copy_context(
 
         for session in &sessions {
             if session.timestamp.is_none()
+                && session.last_message_at.is_none()
+                && session.last_message.is_none()
                 && session.first_message.is_none()
                 && session.error_summary.is_none()
             {
@@ -2275,8 +2300,9 @@ fn copy_context(
             }
 
             let relative_time = session
-                .timestamp
+                .last_message_at
                 .as_deref()
+                .or(session.timestamp.as_deref())
                 .map(format_relative_time)
                 .unwrap_or_else(|| "".to_string());
 
@@ -2288,11 +2314,13 @@ fn copy_context(
                 .filter(|name| !is_auto_generated_name(name));
 
             let summary = session
-                .first_message
+                .last_message
                 .as_deref()
+                .or(session.first_message.as_deref())
                 .or(session.error_summary.as_deref())
                 .unwrap_or("");
             let summary_clean = clean_summary(summary);
+            let id_short = &session.session_id[..8.min(session.session_id.len())];
 
             let provider_tag = if provider == Provider::All {
                 match session.provider {
@@ -2314,10 +2342,11 @@ fn copy_context(
                 )
             } else {
                 format!(
-                    "{}{} | {}",
+                    "{}{} | {} | {}",
                     provider_tag,
                     relative_time,
-                    truncate_str(&summary_clean, 60)
+                    truncate_str(&summary_clean, 60),
+                    id_short
                 )
             };
 
