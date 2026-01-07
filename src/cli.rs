@@ -85,6 +85,11 @@ pub enum Commands {
     )]
     Init(InitOpts),
     #[command(
+        about = "Clone and apply a home config repo.",
+        long_about = "Clones a GitHub config repo into ~/config, optionally pulls an internal repo into ~/config/i, then applies symlinked configs."
+    )]
+    Home(HomeOpts),
+    #[command(
         about = "Verify required tools and shell integrations.",
         long_about = "Checks for flox (for managed deps), lin (hub helper), and direnv + shell hook presence."
     )]
@@ -581,6 +586,15 @@ pub struct InitOpts {
     /// Where to write the scaffolded flow.toml (defaults to ./flow.toml).
     #[arg(long)]
     pub path: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HomeOpts {
+    /// GitHub URL or owner/repo for the config repo.
+    pub repo: String,
+    /// Optional internal config repo URL (cloned into ~/config/i).
+    #[arg(long)]
+    pub internal: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]

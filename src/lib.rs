@@ -18,6 +18,7 @@ pub mod env_setup;
 pub mod fixup;
 pub mod flox;
 pub mod history;
+pub mod home;
 pub mod hub;
 pub mod init;
 pub mod lin_runtime;

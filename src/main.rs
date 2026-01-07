@@ -6,7 +6,7 @@ use clap::{Parser, error::ErrorKind};
 use flowd::{
     agents, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    commit, commits, daemon, deploy, docs, doctor, env, fixup, history, hub, init, init_tracing,
+    commit, commits, daemon, deploy, docs, doctor, env, fixup, history, home, hub, init, init_tracing,
     log_server, notify, palette, parallel, processes, projects, publish, repos, setup,
     skills, storage, sync, task_match, tasks, todo, tools, upstream, deps,
     web,
@@ -41,6 +41,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Init(opts)) => {
             init::run(opts)?;
+        }
+        Some(Commands::Home(opts)) => {
+            home::run(opts)?;
         }
         Some(Commands::Doctor(opts)) => {
             doctor::run(opts)?;
