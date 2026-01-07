@@ -43,3 +43,17 @@ ln -s "${SOURCE_LIN}" "${TARGET_BIN_LIN}"
 echo "Symlinked CLI to ${TARGET_BIN_F} and ${TARGET_BIN_FLOW}"
 echo "Symlinked watcher daemon to ${TARGET_BIN_LIN}"
 echo "Ensure ${INSTALL_DIR} is on your PATH to run 'f', 'flow', or 'lin' from anywhere."
+
+case ":${PATH}:" in
+    *":${INSTALL_DIR}:"*) ;;
+    *)
+        echo "PATH missing ${INSTALL_DIR}. Add it with:"
+        echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+        ;;
+esac
+
+current_f="$(command -v f 2>/dev/null || true)"
+if [ -n "${current_f}" ] && [ "${current_f}" != "${TARGET_BIN_F}" ]; then
+    echo "Warning: 'f' resolves to ${current_f} (expected ${TARGET_BIN_F})."
+    echo "Make sure ${INSTALL_DIR} is earlier in PATH or run ${TARGET_BIN_F} directly."
+fi
