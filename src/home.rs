@@ -9,9 +9,9 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::cli::HomeOpts;
-use crate::config;
+use crate::{config, ssh};
 
-const KAR_REPO_URL: &str = "https://github.com/nikivdev/kar";
+const KAR_REPO_URL: &str = "git@github.com:nikivdev/kar.git";
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
 
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ struct RepoInput {
     scheme: RepoScheme,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum RepoScheme {
     Https,
     Ssh,
@@ -47,6 +47,7 @@ struct HomeConfigSection {
 }
 
 pub fn run(opts: HomeOpts) -> Result<()> {
+    ssh::ensure_ssh_env();
     let home = dirs::home_dir().context("Could not find home directory")?;
     let config_dir = home.join("config");
     let repo = parse_repo_input(&opts.repo)?;
@@ -352,7 +353,12 @@ fn ensure_kar_repo(flow_bin: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_repo(dest: &Path, repo_url: Option<&str>, label: &str, allow_origin_reset: bool) -> Result<()> {
+fn ensure_repo(
+    dest: &Path,
+    repo_url: Option<&str>,
+    label: &str,
+    allow_origin_reset: bool,
+) -> Result<()> {
     if dest.exists() {
         if !dest.join(".git").exists() {
             bail!(
@@ -363,22 +369,16 @@ fn ensure_repo(dest: &Path, repo_url: Option<&str>, label: &str, allow_origin_re
         }
 
         if let Some(expected) = repo_url {
-            if let Ok(actual) = git_capture(dest, &["remote", "get-url", "origin"]) {
+            if allow_origin_reset {
+                ensure_origin_url(dest, expected)?;
+            } else if let Ok(actual) = git_capture(dest, &["remote", "get-url", "origin"]) {
                 if !urls_match(expected, actual.trim()) {
-                    if allow_origin_reset {
-                        run_command(
-                            "git",
-                            &["remote", "set-url", "origin", expected],
-                            Some(dest),
-                        )?;
-                    } else {
                     bail!(
                         "{} origin mismatch: expected {}, got {}",
                         label,
                         expected,
                         actual.trim()
                     );
-                    }
                 }
             }
         }
@@ -423,6 +423,39 @@ fn clone_repo(repo_url: &str, dest: &Path) -> Result<()> {
         None,
     )?;
     println!("Cloned {}", dest.display());
+    Ok(())
+}
+
+fn ensure_origin_url(dest: &Path, expected: &str) -> Result<()> {
+    match git_capture(dest, &["remote", "get-url", "origin"]) {
+        Ok(actual) => {
+            let actual = actual.trim();
+            let mut needs_reset = !urls_match(expected, actual);
+            if !needs_reset {
+                if let (Some(expected_scheme), Some(actual_scheme)) =
+                    (scheme_for_url(expected), scheme_for_url(actual))
+                {
+                    if expected_scheme != actual_scheme {
+                        needs_reset = true;
+                    }
+                }
+            }
+            if needs_reset {
+                run_command(
+                    "git",
+                    &["remote", "set-url", "origin", expected],
+                    Some(dest),
+                )?;
+            }
+        }
+        Err(_) => {
+            run_command(
+                "git",
+                &["remote", "add", "origin", expected],
+                Some(dest),
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -598,4 +631,15 @@ fn normalize_repo_url(raw: &str) -> String {
         return format!("github.com/{}", rest);
     }
     trimmed.to_string()
+}
+
+fn scheme_for_url(raw: &str) -> Option<RepoScheme> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("git@github.com:") || trimmed.starts_with("ssh://git@github.com/") {
+        return Some(RepoScheme::Ssh);
+    }
+    if trimmed.starts_with("https://github.com/") || trimmed.starts_with("http://github.com/") {
+        return Some(RepoScheme::Https);
+    }
+    None
 }
