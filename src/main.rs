@@ -177,7 +177,7 @@ fn main() -> Result<()> {
         Some(Commands::Deps(cmd)) => {
             deps::run(cmd)?;
         }
-        Some(Commands::Storage(cmd)) => {
+        Some(Commands::Db(cmd)) => {
             storage::run(cmd)?;
         }
         Some(Commands::Tools(cmd)) => {

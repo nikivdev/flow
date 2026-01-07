@@ -90,7 +90,7 @@ f commit --help
 ### Other
 
 - **[skills](skills.md)** - Manage Codex skills
-- **[storage](storage.md)** - Manage storage providers
+- **[db](db.md)** - Manage databases and providers
 - **[tools](tools.md)** - Manage AI tools
 - **[notify](notify.md)** - Send proposal notifications
 - **[server](server.md)** - Start HTTP server for logs

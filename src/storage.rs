@@ -1,19 +1,24 @@
+use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use shellexpand::tilde;
 
-use crate::cli::{JazzStorageAction, JazzStorageKind, StorageAction, StorageCommand};
+use crate::cli::{
+    DbAction, DbCommand, JazzStorageAction, JazzStorageKind, PostgresAction,
+};
 use crate::{config, env};
 
 const DEFAULT_JAZZ_API_KEY_MIRROR: &str = "jazz-gitedit-prod";
 const DEFAULT_JAZZ_PEER_MIRROR: &str = "wss://cloud.jazz.tools/?key=jazz-gitedit-prod";
 const DEFAULT_JAZZ_API_KEY_ENV: &str = "1focus@1focus.app";
 const DEFAULT_JAZZ_PEER_ENV: &str = "wss://cloud.jazz.tools/?key=1focus@1focus.app";
+const DEFAULT_POSTGRES_PROJECT: &str = "~/org/la/la/server";
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct JazzCreateOutput {
@@ -23,9 +28,10 @@ pub(crate) struct JazzCreateOutput {
     pub(crate) agent_secret: String,
 }
 
-pub fn run(cmd: StorageCommand) -> Result<()> {
+pub fn run(cmd: DbCommand) -> Result<()> {
     match cmd.action {
-        StorageAction::Jazz(jazz) => run_jazz(jazz.action),
+        DbAction::Jazz(jazz) => run_jazz(jazz.action),
+        DbAction::Postgres(pg) => run_postgres(pg.action),
     }
 }
 
@@ -39,6 +45,140 @@ fn run_jazz(action: JazzStorageAction) -> Result<()> {
             environment,
         } => jazz_new(kind, name, peer, api_key, &environment),
     }
+}
+
+fn run_postgres(action: PostgresAction) -> Result<()> {
+    match action {
+        PostgresAction::Generate { project } => postgres_generate(project),
+        PostgresAction::Migrate {
+            project,
+            database_url,
+            generate,
+        } => postgres_migrate(project, database_url, generate),
+    }
+}
+
+fn postgres_generate(project: Option<PathBuf>) -> Result<()> {
+    let project_dir = resolve_postgres_project(project)?;
+    println!("Running migrations generate in {}", project_dir.display());
+    run_bun_script(&project_dir, "db:generate", None)
+}
+
+fn postgres_migrate(
+    project: Option<PathBuf>,
+    database_url: Option<String>,
+    generate: bool,
+) -> Result<()> {
+    let project_dir = resolve_postgres_project(project)?;
+    let database_url = resolve_database_url(database_url.as_deref(), &project_dir)?;
+
+    if generate {
+        println!("Generating migrations in {}", project_dir.display());
+        run_bun_script(&project_dir, "db:generate", Some(&database_url))?;
+    }
+
+    println!("Applying migrations in {}", project_dir.display());
+    run_bun_script(&project_dir, "db:migrate", Some(&database_url))
+}
+
+fn resolve_postgres_project(project: Option<PathBuf>) -> Result<PathBuf> {
+    let path = match project {
+        Some(path) => path,
+        None => PathBuf::from(tilde(DEFAULT_POSTGRES_PROJECT).as_ref()),
+    };
+
+    if path.exists() {
+        return Ok(path);
+    }
+
+    bail!(
+        "Postgres project path not found: {} (override with --project)",
+        path.display()
+    )
+}
+
+fn resolve_database_url(database_url: Option<&str>, project_dir: &Path) -> Result<String> {
+    if let Some(url) = database_url {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    for key in ["DATABASE_URL", "PLANETSCALE_DATABASE_URL", "PSCALE_DATABASE_URL"] {
+        if let Ok(url) = std::env::var(key) {
+            if !url.trim().is_empty() {
+                return Ok(url);
+            }
+        }
+    }
+
+    let env_path = project_dir.join(".env");
+    if let Some(value) = read_env_value(&env_path, "DATABASE_URL")? {
+        return Ok(value);
+    }
+
+    bail!(
+        "DATABASE_URL not found (set env, PLANETSCALE_DATABASE_URL, or add it to {})",
+        env_path.display()
+    )
+}
+
+fn read_env_value(path: &Path, key: &str) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read env file {}", path.display()))?;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim() != key {
+            continue;
+        }
+        let value = strip_quotes(value.trim());
+        if !value.is_empty() {
+            return Ok(Some(value.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn strip_quotes(value: &str) -> &str {
+    let trimmed = value.trim();
+    trimmed
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| trimmed.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(trimmed)
+}
+
+fn run_bun_script(project_dir: &Path, script: &str, database_url: Option<&str>) -> Result<()> {
+    let mut cmd = Command::new("bun");
+    cmd.args(["run", script]);
+    cmd.current_dir(project_dir);
+    if let Some(url) = database_url {
+        cmd.env("DATABASE_URL", url);
+    }
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
+    let status = cmd.status().with_context(|| {
+        format!(
+            "failed to run bun script '{}' in {}",
+            script,
+            project_dir.display()
+        )
+    })?;
+    if !status.success() {
+        bail!("bun run {} failed with status {}", script, status);
+    }
+    Ok(())
 }
 
 fn jazz_new(

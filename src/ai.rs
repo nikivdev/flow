@@ -114,6 +114,8 @@ struct AiSession {
     provider: Provider,
     /// First message timestamp
     timestamp: Option<String>,
+    /// Last message timestamp
+    last_message_at: Option<String>,
     /// First user message (as summary)
     first_message: Option<String>,
     /// First error summary (for sessions that never produced a user message)
@@ -1418,10 +1420,18 @@ fn read_sessions_for_project(provider: Provider) -> Result<Vec<AiSession>> {
         sessions.extend(read_provider_sessions(Provider::Codex)?);
     }
 
-    // Sort by timestamp descending (most recent first)
+    // Sort by last message timestamp descending (most recent first)
     sessions.sort_by(|a, b| {
-        let ts_a = a.timestamp.as_deref().unwrap_or("");
-        let ts_b = b.timestamp.as_deref().unwrap_or("");
+        let ts_a = a
+            .last_message_at
+            .as_deref()
+            .or(a.timestamp.as_deref())
+            .unwrap_or("");
+        let ts_b = b
+            .last_message_at
+            .as_deref()
+            .or(b.timestamp.as_deref())
+            .unwrap_or("");
         ts_b.cmp(ts_a)
     });
 
@@ -1440,10 +1450,18 @@ fn read_sessions_for_path(provider: Provider, path: &PathBuf) -> Result<Vec<AiSe
         sessions.extend(read_provider_sessions_for_path(Provider::Codex, path)?);
     }
 
-    // Sort by timestamp descending (most recent first)
+    // Sort by last message timestamp descending (most recent first)
     sessions.sort_by(|a, b| {
-        let ts_a = a.timestamp.as_deref().unwrap_or("");
-        let ts_b = b.timestamp.as_deref().unwrap_or("");
+        let ts_a = a
+            .last_message_at
+            .as_deref()
+            .or(a.timestamp.as_deref())
+            .unwrap_or("");
+        let ts_b = b
+            .last_message_at
+            .as_deref()
+            .or(b.timestamp.as_deref())
+            .unwrap_or("");
         ts_b.cmp(ts_a)
     });
 
@@ -1563,6 +1581,7 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
     let content = fs::read_to_string(path).ok()?;
 
     let mut timestamp = None;
+    let mut last_message_at = None;
     let mut first_message = None;
     let mut error_summary = None;
 
@@ -1575,6 +1594,21 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
             // Get timestamp from first entry
             if timestamp.is_none() {
                 timestamp = entry.timestamp.clone();
+            }
+
+            if let Some(ref msg) = entry.message {
+                let role = msg.role.as_deref();
+                if role == Some("user") || role == Some("assistant") {
+                    if let Some(ref content) = msg.content {
+                        if let Some(text) = extract_message_text(content) {
+                            if !text.trim().is_empty() {
+                                if let Some(ts) = entry.timestamp.clone() {
+                                    last_message_at = Some(ts);
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Get first user message as summary
@@ -1602,11 +1636,6 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
             if error_summary.is_none() {
                 error_summary = extract_error_summary(&entry);
             }
-
-            // Once we have both, we can stop
-            if timestamp.is_some() && first_message.is_some() {
-                break;
-            }
         }
     }
 
@@ -1614,6 +1643,7 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
         session_id: session_id.to_string(),
         provider,
         timestamp,
+        last_message_at,
         first_message,
         error_summary,
     })
@@ -1626,6 +1656,7 @@ fn parse_codex_session_file(
     let content = fs::read_to_string(path).ok()?;
 
     let mut timestamp = None;
+    let mut last_message_at = None;
     let mut first_message = None;
     let mut error_summary = None;
     let mut session_id = None;
@@ -1643,6 +1674,19 @@ fn parse_codex_session_file(
 
         if timestamp.is_none() {
             timestamp = entry.timestamp.clone();
+        }
+
+        if let Some((role, text)) = extract_codex_message(&entry) {
+            let clean_text = if role == "assistant" {
+                strip_thinking_blocks(&text)
+            } else {
+                text
+            };
+            if !clean_text.trim().is_empty() {
+                if let Some(ts) = extract_codex_timestamp(&entry) {
+                    last_message_at = Some(ts);
+                }
+            }
         }
 
         if entry.entry_type.as_deref() == Some("session_meta") {
@@ -1679,16 +1723,13 @@ fn parse_codex_session_file(
                 error_summary = Some(summary);
             }
         }
-
-        if timestamp.is_some() && first_message.is_some() && session_id.is_some() && cwd.is_some() {
-            break;
-        }
     }
 
     let session = AiSession {
         session_id: session_id.unwrap_or_else(|| fallback_id.to_string()),
         provider: Provider::Codex,
         timestamp,
+        last_message_at,
         first_message,
         error_summary,
     };
@@ -1784,6 +1825,7 @@ fn list_sessions(provider: Provider) -> Result<()> {
     for session in &sessions {
         // Skip sessions without timestamps or content
         if session.timestamp.is_none()
+            && session.last_message_at.is_none()
             && session.first_message.is_none()
             && session.error_summary.is_none()
         {
@@ -1791,8 +1833,9 @@ fn list_sessions(provider: Provider) -> Result<()> {
         }
 
         let relative_time = session
-            .timestamp
+            .last_message_at
             .as_deref()
+            .or(session.timestamp.as_deref())
             .map(format_relative_time)
             .unwrap_or_else(|| "".to_string());
 

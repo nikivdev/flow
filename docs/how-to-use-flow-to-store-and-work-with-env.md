@@ -124,7 +124,7 @@ f env apply
 Create a Jazz worker account and store env vars in 1focus:
 
 ```bash
-f storage jazz new --name gitedit-mirror \
+f db jazz new --name gitedit-mirror \
   --peer "wss://cloud.jazz.tools/?key=jazz-gitedit-prod" \
   --environment production
 ```
