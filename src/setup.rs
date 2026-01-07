@@ -1740,10 +1740,15 @@ fn suggested_commands(project_root: &Path) -> SuggestedCommands {
         return suggest_node_commands(project_root, None);
     }
 
-    // Check subdirectories for project files
-    let (subdir_cargo, subdir_package) = find_subdir_projects(project_root);
+    // Check for LaTeX project
+    if let Some(cmds) = suggest_latex_commands(project_root, None) {
+        return cmds;
+    }
 
-    if let Some(subdir) = subdir_cargo {
+    // Check subdirectories for project files
+    let subdir_projects = find_subdir_projects(project_root);
+
+    if let Some(subdir) = subdir_projects.cargo {
         return SuggestedCommands {
             setup: Some(format!("cd {subdir} && cargo build --locked")),
             dev: Some(format!("cd {subdir} && cargo run")),
@@ -1751,9 +1756,16 @@ fn suggested_commands(project_root: &Path) -> SuggestedCommands {
         };
     }
 
-    if let Some(subdir) = subdir_package {
+    if let Some(subdir) = subdir_projects.package {
         let subdir_path = project_root.join(&subdir);
         return suggest_node_commands(&subdir_path, Some(&subdir));
+    }
+
+    if let Some(subdir) = subdir_projects.latex {
+        let subdir_path = project_root.join(&subdir);
+        if let Some(cmds) = suggest_latex_commands(&subdir_path, Some(&subdir)) {
+            return cmds;
+        }
     }
 
     SuggestedCommands {
@@ -1827,6 +1839,94 @@ fn suggest_node_commands(project_path: &Path, subdir: Option<&str>) -> Suggested
         dev: Some(format!("{prefix}npm run dev")),
         deps: vec![DepSpec::Multiple("node", &["node", "npm"])],
     }
+}
+
+/// Detect LaTeX project and suggest build commands.
+/// Looks for .tex files and determines the main document file.
+fn suggest_latex_commands(project_path: &Path, subdir: Option<&str>) -> Option<SuggestedCommands> {
+    let prefix = subdir.map(|s| format!("cd {s} && ")).unwrap_or_default();
+
+    // Find .tex files in the project
+    let tex_files: Vec<_> = fs::read_dir(project_path)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "tex")
+        })
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+
+    if tex_files.is_empty() {
+        return None;
+    }
+
+    // Determine the main LaTeX file
+    let main_file = detect_main_tex_file(project_path, &tex_files);
+
+    // Check for Makefile or latexmk config
+    let has_makefile = project_path.join("Makefile").exists();
+    let has_latexmkrc = project_path.join(".latexmkrc").exists()
+        || project_path.join("latexmkrc").exists();
+
+    if has_makefile {
+        return Some(SuggestedCommands {
+            setup: Some(format!("{prefix}echo 'LaTeX project ready'")),
+            dev: Some(format!("{prefix}make")),
+            deps: vec![
+                DepSpec::Single("pdflatex", "pdflatex"),
+                DepSpec::Single("make", "make"),
+            ],
+        });
+    }
+
+    if has_latexmkrc {
+        return Some(SuggestedCommands {
+            setup: Some(format!("{prefix}echo 'LaTeX project ready'")),
+            dev: Some(format!("{prefix}latexmk")),
+            deps: vec![DepSpec::Single("latexmk", "latexmk")],
+        });
+    }
+
+    // Default to pdflatex with detected main file
+    Some(SuggestedCommands {
+        setup: Some(format!("{prefix}echo 'LaTeX project ready'")),
+        dev: Some(format!("{prefix}pdflatex {main_file}")),
+        deps: vec![DepSpec::Single("pdflatex", "pdflatex")],
+    })
+}
+
+/// Detect the main .tex file in a LaTeX project.
+/// Priority: main.tex > document.tex > single .tex file > first alphabetically
+fn detect_main_tex_file(project_path: &Path, tex_files: &[String]) -> String {
+    // Common main file names
+    for name in ["main.tex", "document.tex", "paper.tex", "thesis.tex", "cv.tex", "resume.tex"] {
+        if tex_files.contains(&name.to_string()) {
+            return name.to_string();
+        }
+    }
+
+    // If only one .tex file, use it
+    if tex_files.len() == 1 {
+        return tex_files[0].clone();
+    }
+
+    // Look for \documentclass in files to find the main document
+    for file in tex_files {
+        let path = project_path.join(file);
+        if let Ok(content) = fs::read_to_string(&path) {
+            // Main document has \documentclass, included files don't
+            if content.contains("\\documentclass") {
+                return file.clone();
+            }
+        }
+    }
+
+    // Fallback to first file alphabetically
+    let mut sorted = tex_files.to_vec();
+    sorted.sort();
+    sorted.first().cloned().unwrap_or_else(|| "main.tex".to_string())
 }
 
 /// Detect package manager from package.json content.
@@ -1964,14 +2064,26 @@ fn project_hints(project_root: &Path) -> Vec<String> {
 fn project_guidance(project_root: &Path) -> Option<String> {
     let has_cargo = project_root.join("Cargo.toml").exists();
     let has_package = project_root.join("package.json").exists();
+    let has_tex = has_tex_files(project_root);
 
     // Check for project files in subdirectories
-    let (subdir_cargo, subdir_package) = find_subdir_projects(project_root);
+    let subdir_projects = find_subdir_projects(project_root);
 
-    let cargo_found = has_cargo || subdir_cargo.is_some();
-    let package_found = has_package || subdir_package.is_some();
+    let cargo_found = has_cargo || subdir_projects.cargo.is_some();
+    let package_found = has_package || subdir_projects.package.is_some();
+    let latex_found = has_tex || subdir_projects.latex.is_some();
 
-    match (cargo_found, package_found, &subdir_cargo, &subdir_package) {
+    // LaTeX-only projects
+    if latex_found && !cargo_found && !package_found {
+        if let Some(ref subdir) = subdir_projects.latex {
+            return Some(format!(
+                "Detected LaTeX project in {subdir}/. Use pdflatex/latexmk commands. Avoid bun/npm/pnpm/yarn/cargo."
+            ));
+        }
+        return Some("Detected LaTeX project (.tex files). Use pdflatex or latexmk to compile; avoid bun/npm/pnpm/yarn/cargo.".to_string());
+    }
+
+    match (cargo_found, package_found, &subdir_projects.cargo, &subdir_projects.package) {
         (true, false, Some(subdir), _) => Some(format!(
             "Detected Rust project in {subdir}/. Run cargo commands from that directory (cd {subdir} && cargo build). Avoid bun/npm/pnpm/yarn."
         )),
@@ -1985,15 +2097,27 @@ fn project_guidance(project_root: &Path) -> Option<String> {
     }
 }
 
-/// Find Cargo.toml or package.json in immediate subdirectories.
-/// Returns (cargo_subdir, package_subdir) with the first match found.
-fn find_subdir_projects(project_root: &Path) -> (Option<String>, Option<String>) {
+/// Find project files (Cargo.toml, package.json, .tex files) in immediate subdirectories.
+struct SubdirProjects {
+    cargo: Option<String>,
+    package: Option<String>,
+    latex: Option<String>,
+}
+
+fn find_subdir_projects(project_root: &Path) -> SubdirProjects {
     let mut cargo_subdir = None;
     let mut package_subdir = None;
+    let mut latex_subdir = None;
 
     let entries = match fs::read_dir(project_root) {
         Ok(entries) => entries,
-        Err(_) => return (None, None),
+        Err(_) => {
+            return SubdirProjects {
+                cargo: None,
+                package: None,
+                latex: None,
+            }
+        }
     };
 
     for entry in entries.flatten() {
@@ -2010,15 +2134,35 @@ fn find_subdir_projects(project_root: &Path) -> (Option<String>, Option<String>)
             cargo_subdir = Some(subdir_name.clone());
         }
         if package_subdir.is_none() && path.join("package.json").exists() {
-            package_subdir = Some(subdir_name);
+            package_subdir = Some(subdir_name.clone());
+        }
+        if latex_subdir.is_none() && has_tex_files(&path) {
+            latex_subdir = Some(subdir_name);
         }
 
-        if cargo_subdir.is_some() && package_subdir.is_some() {
+        if cargo_subdir.is_some() && package_subdir.is_some() && latex_subdir.is_some() {
             break;
         }
     }
 
-    (cargo_subdir, package_subdir)
+    SubdirProjects {
+        cargo: cargo_subdir,
+        package: package_subdir,
+        latex: latex_subdir,
+    }
+}
+
+/// Check if a directory contains .tex files
+fn has_tex_files(path: &Path) -> bool {
+    fs::read_dir(path)
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "tex")
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn detect_server_project(project_root: &Path) -> Option<String> {
@@ -2092,11 +2236,13 @@ fn detect_node_server(project_root: &Path) -> Option<String> {
 fn ai_flow_toml_mismatch_reason(project_root: &Path, toml_content: &str) -> Option<String> {
     let has_cargo = project_root.join("Cargo.toml").exists();
     let has_package = project_root.join("package.json").exists();
+    let has_tex = has_tex_files(project_root);
 
     // Also check subdirectories
-    let (subdir_cargo, subdir_package) = find_subdir_projects(project_root);
-    let cargo_found = has_cargo || subdir_cargo.is_some();
-    let package_found = has_package || subdir_package.is_some();
+    let subdir_projects = find_subdir_projects(project_root);
+    let cargo_found = has_cargo || subdir_projects.cargo.is_some();
+    let package_found = has_package || subdir_projects.package.is_some();
+    let latex_found = has_tex || subdir_projects.latex.is_some();
 
     let parsed: toml::Value = toml::from_str(toml_content).ok()?;
 
@@ -2104,6 +2250,7 @@ fn ai_flow_toml_mismatch_reason(project_root: &Path, toml_content: &str) -> Opti
 
     let mut uses_node = false;
     let mut uses_cargo = false;
+    let mut uses_latex = false;
 
     for task in tasks {
         let command = match task.get("command").and_then(toml::Value::as_str) {
@@ -2112,6 +2259,7 @@ fn ai_flow_toml_mismatch_reason(project_root: &Path, toml_content: &str) -> Opti
         };
         uses_node |= command_uses_node_tool(command);
         uses_cargo |= command_uses_cargo_tool(command);
+        uses_latex |= command_uses_latex_tool(command);
     }
 
     if cargo_found && !package_found && uses_node {
@@ -2119,6 +2267,9 @@ fn ai_flow_toml_mismatch_reason(project_root: &Path, toml_content: &str) -> Opti
     }
     if package_found && !cargo_found && uses_cargo {
         return Some("AI suggested Cargo commands, but no Cargo.toml was found.".to_string());
+    }
+    if !latex_found && uses_latex {
+        return Some("AI suggested LaTeX commands, but no .tex files were found.".to_string());
     }
 
     None
@@ -2132,6 +2283,12 @@ fn command_uses_node_tool(command: &str) -> bool {
 
 fn command_uses_cargo_tool(command: &str) -> bool {
     command_mentions_tool(command, "cargo")
+}
+
+fn command_uses_latex_tool(command: &str) -> bool {
+    ["pdflatex", "xelatex", "lualatex", "latexmk", "latex", "bibtex", "biber"]
+        .iter()
+        .any(|tool| command_mentions_tool(command, tool))
 }
 
 fn command_mentions_tool(command: &str, tool: &str) -> bool {
@@ -2154,6 +2311,13 @@ fn render_flow_toml(setup_cmd: &str, dev_cmd: &str, deps: Vec<DepSpec>) -> Strin
         "echo TODO: add dev command"
     } else {
         dev_cmd
+    };
+
+    // Determine appropriate descriptions based on project type
+    let dev_description = if command_uses_latex_tool(dev_cmd) {
+        "Compile document"
+    } else {
+        "Run development server"
     };
 
     let mut out = String::from("version = 1\n\n");
@@ -2180,7 +2344,7 @@ fn render_flow_toml(setup_cmd: &str, dev_cmd: &str, deps: Vec<DepSpec>) -> Strin
     out.push_str("[[tasks]]\n");
     out.push_str("name = \"dev\"\n");
     out.push_str(&format!("command = \"{}\"\n", toml_escape(dev_cmd)));
-    out.push_str("description = \"Run development server\"\n");
+    out.push_str(&format!("description = \"{dev_description}\"\n"));
     out.push_str("dependencies = [\"setup\"]\n");
     out.push_str("shortcuts = [\"d\"]\n");
     if command_needs_interactive(dev_cmd) {
