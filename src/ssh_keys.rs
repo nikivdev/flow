@@ -1,10 +1,14 @@
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use bs58;
+use chrono::{DateTime, Local, TimeZone, Utc};
+use cojson_core::crypto::{get_sealer_id, new_x25519_private_key, seal, unseal};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::cli::SshAction;
@@ -12,11 +16,30 @@ use crate::{config, env, ssh};
 
 const DEFAULT_TTL_HOURS: u64 = 24;
 const KEY_PRIVATE: &str = "SSH_PRIVATE_KEY_B64";
+const KEY_PRIVATE_SEALED: &str = "SSH_PRIVATE_KEY_SEALED_B64";
+const KEY_PRIVATE_SEALED_NONCE: &str = "SSH_PRIVATE_KEY_SEALED_NONCE_B64";
+const KEY_PRIVATE_SEALER_ID: &str = "SSH_PRIVATE_KEY_SEALER_ID";
 const KEY_PUBLIC: &str = "SSH_PUBLIC_KEY";
 const KEY_FINGERPRINT: &str = "SSH_FINGERPRINT";
 
 pub(crate) const DEFAULT_KEY_NAME: &str = "default";
 const DEFAULT_SSH_MODE: &str = "force";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SealerIdentity {
+    sealer_secret: String,
+    sealer_id: String,
+}
+
+struct SealedKeyPayload {
+    sealed_b64: String,
+    nonce_b64: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SshKeyUnlock {
+    expires_at: i64,
+}
 
 pub fn run(action: Option<SshAction>) -> Result<()> {
     match action {
@@ -69,10 +92,15 @@ fn setup(name: &str, unlock_after: bool) -> Result<()> {
     let public_key = fs::read_to_string(&public_key_path)
         .with_context(|| format!("failed to read {}", public_key_path.display()))?;
 
-    let private_b64 = STANDARD.encode(private_key.as_bytes());
-    let (env_private, env_public, env_fingerprint) = key_env_keys(&key_name);
+    let identity = load_or_create_sealer_identity()?;
+    let sealed = seal_private_key(private_key.as_bytes(), &identity)?;
+    let (env_private_plain, env_public, env_fingerprint) = key_env_keys(&key_name);
+    let (env_private_sealed, env_private_nonce, env_private_sealer_id) =
+        key_env_sealed_keys(&key_name);
 
-    env::set_personal_env_var(&env_private, &private_b64)?;
+    env::set_personal_env_var(&env_private_sealed, &sealed.sealed_b64)?;
+    env::set_personal_env_var(&env_private_nonce, &sealed.nonce_b64)?;
+    env::set_personal_env_var(&env_private_sealer_id, &identity.sealer_id)?;
     env::set_personal_env_var(&env_public, public_key.trim())?;
 
     if let Some(fingerprint) = compute_fingerprint(&public_key_path) {
@@ -81,7 +109,14 @@ fn setup(name: &str, unlock_after: bool) -> Result<()> {
 
     let _ = fs::remove_dir_all(&tmp_dir);
 
-    println!("Stored SSH key in 1focus as '{}'.", key_name);
+    if let Err(err) = env::delete_personal_env_vars(&[env_private_plain.clone()]) {
+        eprintln!(
+            "Warning: failed to delete legacy plaintext key {}: {}",
+            env_private_plain, err
+        );
+    }
+
+    println!("Stored SSH key in 1focus as '{}' (sealed).", key_name);
     println!("Public key:\n{}", public_key.trim());
     println!("Add it to GitHub: https://github.com/settings/keys");
     ensure_global_ssh_config(&key_name)?;
@@ -95,40 +130,63 @@ fn setup(name: &str, unlock_after: bool) -> Result<()> {
 
 fn unlock(name: &str, ttl_hours: u64) -> Result<()> {
     let key_name = normalize_name(name);
-    let (env_private, _env_public, _env_fingerprint) = key_env_keys(&key_name);
+    require_ssh_key_unlock()?;
+    let (env_private_plain, _env_public, _env_fingerprint) = key_env_keys(&key_name);
+    let (env_private_sealed, env_private_nonce, env_private_sealer_id) =
+        key_env_sealed_keys(&key_name);
 
-    let vars = env::fetch_personal_env_vars(&[env_private.clone()])?;
-    let private_b64 = vars
-        .get(&env_private)
-        .ok_or_else(|| anyhow::anyhow!("SSH key not found in 1focus. Run `f ssh setup` first."))?;
+    let vars = env::fetch_personal_env_vars(&[
+        env_private_sealed.clone(),
+        env_private_nonce.clone(),
+        env_private_sealer_id.clone(),
+        env_private_plain.clone(),
+    ])?;
 
-    let private_key = STANDARD
-        .decode(private_b64.as_bytes())
-        .context("failed to decode SSH private key")?;
-
-    let ssh_dir = config::global_config_dir().join("ssh");
-    fs::create_dir_all(&ssh_dir)?;
-    let key_path = ssh_dir.join(format!("id_ed25519_{}", key_name));
-    write_private_key(&key_path, &private_key)?;
+    let private_key = if vars.contains_key(&env_private_sealed)
+        || vars.contains_key(&env_private_nonce)
+    {
+        let sealed_b64 = vars.get(&env_private_sealed).ok_or_else(|| {
+            anyhow::anyhow!(
+                "SSH key sealed payload is missing ({}). Run `f ssh setup` again.",
+                env_private_sealed
+            )
+        })?;
+        let nonce_b64 = vars.get(&env_private_nonce).ok_or_else(|| {
+            anyhow::anyhow!(
+                "SSH key sealed nonce is missing ({}). Run `f ssh setup` again.",
+                env_private_nonce
+            )
+        })?;
+        let identity = load_sealer_identity()?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Local SSH seal identity not found. Run `f ssh setup` on this machine first."
+            )
+        })?;
+        if let Some(expected_id) = vars.get(&env_private_sealer_id) {
+            if expected_id.trim() != identity.sealer_id {
+                bail!(
+                    "Stored SSH key is sealed for a different device. Run `f ssh setup` to create a new key or copy {} from the original device.",
+                    sealer_identity_path()?.display()
+                );
+            }
+        }
+        unseal_private_key(sealed_b64, nonce_b64, &identity)?
+    } else if let Some(private_b64) = vars.get(&env_private_plain) {
+        eprintln!(
+            "Warning: using legacy plaintext SSH key from 1focus; run `f ssh setup` to seal it."
+        );
+        STANDARD
+            .decode(private_b64.as_bytes())
+            .context("failed to decode SSH private key")?
+    } else {
+        bail!("SSH key not found in 1focus. Run `f ssh setup` first.");
+    };
 
     let sock = ssh::ensure_flow_agent()?;
-    let ttl_seconds = ttl_hours.saturating_mul(3600).to_string();
-
-    let status = Command::new("ssh-add")
-        .arg("-t")
-        .arg(&ttl_seconds)
-        .arg(key_path.to_string_lossy().as_ref())
-        .env("SSH_AUTH_SOCK", &sock)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to run ssh-add")?;
-    if !status.success() {
-        bail!("ssh-add failed");
-    }
-
-    let _ = fs::remove_file(&key_path);
+    let result = add_key_to_agent(&private_key, &sock, ttl_hours);
+    let mut private_key = private_key;
+    private_key.fill(0);
+    result?;
 
     let _ = ssh::ensure_git_ssh_command_for_sock(&sock, true);
     let _ = ssh::clear_git_https_insteadof();
@@ -139,11 +197,16 @@ fn unlock(name: &str, ttl_hours: u64) -> Result<()> {
 
 fn status(name: &str) -> Result<()> {
     let key_name = normalize_name(name);
-    let (env_private, env_public, env_fingerprint) = key_env_keys(&key_name);
+    let (env_private_plain, env_public, env_fingerprint) = key_env_keys(&key_name);
+    let (env_private_sealed, env_private_nonce, env_private_sealer_id) =
+        key_env_sealed_keys(&key_name);
     let vars = match env::fetch_personal_env_vars(&[
-        env_private.clone(),
+        env_private_plain.clone(),
         env_public.clone(),
         env_fingerprint.clone(),
+        env_private_sealed.clone(),
+        env_private_nonce.clone(),
+        env_private_sealer_id.clone(),
     ]) {
         Ok(vars) => vars,
         Err(err) => {
@@ -151,21 +214,38 @@ fn status(name: &str) -> Result<()> {
             return Ok(());
         }
     };
-    let has_key = vars.contains_key(&env_private);
+    let has_plain = vars.contains_key(&env_private_plain);
+    let has_sealed = vars.contains_key(&env_private_sealed) && vars.contains_key(&env_private_nonce);
     let has_pub = vars.contains_key(&env_public);
     let fingerprint = vars
         .get(&env_fingerprint)
         .cloned()
         .unwrap_or_default();
+    let sealer_id = vars.get(&env_private_sealer_id).cloned().unwrap_or_default();
+    let local_identity = load_sealer_identity().ok().flatten();
 
     let agent = ssh::flow_agent_status();
 
     println!("Key: {}", key_name);
-    println!("Stored in 1focus: {}", if has_key { "yes" } else { "no" });
+    println!(
+        "Stored in 1focus (sealed): {}",
+        if has_sealed { "yes" } else { "no" }
+    );
+    println!(
+        "Stored in 1focus (plaintext): {}",
+        if has_plain { "yes" } else { "no" }
+    );
     println!("Public key stored: {}", if has_pub { "yes" } else { "no" });
     if !fingerprint.is_empty() {
         println!("Fingerprint: {}", fingerprint);
     }
+    if !sealer_id.is_empty() {
+        println!("Sealer id: {}", sealer_id);
+    }
+    println!(
+        "Local seal identity: {}",
+        if local_identity.is_some() { "yes" } else { "no" }
+    );
     match agent {
         Some(sock) => println!("Flow SSH agent: running ({})", sock.display()),
         None => println!("Flow SSH agent: not running"),
@@ -305,6 +385,23 @@ fn key_env_keys(name: &str) -> (String, String, String) {
     }
 }
 
+fn key_env_sealed_keys(name: &str) -> (String, String, String) {
+    if name == "default" {
+        (
+            format!("FLOW_{}", KEY_PRIVATE_SEALED),
+            format!("FLOW_{}", KEY_PRIVATE_SEALED_NONCE),
+            format!("FLOW_{}", KEY_PRIVATE_SEALER_ID),
+        )
+    } else {
+        let suffix = sanitize_env_suffix(name);
+        (
+            format!("FLOW_{}_{}", KEY_PRIVATE_SEALED, suffix),
+            format!("FLOW_{}_{}", KEY_PRIVATE_SEALED_NONCE, suffix),
+            format!("FLOW_{}_{}", KEY_PRIVATE_SEALER_ID, suffix),
+        )
+    }
+}
+
 fn normalize_name(name: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -326,11 +423,291 @@ fn sanitize_env_suffix(name: &str) -> String {
         .collect()
 }
 
+fn ensure_ssh_state_dir() -> Result<PathBuf> {
+    let base = config::ensure_global_state_dir()?;
+    let dir = base.join("ssh");
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o700);
+        fs::set_permissions(&dir, perms)
+            .with_context(|| format!("failed to chmod {}", dir.display()))?;
+    }
+    Ok(dir)
+}
+
+fn sealer_identity_path() -> Result<PathBuf> {
+    Ok(ensure_ssh_state_dir()?.join("sealer.json"))
+}
+
+fn ssh_unlock_path() -> Result<PathBuf> {
+    Ok(ensure_ssh_state_dir()?.join("unlock.json"))
+}
+
+fn load_ssh_unlock() -> Option<SshKeyUnlock> {
+    let path = ssh_unlock_path().ok()?;
+    let content = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn save_ssh_unlock(expires_at: DateTime<Utc>) -> Result<()> {
+    let path = ssh_unlock_path()?;
+    let entry = SshKeyUnlock {
+        expires_at: expires_at.timestamp(),
+    };
+    let content = serde_json::to_string_pretty(&entry)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+fn unlock_expires_at(entry: &SshKeyUnlock) -> Option<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(entry.expires_at, 0)
+}
+
+fn next_local_midnight_utc() -> Result<DateTime<Utc>> {
+    let now = Local::now();
+    let tomorrow = now
+        .date_naive()
+        .succ_opt()
+        .ok_or_else(|| anyhow::anyhow!("failed to calculate next day"))?;
+    let naive = tomorrow
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("failed to build midnight time"))?;
+    let local_dt = Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| Local.from_local_datetime(&naive).earliest())
+        .ok_or_else(|| anyhow::anyhow!("failed to resolve local midnight"))?;
+    Ok(local_dt.with_timezone(&Utc))
+}
+
+fn prompt_touch_id() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("Touch ID is not available on this OS");
+    }
+
+    let reason = "Flow needs Touch ID to unlock SSH keys.";
+    let reason = reason.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"ObjC.import('stdlib');
+ObjC.import('Foundation');
+ObjC.import('LocalAuthentication');
+const context = $.LAContext.alloc.init;
+const policy = $.LAPolicyDeviceOwnerAuthenticationWithBiometrics;
+const error = Ref();
+if (!context.canEvaluatePolicyError(policy, error)) {{
+  $.exit(2);
+}}
+let ok = false;
+let done = false;
+context.evaluatePolicyLocalizedReasonReply(policy, "{reason}", function(success, err) {{
+  ok = success;
+  done = true;
+}});
+const runLoop = $.NSRunLoop.currentRunLoop;
+while (!done) {{
+  runLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));
+}}
+$.exit(ok ? 0 : 1);"#
+    );
+
+    let status = Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", &script])
+        .status()
+        .context("failed to launch Touch ID prompt")?;
+
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(1) => bail!("Touch ID verification failed"),
+        Some(2) => bail!("Touch ID is not available on this device"),
+        _ => bail!("Touch ID verification failed"),
+    }
+}
+
+fn unlock_ssh_key() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        println!("Touch ID unlock is not available on this OS.");
+        return Ok(());
+    }
+
+    if let Some(entry) = load_ssh_unlock() {
+        if let Some(expires_at) = unlock_expires_at(&entry) {
+            if expires_at > Utc::now() {
+                let local_expiry = expires_at.with_timezone(&Local);
+                println!(
+                    "SSH key access already unlocked until {}",
+                    local_expiry.format("%Y-%m-%d %H:%M %Z")
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    println!("Touch ID required to unlock SSH keys.");
+    prompt_touch_id()?;
+    let expires_at = next_local_midnight_utc()?;
+    save_ssh_unlock(expires_at)?;
+    let local_expiry = expires_at.with_timezone(&Local);
+    println!(
+        "✓ SSH key access unlocked until {}",
+        local_expiry.format("%Y-%m-%d %H:%M %Z")
+    );
+    Ok(())
+}
+
+fn require_ssh_key_unlock() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    if let Some(entry) = load_ssh_unlock() {
+        if let Some(expires_at) = unlock_expires_at(&entry) {
+            if expires_at > Utc::now() {
+                return Ok(());
+            }
+        }
+    }
+
+    unlock_ssh_key()
+}
+
+fn load_sealer_identity() -> Result<Option<SealerIdentity>> {
+    let path = sealer_identity_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let mut identity: SealerIdentity =
+        serde_json::from_str(&content).context("failed to parse SSH sealer identity")?;
+    if identity.sealer_secret.trim().is_empty() {
+        bail!("SSH sealer identity is missing its secret");
+    }
+
+    let derived_id =
+        get_sealer_id(&identity.sealer_secret).context("invalid SSH sealer secret")?;
+    if identity.sealer_id != derived_id {
+        identity.sealer_id = derived_id;
+        let updated = serde_json::to_string_pretty(&identity)?;
+        write_private_key(&path, updated.as_bytes())?;
+    }
+
+    Ok(Some(identity))
+}
+
+fn load_or_create_sealer_identity() -> Result<SealerIdentity> {
+    if let Some(identity) = load_sealer_identity()? {
+        return Ok(identity);
+    }
+
+    let identity = create_sealer_identity()?;
+    let path = sealer_identity_path()?;
+    let content = serde_json::to_string_pretty(&identity)?;
+    write_private_key(&path, content.as_bytes())?;
+    Ok(identity)
+}
+
+fn create_sealer_identity() -> Result<SealerIdentity> {
+    let private_key = new_x25519_private_key();
+    let sealer_secret = format!("sealerSecret_z{}", bs58::encode(&private_key).into_string());
+    let sealer_id =
+        get_sealer_id(&sealer_secret).context("failed to derive SSH sealer id")?;
+    Ok(SealerIdentity {
+        sealer_secret,
+        sealer_id,
+    })
+}
+
+fn seal_private_key(private_key: &[u8], identity: &SealerIdentity) -> Result<SealedKeyPayload> {
+    let mut nonce_material = [0u8; 32];
+    nonce_material[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    nonce_material[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+
+    let sealed = seal(
+        private_key,
+        &identity.sealer_secret,
+        &identity.sealer_id,
+        &nonce_material,
+    )
+    .context("failed to seal SSH private key")?;
+    Ok(SealedKeyPayload {
+        sealed_b64: STANDARD.encode(sealed),
+        nonce_b64: STANDARD.encode(nonce_material),
+    })
+}
+
+fn unseal_private_key(
+    sealed_b64: &str,
+    nonce_b64: &str,
+    identity: &SealerIdentity,
+) -> Result<Vec<u8>> {
+    let sealed = STANDARD
+        .decode(sealed_b64.as_bytes())
+        .context("failed to decode sealed SSH key")?;
+    let nonce_material = STANDARD
+        .decode(nonce_b64.as_bytes())
+        .context("failed to decode sealed SSH nonce")?;
+    if nonce_material.is_empty() {
+        bail!("sealed SSH nonce is empty");
+    }
+
+    let unsealed = unseal(
+        &sealed,
+        &identity.sealer_secret,
+        &identity.sealer_id,
+        &nonce_material,
+    )
+    .context("failed to unseal SSH private key")?;
+    Ok(unsealed.into())
+}
+
+fn add_key_to_agent(private_key: &[u8], sock: &Path, ttl_hours: u64) -> Result<()> {
+    let ttl_seconds = ttl_hours.saturating_mul(3600).to_string();
+    let mut child = Command::new("ssh-add")
+        .arg("-t")
+        .arg(&ttl_seconds)
+        .arg("-")
+        .env("SSH_AUTH_SOCK", sock)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to run ssh-add")?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("failed to open ssh-add stdin")?;
+        stdin
+            .write_all(private_key)
+            .context("failed to write SSH key to ssh-add")?;
+    }
+
+    let status = child.wait().context("failed to wait for ssh-add")?;
+    if !status.success() {
+        bail!("ssh-add failed");
+    }
+
+    Ok(())
+}
+
 fn write_private_key(path: &PathBuf, content: &[u8]) -> Result<()> {
-    let mut file = fs::File::create(path)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options
+        .open(path)
         .with_context(|| format!("failed to create {}", path.display()))?;
-    file.write_all(content)
-        .with_context(|| format!("failed to write {}", path.display()))?;
 
     #[cfg(unix)]
     {
@@ -339,6 +716,9 @@ fn write_private_key(path: &PathBuf, content: &[u8]) -> Result<()> {
         fs::set_permissions(path, perms)
             .with_context(|| format!("failed to chmod {}", path.display()))?;
     }
+
+    file.write_all(content)
+        .with_context(|| format!("failed to write {}", path.display()))?;
 
     Ok(())
 }
@@ -384,6 +764,29 @@ mod tests {
         assert_eq!(priv_key, "FLOW_SSH_PRIVATE_KEY_B64_WORK");
         assert_eq!(pub_key, "FLOW_SSH_PUBLIC_KEY_WORK");
         assert_eq!(fp, "FLOW_SSH_FINGERPRINT_WORK");
+    }
+
+    #[test]
+    fn key_env_sealed_keys_uses_expected_prefixes() {
+        let (sealed, nonce, sealer) = key_env_sealed_keys("default");
+        assert_eq!(sealed, "FLOW_SSH_PRIVATE_KEY_SEALED_B64");
+        assert_eq!(nonce, "FLOW_SSH_PRIVATE_KEY_SEALED_NONCE_B64");
+        assert_eq!(sealer, "FLOW_SSH_PRIVATE_KEY_SEALER_ID");
+
+        let (sealed, nonce, sealer) = key_env_sealed_keys("work");
+        assert_eq!(sealed, "FLOW_SSH_PRIVATE_KEY_SEALED_B64_WORK");
+        assert_eq!(nonce, "FLOW_SSH_PRIVATE_KEY_SEALED_NONCE_B64_WORK");
+        assert_eq!(sealer, "FLOW_SSH_PRIVATE_KEY_SEALER_ID_WORK");
+    }
+
+    #[test]
+    fn seal_private_key_roundtrip() {
+        let identity = create_sealer_identity().expect("identity");
+        let payload = seal_private_key(b"PRIVATE_KEY", &identity).expect("seal");
+        let unsealed =
+            unseal_private_key(&payload.sealed_b64, &payload.nonce_b64, &identity)
+                .expect("unseal");
+        assert_eq!(unsealed, b"PRIVATE_KEY");
     }
 
     #[test]

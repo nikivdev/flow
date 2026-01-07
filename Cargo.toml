@@ -35,6 +35,7 @@ notify-debouncer-mini = "0.7"
 shellexpand = "3"
 shell-words = "1"
 base64 = "0.22"
+bs58 = "0.5.1"
 strip-ansi-escapes = "0.2"
 portable-pty = "0.8"
 regex = "1.12.2"
@@ -45,6 +46,7 @@ tempfile = "3"
 ctrlc = "3.4"
 rpassword = "7"
 atty = "0.2"
+cojson-core = { git = "https://github.com/garden-co/jazz", rev = "c5b673823e81b55eff6304b673eeea32e1e0ebb4", package = "cojson-core" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
