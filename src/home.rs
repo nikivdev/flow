@@ -103,6 +103,7 @@ pub fn run(opts: HomeOpts) -> Result<()> {
         }
     }
     ensure_kar_repo(&flow_bin, prefer_ssh)?;
+    validate_setup(&config_dir)?;
 
     if !archived.is_empty() {
         println!("\nMoved existing config files to ~/flow-archive:");
@@ -382,6 +383,63 @@ fn ensure_kar_repo(flow_bin: &Path, prefer_ssh: bool) -> Result<()> {
 
     println!("Deploying kar from {}", repo_path.display());
     run_command(flow_bin.to_string_lossy().as_ref(), &["deploy"], Some(&repo_path))?;
+    Ok(())
+}
+
+fn validate_setup(config_dir: &Path) -> Result<()> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    let mappings = load_link_mappings(config_dir)?;
+    let mut missing = Vec::new();
+    let mut mismatched = Vec::new();
+
+    for (source_rel, dest_rel) in &mappings {
+        let source = config_dir.join(source_rel);
+        if !source.exists() {
+            continue;
+        }
+
+        let dest_rel = normalize_dest_rel(dest_rel)?;
+        let dest = home.join(&dest_rel);
+        if !dest.exists() {
+            missing.push(dest);
+            continue;
+        }
+
+        if !is_symlink_to(&dest, &source) {
+            mismatched.push((dest, source));
+        }
+    }
+
+    let mut critical_missing = Vec::new();
+    let kar_config = home.join(".config/kar/config.ts");
+    if !kar_config.exists() {
+        critical_missing.push(kar_config);
+    }
+    let karabiner_config = home.join(".config/karabiner.edn");
+    if !karabiner_config.exists() {
+        critical_missing.push(karabiner_config);
+    }
+
+    if missing.is_empty() && mismatched.is_empty() && critical_missing.is_empty() {
+        println!("Validation: all expected configs are in place.");
+        return Ok(());
+    }
+
+    println!("\nValidation warnings:");
+    for path in critical_missing {
+        println!("  missing critical config: {}", path.display());
+    }
+    for path in missing {
+        println!("  missing link target: {}", path.display());
+    }
+    for (dest, source) in mismatched {
+        println!(
+            "  not linked: {} (expected -> {})",
+            dest.display(),
+            source.display()
+        );
+    }
+
     Ok(())
 }
 
