@@ -1,9 +1,17 @@
-use std::{fs, path::Path, process::{Command, Stdio}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::cli::HomeOpts;
+use crate::cli::{HomeOpts, ReposCloneOpts};
+use crate::repos;
+
+const KAR_REPO_URL: &str = "https://github.com/nikivdev/kar";
+const DEFAULT_REPOS_ROOT: &str = "~/repos";
 
 #[derive(Debug, Clone)]
 struct RepoInput {
@@ -41,6 +49,7 @@ pub fn run(opts: HomeOpts) -> Result<()> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let config_dir = home.join("config");
     let repo = parse_repo_input(&opts.repo)?;
+    let flow_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("f"));
 
     ensure_repo(&config_dir, Some(&repo.clone_url), "config")?;
 
@@ -63,6 +72,7 @@ pub fn run(opts: HomeOpts) -> Result<()> {
     }
 
     apply_config(&config_dir)?;
+    ensure_kar_repo(&flow_bin)?;
 
     Ok(())
 }
@@ -108,6 +118,31 @@ fn apply_config(config_dir: &Path) -> Result<()> {
         "sync tool not available; install bun or build the sync CLI in {}",
         config_dir.display()
     )
+}
+
+fn ensure_kar_repo(flow_bin: &Path) -> Result<()> {
+    let opts = ReposCloneOpts {
+        url: KAR_REPO_URL.to_string(),
+        root: DEFAULT_REPOS_ROOT.to_string(),
+        full: false,
+        no_upstream: false,
+        upstream_url: None,
+    };
+    let repo_path = repos::clone_repo(opts)?;
+    update_repo(&repo_path)?;
+
+    let flow_toml = repo_path.join("flow.toml");
+    if !flow_toml.exists() {
+        println!(
+            "No flow.toml found in {}; skipping f deploy",
+            repo_path.display()
+        );
+        return Ok(());
+    }
+
+    println!("Deploying kar from {}", repo_path.display());
+    run_command(flow_bin.to_string_lossy().as_ref(), &["deploy"], Some(&repo_path))?;
+    Ok(())
 }
 
 fn ensure_repo(dest: &Path, repo_url: Option<&str>, label: &str) -> Result<()> {
