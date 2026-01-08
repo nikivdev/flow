@@ -22,6 +22,7 @@ use crate::deploy_setup::{
 };
 use crate::env::parse_env_file;
 use crate::release;
+use crate::services;
 use crate::tasks;
 
 const DEPLOY_HELPER_BIN: &str = "infra";
@@ -1047,15 +1048,24 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
             true
         } else {
             match crate::env::fetch_project_env_vars(&env_name, &keys) {
-                Ok(vars) => !vars.is_empty(),
+                Ok(_) => true,
                 Err(err) => {
-                    eprintln!("⚠ Env store unavailable: {err}");
-                    false
+                    let msg = format!("{err:#}");
+                    if msg.contains("Project not found.") {
+                        println!("Project not found yet; it will be created on first set.");
+                        true
+                    } else {
+                        eprintln!("⚠ Env store unavailable: {err}");
+                        false
+                    }
                 }
             }
         };
 
         if env_store_ok {
+            if let Some(flow_cfg) = config {
+                services::maybe_run_stripe_setup(project_root, flow_cfg, &env_name)?;
+            }
             crate::env::run(Some(EnvAction::Guide {
                 environment: env_name,
             }))?;

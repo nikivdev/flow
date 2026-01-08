@@ -205,6 +205,9 @@ This walks you through:
 4. Picking which secrets to push
 5. Updating `flow.toml` with your choices
 
+If your `flow.toml` lists service keys (for example Stripe keys), the setup flow
+will offer to run the matching service onboarding before applying envs.
+
 ### Secrets from 1focus
 
 If using 1focus for secret management:

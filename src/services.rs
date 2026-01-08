@@ -22,6 +22,60 @@ fn list_services() -> Result<()> {
     Ok(())
 }
 
+pub fn maybe_run_stripe_setup(
+    project_root: &Path,
+    flow_cfg: &config::Config,
+    env_name: &str,
+) -> Result<()> {
+    let stripe_keys = collect_stripe_keys(flow_cfg);
+    if stripe_keys.is_empty() {
+        return Ok(());
+    }
+
+    let required_keys = stripe_keys
+        .iter()
+        .filter(|key| stripe_key_spec(key).required)
+        .cloned()
+        .collect::<Vec<_>>();
+    if required_keys.is_empty() {
+        return Ok(());
+    }
+
+    let existing = fetch_project_env_vars_allow_missing(env_name, &required_keys)?;
+    let missing_required = required_keys
+        .iter()
+        .filter(|key| {
+            existing
+                .get(*key)
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if missing_required.is_empty() {
+        println!("Stripe env vars already configured; skipping Stripe setup.");
+        return Ok(());
+    }
+
+    println!("Stripe env vars missing: {}", missing_required.join(", "));
+    if !prompt_yes_no("Run Stripe setup now?", true)? {
+        return Ok(());
+    }
+
+    let mode_default = default_stripe_mode_for_env(env_name);
+    let mode = prompt_stripe_mode(mode_default)?;
+
+    run_stripe(StripeServiceOpts {
+        path: Some(project_root.to_path_buf()),
+        environment: Some(env_name.to_string()),
+        mode,
+        force: false,
+        apply: false,
+        no_apply: true,
+    })
+}
+
 fn run_stripe(opts: StripeServiceOpts) -> Result<()> {
     let (project_root, flow_path, flow_cfg) = resolve_project_root(opts.path.as_ref())?;
     let _dir_guard = DirGuard::new(&project_root)?;
@@ -66,20 +120,7 @@ fn run_stripe(opts: StripeServiceOpts) -> Result<()> {
         .collect::<Vec<_>>();
 
     let key_names: Vec<String> = specs.iter().map(|spec| spec.key.clone()).collect();
-    let existing = match env::fetch_project_env_vars(&env_name, &key_names) {
-        Ok(values) => values,
-        Err(err) => {
-            let msg = format!("{err:#}");
-            if msg.contains("Project not found.") {
-                println!("Project not found yet; it will be created on first set.");
-                HashMap::new()
-            } else {
-                println!("Unable to read existing env vars: {err}");
-                println!("Run `f env login` to authenticate with 1focus.");
-                return Err(err);
-            }
-        }
-    };
+    let existing = fetch_project_env_vars_allow_missing(&env_name, &key_names)?;
 
     let has_optional = specs.iter().any(|spec| !spec.required);
     let include_optional = if has_optional {
@@ -186,6 +227,51 @@ fn is_1focus_source(source: Option<&str>) -> bool {
         source.map(|s| s.to_ascii_lowercase()).as_deref(),
         Some("1focus") | Some("1f") | Some("onefocus")
     )
+}
+
+fn fetch_project_env_vars_allow_missing(
+    env_name: &str,
+    keys: &[String],
+) -> Result<HashMap<String, String>> {
+    match env::fetch_project_env_vars(env_name, keys) {
+        Ok(values) => Ok(values),
+        Err(err) => {
+            let msg = format!("{err:#}");
+            if msg.contains("Project not found.") {
+                println!("Project not found yet; it will be created on first set.");
+                Ok(HashMap::new())
+            } else {
+                println!("Unable to read existing env vars: {err}");
+                println!("Run `f env login` to authenticate with 1focus.");
+                Err(err)
+            }
+        }
+    }
+}
+
+fn default_stripe_mode_for_env(env_name: &str) -> StripeModeArg {
+    if env_name.eq_ignore_ascii_case("production") {
+        StripeModeArg::Live
+    } else {
+        StripeModeArg::Test
+    }
+}
+
+fn prompt_stripe_mode(default: StripeModeArg) -> Result<StripeModeArg> {
+    let default_label = match default {
+        StripeModeArg::Test => "test",
+        StripeModeArg::Live => "live",
+    };
+    let value = prompt_line("Stripe mode (test/live)", Some(default_label))?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(default),
+        "test" | "t" => Ok(StripeModeArg::Test),
+        "live" | "l" => Ok(StripeModeArg::Live),
+        other => {
+            println!("Unknown mode '{other}', using {default_label}.");
+            Ok(default)
+        }
+    }
 }
 
 fn collect_stripe_keys(flow_cfg: &config::Config) -> Vec<String> {
