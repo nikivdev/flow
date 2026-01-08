@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -68,9 +69,15 @@ fn run_stripe(opts: StripeServiceOpts) -> Result<()> {
     let existing = match env::fetch_project_env_vars(&env_name, &key_names) {
         Ok(values) => values,
         Err(err) => {
-            println!("Unable to read existing env vars: {err}");
-            println!("Run `f env login` to authenticate with 1focus.");
-            return Err(err);
+            let msg = format!("{err:#}");
+            if msg.contains("Project not found.") {
+                println!("Project not found yet; it will be created on first set.");
+                HashMap::new()
+            } else {
+                println!("Unable to read existing env vars: {err}");
+                println!("Run `f env login` to authenticate with 1focus.");
+                return Err(err);
+            }
         }
     };
 

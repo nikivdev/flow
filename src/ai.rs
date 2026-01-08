@@ -158,25 +158,31 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
 
     match action {
         AiAction::List => list_sessions(Provider::All)?,
-        AiAction::Claude { action } => match action.unwrap_or(ProviderAiAction::List) {
-            ProviderAiAction::List => list_sessions(Provider::Claude)?,
-            ProviderAiAction::Resume { session } => resume_session(session, Provider::Claude)?,
-            ProviderAiAction::Copy { session } => copy_session(session, Provider::Claude)?,
-            ProviderAiAction::Context {
+        AiAction::Claude { action } => match action {
+            None => quick_start_session(Provider::Claude)?,
+            Some(ProviderAiAction::List) => list_sessions(Provider::Claude)?,
+            Some(ProviderAiAction::Resume { session }) => {
+                resume_session(session, Provider::Claude)?
+            }
+            Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Claude)?,
+            Some(ProviderAiAction::Context {
                 session,
                 count,
                 path,
-            } => copy_context(session, Provider::Claude, count, path)?,
+            }) => copy_context(session, Provider::Claude, count, path)?,
         },
-        AiAction::Codex { action } => match action.unwrap_or(ProviderAiAction::List) {
-            ProviderAiAction::List => list_sessions(Provider::Codex)?,
-            ProviderAiAction::Resume { session } => resume_session(session, Provider::Codex)?,
-            ProviderAiAction::Copy { session } => copy_session(session, Provider::Codex)?,
-            ProviderAiAction::Context {
+        AiAction::Codex { action } => match action {
+            None => quick_start_session(Provider::Codex)?,
+            Some(ProviderAiAction::List) => list_sessions(Provider::Codex)?,
+            Some(ProviderAiAction::Resume { session }) => {
+                resume_session(session, Provider::Codex)?
+            }
+            Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Codex)?,
+            Some(ProviderAiAction::Context {
                 session,
                 count,
                 path,
-            } => copy_context(session, Provider::Codex, count, path)?,
+            }) => copy_context(session, Provider::Codex, count, path)?,
         },
         AiAction::Resume { session } => resume_session(session, Provider::All)?,
         AiAction::Save { name, id } => save_session(&name, id)?,
@@ -2001,6 +2007,49 @@ fn launch_session(session_id: &str, provider: Provider) -> Result<()> {
 
     if !status.success() {
         bail!("{} exited with status {}", name, status);
+    }
+
+    Ok(())
+}
+
+/// Quick start: continue last session or create new one with dangerous flags.
+fn quick_start_session(provider: Provider) -> Result<()> {
+    // Auto-import any new sessions silently
+    let _ = auto_import_sessions();
+
+    let sessions = read_sessions_for_project(provider)?;
+
+    if let Some(sess) = sessions.first() {
+        // Resume most recent session
+        println!(
+            "Resuming session {}...",
+            &sess.session_id[..8.min(sess.session_id.len())]
+        );
+        launch_session(&sess.session_id, sess.provider)?;
+    } else {
+        // No sessions - start new one with dangerous flags
+        println!("No sessions found. Starting new session...");
+        let status = match provider {
+            Provider::Claude | Provider::All => Command::new("claude")
+                .arg("--dangerously-skip-permissions")
+                .status()
+                .with_context(|| "failed to launch claude")?,
+            Provider::Codex => Command::new("codex")
+                .arg("--yolo")
+                .arg("--sandbox")
+                .arg("danger-full-access")
+                .status()
+                .with_context(|| "failed to launch codex")?,
+        };
+
+        let name = match provider {
+            Provider::Claude | Provider::All => "claude",
+            Provider::Codex => "codex",
+        };
+
+        if !status.success() {
+            bail!("{} exited with status {}", name, status);
+        }
     }
 
     Ok(())
