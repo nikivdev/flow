@@ -14,12 +14,14 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{EnvAction, TokenAction, ProjectEnvAction};
+use crate::agent_setup;
+use crate::cli::{EnvAction, ProjectEnvAction, TokenAction};
 use crate::config;
 use crate::deploy;
 use crate::env_setup::{EnvSetupDefaults, run_env_setup};
-use crate::storage::{create_jazz_worker_account, get_project_name as storage_project_name, sanitize_name};
-use crate::agent_setup;
+use crate::storage::{
+    create_jazz_worker_account, get_project_name as storage_project_name, sanitize_name,
+};
 use uuid::Uuid;
 
 const DEFAULT_API_URL: &str = "https://1focus.ai";
@@ -150,14 +152,7 @@ fn get_keychain_token(api_url: &str) -> Result<Option<String>> {
 
     let service = keychain_service(api_url);
     let output = Command::new("security")
-        .args([
-            "find-generic-password",
-            "-a",
-            "flow",
-            "-s",
-            &service,
-            "-w",
-        ])
+        .args(["find-generic-password", "-a", "flow", "-s", &service, "-w"])
         .output()
         .context("failed to read token from Keychain")?;
 
@@ -473,7 +468,12 @@ fn fuzzy_select_env() -> Result<()> {
 
     // Run fzf
     let mut child = Command::new("fzf")
-        .args(["--height=40%", "--reverse", "--delimiter=\t", "--with-nth=1"])
+        .args([
+            "--height=40%",
+            "--reverse",
+            "--delimiter=\t",
+            "--with-nth=1",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -541,10 +541,7 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
             let cwd = std::env::current_dir()?;
             let flow_path = find_flow_toml(&cwd)
                 .ok_or_else(|| anyhow::anyhow!("flow.toml not found. Run `f init` first."))?;
-            let project_root = flow_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or(cwd);
+            let project_root = flow_path.parent().map(|p| p.to_path_buf()).unwrap_or(cwd);
             let flow_config = config::load(&flow_path)?;
             deploy::apply_cloudflare_env(&project_root, Some(&flow_config))?;
         }
@@ -552,31 +549,35 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
             let cwd = std::env::current_dir()?;
             let flow_path = find_flow_toml(&cwd)
                 .ok_or_else(|| anyhow::anyhow!("flow.toml not found. Run `f init` first."))?;
-            let project_root = flow_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or(cwd);
+            let project_root = flow_path.parent().map(|p| p.to_path_buf()).unwrap_or(cwd);
             let flow_config = config::load(&flow_path)?;
             bootstrap_cloudflare_secrets(&project_root, &flow_config)?;
         }
         EnvAction::Keys => {
             show_keys()?;
         }
-        EnvAction::Setup { env_file, environment } => setup(env_file, environment)?,
+        EnvAction::Setup {
+            env_file,
+            environment,
+        } => setup(env_file, environment)?,
         EnvAction::List { environment } => list(&environment)?,
         EnvAction::Set { pair } => set_personal_env_var_from_pair(&pair)?,
         EnvAction::Delete { keys } => delete_personal_env_vars(&keys)?,
         EnvAction::Project { action } => run_project_env_action(action)?,
         EnvAction::Status => status()?,
-        EnvAction::Get { keys, personal, environment, format } => {
-            get_vars(&keys, personal, &environment, &format)?
-        }
-        EnvAction::Run { personal, environment, keys, command } => {
-            run_with_env(personal, &environment, &keys, &command)?
-        }
-        EnvAction::Token { action } => {
-            run_token_action(action)?
-        }
+        EnvAction::Get {
+            keys,
+            personal,
+            environment,
+            format,
+        } => get_vars(&keys, personal, &environment, &format)?,
+        EnvAction::Run {
+            personal,
+            environment,
+            keys,
+            command,
+        } => run_with_env(personal, &environment, &keys, &command)?,
+        EnvAction::Token { action } => run_token_action(action)?,
     }
 
     Ok(())
@@ -584,15 +585,9 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
 
 fn run_token_action(action: TokenAction) -> Result<()> {
     match action {
-        TokenAction::Create { name, permissions } => {
-            token_create(name.as_deref(), &permissions)?
-        }
-        TokenAction::List => {
-            token_list()?
-        }
-        TokenAction::Revoke { name } => {
-            token_revoke(&name)?
-        }
+        TokenAction::Create { name, permissions } => token_create(name.as_deref(), &permissions)?,
+        TokenAction::List => token_list()?,
+        TokenAction::Revoke { name } => token_revoke(&name)?,
     }
     Ok(())
 }
@@ -605,9 +600,7 @@ fn run_project_env_action(action: ProjectEnvAction) -> Result<()> {
         ProjectEnvAction::Delete { keys, environment } => {
             delete_project_env_vars(&keys, &environment)?
         }
-        ProjectEnvAction::List { environment } => {
-            list(&environment)?
-        }
+        ProjectEnvAction::List { environment } => list(&environment)?,
     }
     Ok(())
 }
@@ -698,7 +691,12 @@ fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
         bail!("API error {}: {}", status, body);
     }
 
-    println!("✓ Deleted {} key(s) from {} ({})", keys.len(), project, environment);
+    println!(
+        "✓ Deleted {} key(s) from {} ({})",
+        keys.len(),
+        project,
+        environment
+    );
     Ok(())
 }
 
@@ -932,7 +930,9 @@ fn guide(environment: &str) -> Result<()> {
     }
 
     if required.is_empty() {
-        bail!("No env keys configured. Add cloudflare.env_keys or cloudflare.env_vars to flow.toml.");
+        bail!(
+            "No env keys configured. Add cloudflare.env_keys or cloudflare.env_vars to flow.toml."
+        );
     }
 
     println!("Checking required env vars for '{}'...", environment);
@@ -952,7 +952,11 @@ fn guide(environment: &str) -> Result<()> {
 
     let mut missing = Vec::new();
     for key in &required {
-        if existing.get(key).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        if existing
+            .get(key)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
             println!("  ✓ {}", key);
         } else {
             println!("  ✗ {} (missing)", key);
@@ -996,9 +1000,10 @@ fn bootstrap_cloudflare_secrets(project_root: &Path, cfg: &config::Config) -> Re
 
     let mut values = HashMap::new();
     let mut generated_env_token: Option<String> = None;
-    let needs_env_account = cf_cfg.bootstrap_secrets.iter().any(|key| {
-        key == "JAZZ_WORKER_ACCOUNT" || key == "JAZZ_WORKER_SECRET"
-    });
+    let needs_env_account = cf_cfg
+        .bootstrap_secrets
+        .iter()
+        .any(|key| key == "JAZZ_WORKER_ACCOUNT" || key == "JAZZ_WORKER_SECRET");
     let needs_auth_account = cf_cfg.bootstrap_secrets.iter().any(|key| {
         key == "JAZZ_AUTH_WORKER_ACCOUNT_ID" || key == "JAZZ_AUTH_WORKER_ACCOUNT_SECRET"
     });
@@ -1039,10 +1044,7 @@ fn bootstrap_cloudflare_secrets(project_root: &Path, cfg: &config::Config) -> Re
                     .as_deref()
                     .unwrap_or(default_peer);
                 let creds = create_jazz_worker_account(peer, name)?;
-                values.insert(
-                    "JAZZ_AUTH_WORKER_ACCOUNT_ID".to_string(),
-                    creds.account_id,
-                );
+                values.insert("JAZZ_AUTH_WORKER_ACCOUNT_ID".to_string(), creds.account_id);
                 values.insert(
                     "JAZZ_AUTH_WORKER_ACCOUNT_SECRET".to_string(),
                     creds.agent_secret,
@@ -1129,7 +1131,10 @@ fn bootstrap_cloudflare_secrets(project_root: &Path, cfg: &config::Config) -> Re
         if auth.token_source.as_deref() == Some("keychain") {
             println!("✓ Saved ENV_API_TOKEN to Keychain");
         } else {
-            println!("✓ Saved ENV_API_TOKEN to {}", get_auth_config_path().display());
+            println!(
+                "✓ Saved ENV_API_TOKEN to {}",
+                get_auth_config_path().display()
+            );
         }
     }
 
@@ -1164,11 +1169,7 @@ fn prompt_line_default(key: &str, default_value: Option<&str>) -> Result<Option<
     }
 }
 
-fn prompt_value(
-    key: &str,
-    default_value: Option<&str>,
-    secret: bool,
-) -> Result<Option<String>> {
+fn prompt_value(key: &str, default_value: Option<&str>, secret: bool) -> Result<Option<String>> {
     if secret {
         return prompt_secret(&format!("{}: ", key));
     }
@@ -1206,14 +1207,21 @@ fn prompt_confirm(label: &str) -> Result<bool> {
             let _ = crossterm::terminal::disable_raw_mode();
             if let Ok(crossterm::event::Event::Key(key)) = read {
                 println!();
-                return Ok(matches!(key.code, crossterm::event::KeyCode::Char('y' | 'Y')));
+                return Ok(matches!(
+                    key.code,
+                    crossterm::event::KeyCode::Char('y' | 'Y')
+                ));
             }
         }
     }
 
     let value = prompt_line("")?;
     Ok(matches!(
-        value.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+        value
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
         "y" | "yes"
     ))
 }
@@ -1694,7 +1702,10 @@ fn fetch_env_vars(
         }
     } else {
         let project = get_project_name()?;
-        let base = format!("{}/api/env/{}?environment={}", api_url, project, environment);
+        let base = format!(
+            "{}/api/env/{}?environment={}",
+            api_url, project, environment
+        );
         if keys.is_empty() {
             base
         } else {
@@ -1735,7 +1746,10 @@ fn fetch_env_vars(
     }
 }
 
-pub fn fetch_project_env_vars(environment: &str, keys: &[String]) -> Result<HashMap<String, String>> {
+pub fn fetch_project_env_vars(
+    environment: &str,
+    keys: &[String],
+) -> Result<HashMap<String, String>> {
     fetch_env_vars(false, environment, keys)
 }
 
@@ -1806,7 +1820,9 @@ fn run_with_env(
         child.env(key, value);
     }
 
-    let status = child.status().with_context(|| format!("failed to run '{}'", cmd))?;
+    let status = child
+        .status()
+        .with_context(|| format!("failed to run '{}'", cmd))?;
 
     std::process::exit(status.code().unwrap_or(1));
 }
@@ -1904,7 +1920,10 @@ fn token_create(name: Option<&str>, permissions: &str) -> Result<()> {
     println!();
     println!("IMPORTANT: Save this token now. It won't be shown again.");
     println!();
-    println!("This token can ONLY access env vars for '{}'.", data.project_name);
+    println!(
+        "This token can ONLY access env vars for '{}'.",
+        data.project_name
+    );
     println!("If the host is compromised, revoke it with:");
     println!("  f env token revoke {}", data.name);
 

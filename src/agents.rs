@@ -84,7 +84,9 @@ enum GenLocation {
 /// List available agents.
 fn list_agents() -> Result<()> {
     println!("Flow agents:\n");
-    println!("  flow          - Flow-aware agent with full context about flow.toml, tasks, and CLI");
+    println!(
+        "  flow          - Flow-aware agent with full context about flow.toml, tasks, and CLI"
+    );
     println!("                  Knows schema, best practices, and can create/modify tasks");
     println!();
 
@@ -317,10 +319,7 @@ fn collect_agent_entries(
         let summary = desc.unwrap_or_else(|| "No description".to_string());
         let display = format!("[{label}] {} - {}", name, summary);
         if seen.insert(display.clone()) {
-            entries.push(AgentEntry {
-                name,
-                display,
-            });
+            entries.push(AgentEntry { name, display });
         }
     }
 
@@ -330,7 +329,11 @@ fn collect_agent_entries(
 fn agent_name_from_path(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     let without_ext = relative.with_extension("");
-    Some(without_ext.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+    Some(
+        without_ext
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/"),
+    )
 }
 
 fn parse_agent_frontmatter(path: &Path) -> Result<(Option<String>, Option<String>)> {
@@ -359,10 +362,7 @@ fn parse_agent_frontmatter(path: &Path) -> Result<(Option<String>, Option<String
 
 fn trim_yaml_scalar(value: &str) -> String {
     let trimmed = value.trim();
-    trimmed
-        .trim_matches('"')
-        .trim_matches('\'')
-        .to_string()
+    trimmed.trim_matches('"').trim_matches('\'').to_string()
 }
 
 fn run_agent_optional(agent: &str, prompt: Option<Vec<String>>) -> Result<()> {
@@ -676,7 +676,10 @@ fn invoke_gen_capture_streaming(location: &GenLocation, prompt: &str) -> Result<
     };
 
     let mut child = cmd.spawn().context("failed to run gen")?;
-    let stdout = child.stdout.take().context("failed to capture gen stdout")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture gen stdout")?;
     let reader = BufReader::new(stdout);
 
     let mut last_text = String::new();
@@ -768,9 +771,15 @@ fn build_flow_prompt(user_prompt: &str) -> Result<String> {
             for task in &discovery.tasks {
                 let desc = task.task.description.as_deref().unwrap_or("");
                 if task.relative_dir.is_empty() {
-                    context.push_str(&format!("- `{}`: {} ({})\n", task.task.name, desc, task.task.command));
+                    context.push_str(&format!(
+                        "- `{}`: {} ({})\n",
+                        task.task.name, desc, task.task.command
+                    ));
                 } else {
-                    context.push_str(&format!("- `{}` ({}): {} ({})\n", task.task.name, task.relative_dir, desc, task.task.command));
+                    context.push_str(&format!(
+                        "- `{}` ({}): {} ({})\n",
+                        task.task.name, task.relative_dir, desc, task.task.command
+                    ));
                 }
             }
         }

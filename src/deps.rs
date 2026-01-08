@@ -20,7 +20,11 @@ pub fn run(cmd: DepsCommand) -> Result<()> {
         None | Some(DepsAction::Pick) => {
             pick_dependency(&project_root)?;
         }
-        Some(DepsAction::Repo { repo, root, private }) => {
+        Some(DepsAction::Repo {
+            repo,
+            root,
+            private,
+        }) => {
             link_repo_dependency(&project_root, &repo, &root, private)?;
         }
         Some(other) => {
@@ -86,7 +90,9 @@ fn build_command(
 }
 
 fn detect_manager(project_root: &Path) -> DepsManager {
-    if project_root.join("pnpm-lock.yaml").exists() || project_root.join("pnpm-workspace.yaml").exists() {
+    if project_root.join("pnpm-lock.yaml").exists()
+        || project_root.join("pnpm-workspace.yaml").exists()
+    {
         return DepsManager::Pnpm;
     }
     if project_root.join("bun.lockb").exists() || project_root.join("bun.lock").exists() {
@@ -254,7 +260,11 @@ fn build_pick_entries(
                 let is_local = root_path.join(&repo.owner).join(&repo.repo).exists();
                 let _repo_url = repo.url.clone().unwrap_or_else(|| repo_id.clone());
                 entries.push(DepPickEntry {
-                    display: format!("[linked] {}{}", repo_id, if is_local { " (local)" } else { "" }),
+                    display: format!(
+                        "[linked] {}{}",
+                        repo_id,
+                        if is_local { " (local)" } else { "" }
+                    ),
                     action: DepPickAction::RepoOpen {
                         owner: repo.owner.clone(),
                         repo: repo.repo.clone(),
@@ -330,10 +340,14 @@ fn build_pick_entries(
                         owner: repo_ref.owner,
                         repo: repo_ref.repo,
                     },
-                    Err(_) => DepPickAction::RepoLink { repo: repo_url.clone() },
+                    Err(_) => DepPickAction::RepoLink {
+                        repo: repo_url.clone(),
+                    },
                 }
             } else {
-                DepPickAction::RepoLink { repo: repo_url.clone() }
+                DepPickAction::RepoLink {
+                    repo: repo_url.clone(),
+                }
             };
             entries.push(DepPickEntry {
                 display: format!("{} {} -> {}", label, dep, display),
@@ -353,7 +367,11 @@ fn build_pick_entries(
         let repo_url = resolve_cargo_repo(&cargo_lock, &dep);
         if let Some(repo_url) = repo_url {
             let is_local = local_repo_is_present(root_path, &repo_url);
-            let label = if is_local { "[linked-crate]" } else { "[crate]" };
+            let label = if is_local {
+                "[linked-crate]"
+            } else {
+                "[crate]"
+            };
             let display = display_repo(&repo_url);
             let action = if is_local {
                 match repos::parse_github_repo(&repo_url) {
@@ -361,10 +379,14 @@ fn build_pick_entries(
                         owner: repo_ref.owner,
                         repo: repo_ref.repo,
                     },
-                    Err(_) => DepPickAction::RepoLink { repo: repo_url.clone() },
+                    Err(_) => DepPickAction::RepoLink {
+                        repo: repo_url.clone(),
+                    },
                 }
             } else {
-                DepPickAction::RepoLink { repo: repo_url.clone() }
+                DepPickAction::RepoLink {
+                    repo: repo_url.clone(),
+                }
             };
             entries.push(DepPickEntry {
                 display: format!("{} {} -> {}", label, dep, display),
@@ -390,8 +412,8 @@ fn load_repo_manifest(project_root: &Path) -> Result<Option<RepoManifest>> {
     }
     let contents = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let manifest = toml::from_str::<RepoManifest>(&contents)
-        .context("failed to parse .ai/repos.toml")?;
+    let manifest =
+        toml::from_str::<RepoManifest>(&contents).context("failed to parse .ai/repos.toml")?;
     Ok(Some(manifest))
 }
 
@@ -438,10 +460,18 @@ fn parse_package_json(path: &Path) -> Result<PackageJsonInfo> {
     let value: serde_json::Value = serde_json::from_str(&contents)
         .with_context(|| format!("failed to parse {}", path.display()))?;
 
-    let name = value.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let name = value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let mut deps = BTreeSet::new();
 
-    for key in ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] {
+    for key in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
         if let Some(obj) = value.get(key).and_then(|v| v.as_object()) {
             for dep in obj.keys() {
                 deps.insert(dep.to_string());
@@ -463,8 +493,8 @@ struct CargoTomlInfo {
 fn parse_cargo_toml(path: &Path) -> Result<CargoTomlInfo> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let value: toml::Value = toml::from_str(&contents)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let value: toml::Value =
+        toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))?;
 
     let name = value
         .get("package")
@@ -522,7 +552,10 @@ fn load_cargo_lock(project_root: &Path) -> Result<CargoLockIndex> {
             None => continue,
         };
         if let Some(version) = table.get("version").and_then(Value::as_str) {
-            index.versions.entry(name.clone()).or_insert_with(|| version.to_string());
+            index
+                .versions
+                .entry(name.clone())
+                .or_insert_with(|| version.to_string());
         }
         if let Some(source) = table.get("source").and_then(Value::as_str) {
             if source.starts_with("registry+") {
@@ -627,15 +660,16 @@ fn extract_repo_url(value: &serde_json::Value) -> Option<String> {
 
 fn normalize_github_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_start_matches("git+");
-    let cleaned = trimmed
-        .trim_end_matches('/')
-        .trim_end_matches(".git");
+    let cleaned = trimmed.trim_end_matches('/').trim_end_matches(".git");
     if cleaned.contains("crates.io-index") {
         return None;
     }
 
     if let Ok(repo_ref) = repos::parse_github_repo(cleaned) {
-        return Some(format!("https://github.com/{}/{}", repo_ref.owner, repo_ref.repo));
+        return Some(format!(
+            "https://github.com/{}/{}",
+            repo_ref.owner, repo_ref.repo
+        ));
     }
     None
 }
@@ -678,9 +712,7 @@ fn path_relative(root: &Path, path: &Path) -> String {
 }
 
 fn is_project_root(root: &Path, candidate: &Path) -> bool {
-    let root = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf());
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let candidate = candidate
         .canonicalize()
         .unwrap_or_else(|_| candidate.to_path_buf());
@@ -770,8 +802,8 @@ fn looks_like_repo_ref(input: &str) -> bool {
 
 fn resolve_repo_by_name(root: &Path, name: &str) -> Result<repos::RepoRef> {
     let mut matches = Vec::new();
-    let root_entries = std::fs::read_dir(root)
-        .with_context(|| format!("failed to read {}", root.display()))?;
+    let root_entries =
+        std::fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))?;
 
     for owner_entry in root_entries.flatten() {
         if !owner_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -780,7 +812,10 @@ fn resolve_repo_by_name(root: &Path, name: &str) -> Result<repos::RepoRef> {
         let owner = owner_entry.file_name().to_string_lossy().to_string();
         let repo_path = owner_entry.path().join(name);
         if repo_path.is_dir() {
-            matches.push(repos::RepoRef { owner, repo: name.to_string() });
+            matches.push(repos::RepoRef {
+                owner,
+                repo: name.to_string(),
+            });
         }
     }
 
@@ -798,7 +833,11 @@ fn resolve_repo_by_name(root: &Path, name: &str) -> Result<repos::RepoRef> {
             .map(|repo| format!("{}/{}", repo.owner, repo.repo))
             .collect::<Vec<_>>()
             .join(", ");
-        bail!("multiple matches for '{}': {}. Use owner/repo.", name, options);
+        bail!(
+            "multiple matches for '{}': {}. Use owner/repo.",
+            name,
+            options
+        );
     }
 
     Ok(matches.remove(0))
@@ -813,10 +852,16 @@ fn upsert_repo_manifest(path: &Path, root: &str, repo: &repos::RepoRef, url: &st
         Value::Table(Map::new())
     };
 
-    let table = doc.as_table_mut().ok_or_else(|| anyhow::anyhow!("invalid repos.toml"))?;
-    table.entry("root".to_string()).or_insert_with(|| Value::String(root.to_string()));
+    let table = doc
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("invalid repos.toml"))?;
+    table
+        .entry("root".to_string())
+        .or_insert_with(|| Value::String(root.to_string()));
 
-    let repos_value = table.entry("repos".to_string()).or_insert_with(|| Value::Array(Vec::new()));
+    let repos_value = table
+        .entry("repos".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
     let repos_array = repos_value
         .as_array_mut()
         .ok_or_else(|| anyhow::anyhow!("invalid repos list"))?;
@@ -835,7 +880,8 @@ fn upsert_repo_manifest(path: &Path, root: &str, repo: &repos::RepoRef, url: &st
     }
 
     let rendered = toml::to_string_pretty(&doc)?;
-    std::fs::write(path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(path, rendered)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     println!("✓ updated {}", path.display());
     Ok(())
 }
@@ -952,7 +998,9 @@ fn git_remote_get(repo_dir: &Path, name: &str) -> Result<Option<String>> {
         _ => return Ok(None),
     };
 
-    Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
 }
 
 fn set_origin_remote(repo_dir: &Path, url: &str) -> Result<()> {

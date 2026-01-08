@@ -213,7 +213,12 @@ fn extract_binary(tarball: &Path, binary_name: &str) -> Result<PathBuf> {
 
     // Extract tarball
     let status = Command::new("tar")
-        .args(["-xzf", tarball.to_str().unwrap(), "-C", temp_path.to_str().unwrap()])
+        .args([
+            "-xzf",
+            tarball.to_str().unwrap(),
+            "-C",
+            temp_path.to_str().unwrap(),
+        ])
         .status()
         .context("Failed to run tar")?;
 
@@ -327,10 +332,7 @@ fn check_write_permission(path: &Path) -> Result<()> {
             bail!("You do not have write permission to {}", path.display());
         }
     } else if !parent.exists() || fs::metadata(parent)?.permissions().readonly() {
-        bail!(
-            "You do not have write permission to {}",
-            parent.display()
-        );
+        bail!("You do not have write permission to {}", parent.display());
     }
 
     Ok(())
@@ -344,7 +346,11 @@ pub fn run(opts: UpgradeOpts) -> Result<()> {
     println!("Current version: {}", current);
 
     // Check write permissions early
-    let output_path = opts.output.as_ref().map(PathBuf::from).unwrap_or_else(|| current_exe.clone());
+    let output_path = opts
+        .output
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| current_exe.clone());
     check_write_permission(&output_path)?;
 
     let client = Client::builder()

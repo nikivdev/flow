@@ -12,7 +12,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{GhReleaseCommand, GhReleaseAction, GhReleaseCreateOpts};
+use crate::cli::{GhReleaseAction, GhReleaseCommand, GhReleaseCreateOpts};
 
 /// Run the release command.
 pub fn run(cmd: GhReleaseCommand) -> Result<()> {
@@ -42,7 +42,9 @@ pub fn run(cmd: GhReleaseCommand) -> Result<()> {
         Some(GhReleaseAction::Create(opts)) => create_release(opts),
         Some(GhReleaseAction::List { limit }) => list_releases(limit),
         Some(GhReleaseAction::Delete { tag, yes }) => delete_release(&tag, yes),
-        Some(GhReleaseAction::Download { tag, output }) => download_release(tag.as_deref(), &output),
+        Some(GhReleaseAction::Download { tag, output }) => {
+            download_release(tag.as_deref(), &output)
+        }
         None => list_releases(10), // Default action
     }
 }
@@ -72,7 +74,10 @@ fn create_release(opts: GhReleaseCreateOpts) -> Result<()> {
         .unwrap_or(false);
 
     if tag_exists {
-        bail!("Release {} already exists. Use a different version or delete the existing release.", tag);
+        bail!(
+            "Release {} already exists. Use a different version or delete the existing release.",
+            tag
+        );
     }
 
     // Validate assets exist
@@ -188,12 +193,7 @@ fn create_release(opts: GhReleaseCreateOpts) -> Result<()> {
 /// List recent releases.
 fn list_releases(limit: usize) -> Result<()> {
     let output = Command::new("gh")
-        .args([
-            "release",
-            "list",
-            "--limit",
-            &limit.to_string(),
-        ])
+        .args(["release", "list", "--limit", &limit.to_string()])
         .output()
         .context("failed to list releases")?;
 
@@ -259,10 +259,7 @@ fn delete_release(tag: &str, yes: bool) -> Result<()> {
     io::stdin().read_line(&mut input)?;
     let input = input.trim().to_lowercase();
     if input == "y" || input == "yes" {
-        Command::new("git")
-            .args(["tag", "-d", tag])
-            .status()
-            .ok();
+        Command::new("git").args(["tag", "-d", tag]).status().ok();
         Command::new("git")
             .args(["push", "origin", &format!(":refs/tags/{}", tag)])
             .status()

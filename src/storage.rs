@@ -9,9 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use shellexpand::tilde;
 
-use crate::cli::{
-    DbAction, DbCommand, JazzStorageAction, JazzStorageKind, PostgresAction,
-};
+use crate::cli::{DbAction, DbCommand, JazzStorageAction, JazzStorageKind, PostgresAction};
 use crate::{config, env};
 
 const DEFAULT_JAZZ_API_KEY_MIRROR: &str = "jazz-gitedit-prod";
@@ -105,7 +103,11 @@ fn resolve_database_url(database_url: Option<&str>, project_dir: &Path) -> Resul
         }
     }
 
-    for key in ["DATABASE_URL", "PLANETSCALE_DATABASE_URL", "PSCALE_DATABASE_URL"] {
+    for key in [
+        "DATABASE_URL",
+        "PLANETSCALE_DATABASE_URL",
+        "PSCALE_DATABASE_URL",
+    ] {
         if let Ok(url) = std::env::var(key) {
             if !url.trim().is_empty() {
                 return Ok(url);
@@ -155,7 +157,11 @@ fn strip_quotes(value: &str) -> &str {
     trimmed
         .strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
-        .or_else(|| trimmed.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+        })
         .unwrap_or(trimmed)
 }
 
@@ -258,10 +264,9 @@ fn jazz_new(
                 "JAZZ_MIRROR_SYNC_SERVER",
                 "Custom Jazz sync server for mirror worker",
             ),
-            JazzStorageKind::EnvStore => (
-                "JAZZ_SYNC_SERVER",
-                "Custom Jazz sync server for env worker",
-            ),
+            JazzStorageKind::EnvStore => {
+                ("JAZZ_SYNC_SERVER", "Custom Jazz sync server for env worker")
+            }
         };
         env::set_project_env_var(key, &peer, environment, Some(desc))?;
     }
@@ -287,13 +292,7 @@ pub(crate) fn create_jazz_worker_account(peer: &str, name: &str) -> Result<JazzC
         {
             let mut cmd = Command::new(path);
             cmd.args([
-                "account",
-                "create",
-                "--peer",
-                peer,
-                "--name",
-                name,
-                "--json",
+                "account", "create", "--peer", peer, "--name", name, "--json",
             ]);
             run_command_with_output(cmd)
         }
@@ -306,15 +305,7 @@ pub(crate) fn create_jazz_worker_account(peer: &str, name: &str) -> Result<JazzC
         {
             let mut cmd = Command::new("npx");
             cmd.args([
-                "--yes",
-                "jazz-run",
-                "account",
-                "create",
-                "--peer",
-                peer,
-                "--name",
-                name,
-                "--json",
+                "--yes", "jazz-run", "account", "create", "--peer", peer, "--name", name, "--json",
             ]);
             run_command_with_output(cmd)
         }
@@ -341,10 +332,7 @@ pub(crate) fn create_jazz_worker_account(peer: &str, name: &str) -> Result<JazzC
 }
 
 fn run_command_with_output(mut cmd: Command) -> Result<Output> {
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
     let mut stdout = child
         .stdout

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bs58;
 use chrono::{DateTime, Local, TimeZone, Utc};
 use cojson_core::crypto::{get_sealer_id, new_x25519_private_key, seal, unseal};
@@ -65,7 +65,10 @@ fn setup(name: &str, unlock_after: bool) -> Result<()> {
     fs::create_dir_all(&tmp_dir)?;
     let key_path = tmp_dir.join("id_ed25519");
 
-    let comment = format!("flow@{}", std::env::var("USER").unwrap_or_else(|_| "flow".to_string()));
+    let comment = format!(
+        "flow@{}",
+        std::env::var("USER").unwrap_or_else(|_| "flow".to_string())
+    );
     let status = Command::new("ssh-keygen")
         .args([
             "-t",
@@ -120,6 +123,8 @@ fn setup(name: &str, unlock_after: bool) -> Result<()> {
     println!("Public key:\n{}", public_key.trim());
     println!("Add it to GitHub: https://github.com/settings/keys");
     ensure_global_ssh_config(&key_name)?;
+    let wrapper = ensure_flow_ssh_wrapper(&key_name)?;
+    let _ = ssh::ensure_git_ssh_command_wrapper(&wrapper, true);
 
     if unlock_after {
         unlock(&key_name, DEFAULT_TTL_HOURS)?;
@@ -188,7 +193,8 @@ fn unlock(name: &str, ttl_hours: u64) -> Result<()> {
     private_key.fill(0);
     result?;
 
-    let _ = ssh::ensure_git_ssh_command_for_sock(&sock, true);
+    let wrapper = ensure_flow_ssh_wrapper(&key_name)?;
+    let _ = ssh::ensure_git_ssh_command_wrapper(&wrapper, true);
     let _ = ssh::clear_git_https_insteadof();
     println!("✓ SSH key unlocked (ttl: {}h)", ttl_hours);
 
@@ -215,13 +221,14 @@ fn status(name: &str) -> Result<()> {
         }
     };
     let has_plain = vars.contains_key(&env_private_plain);
-    let has_sealed = vars.contains_key(&env_private_sealed) && vars.contains_key(&env_private_nonce);
+    let has_sealed =
+        vars.contains_key(&env_private_sealed) && vars.contains_key(&env_private_nonce);
     let has_pub = vars.contains_key(&env_public);
-    let fingerprint = vars
-        .get(&env_fingerprint)
+    let fingerprint = vars.get(&env_fingerprint).cloned().unwrap_or_default();
+    let sealer_id = vars
+        .get(&env_private_sealer_id)
         .cloned()
         .unwrap_or_default();
-    let sealer_id = vars.get(&env_private_sealer_id).cloned().unwrap_or_default();
     let local_identity = load_sealer_identity().ok().flatten();
 
     let agent = ssh::flow_agent_status();
@@ -244,7 +251,11 @@ fn status(name: &str) -> Result<()> {
     }
     println!(
         "Local seal identity: {}",
-        if local_identity.is_some() { "yes" } else { "no" }
+        if local_identity.is_some() {
+            "yes"
+        } else {
+            "no"
+        }
     );
     match agent {
         Some(sock) => println!("Flow SSH agent: running ({})", sock.display()),
@@ -426,8 +437,7 @@ fn sanitize_env_suffix(name: &str) -> String {
 fn ensure_ssh_state_dir() -> Result<PathBuf> {
     let base = config::ensure_global_state_dir()?;
     let dir = base.join("ssh");
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -436,6 +446,40 @@ fn ensure_ssh_state_dir() -> Result<PathBuf> {
             .with_context(|| format!("failed to chmod {}", dir.display()))?;
     }
     Ok(dir)
+}
+
+fn ensure_flow_ssh_wrapper(key_name: &str) -> Result<PathBuf> {
+    let dir = ensure_ssh_state_dir()?;
+    let path = dir.join("flow-ssh");
+    let sock = ssh::flow_agent_sock_path();
+    let sock_escaped = escape_double_quotes(&sock.to_string_lossy());
+    let key_arg = shell_escape_arg(key_name);
+
+    let content = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+SOCK="{sock}"
+if [[ -S "$SOCK" ]]; then
+  if SSH_AUTH_SOCK="$SOCK" ssh-add -l >/dev/null 2>&1; then
+    exec /usr/bin/ssh -o IdentityAgent="$SOCK" -o IdentitiesOnly=yes -o BatchMode=yes "$@"
+  fi
+fi
+if command -v f >/dev/null 2>&1; then
+  f ssh unlock --name {key}
+elif command -v flow >/dev/null 2>&1; then
+  flow ssh unlock --name {key}
+fi
+exec /usr/bin/ssh -o IdentityAgent="$SOCK" -o IdentitiesOnly=yes -o BatchMode=yes "$@"
+"#,
+        sock = sock_escaped,
+        key = key_arg
+    );
+
+    if !path.exists() || fs::read_to_string(&path).unwrap_or_default() != content {
+        write_executable_file(&path, content.as_bytes())?;
+    }
+
+    Ok(path)
 }
 
 fn sealer_identity_path() -> Result<PathBuf> {
@@ -579,16 +623,15 @@ fn load_sealer_identity() -> Result<Option<SealerIdentity>> {
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut identity: SealerIdentity =
         serde_json::from_str(&content).context("failed to parse SSH sealer identity")?;
     if identity.sealer_secret.trim().is_empty() {
         bail!("SSH sealer identity is missing its secret");
     }
 
-    let derived_id =
-        get_sealer_id(&identity.sealer_secret).context("invalid SSH sealer secret")?;
+    let derived_id = get_sealer_id(&identity.sealer_secret).context("invalid SSH sealer secret")?;
     if identity.sealer_id != derived_id {
         identity.sealer_id = derived_id;
         let updated = serde_json::to_string_pretty(&identity)?;
@@ -613,8 +656,7 @@ fn load_or_create_sealer_identity() -> Result<SealerIdentity> {
 fn create_sealer_identity() -> Result<SealerIdentity> {
     let private_key = new_x25519_private_key();
     let sealer_secret = format!("sealerSecret_z{}", bs58::encode(&private_key).into_string());
-    let sealer_id =
-        get_sealer_id(&sealer_secret).context("failed to derive SSH sealer id")?;
+    let sealer_id = get_sealer_id(&sealer_secret).context("failed to derive SSH sealer id")?;
     Ok(SealerIdentity {
         sealer_secret,
         sealer_id,
@@ -723,6 +765,49 @@ fn write_private_key(path: &PathBuf, content: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn write_executable_file(path: &PathBuf, content: &[u8]) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o700);
+    }
+
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o700);
+        fs::set_permissions(path, perms)
+            .with_context(|| format!("failed to chmod {}", path.display()))?;
+    }
+
+    file.write_all(content)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+
+    Ok(())
+}
+
+fn escape_double_quotes(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn shell_escape_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
 fn compute_fingerprint(public_key_path: &PathBuf) -> Option<String> {
     let output = Command::new("ssh-keygen")
         .args(["-lf", public_key_path.to_string_lossy().as_ref()])
@@ -784,8 +869,7 @@ mod tests {
         let identity = create_sealer_identity().expect("identity");
         let payload = seal_private_key(b"PRIVATE_KEY", &identity).expect("seal");
         let unsealed =
-            unseal_private_key(&payload.sealed_b64, &payload.nonce_b64, &identity)
-                .expect("unseal");
+            unseal_private_key(&payload.sealed_b64, &payload.nonce_b64, &identity).expect("unseal");
         assert_eq!(unsealed, b"PRIVATE_KEY");
     }
 

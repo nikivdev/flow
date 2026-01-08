@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
+use crate::cli::Cli;
 use crate::{
     cli::TaskRunOpts,
     config,
@@ -12,7 +13,6 @@ use crate::{
     lmstudio, tasks,
 };
 use clap::CommandFactory;
-use crate::cli::Cli;
 
 /// Options for the match command.
 #[derive(Debug, Clone)]
@@ -137,7 +137,11 @@ pub fn run_global(opts: MatchOpts) -> Result<()> {
     run_with_tasks(opts, tasks, false)
 }
 
-fn run_with_tasks(opts: MatchOpts, tasks: Vec<DiscoveredTask>, allow_passthrough: bool) -> Result<()> {
+fn run_with_tasks(
+    opts: MatchOpts,
+    tasks: Vec<DiscoveredTask>,
+    allow_passthrough: bool,
+) -> Result<()> {
     // Check if this is a CLI subcommand that should bypass matching
     if allow_passthrough && is_cli_subcommand(&opts.args) {
         return passthrough_to_cli(&opts.args);
@@ -198,11 +202,7 @@ fn run_with_tasks(opts: MatchOpts, tasks: Vec<DiscoveredTask>, allow_passthrough
         };
 
         // Parse the response to get the task name (no args for LLM matches)
-        (
-            extract_task_name(&response, &tasks)?,
-            Vec::new(),
-            false,
-        )
+        (extract_task_name(&response, &tasks)?, Vec::new(), false)
     };
 
     // Find the matched task

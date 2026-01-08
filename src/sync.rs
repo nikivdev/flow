@@ -8,7 +8,10 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use crossterm::{terminal, event::{self, Event, KeyCode, KeyEventKind}};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind},
+    terminal,
+};
 
 use crate::cli::SyncCommand;
 
@@ -91,7 +94,8 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
     let has_upstream = git_capture(&["remote", "get-url", "upstream"]).is_ok();
 
     // Check if origin remote is reachable (repo exists on remote)
-    let origin_reachable = has_origin && git_capture(&["ls-remote", "--exit-code", "-q", "origin"]).is_ok();
+    let origin_reachable =
+        has_origin && git_capture(&["ls-remote", "--exit-code", "-q", "origin"]).is_ok();
 
     // Step 1: Pull from origin (if tracking branch exists and repo is reachable)
     if has_origin && origin_reachable {
@@ -108,11 +112,15 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
                                 println!("  ✓ Rebase conflicts auto-resolved");
                             } else {
                                 restore_stash(stashed);
-                                bail!("Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue");
+                                bail!(
+                                    "Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue"
+                                );
                             }
                         } else {
                             restore_stash(stashed);
-                            bail!("Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue");
+                            bail!(
+                                "Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue"
+                            );
                         }
                     } else {
                         restore_stash(stashed);
@@ -122,7 +130,8 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
             } else {
                 if let Err(_) = git_run(&["pull", "origin", current]) {
                     // Check for merge conflicts
-                    let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+                    let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"])
+                        .unwrap_or_default();
                     if !conflicts.trim().is_empty() {
                         let should_fix = auto_fix || prompt_for_auto_fix()?;
                         if should_fix {
@@ -132,11 +141,15 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
                                 println!("  ✓ Merge conflicts auto-resolved");
                             } else {
                                 restore_stash(stashed);
-                                bail!("Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit");
+                                bail!(
+                                    "Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit"
+                                );
                             }
                         } else {
                             restore_stash(stashed);
-                            bail!("Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit");
+                            bail!(
+                                "Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit"
+                            );
                         }
                     } else {
                         restore_stash(stashed);
@@ -165,7 +178,8 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
         // Check if origin == upstream (read-only clone, no fork)
         let origin_url = git_capture(&["remote", "get-url", "origin"]).unwrap_or_default();
         let upstream_url = git_capture(&["remote", "get-url", "upstream"]).unwrap_or_default();
-        let is_read_only = has_upstream && normalize_git_url(&origin_url) == normalize_git_url(&upstream_url);
+        let is_read_only =
+            has_upstream && normalize_git_url(&origin_url) == normalize_git_url(&upstream_url);
 
         if is_read_only {
             println!("==> Skipping push (origin == upstream, read-only clone)");
@@ -208,32 +222,38 @@ fn sync_upstream_internal(current_branch: &str, auto_fix: bool) -> Result<()> {
     git_run(&["fetch", "upstream", "--prune"])?;
 
     // Determine upstream branch
-    let upstream_branch = if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
-        merge_ref.trim().replace("refs/heads/", "")
-    } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
-        head_ref.trim().replace("refs/remotes/upstream/", "")
-    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
-        "main".to_string()
-    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
-        "master".to_string()
-    } else {
-        println!("  Cannot determine upstream branch, skipping upstream sync");
-        return Ok(());
-    };
+    let upstream_branch =
+        if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
+            merge_ref.trim().replace("refs/heads/", "")
+        } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
+            head_ref.trim().replace("refs/remotes/upstream/", "")
+        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
+            "main".to_string()
+        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
+            "master".to_string()
+        } else {
+            println!("  Cannot determine upstream branch, skipping upstream sync");
+            return Ok(());
+        };
 
     let upstream_ref = format!("upstream/{}", upstream_branch);
 
     // Update local upstream branch if it exists
-    let local_upstream_exists = git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
+    let local_upstream_exists =
+        git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
     if local_upstream_exists {
         git_run(&["branch", "-f", "upstream", &upstream_ref])?;
     }
 
     // Check if current branch is behind upstream
-    let behind = git_capture(&["rev-list", "--count", &format!("{}..{}", current_branch, upstream_ref)])
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+    let behind = git_capture(&[
+        "rev-list",
+        "--count",
+        &format!("{}..{}", current_branch, upstream_ref),
+    ])
+    .ok()
+    .and_then(|s| s.trim().parse::<u32>().ok())
+    .unwrap_or(0);
 
     if behind > 0 {
         println!("  Merging {} commits from upstream...", behind);
@@ -249,14 +269,14 @@ fn sync_upstream_internal(current_branch: &str, auto_fix: bool) -> Result<()> {
                     if try_resolve_conflicts()? {
                         // Conflicts resolved, commit
                         let _ = git_run(&["add", "-A"]);
-                        let _ = Command::new("git")
-                            .args(["commit", "--no-edit"])
-                            .output();
+                        let _ = Command::new("git").args(["commit", "--no-edit"]).output();
                         println!("  ✓ Conflicts auto-resolved");
                         return Ok(());
                     }
                 }
-                bail!("Merge conflicts with upstream. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit");
+                bail!(
+                    "Merge conflicts with upstream. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit"
+                );
             }
         }
     } else {
@@ -290,7 +310,9 @@ fn read_yes_no() -> Result<bool> {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') => break Ok(true),
-                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter | KeyCode::Esc => break Ok(false),
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter | KeyCode::Esc => {
+                            break Ok(false);
+                        }
                         _ => {}
                     }
                 }
@@ -393,14 +415,28 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
 
     // Auto-generated files - accept theirs (upstream/incoming)
     let auto_generated = [
-        "STATS.md", "stats.md", "CHANGELOG.md", "changelog.md",
-        "package-lock.json", "yarn.lock", "bun.lock", "pnpm-lock.yaml",
-        "Cargo.lock", "Gemfile.lock", "poetry.lock", "composer.lock",
+        "STATS.md",
+        "stats.md",
+        "CHANGELOG.md",
+        "changelog.md",
+        "package-lock.json",
+        "yarn.lock",
+        "bun.lock",
+        "pnpm-lock.yaml",
+        "Cargo.lock",
+        "Gemfile.lock",
+        "poetry.lock",
+        "composer.lock",
     ];
 
-    if auto_generated.iter().any(|&ag| filename.eq_ignore_ascii_case(ag)) {
+    if auto_generated
+        .iter()
+        .any(|&ag| filename.eq_ignore_ascii_case(ag))
+    {
         println!("  Auto-resolving {} (accepting theirs)", file);
-        let _ = Command::new("git").args(["checkout", "--theirs", file]).output();
+        let _ = Command::new("git")
+            .args(["checkout", "--theirs", file])
+            .output();
         let _ = Command::new("git").args(["add", file]).output();
         return Ok(true);
     }
@@ -411,7 +447,11 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
         println!("  Trying Claude for {}...", file);
         let prompt = format!(
             "This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
-            if content.len() > 8000 { &content[..8000] } else { &content }
+            if content.len() > 8000 {
+                &content[..8000]
+            } else {
+                &content
+            }
         );
 
         let output = Command::new("claude")
@@ -498,15 +538,16 @@ fn try_resolve_conflicts() -> Result<bool> {
     for file in &conflicted_files {
         let filename = file.rsplit('/').next().unwrap_or(file);
 
-        if auto_generated.iter().any(|&ag| filename.eq_ignore_ascii_case(ag)) {
+        if auto_generated
+            .iter()
+            .any(|&ag| filename.eq_ignore_ascii_case(ag))
+        {
             // Accept theirs for auto-generated files
             println!("  Auto-resolving {} (accepting upstream)", file);
             let _ = Command::new("git")
                 .args(["checkout", "--theirs", file])
                 .output();
-            let _ = Command::new("git")
-                .args(["add", file])
-                .output();
+            let _ = Command::new("git").args(["add", file]).output();
             resolved_count += 1;
         } else {
             needs_claude.push(*file);
@@ -519,14 +560,21 @@ fn try_resolve_conflicts() -> Result<bool> {
     }
 
     // Try Claude for remaining conflicts
-    println!("  Trying Claude for {} remaining conflicts...", needs_claude.len());
+    println!(
+        "  Trying Claude for {} remaining conflicts...",
+        needs_claude.len()
+    );
 
     for file in &needs_claude {
         let content = std::fs::read_to_string(file).unwrap_or_default();
         if content.contains("<<<<<<<") {
             let prompt = format!(
                 "This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
-                if content.len() > 8000 { &content[..8000] } else { &content }
+                if content.len() > 8000 {
+                    &content[..8000]
+                } else {
+                    &content
+                }
             );
 
             let output = Command::new("claude")
@@ -654,7 +702,10 @@ fn push_with_autofix(branch: &str, auto_fix: bool, max_attempts: u32) -> Result<
             bail!("git push origin {} failed", branch);
         }
 
-        println!("\n==> Push failed (attempt {}/{}), attempting auto-fix with Claude...", attempts, max_attempts);
+        println!(
+            "\n==> Push failed (attempt {}/{}), attempting auto-fix with Claude...",
+            attempts, max_attempts
+        );
 
         // Run Claude to fix the errors
         if !try_claude_fix(&combined)? {
@@ -680,9 +731,7 @@ fn push_with_autofix(branch: &str, auto_fix: bool, max_attempts: u32) -> Result<
 /// Try to fix errors using Claude CLI.
 fn try_claude_fix(error_output: &str) -> Result<bool> {
     // Check if claude is available
-    let claude_check = Command::new("which")
-        .arg("claude")
-        .output();
+    let claude_check = Command::new("which").arg("claude").output();
 
     if claude_check.is_err() || !claude_check.unwrap().status.success() {
         println!("  Claude CLI not found. Install with: npm i -g @anthropic-ai/claude-code");

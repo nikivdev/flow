@@ -16,15 +16,12 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{DeployAction, DeployCommand, EnvAction, TaskRunOpts};
-use crate::release;
 use crate::config::Config;
 use crate::deploy_setup::{
-    CloudflareSetupDefaults,
-    CloudflareSetupResult,
-    discover_wrangler_configs,
-    run_cloudflare_setup,
+    CloudflareSetupDefaults, CloudflareSetupResult, discover_wrangler_configs, run_cloudflare_setup,
 };
 use crate::env::parse_env_file;
+use crate::release;
 use crate::tasks;
 
 const DEPLOY_HELPER_BIN: &str = "infra";
@@ -325,9 +322,10 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
 
             bail!("No flow.toml found. Run `f setup` first.")
         }
-        Some(DeployAction::Host { remote_build, setup }) => {
-            deploy_host(&project_root, flow_config.as_ref(), remote_build, setup)
-        }
+        Some(DeployAction::Host {
+            remote_build,
+            setup,
+        }) => deploy_host(&project_root, flow_config.as_ref(), remote_build, setup),
         Some(DeployAction::Cloudflare { secrets, dev }) => {
             deploy_cloudflare(&project_root, flow_config.as_ref(), secrets, dev)
         }
@@ -368,10 +366,7 @@ fn configure_deploy() -> Result<()> {
     let infra_default = infra_linux_connection_string();
 
     if let Some(conn) = existing.as_ref() {
-        println!(
-            "Current host: {}@{}:{}",
-            conn.user, conn.host, conn.port
-        );
+        println!("Current host: {}@{}:{}", conn.user, conn.host, conn.port);
     }
     if let Some(default_conn) = infra_default.as_ref() {
         if existing.is_none() {
@@ -585,7 +580,14 @@ fn deploy_host(
         let project_name = project_root.file_name().unwrap().to_str().unwrap();
 
         println!("==> Installing env-fetch script (host will fetch on startup)...");
-        install_env_fetch_script(conn, dest, service_token, project_name, env_name, &host_cfg.env_keys)?;
+        install_env_fetch_script(
+            conn,
+            dest,
+            service_token,
+            project_name,
+            env_name,
+            &host_cfg.env_keys,
+        )?;
     } else if use_1focus {
         // Deploy-time fetch mode: fetch now and copy to host
         let env_name = host_cfg.environment.as_deref().unwrap_or("production");
@@ -593,7 +595,11 @@ fn deploy_host(
         let use_project = host_cfg.env_project;
 
         if !keys.is_empty() {
-            let source = if use_project { &format!("project/{}", env_name) } else { "personal" };
+            let source = if use_project {
+                &format!("project/{}", env_name)
+            } else {
+                "personal"
+            };
             println!("==> Fetching env vars from 1focus ({})...", source);
 
             let result = if use_project {
@@ -606,7 +612,10 @@ fn deploy_host(
                 Ok(vars) if !vars.is_empty() => {
                     // Generate .env content
                     let mut content = String::new();
-                    content.push_str(&format!("# Source: 1focus {} (fetched at deploy)\n", source));
+                    content.push_str(&format!(
+                        "# Source: 1focus {} (fetched at deploy)\n",
+                        source
+                    ));
                     let mut sorted_keys: Vec<_> = vars.keys().collect();
                     sorted_keys.sort();
                     for key in sorted_keys {
@@ -616,7 +625,8 @@ fn deploy_host(
                     }
 
                     // Write to temp file and scp
-                    let temp_env = std::env::temp_dir().join(format!(".env.{}", std::process::id()));
+                    let temp_env =
+                        std::env::temp_dir().join(format!(".env.{}", std::process::id()));
                     fs::write(&temp_env, &content)?;
                     let remote_env = format!("{}/.env", dest);
                     println!("==> Copying {} env vars to remote...", vars.len());
@@ -843,14 +853,14 @@ fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConf
         bail!("cloudflare.env_source must be set to \"1focus\" to apply envs");
     }
 
-    let onefocus_env = cf_cfg
-        .environment
-        .as_deref()
-        .unwrap_or("production");
+    let onefocus_env = cf_cfg.environment.as_deref().unwrap_or("production");
     let keys = collect_cloudflare_env_keys(cf_cfg);
     let vars = crate::env::fetch_project_env_vars(onefocus_env, &keys)?;
     if vars.is_empty() {
-        bail!("No env vars found in 1focus for environment '{}'", onefocus_env);
+        bail!(
+            "No env vars found in 1focus for environment '{}'",
+            onefocus_env
+        );
     }
 
     apply_cloudflare_env_map(project_root, cf_cfg, &vars)?;
@@ -904,7 +914,10 @@ fn ensure_wrangler_config(worker_path: &Path) -> Result<()> {
 }
 
 fn wrangler_command(worker_path: &Path) -> Command {
-    let local_bin = worker_path.join("node_modules").join(".bin").join("wrangler");
+    let local_bin = worker_path
+        .join("node_modules")
+        .join(".bin")
+        .join("wrangler");
     let mut cmd = if local_bin.exists() {
         Command::new(local_bin)
     } else if worker_path.join("package.json").exists() {
@@ -1043,7 +1056,9 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
         };
 
         if env_store_ok {
-            crate::env::run(Some(EnvAction::Guide { environment: env_name }))?;
+            crate::env::run(Some(EnvAction::Guide {
+                environment: env_name,
+            }))?;
             crate::env::run(Some(EnvAction::Apply))?;
         } else {
             eprintln!("⚠ Skipping env guide/apply (1focus unavailable).");
@@ -1054,16 +1069,11 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
     }
 
     let defaults = CloudflareSetupDefaults {
-        worker_path: cf_cfg
-            .path
-            .as_ref()
-            .map(|p| project_root.join(p)),
+        worker_path: cf_cfg.path.as_ref().map(|p| project_root.join(p)),
         env_file: if is_1focus_source(cf_cfg.env_source.as_deref()) {
             None
         } else {
-            cf_cfg.env_file
-                .as_ref()
-                .map(|p| project_root.join(p))
+            cf_cfg.env_file.as_ref().map(|p| project_root.join(p))
         },
         environment: cf_cfg.environment.clone(),
     };
@@ -1091,7 +1101,9 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
                 .environment
                 .clone()
                 .unwrap_or_else(|| "production".to_string());
-            crate::env::run(Some(EnvAction::Guide { environment: env_name }))?;
+            crate::env::run(Some(EnvAction::Guide {
+                environment: env_name,
+            }))?;
             crate::env::run(Some(EnvAction::Apply))?;
         } else if let Some(env_file) = result.env_file.as_ref() {
             let env_name = result.environment.as_deref();
@@ -1170,7 +1182,13 @@ fn show_status(_project_root: &Path, config: Option<&Config>) -> Result<()> {
         println!("Host: {}@{}:{}", conn.user, conn.host, conn.port);
         if let Some(cfg) = config.and_then(|c| c.host.as_ref()) {
             if let Some(service) = &cfg.service {
-                let output = ssh_capture(conn, &format!("systemctl is-active {} 2>/dev/null || echo inactive", service))?;
+                let output = ssh_capture(
+                    conn,
+                    &format!(
+                        "systemctl is-active {} 2>/dev/null || echo inactive",
+                        service
+                    ),
+                )?;
                 println!("  Service '{}': {}", service, output.trim());
             }
         }
@@ -1195,10 +1213,7 @@ fn show_logs(
     }
 
     let deploy_config = load_deploy_config()?;
-    let conn = deploy_config
-        .host
-        .as_ref()
-        .context("No host configured")?;
+    let conn = deploy_config.host.as_ref().context("No host configured")?;
 
     let service = config
         .and_then(|c| c.host.as_ref())
@@ -1517,7 +1532,13 @@ echo "Fetched env vars for {project_name} ({environment})"
 
 /// Check if systemd service exists.
 fn service_exists(conn: &HostConnection, name: &str) -> Result<bool> {
-    let output = ssh_capture(conn, &format!("systemctl list-unit-files {} 2>/dev/null | grep -c {} || true", name, name))?;
+    let output = ssh_capture(
+        conn,
+        &format!(
+            "systemctl list-unit-files {} 2>/dev/null | grep -c {} || true",
+            name, name
+        ),
+    )?;
     Ok(output.trim() != "0")
 }
 
@@ -1583,8 +1604,8 @@ fn normalize_exec_start(workdir: &str, exec_start: &str) -> String {
         return String::new();
     }
 
-    let mut parts =
-        shell_words::split(trimmed).unwrap_or_else(|_| trimmed.split_whitespace().map(|s| s.to_string()).collect());
+    let mut parts = shell_words::split(trimmed)
+        .unwrap_or_else(|_| trimmed.split_whitespace().map(|s| s.to_string()).collect());
     if parts.is_empty() {
         return trimmed.to_string();
     }
@@ -1595,10 +1616,7 @@ fn normalize_exec_start(workdir: &str, exec_start: &str) -> String {
     }
 
     if cmd.starts_with("./") || cmd.starts_with("../") || cmd.contains('/') {
-        let abs = Path::new(workdir)
-            .join(cmd)
-            .to_string_lossy()
-            .to_string();
+        let abs = Path::new(workdir).join(cmd).to_string_lossy().to_string();
         parts[0] = abs;
         return shell_words::join(parts);
     }
@@ -1663,8 +1681,7 @@ fn set_wrangler_secrets(
 ) -> Result<()> {
     let content = fs::read_to_string(env_file)?;
     let vars = parse_env_file(&content);
-    let allowlist = selected_keys
-        .map(|keys| keys.iter().cloned().collect::<HashSet<String>>());
+    let allowlist = selected_keys.map(|keys| keys.iter().cloned().collect::<HashSet<String>>());
 
     for (key, value) in vars {
         if let Some(allowlist) = &allowlist {
@@ -1743,7 +1760,12 @@ fn update_flow_toml_cloudflare(
         updated.extend_from_slice(&lines[end..]);
         lines = updated;
     } else {
-        if !lines.is_empty() && !lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        if !lines.is_empty()
+            && !lines
+                .last()
+                .map(|line| line.trim().is_empty())
+                .unwrap_or(false)
+        {
             lines.push(String::new());
         }
         lines.push("[cloudflare]".to_string());
@@ -1849,7 +1871,9 @@ fn check_health(
             if let Some(cf_url) = &cf.url {
                 cf_url.clone()
             } else {
-                bail!("No URL configured in [cloudflare]. Add 'url = \"https://...\"' or use --url.");
+                bail!(
+                    "No URL configured in [cloudflare]. Add 'url = \"https://...\"' or use --url."
+                );
             }
         } else {
             bail!("No deployment config found. Use --url to specify a URL to check.");

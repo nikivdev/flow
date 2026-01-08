@@ -140,10 +140,8 @@ fn archive_existing_configs(config_dir: &Path) -> Result<Vec<PathBuf>> {
 
         let mut archive_path = archive_root.join(&dest_rel);
         if archive_path.exists() {
-            archive_path = archive_path.with_extension(format!(
-                "bak-{}",
-                chrono::Utc::now().timestamp()
-            ));
+            archive_path =
+                archive_path.with_extension(format!("bak-{}", chrono::Utc::now().timestamp()));
         }
 
         if let Some(parent) = archive_path.parent() {
@@ -170,7 +168,10 @@ fn normalize_dest_rel(dest: &Path) -> Result<PathBuf> {
         return Ok(PathBuf::from(stripped));
     }
     if dest.is_absolute() {
-        bail!("absolute paths are not supported in sync links: {}", dest.display());
+        bail!(
+            "absolute paths are not supported in sync links: {}",
+            dest.display()
+        );
     }
     Ok(dest.to_path_buf())
 }
@@ -211,8 +212,8 @@ fn load_link_mappings(config_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
     if sync_file.exists() {
         let raw = fs::read_to_string(&sync_file)
             .with_context(|| format!("failed to read {}", sync_file.display()))?;
-        let re = Regex::new(r#""([^"]+)"\s*:\s*"([^"]+)""#)
-            .context("failed to compile link regex")?;
+        let re =
+            Regex::new(r#""([^"]+)"\s*:\s*"([^"]+)""#).context("failed to compile link regex")?;
         let mut links = Vec::new();
         let mut in_links = false;
         for line in raw.lines() {
@@ -282,11 +283,7 @@ fn apply_config(config_dir: &Path) -> Result<()> {
     let fallback = config_dir.join("sh").join("check-config-setup.sh");
     if fallback.exists() {
         println!("sync not available; falling back to {}", fallback.display());
-        run_command(
-            fallback.to_string_lossy().as_ref(),
-            &[],
-            Some(config_dir),
-        )?;
+        run_command(fallback.to_string_lossy().as_ref(), &[], Some(config_dir))?;
         let internal_fallback = config_dir.join("sh").join("ensure-i-dotfiles.sh");
         if internal_fallback.exists() {
             run_command(
@@ -349,8 +346,13 @@ fn ensure_link_targets(config_dir: &Path) -> Result<()> {
 fn create_symlink(source: &Path, dest: &Path) -> Result<()> {
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(source, dest)
-            .with_context(|| format!("failed to symlink {} -> {}", dest.display(), source.display()))?;
+        std::os::unix::fs::symlink(source, dest).with_context(|| {
+            format!(
+                "failed to symlink {} -> {}",
+                dest.display(),
+                source.display()
+            )
+        })?;
         return Ok(());
     }
     #[cfg(not(unix))]
@@ -382,7 +384,11 @@ fn ensure_kar_repo(flow_bin: &Path, prefer_ssh: bool) -> Result<()> {
     }
 
     println!("Deploying kar from {}", repo_path.display());
-    run_command(flow_bin.to_string_lossy().as_ref(), &["deploy"], Some(&repo_path))?;
+    run_command(
+        flow_bin.to_string_lossy().as_ref(),
+        &["deploy"],
+        Some(&repo_path),
+    )?;
     Ok(())
 }
 
@@ -451,11 +457,7 @@ fn ensure_repo(
 ) -> Result<()> {
     if dest.exists() {
         if !dest.join(".git").exists() {
-            bail!(
-                "{} exists but is not a git repo: {}",
-                label,
-                dest.display()
-            );
+            bail!("{} exists but is not a git repo: {}", label, dest.display());
         }
 
         if let Some(expected) = repo_url {
@@ -539,11 +541,7 @@ fn ensure_origin_url(dest: &Path, expected: &str) -> Result<()> {
             }
         }
         Err(_) => {
-            run_command(
-                "git",
-                &["remote", "add", "origin", expected],
-                Some(dest),
-            )?;
+            run_command("git", &["remote", "add", "origin", expected], Some(dest))?;
         }
     }
     Ok(())
@@ -617,10 +615,10 @@ fn read_internal_repo(config_dir: &Path) -> Result<Option<String>> {
         if !path.exists() {
             continue;
         }
-        let raw =
-            fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-        let parsed: HomeConfigFile = toml::from_str(&raw)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed: HomeConfigFile =
+            toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
         let from_section = parsed
             .home
             .as_ref()

@@ -84,13 +84,26 @@ pub fn run(opts: PublishOpts) -> Result<()> {
 
     // Check if repo already exists
     let repo_check = Command::new("gh")
-        .args(["repo", "view", &full_name, "--json", "visibility", "-q", ".visibility"])
+        .args([
+            "repo",
+            "view",
+            &full_name,
+            "--json",
+            "visibility",
+            "-q",
+            ".visibility",
+        ])
         .output();
 
     if let Ok(output) = repo_check {
         if output.status.success() {
-            let current_visibility = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
-            println!("Repository {} already exists ({}).", full_name, current_visibility);
+            let current_visibility = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_lowercase();
+            println!(
+                "Repository {} already exists ({}).",
+                full_name, current_visibility
+            );
 
             // Check if visibility needs to change
             let target_visibility = if is_public { "public" } else { "private" };
@@ -233,7 +246,10 @@ fn prompt_public_choice() -> Result<bool> {
     if answer.is_empty() {
         return Ok(default_public);
     }
-    Ok(matches!(answer.as_str(), "y" | "yes" | "public" | "pub" | "p"))
+    Ok(matches!(
+        answer.as_str(),
+        "y" | "yes" | "public" | "pub" | "p"
+    ))
 }
 
 fn read_yes_no_key(default_yes: bool) -> Result<bool> {

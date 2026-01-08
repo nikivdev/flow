@@ -139,8 +139,8 @@ async fn fallback(
     }
     let file_path = web_root.join(path);
     if file_path.is_file() {
-        let contents = fs::read(&file_path)
-            .map_err(|err| (StatusCode::NOT_FOUND, err.to_string()))?;
+        let contents =
+            fs::read(&file_path).map_err(|err| (StatusCode::NOT_FOUND, err.to_string()))?;
         let content_type = content_type_for_path(&file_path);
         return Ok((
             StatusCode::OK,
@@ -362,14 +362,17 @@ fn build_web_ui(project_root: &Path) -> Result<()> {
 
     let node_modules = web_root.join("node_modules");
     let install_stamp = node_modules.join(".flow-web-install");
-    if needs_install(&node_modules, &package_json, &web_root.join("bun.lock"), &install_stamp)? {
-        run_command("bun", &["install"], &web_root)
-            .context("bun install failed for .ai/web")?;
+    if needs_install(
+        &node_modules,
+        &package_json,
+        &web_root.join("bun.lock"),
+        &install_stamp,
+    )? {
+        run_command("bun", &["install"], &web_root).context("bun install failed for .ai/web")?;
         write_install_stamp(&install_stamp)?;
     }
 
-    run_command("bun", &["run", "build"], &web_root)
-        .context("bun run build failed for .ai/web")?;
+    run_command("bun", &["run", "build"], &web_root).context("bun run build failed for .ai/web")?;
 
     Ok(())
 }

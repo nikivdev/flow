@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::cli::{ReposAction, ReposCloneOpts, ReposCommand};
@@ -23,9 +23,7 @@ pub fn run(cmd: ReposCommand) -> Result<()> {
             open_in_zed(&path)?;
             Ok(())
         }
-        Some(ReposAction::Create(opts)) => {
-            publish::run(opts)
-        }
+        Some(ReposAction::Create(opts)) => publish::run(opts),
         None => fuzzy_select_repo(),
     }
 }
@@ -219,7 +217,10 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     let clone_url = if prefer_ssh {
         format!("git@github.com:{}/{}.git", repo_ref.owner, repo_ref.repo)
     } else {
-        format!("https://github.com/{}/{}.git", repo_ref.owner, repo_ref.repo)
+        format!(
+            "https://github.com/{}/{}.git",
+            repo_ref.owner, repo_ref.repo
+        )
     };
     let shallow = !opts.full;
     let fetch_depth = if shallow { Some(1) } else { None };
@@ -369,9 +370,7 @@ fn resolve_upstream_url(repo_ref: &RepoRef, prefer_ssh: bool) -> Result<Option<S
         if prefer_ssh {
             parent.ssh_url
         } else {
-            parent
-                .clone_url
-                .unwrap_or_else(|| parent.ssh_url)
+            parent.clone_url.unwrap_or_else(|| parent.ssh_url)
         }
     });
 

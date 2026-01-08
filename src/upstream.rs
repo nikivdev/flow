@@ -17,11 +17,15 @@ pub fn run(cmd: UpstreamCommand) -> Result<()> {
 
     match action {
         UpstreamAction::Status => show_status(),
-        UpstreamAction::Setup { upstream_url, upstream_branch } => {
-            setup_upstream(upstream_url.as_deref(), upstream_branch.as_deref())
-        }
+        UpstreamAction::Setup {
+            upstream_url,
+            upstream_branch,
+        } => setup_upstream(upstream_url.as_deref(), upstream_branch.as_deref()),
         UpstreamAction::Pull { branch } => pull_upstream(branch.as_deref()),
-        UpstreamAction::Sync { no_push, create_repo } => sync_upstream(!no_push, create_repo),
+        UpstreamAction::Sync {
+            no_push,
+            create_repo,
+        } => sync_upstream(!no_push, create_repo),
         UpstreamAction::Open => open_upstream(),
     }
 }
@@ -54,7 +58,8 @@ fn show_status() -> Result<()> {
     }
 
     // Check for local upstream branch
-    let has_upstream_branch = git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
+    let has_upstream_branch =
+        git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
     if has_upstream_branch {
         let tracking = git_capture(&["config", "--get", "branch.upstream.remote"])
             .ok()
@@ -206,11 +211,15 @@ fn setup_upstream_internal(
     }
 
     // Create or update local upstream branch
-    let local_upstream_exists = git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
+    let local_upstream_exists =
+        git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
     let upstream_ref = format!("upstream/{}", upstream_branch);
 
     if local_upstream_exists {
-        println!("Updating local 'upstream' branch to match {}...", upstream_ref);
+        println!(
+            "Updating local 'upstream' branch to match {}...",
+            upstream_ref
+        );
         let current = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])?;
         let current = current.trim();
 
@@ -222,13 +231,20 @@ fn setup_upstream_internal(
             git_run(&["branch", "-f", "upstream", &upstream_ref])?;
         }
     } else {
-        println!("Creating local 'upstream' branch tracking {}...", upstream_ref);
+        println!(
+            "Creating local 'upstream' branch tracking {}...",
+            upstream_ref
+        );
         git_run(&["branch", "upstream", &upstream_ref])?;
     }
 
     // Set up tracking
     git_run(&["config", "branch.upstream.remote", "upstream"])?;
-    git_run(&["config", "branch.upstream.merge", &format!("refs/heads/{}", upstream_branch)])?;
+    git_run(&[
+        "config",
+        "branch.upstream.merge",
+        &format!("refs/heads/{}", upstream_branch),
+    ])?;
 
     println!("\n✓ Upstream setup complete!");
     println!("\nWorkflow:");
@@ -252,20 +268,21 @@ fn pull_upstream(target_branch: Option<&str>) -> Result<()> {
     git_run(&["fetch", "upstream", "--prune"])?;
 
     // Determine the upstream branch to track (check config, then HEAD, then try main/master)
-    let upstream_branch = if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
-        merge_ref.trim().replace("refs/heads/", "")
-    } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
-        // Parse "refs/remotes/upstream/master" -> "master"
-        head_ref.trim().replace("refs/remotes/upstream/", "")
-    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
-        "main".to_string()
-    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
-        "master".to_string()
-    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/dev"]).is_ok() {
-        "dev".to_string()
-    } else {
-        bail!("Cannot determine upstream branch. Run: f upstream setup --branch <branch>");
-    };
+    let upstream_branch =
+        if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
+            merge_ref.trim().replace("refs/heads/", "")
+        } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
+            // Parse "refs/remotes/upstream/master" -> "master"
+            head_ref.trim().replace("refs/remotes/upstream/", "")
+        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
+            "main".to_string()
+        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
+            "master".to_string()
+        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/dev"]).is_ok() {
+            "dev".to_string()
+        } else {
+            bail!("Cannot determine upstream branch. Run: f upstream setup --branch <branch>");
+        };
 
     let upstream_ref = format!("upstream/{}", upstream_branch);
 
@@ -292,7 +309,8 @@ fn pull_upstream(target_branch: Option<&str>) -> Result<()> {
     }
 
     // Update local upstream branch
-    let local_upstream_exists = git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
+    let local_upstream_exists =
+        git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
 
     if local_upstream_exists {
         if current == "upstream" {
@@ -386,23 +404,25 @@ fn sync_upstream(push: bool, create_repo: bool) -> Result<()> {
     git_run(&["fetch", "upstream", "--prune"])?;
 
     // Determine upstream branch (check config, then HEAD, then try main/master)
-    let upstream_branch = if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
-        merge_ref.trim().replace("refs/heads/", "")
-    } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
-        // Parse "refs/remotes/upstream/master" -> "master"
-        head_ref.trim().replace("refs/remotes/upstream/", "")
-    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
-        "main".to_string()
-    } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
-        "master".to_string()
-    } else {
-        "main".to_string()
-    };
+    let upstream_branch =
+        if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
+            merge_ref.trim().replace("refs/heads/", "")
+        } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
+            // Parse "refs/remotes/upstream/master" -> "master"
+            head_ref.trim().replace("refs/remotes/upstream/", "")
+        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
+            "main".to_string()
+        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
+            "master".to_string()
+        } else {
+            "main".to_string()
+        };
     let upstream_ref = format!("upstream/{}", upstream_branch);
 
     // Update local upstream branch
     println!("==> Updating local 'upstream' branch...");
-    let local_upstream_exists = git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
+    let local_upstream_exists =
+        git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
     if local_upstream_exists {
         git_run(&["branch", "-f", "upstream", &upstream_ref])?;
     } else {
