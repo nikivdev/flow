@@ -54,8 +54,6 @@ struct EnvResponse {
     env: HashMap<String, String>,
     #[serde(default)]
     descriptions: HashMap<String, String>,
-    project: String,
-    environment: String,
 }
 
 /// Response from POST /api/env/:projectName
@@ -435,29 +433,6 @@ fn env_target_name_for_tokens(target: &EnvTarget) -> Result<String> {
     }
 }
 
-/// Get the project name from flow.toml.
-fn get_project_name() -> Result<String> {
-    let cwd = std::env::current_dir()?;
-    if let Some(flow_path) = find_flow_toml(&cwd) {
-        let cfg = config::load(&flow_path)?;
-        if let Some(name) = cfg.project_name {
-            return Ok(name);
-        }
-        if let Some(parent) = flow_path.parent() {
-            if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
-                return Ok(dir_name.to_string());
-            }
-        }
-    }
-
-    // Fall back to directory name
-    Ok(cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unnamed".to_string()))
-}
-
 fn resolve_env_file_path() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
 
@@ -793,7 +768,7 @@ fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
         .build()?;
     let target = resolve_env_target()?;
 
-    let mut url = match &target {
+    let url = match &target {
         EnvTarget::Personal { space } => {
             let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
             if let Some(space) = space {
@@ -978,7 +953,7 @@ fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let mut url = match &target {
+    let url = match &target {
         EnvTarget::Personal { space } => {
             let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
             if let Some(space) = space {
@@ -1528,7 +1503,7 @@ fn list(environment: &str) -> Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let mut url = match &target {
+    let url = match &target {
         EnvTarget::Personal { space } => {
             let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
             url.query_pairs_mut()
@@ -1700,7 +1675,7 @@ fn set_project_env_var_internal(
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let mut url = match &target {
+    let url = match &target {
         EnvTarget::Personal { space } => {
             let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
             if let Some(space) = space {
