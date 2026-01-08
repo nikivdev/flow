@@ -965,6 +965,12 @@ pub enum AiAction {
         /// Session name or ID to copy (if not provided, shows fuzzy search).
         session: Option<String>,
     },
+    /// Copy last Claude session to clipboard.
+    #[command(name = "copy-claude", alias = "cc")]
+    CopyClaude,
+    /// Copy last Codex session to clipboard.
+    #[command(name = "copy-codex", alias = "cx")]
+    CopyCodex,
     /// Copy last prompt and response from a session to clipboard (for context passing).
     /// Usage: f ai context [session] [path] [count]
     Context {

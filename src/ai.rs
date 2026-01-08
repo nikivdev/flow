@@ -210,6 +210,8 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Init => init_ai_folder()?,
         AiAction::Import => import_sessions()?,
         AiAction::Copy { session } => copy_session(session, Provider::All)?,
+        AiAction::CopyClaude => copy_last_session(Provider::Claude)?,
+        AiAction::CopyCodex => copy_last_session(Provider::Codex)?,
         AiAction::Context {
             session,
             count,
@@ -2215,6 +2217,42 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
 
     let line_count = history.lines().count();
     println!("Copied session history ({} lines) to clipboard", line_count);
+
+    Ok(())
+}
+
+/// Copy the most recent session for a provider directly (no fzf selection).
+fn copy_last_session(provider: Provider) -> Result<()> {
+    // Auto-import any new sessions silently
+    auto_import_sessions()?;
+
+    let sessions = read_sessions_for_project(provider)?;
+
+    if sessions.is_empty() {
+        let provider_name = match provider {
+            Provider::Claude => "Claude",
+            Provider::Codex => "Codex",
+            Provider::All => "AI",
+        };
+        println!("No {} sessions found for this project.", provider_name);
+        return Ok(());
+    }
+
+    // sessions are already sorted by most recent first
+    let session = &sessions[0];
+
+    // Read and format the session history
+    let history = read_session_history(&session.session_id, session.provider)?;
+
+    // Copy to clipboard
+    copy_to_clipboard(&history)?;
+
+    let line_count = history.lines().count();
+    let id_short = &session.session_id[..8.min(session.session_id.len())];
+    println!(
+        "Copied session {} ({} lines) to clipboard",
+        id_short, line_count
+    );
 
     Ok(())
 }
