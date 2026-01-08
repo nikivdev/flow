@@ -24,6 +24,17 @@ pub struct Config {
         alias = "project-name"
     )]
     pub project_name: Option<String>,
+    /// Optional env store space override for 1focus.
+    #[serde(default, rename = "env_space", alias = "env-space")]
+    pub env_space: Option<String>,
+    /// Env store scope: "project" (default) or "personal".
+    #[serde(
+        default,
+        rename = "env_space_kind",
+        alias = "env-space-kind",
+        alias = "env-space-scope"
+    )]
+    pub env_space_kind: Option<String>,
     /// Flow-specific settings (primary_task, etc.)
     #[serde(default)]
     pub flow: FlowSettings,
@@ -149,6 +160,8 @@ impl Default for Config {
         Self {
             version: None,
             project_name: None,
+            env_space: None,
+            env_space_kind: None,
             flow: FlowSettings::default(),
             options: OptionsConfig::default(),
             servers: Vec::new(),

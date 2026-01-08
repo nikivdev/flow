@@ -168,6 +168,12 @@ fn main() -> Result<()> {
         Some(Commands::Ai(cmd)) => {
             ai::run(cmd.action)?;
         }
+        Some(Commands::Codex { action }) => {
+            ai::run_provider(ai::Provider::Codex, action)?;
+        }
+        Some(Commands::Claude { action }) => {
+            ai::run_provider(ai::Provider::Claude, action)?;
+        }
         Some(Commands::Env(cmd)) => {
             env::run(cmd.action)?;
         }

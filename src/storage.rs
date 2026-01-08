@@ -16,6 +16,8 @@ const DEFAULT_JAZZ_API_KEY_MIRROR: &str = "jazz-gitedit-prod";
 const DEFAULT_JAZZ_PEER_MIRROR: &str = "wss://cloud.jazz.tools/?key=jazz-gitedit-prod";
 const DEFAULT_JAZZ_API_KEY_ENV: &str = "1focus@1focus.app";
 const DEFAULT_JAZZ_PEER_ENV: &str = "wss://cloud.jazz.tools/?key=1focus@1focus.app";
+const DEFAULT_JAZZ_API_KEY_APP: &str = "1focus@1focus.app";
+const DEFAULT_JAZZ_PEER_APP: &str = "wss://cloud.jazz.tools/?key=1focus@1focus.app";
 const DEFAULT_POSTGRES_PROJECT: &str = "~/org/la/la/server";
 
 #[derive(Debug, Deserialize)]
@@ -198,12 +200,14 @@ fn jazz_new(
     let default_name = match kind {
         JazzStorageKind::Mirror => format!("{}-jazz-mirror", sanitize_name(&project)),
         JazzStorageKind::EnvStore => format!("{}-jazz-env", sanitize_name(&project)),
+        JazzStorageKind::AppStore => format!("{}-jazz-app", sanitize_name(&project)),
     };
     let name = name.unwrap_or(default_name);
 
     let default_peer = match kind {
         JazzStorageKind::Mirror => DEFAULT_JAZZ_PEER_MIRROR,
         JazzStorageKind::EnvStore => DEFAULT_JAZZ_PEER_ENV,
+        JazzStorageKind::AppStore => DEFAULT_JAZZ_PEER_APP,
     };
 
     let peer = match (peer, api_key.as_deref()) {
@@ -243,12 +247,27 @@ fn jazz_new(
                 Some("Jazz worker account secret"),
             )?;
         }
+        JazzStorageKind::AppStore => {
+            env::set_project_env_var(
+                "JAZZ_APP_WORKER_ACCOUNT_ID",
+                &creds.account_id,
+                environment,
+                Some("Jazz app worker account ID"),
+            )?;
+            env::set_project_env_var(
+                "JAZZ_APP_WORKER_ACCOUNT_SECRET",
+                &creds.agent_secret,
+                environment,
+                Some("Jazz app worker account secret"),
+            )?;
+        }
     }
 
     if api_key.is_some() {
         let key = api_key.unwrap_or_else(|| match kind {
             JazzStorageKind::Mirror => DEFAULT_JAZZ_API_KEY_MIRROR.to_string(),
             JazzStorageKind::EnvStore => DEFAULT_JAZZ_API_KEY_ENV.to_string(),
+            JazzStorageKind::AppStore => DEFAULT_JAZZ_API_KEY_APP.to_string(),
         });
         env::set_project_env_var(
             "JAZZ_API_KEY",
@@ -266,6 +285,9 @@ fn jazz_new(
             ),
             JazzStorageKind::EnvStore => {
                 ("JAZZ_SYNC_SERVER", "Custom Jazz sync server for env worker")
+            }
+            JazzStorageKind::AppStore => {
+                ("JAZZ_APP_SYNC_SERVER", "Custom Jazz sync server for app worker")
             }
         };
         env::set_project_env_var(key, &peer, environment, Some(desc))?;

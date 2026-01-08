@@ -829,14 +829,20 @@ const App = () => {
   const refreshProjects = useCallback(async () => {
     try {
       const registered = (await invoke("list_projects")) as DesktopProject[]
-      const discoveredLists = await Promise.all(
-        roots.map((root) => invoke("discover_projects", { root }) as Promise<DesktopProject[]>),
-      )
-      const discovered = discoveredLists.flat()
       const map = new Map<string, DesktopProject>()
-      for (const project of [...registered, ...discovered]) {
+      for (const project of registered) {
         map.set(project.config_path || project.project_root, project)
       }
+      const registeredOnly = Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name))
+      setProjects(registeredOnly)
+
+      for (const root of roots) {
+        const discovered = (await invoke("discover_projects", { root })) as DesktopProject[]
+        for (const project of discovered) {
+          map.set(project.config_path || project.project_root, project)
+        }
+      }
+
       const merged = Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name))
       setProjects(merged)
 

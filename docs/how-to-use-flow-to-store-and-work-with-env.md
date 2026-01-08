@@ -89,6 +89,13 @@ f env get --personal KEY
 f env run --personal -- npm start
 ```
 
+To store project envs under a personal space, set in `flow.toml`:
+
+```toml
+env_space = "nikiv"
+env_space_kind = "personal"
+```
+
 ## Apply envs to Cloudflare Workers
 
 Set the Cloudflare section in `flow.toml`:
