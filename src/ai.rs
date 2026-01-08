@@ -236,7 +236,10 @@ pub fn log_review_result(
     context_chars: usize,
     review_time_secs: u64,
 ) {
-    let log_path = project_path.join(".ai").join("internal").join("review-log.jsonl");
+    let log_path = project_path
+        .join(".ai")
+        .join("internal")
+        .join("review-log.jsonl");
     if let Some(parent) = log_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -400,10 +403,7 @@ pub fn get_session_ids_for_hash(project_path: &PathBuf) -> Result<(Vec<String>, 
         .as_ref()
         .and_then(|c| c.last_entry_timestamp.clone());
 
-    let session_ids: Vec<String> = sessions
-        .iter()
-        .map(|s| s.session_id.clone())
-        .collect();
+    let session_ids: Vec<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
 
     Ok((session_ids, checkpoint_ts))
 }
@@ -537,7 +537,9 @@ fn get_session_exchanges_since(
                         serde_json::Value::Array(arr) => arr
                             .iter()
                             .filter_map(|v| {
-                                v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                                v.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
                             })
                             .collect::<Vec<_>>()
                             .join("\n"),
@@ -1106,7 +1108,11 @@ pub fn get_recent_session_context(max_exchanges: usize) -> Result<Option<String>
 /// Get the .ai/internal/sessions/claude directory for the current project.
 fn get_ai_sessions_dir() -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    Ok(cwd.join(".ai").join("internal").join("sessions").join("claude"))
+    Ok(cwd
+        .join(".ai")
+        .join("internal")
+        .join("sessions")
+        .join("claude"))
 }
 
 /// Get the index.json path.
@@ -1217,10 +1223,7 @@ fn read_session_messages_for_path(
     }
 }
 
-fn read_claude_messages_for_path(
-    project_path: &Path,
-    session_id: &str,
-) -> Result<SessionMessages> {
+fn read_claude_messages_for_path(project_path: &Path, session_id: &str) -> Result<SessionMessages> {
     let path_str = project_path.to_string_lossy().to_string();
     let project_folder = path_to_project_name(&path_str);
     let session_file = get_claude_projects_dir()

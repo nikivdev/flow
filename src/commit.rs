@@ -1,11 +1,11 @@
 //! AI-powered git commit command using OpenAI.
 
 use std::collections::hash_map::DefaultHasher;
+use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::net::IpAddr;
-use std::env;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -175,7 +175,11 @@ fn check_sensitive_files(repo_root: &Path) -> Vec<String> {
             .unwrap_or(file)
             .to_lowercase();
 
+        // Check for .env files, but allow .env.example and .env.sample (safe templates)
         if file_name.starts_with(".env") {
+            if file_name.ends_with(".example") || file_name.ends_with(".sample") {
+                continue;
+            }
             sensitive.push(file.to_string());
             continue;
         }
@@ -268,7 +272,10 @@ fn warn_large_diffs(files: &[(String, usize)]) -> Result<()> {
         return Ok(());
     }
 
-    println!("⚠️  Warning: Files with large diffs ({}+ lines):", LARGE_DIFF_THRESHOLD);
+    println!(
+        "⚠️  Warning: Files with large diffs ({}+ lines):",
+        LARGE_DIFF_THRESHOLD
+    );
     for (file, lines) in files {
         println!("   - {} ({} lines)", file, lines);
     }
@@ -682,7 +689,7 @@ pub fn run_with_check_with_gitedit(
     let force_gitedit = gitedit_globally_enabled();
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
         return delegate_to_hub_with_check(
-            "commit",  // CLI command name
+            "commit", // CLI command name
             push,
             include_context,
             review_selection,
@@ -990,15 +997,27 @@ pub fn run_with_check_sync(
     println!("────────────────────────────────────────");
 
     let review = match &review_selection {
-        ReviewSelection::Claude(model) => {
-            run_claude_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, *model)
-        }
-        ReviewSelection::Codex(model) => {
-            run_codex_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, *model)
-        }
-        ReviewSelection::Opencode { model } => {
-            run_opencode_review(&diff, session_context.as_deref(), review_instructions.as_deref(), &repo_root, model)
-        }
+        ReviewSelection::Claude(model) => run_claude_review(
+            &diff,
+            session_context.as_deref(),
+            review_instructions.as_deref(),
+            &repo_root,
+            *model,
+        ),
+        ReviewSelection::Codex(model) => run_codex_review(
+            &diff,
+            session_context.as_deref(),
+            review_instructions.as_deref(),
+            &repo_root,
+            *model,
+        ),
+        ReviewSelection::Opencode { model } => run_opencode_review(
+            &diff,
+            session_context.as_deref(),
+            review_instructions.as_deref(),
+            &repo_root,
+            model,
+        ),
     };
     let review = match review {
         Ok(review) => review,
@@ -1107,8 +1126,8 @@ pub fn run_with_check_sync(
     let mut gitedit_sessions: Vec<ai::GitEditSessionData> = Vec::new();
     let mut gitedit_session_hash: Option<String> = None;
 
-    let gitedit_enabled =
-        force_gitedit || (gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit_with_check(&repo_root));
+    let gitedit_enabled = force_gitedit
+        || (gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit_with_check(&repo_root));
 
     if gitedit_enabled {
         match ai::get_sessions_for_gitedit(&repo_root) {
@@ -1270,13 +1289,11 @@ pub fn run_with_check_sync(
             issues_found: review.issues_found,
             issues: review.issues.clone(),
             summary: review.summary.clone(),
-            reviewer: Some(
-                if review_selection.is_claude() {
-                    "claude".to_string()
-                } else {
-                    "codex".to_string()
-                },
-            ),
+            reviewer: Some(if review_selection.is_claude() {
+                "claude".to_string()
+            } else {
+                "codex".to_string()
+            }),
         };
 
         sync_to_gitedit(
@@ -1306,11 +1323,16 @@ fn run_codex_review(
     let (diff_for_prompt, _truncated) = truncate_diff(diff);
 
     // Build compact review prompt optimized for speed/cost
-    let mut prompt = String::from("Review diff for bugs, security, perf issues. Return JSON: {\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}\n");
+    let mut prompt = String::from(
+        "Review diff for bugs, security, perf issues. Return JSON: {\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}\n",
+    );
 
     // Add custom review instructions if provided
     if let Some(instructions) = review_instructions {
-        prompt.push_str(&format!("\nAdditional review instructions:\n{}\n", instructions));
+        prompt.push_str(&format!(
+            "\nAdditional review instructions:\n{}\n",
+            instructions
+        ));
     }
 
     // Add session context if provided
@@ -1533,7 +1555,10 @@ fn run_remote_claude_review(
     } else if result.trim().is_empty() {
         (false, Vec::new())
     } else {
-        debug!(review_output = result.as_str(), "remote claude review output");
+        debug!(
+            review_output = result.as_str(),
+            "remote claude review output"
+        );
         let lowered = result.to_lowercase();
         let has_issues = lowered.contains("bug")
             || lowered.contains("issue")
@@ -1579,11 +1604,16 @@ fn run_claude_review(
         let (diff_for_prompt, _truncated) = truncate_diff(diff);
 
         // Build compact review prompt optimized for speed/cost
-        let mut prompt = String::from("Review diff for bugs, security, perf issues. Return JSON: {\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}\n");
+        let mut prompt = String::from(
+            "Review diff for bugs, security, perf issues. Return JSON: {\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\"}\n",
+        );
 
         // Add custom review instructions if provided
         if let Some(instructions) = review_instructions {
-            prompt.push_str(&format!("\nAdditional review instructions:\n{}\n", instructions));
+            prompt.push_str(&format!(
+                "\nAdditional review instructions:\n{}\n",
+                instructions
+            ));
         }
 
         // Add session context if provided
@@ -1670,8 +1700,9 @@ fn run_claude_review(
                         last_progress = Instant::now();
                     }
                     if Instant::now() >= deadline {
-                        if prompt_yes_no("Claude review is taking longer than expected. Keep waiting?")?
-                        {
+                        if prompt_yes_no(
+                            "Claude review is taking longer than expected. Keep waiting?",
+                        )? {
                             deadline = Instant::now() + timeout;
                         } else {
                             timed_out = true;
@@ -1773,8 +1804,7 @@ fn run_opencode_review(
     // Write diff to a temp file in the working directory to avoid /tmp permission issues
     let diff_file = workdir.join(".flow_diff_review.tmp");
     {
-        let mut f = std::fs::File::create(&diff_file)
-            .context("failed to create temp diff file")?;
+        let mut f = std::fs::File::create(&diff_file).context("failed to create temp diff file")?;
         f.write_all(diff_for_prompt.as_bytes())
             .context("failed to write temp diff file")?;
     }
@@ -1787,7 +1817,10 @@ fn run_opencode_review(
     );
 
     if let Some(instructions) = review_instructions {
-        prompt.push_str(&format!("\n\nAdditional review instructions:\n{}", instructions));
+        prompt.push_str(&format!(
+            "\n\nAdditional review instructions:\n{}",
+            instructions
+        ));
     }
 
     if let Some(context) = session_context {
@@ -1796,7 +1829,14 @@ fn run_opencode_review(
 
     // Run opencode with the diff as an attached file
     let mut child = Command::new("opencode")
-        .args(["run", "--model", model, "-f", diff_file.to_str().unwrap(), &prompt])
+        .args([
+            "run",
+            "--model",
+            model,
+            "-f",
+            diff_file.to_str().unwrap(),
+            &prompt,
+        ])
         .current_dir(workdir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2038,9 +2078,7 @@ fn generate_commit_message_opencode(
         bail!("opencode failed: {}", stderr.trim());
     }
 
-    let message = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string();
+    let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     if message.is_empty() {
         bail!("opencode returned empty commit message");
@@ -2404,9 +2442,7 @@ fn sync_to_gitedit(
     let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .map(|b| b.trim().to_string());
-    let ref_name = branch
-        .as_ref()
-        .map(|name| format!("refs/heads/{}", name));
+    let ref_name = branch.as_ref().map(|name| format!("refs/heads/{}", name));
 
     // Get commit message
     let commit_message = git_capture_in(repo_root, &["log", "-1", "--format=%B"])
@@ -2735,7 +2771,8 @@ fn generate_early_gitedit_url(repo_root: &std::path::Path) -> Option<String> {
     let (owner, repo) = get_gitedit_project(repo_root)?;
 
     // Get session IDs and checkpoint for hashing
-    let (session_ids, checkpoint_ts) = ai::get_session_ids_for_hash(&repo_root.to_path_buf()).ok()?;
+    let (session_ids, checkpoint_ts) =
+        ai::get_session_ids_for_hash(&repo_root.to_path_buf()).ok()?;
 
     if session_ids.is_empty() {
         return None;
@@ -3043,12 +3080,37 @@ fn is_binary(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
         ext,
-        "png" | "jpg" | "jpeg" | "gif" | "ico" | "webp" | "svg"
-            | "woff" | "woff2" | "ttf" | "otf" | "eot"
-            | "zip" | "tar" | "gz" | "rar" | "7z"
-            | "pdf" | "doc" | "docx" | "xls" | "xlsx"
-            | "exe" | "dll" | "so" | "dylib"
-            | "mp3" | "mp4" | "wav" | "avi" | "mov"
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "ico"
+            | "webp"
+            | "svg"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "eot"
+            | "zip"
+            | "tar"
+            | "gz"
+            | "rar"
+            | "7z"
+            | "pdf"
+            | "doc"
+            | "docx"
+            | "xls"
+            | "xlsx"
+            | "exe"
+            | "dll"
+            | "so"
+            | "dylib"
+            | "mp3"
+            | "mp4"
+            | "wav"
+            | "avi"
+            | "mov"
     )
 }
 

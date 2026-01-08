@@ -1,4 +1,7 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -25,8 +28,7 @@ pub(crate) fn write_template(path: &Path) -> Result<()> {
         }
     }
 
-    fs::write(path, TEMPLATE)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    fs::write(path, TEMPLATE).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 

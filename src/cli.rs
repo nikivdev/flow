@@ -201,6 +201,11 @@ pub enum Commands {
     )]
     Env(EnvCommand),
     #[command(
+        about = "Onboard third-party services (Stripe, etc.) with guided env setup.",
+        long_about = "Guided setup flows for external services. Prompts for required env vars, stores them in 1focus, and can apply them to Cloudflare."
+    )]
+    Services(ServicesCommand),
+    #[command(
         about = "Manage SSH keys via 1focus.",
         long_about = "Generate, store, and unlock SSH keys stored in 1focus personal env vars, then wire git to use the Flow SSH agent."
     )]
@@ -997,6 +1002,12 @@ pub struct EnvCommand {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct ServicesCommand {
+    #[command(subcommand)]
+    pub action: Option<ServicesAction>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct SshCommand {
     #[command(subcommand)]
     pub action: Option<SshAction>,
@@ -1101,6 +1112,43 @@ pub enum EnvAction {
         #[command(subcommand)]
         action: TokenAction,
     },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ServicesAction {
+    /// Set up Stripe env vars with guided prompts.
+    Stripe(StripeServiceOpts),
+    /// List available service setup flows.
+    #[command(alias = "ls")]
+    List,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct StripeServiceOpts {
+    /// Path to the project root (defaults to current directory).
+    #[arg(short, long)]
+    pub path: Option<PathBuf>,
+    /// Environment to store vars in (dev, staging, production).
+    #[arg(short, long)]
+    pub environment: Option<String>,
+    /// Stripe mode (test or live).
+    #[arg(long, value_enum, default_value_t = StripeModeArg::Test)]
+    pub mode: StripeModeArg,
+    /// Prompt even if keys are already set.
+    #[arg(long)]
+    pub force: bool,
+    /// Apply env vars to Cloudflare after setting them.
+    #[arg(long, conflicts_with = "no_apply")]
+    pub apply: bool,
+    /// Skip applying env vars to Cloudflare.
+    #[arg(long, conflicts_with = "apply")]
+    pub no_apply: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum StripeModeArg {
+    Test,
+    Live,
 }
 
 #[derive(Subcommand, Debug, Clone)]

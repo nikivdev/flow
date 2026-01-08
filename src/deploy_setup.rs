@@ -176,7 +176,11 @@ impl DeploySetupApp {
         }
 
         if let Some(env) = preferred {
-            if !targets.iter().any(|choice| choice.value.as_deref() == Some(env)) && env != "production" {
+            if !targets
+                .iter()
+                .any(|choice| choice.value.as_deref() == Some(env))
+                && env != "production"
+            {
                 targets.push(EnvTargetChoice {
                     label: env.to_string(),
                     value: Some(env.to_string()),
@@ -206,7 +210,10 @@ impl DeploySetupApp {
         self.key_items.clear();
         self.selected_key = 0;
 
-        if let Some(path) = self.env_files.get(self.selected_env_file).and_then(|c| c.path.clone())
+        if let Some(path) = self
+            .env_files
+            .get(self.selected_env_file)
+            .and_then(|c| c.path.clone())
         {
             if let Ok(items) = build_key_items(&path) {
                 self.key_items = items;
@@ -389,7 +396,14 @@ fn handle_key(app: &mut DeploySetupApp, key: KeyEvent) -> Result<bool> {
 fn draw_ui(f: &mut ratatui::Frame<'_>, app: &DeploySetupApp) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(3)].as_ref())
+        .constraints(
+            [
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(3),
+            ]
+            .as_ref(),
+        )
         .split(f.area());
 
     let title = match app.step {
@@ -440,7 +454,11 @@ fn draw_ui(f: &mut ratatui::Frame<'_>, app: &DeploySetupApp) {
                 .map(|choice| ListItem::new(Line::from(choice.label.clone())))
                 .collect::<Vec<_>>();
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title("Secrets source"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Secrets source"),
+                )
                 .highlight_style(
                     Style::default()
                         .fg(Color::Black)
@@ -464,7 +482,11 @@ fn draw_ui(f: &mut ratatui::Frame<'_>, app: &DeploySetupApp) {
                 .map(|choice| ListItem::new(Line::from(choice.label.clone())))
                 .collect::<Vec<_>>();
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title("Wrangler --env"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Wrangler --env"),
+                )
                 .highlight_style(
                     Style::default()
                         .fg(Color::Black)
@@ -478,7 +500,11 @@ fn draw_ui(f: &mut ratatui::Frame<'_>, app: &DeploySetupApp) {
         SetupStep::CustomEnv => {
             let prompt = format!("> {}", app.custom_env);
             let input = Paragraph::new(prompt)
-                .block(Block::default().borders(Borders::ALL).title("Environment name"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Environment name"),
+                )
                 .wrap(Wrap { trim: true });
             f.render_widget(input, chunks[1]);
         }
@@ -499,15 +525,11 @@ fn draw_ui(f: &mut ratatui::Frame<'_>, app: &DeploySetupApp) {
                 })
                 .collect::<Vec<_>>();
             let list = List::new(items)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!(
-                            "Secrets ({}/{})",
-                            selected_count,
-                            app.key_items.len()
-                        )),
-                )
+                .block(Block::default().borders(Borders::ALL).title(format!(
+                    "Secrets ({}/{})",
+                    selected_count,
+                    app.key_items.len()
+                )))
                 .highlight_style(
                     Style::default()
                         .fg(Color::Black)
@@ -549,15 +571,24 @@ fn draw_ui(f: &mut ratatui::Frame<'_>, app: &DeploySetupApp) {
                     Span::raw(env_file),
                 ]),
                 Line::from(vec![
-                    Span::styled("Environment: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Environment: ",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(env_target),
                 ]),
                 Line::from(vec![
-                    Span::styled("Secrets selected: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Secrets selected: ",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(format!("{}", selected_count)),
                 ]),
                 Line::from(vec![
-                    Span::styled("Apply secrets now: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Apply secrets now: ",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(apply),
                 ]),
             ];
@@ -574,7 +605,9 @@ fn draw_ui(f: &mut ratatui::Frame<'_>, app: &DeploySetupApp) {
         SetupStep::EnvFile => "Up/Down to move, Enter to select, Esc to back, q to cancel",
         SetupStep::EnvTarget => "Up/Down to move, Enter to select, Esc to back, q to cancel",
         SetupStep::CustomEnv => "Type name, Enter to confirm, Esc to back, q to cancel",
-        SetupStep::Keys => "Up/Down to move, Space to toggle, Enter to continue, Esc to back, q to cancel",
+        SetupStep::Keys => {
+            "Up/Down to move, Space to toggle, Enter to continue, Esc to back, q to cancel"
+        }
         SetupStep::Confirm => "Space to toggle apply, Enter to finish, Esc to back, q to cancel",
     };
     let footer = Paragraph::new(help)
@@ -739,11 +772,7 @@ fn step_back(app: &mut DeploySetupApp) -> bool {
 fn relative_display(root: &Path, path: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(root) {
         let rel = rel.to_string_lossy().to_string();
-        if rel.is_empty() {
-            ".".to_string()
-        } else {
-            rel
-        }
+        if rel.is_empty() { ".".to_string() } else { rel }
     } else {
         path.to_string_lossy().to_string()
     }
@@ -781,7 +810,11 @@ fn pick_default_env_file_for_worker(
     preferred: Option<&PathBuf>,
 ) -> usize {
     if let Some(path) = preferred {
-        if let Some((idx, _)) = choices.iter().enumerate().find(|(_, c)| c.path.as_ref() == Some(path)) {
+        if let Some((idx, _)) = choices
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.path.as_ref() == Some(path))
+        {
             return idx;
         }
     }

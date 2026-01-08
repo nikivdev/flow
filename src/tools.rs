@@ -17,7 +17,11 @@ pub fn run(cmd: ToolsCommand) -> Result<()> {
     match action {
         ToolsAction::List => list_tools()?,
         ToolsAction::Run { name, args } => run_tool(&name, args)?,
-        ToolsAction::New { name, description, ai } => new_tool(&name, description.as_deref(), ai)?,
+        ToolsAction::New {
+            name,
+            description,
+            ai,
+        } => new_tool(&name, description.as_deref(), ai)?,
         ToolsAction::Edit { name } => edit_tool(&name)?,
         ToolsAction::Remove { name } => remove_tool(&name)?,
     }

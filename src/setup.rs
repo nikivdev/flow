@@ -11,9 +11,7 @@ use serde::Deserialize;
 use crate::{
     agents,
     cli::{SetupOpts, SetupTarget, TaskRunOpts},
-    config,
-    deploy,
-    start,
+    config, deploy, start,
     tasks::{self, load_project_config},
 };
 
@@ -46,11 +44,15 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         if created_flow_toml {
             if io::stdin().is_terminal() {
                 if !prompt_yes_no("Run setup task now?", false)? {
-                    println!("Skipping setup. Review flow.toml, then run `f setup` or `f run setup`.");
+                    println!(
+                        "Skipping setup. Review flow.toml, then run `f setup` or `f run setup`."
+                    );
                     return Ok(());
                 }
             } else {
-                println!("Skipping setup for newly created flow.toml. Run `f setup` or `f run setup` when ready.");
+                println!(
+                    "Skipping setup for newly created flow.toml. Run `f setup` or `f run setup` when ready."
+                );
                 return Ok(());
             }
         }
@@ -95,10 +97,7 @@ fn resolve_project_root(config_path: &PathBuf) -> Result<(PathBuf, PathBuf)> {
     } else {
         cwd.join(config_path)
     };
-    let root = resolved
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or(cwd);
+    let root = resolved.parent().map(|p| p.to_path_buf()).unwrap_or(cwd);
     Ok((root, resolved))
 }
 
@@ -166,90 +165,99 @@ fn setup_deploy(project_root: &Path, config_path: &Path) -> Result<()> {
         }
     }
 
-    let (dest, run, service, setup_script, env_file, domain, ssl, port) =
-        if server_reason.is_some() {
-            (
-                defaults.dest.clone(),
-                defaults.run.clone(),
-                Some(defaults.service.clone()),
-                normalize_optional(defaults.setup_path.clone()),
-                defaults.env_file.clone(),
-                defaults.domain.clone(),
-                defaults.ssl && defaults.domain.is_some(),
-                if defaults.domain.is_some() {
-                    defaults.port
-                } else {
-                    None
-                },
-            )
-        } else {
-            let dest = if is_tty {
-                prompt_line("Remote deploy path", Some(&defaults.dest))?
-            } else {
-                defaults.dest.clone()
-            };
-
-            let run = if is_tty {
-                let value = prompt_line("Run command", defaults.run.as_deref())?;
-                normalize_optional(value)
-            } else {
-                defaults.run.clone()
-            };
-
-            if run.is_none() {
-                println!("Warning: no run command set; deploy will not create a systemd service.");
-            }
-
-            let service = if is_tty {
-                let value = prompt_line("Systemd service name", Some(&defaults.service))?;
-                normalize_optional(value)
-            } else {
-                Some(defaults.service.clone())
-            };
-
-            let setup_script = if is_tty {
-                let value = prompt_line(
-                    "Setup script path (relative to repo)",
-                    Some(&defaults.setup_path),
-                )?;
-                normalize_optional(value)
-            } else {
-                Some(defaults.setup_path.clone())
-            };
-
-            let env_file = if is_tty {
-                prompt_line_optional(
-                    "Env file to upload (copied to remote as .env)",
-                    defaults.env_file.as_deref(),
-                )?
-            } else {
-                defaults.env_file.clone()
-            };
-
-            let domain = if is_tty {
-                prompt_line_optional("Domain (blank to skip)", defaults.domain.as_deref())?
-            } else {
-                defaults.domain.clone()
-            };
-
-            let ssl = if is_tty && domain.is_some() {
-                prompt_yes_no("Enable SSL via Let's Encrypt?", defaults.ssl)?
-            } else {
-                defaults.ssl && domain.is_some()
-            };
-
-            let port = if domain.is_some() {
-                if is_tty {
-                    prompt_u16_optional("Service port for nginx", defaults.port)?
-                } else {
-                    defaults.port
-                }
+    let (dest, run, service, setup_script, env_file, domain, ssl, port) = if server_reason.is_some()
+    {
+        (
+            defaults.dest.clone(),
+            defaults.run.clone(),
+            Some(defaults.service.clone()),
+            normalize_optional(defaults.setup_path.clone()),
+            defaults.env_file.clone(),
+            defaults.domain.clone(),
+            defaults.ssl && defaults.domain.is_some(),
+            if defaults.domain.is_some() {
+                defaults.port
             } else {
                 None
-            };
-
-            (dest, run, service, setup_script, env_file, domain, ssl, port)
+            },
+        )
+    } else {
+        let dest = if is_tty {
+            prompt_line("Remote deploy path", Some(&defaults.dest))?
+        } else {
+            defaults.dest.clone()
         };
+
+        let run = if is_tty {
+            let value = prompt_line("Run command", defaults.run.as_deref())?;
+            normalize_optional(value)
+        } else {
+            defaults.run.clone()
+        };
+
+        if run.is_none() {
+            println!("Warning: no run command set; deploy will not create a systemd service.");
+        }
+
+        let service = if is_tty {
+            let value = prompt_line("Systemd service name", Some(&defaults.service))?;
+            normalize_optional(value)
+        } else {
+            Some(defaults.service.clone())
+        };
+
+        let setup_script = if is_tty {
+            let value = prompt_line(
+                "Setup script path (relative to repo)",
+                Some(&defaults.setup_path),
+            )?;
+            normalize_optional(value)
+        } else {
+            Some(defaults.setup_path.clone())
+        };
+
+        let env_file = if is_tty {
+            prompt_line_optional(
+                "Env file to upload (copied to remote as .env)",
+                defaults.env_file.as_deref(),
+            )?
+        } else {
+            defaults.env_file.clone()
+        };
+
+        let domain = if is_tty {
+            prompt_line_optional("Domain (blank to skip)", defaults.domain.as_deref())?
+        } else {
+            defaults.domain.clone()
+        };
+
+        let ssl = if is_tty && domain.is_some() {
+            prompt_yes_no("Enable SSL via Let's Encrypt?", defaults.ssl)?
+        } else {
+            defaults.ssl && domain.is_some()
+        };
+
+        let port = if domain.is_some() {
+            if is_tty {
+                prompt_u16_optional("Service port for nginx", defaults.port)?
+            } else {
+                defaults.port
+            }
+        } else {
+            None
+        };
+
+        (
+            dest,
+            run,
+            service,
+            setup_script,
+            env_file,
+            domain,
+            ssl,
+            port,
+        )
+    };
 
     if server_reason.is_some() && run.is_none() {
         println!("Warning: no run command set; deploy will not create a systemd service.");
@@ -339,7 +347,13 @@ fn setup_release(project_root: &Path, config_path: &Path) -> Result<()> {
     }
 
     if let Some(env_path) = defaults.env_file.as_ref() {
-        ensure_env_file(project_root, env_path, defaults.env_example.as_ref(), false, false)?;
+        ensure_env_file(
+            project_root,
+            env_path,
+            defaults.env_example.as_ref(),
+            false,
+            false,
+        )?;
     }
 
     if io::stdin().is_terminal() {
@@ -427,7 +441,8 @@ fn create_flow_toml_interactive(project_root: &Path, config_path: &Path) -> Resu
         println!("Using detected defaults. Edit flow.toml if needed.");
     }
 
-    let content = ensure_trailing_newline(content.unwrap_or_else(|| default_flow_template(project_root)));
+    let content =
+        ensure_trailing_newline(content.unwrap_or_else(|| default_flow_template(project_root)));
 
     if !used_ai_content || !streamed_ai_output {
         println!("\nProposed flow.toml:\n");
@@ -643,10 +658,7 @@ fn load_server_setup_template() -> Option<ServerSetupTemplate> {
                             Some(existing) => merge_host_config(existing, host),
                             None => host,
                         });
-                        source = Some(format!(
-                            "{} (inline)",
-                            global_path.display()
-                        ));
+                        source = Some(format!("{} (inline)", global_path.display()));
                     }
                 }
             }
@@ -671,10 +683,7 @@ fn load_server_setup_template() -> Option<ServerSetupTemplate> {
     })
 }
 
-fn merge_host_config(
-    base: deploy::HostConfig,
-    overlay: deploy::HostConfig,
-) -> deploy::HostConfig {
+fn merge_host_config(base: deploy::HostConfig, overlay: deploy::HostConfig) -> deploy::HostConfig {
     deploy::HostConfig {
         dest: overlay.dest.or(base.dest),
         setup: overlay.setup.or(base.setup),
@@ -857,7 +866,12 @@ fn replace_host_section(content: &str, section: &str) -> String {
         updated.extend_from_slice(&lines[end..]);
         lines = updated;
     } else {
-        if !lines.is_empty() && !lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        if !lines.is_empty()
+            && !lines
+                .last()
+                .map(|line| line.trim().is_empty())
+                .unwrap_or(false)
+        {
             lines.push(String::new());
         }
         lines.extend(section_lines);
@@ -1176,15 +1190,16 @@ fn display_relative(project_root: &Path, path: &Path) -> String {
 }
 
 fn write_flow_toml(path: &Path, content: &str) -> Result<()> {
-    fs::write(path, content)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
     println!("Created flow.toml");
     Ok(())
 }
 
 fn generate_flow_toml_with_agent(project_root: &Path, hint: Option<&str>) -> Result<String> {
     let mut prompt = String::new();
-    prompt.push_str("Read the project files and generate a minimal flow.toml with setup and dev tasks.\n\n");
+    prompt.push_str(
+        "Read the project files and generate a minimal flow.toml with setup and dev tasks.\n\n",
+    );
     prompt.push_str("Requirements:\n");
     prompt.push_str("- Detect the project type by looking at files (Cargo.toml, package.json, *.tex, *.py, go.mod, etc.)\n");
     prompt.push_str("- Include only what is needed to make dev work reliably.\n");
@@ -1192,7 +1207,9 @@ fn generate_flow_toml_with_agent(project_root: &Path, hint: Option<&str>) -> Res
     prompt.push_str("- Add descriptions and shortcuts for setup (s) and dev (d).\n");
     prompt.push_str("- Use [deps] for required binaries.\n");
     prompt.push_str("- If a task prompts for input, set interactive = true.\n");
-    prompt.push_str("- Output ONLY the flow.toml content in a ```toml code block, no other commentary.\n\n");
+    prompt.push_str(
+        "- Output ONLY the flow.toml content in a ```toml code block, no other commentary.\n\n",
+    );
     prompt.push_str("# flow.toml examples by project type:\n\n");
     prompt.push_str("## Rust project (Cargo.toml exists):\n");
     prompt.push_str("[deps]\n");
@@ -1227,7 +1244,9 @@ fn generate_flow_toml_with_agent(project_root: &Path, hint: Option<&str>) -> Res
     prompt.push_str("command = \"pdflatex main.tex\"  # use detected main .tex file\n");
     prompt.push_str("description = \"Compile document\"\n");
     prompt.push_str("dependencies = [\"setup\"]\n\n");
-    prompt.push_str("## Python project (pyproject.toml, setup.py, requirements.txt, or .py files):\n");
+    prompt.push_str(
+        "## Python project (pyproject.toml, setup.py, requirements.txt, or .py files):\n",
+    );
     prompt.push_str("[deps]\n");
     prompt.push_str("python = \"python3\"\n\n");
     prompt.push_str("[[tasks]]\n");
@@ -1235,7 +1254,9 @@ fn generate_flow_toml_with_agent(project_root: &Path, hint: Option<&str>) -> Res
     prompt.push_str("command = \"pip install -e .\"  # or pip install -r requirements.txt\n\n");
     prompt.push_str("[[tasks]]\n");
     prompt.push_str("name = \"dev\"\n");
-    prompt.push_str("command = \"python main.py\"  # use entry point from pyproject.toml or main .py file\n\n");
+    prompt.push_str(
+        "command = \"python main.py\"  # use entry point from pyproject.toml or main .py file\n\n",
+    );
     prompt.push_str("## Go project (go.mod exists):\n");
     prompt.push_str("[deps]\n");
     prompt.push_str("go = \"go\"\n\n");
@@ -1279,7 +1300,9 @@ fn generate_flow_toml_with_agent_streaming(
     hint: Option<&str>,
 ) -> Result<String> {
     let mut prompt = String::new();
-    prompt.push_str("Read the project files and generate a minimal flow.toml with setup and dev tasks.\n\n");
+    prompt.push_str(
+        "Read the project files and generate a minimal flow.toml with setup and dev tasks.\n\n",
+    );
     prompt.push_str("Requirements:\n");
     prompt.push_str("- Detect the project type by looking at files (Cargo.toml, package.json, *.tex, *.py, go.mod, etc.)\n");
     prompt.push_str("- Include only what is needed to make dev work reliably.\n");
@@ -1287,7 +1310,9 @@ fn generate_flow_toml_with_agent_streaming(
     prompt.push_str("- Add descriptions and shortcuts for setup (s) and dev (d).\n");
     prompt.push_str("- Use [deps] for required binaries.\n");
     prompt.push_str("- If a task prompts for input, set interactive = true.\n");
-    prompt.push_str("- Output ONLY the flow.toml content in a ```toml code block, no other commentary.\n\n");
+    prompt.push_str(
+        "- Output ONLY the flow.toml content in a ```toml code block, no other commentary.\n\n",
+    );
     prompt.push_str("# flow.toml examples by project type:\n\n");
     prompt.push_str("## Rust project (Cargo.toml exists):\n");
     prompt.push_str("[deps]\n");
@@ -1322,7 +1347,9 @@ fn generate_flow_toml_with_agent_streaming(
     prompt.push_str("command = \"pdflatex main.tex\"  # use detected main .tex file\n");
     prompt.push_str("description = \"Compile document\"\n");
     prompt.push_str("dependencies = [\"setup\"]\n\n");
-    prompt.push_str("## Python project (pyproject.toml, setup.py, requirements.txt, or .py files):\n");
+    prompt.push_str(
+        "## Python project (pyproject.toml, setup.py, requirements.txt, or .py files):\n",
+    );
     prompt.push_str("[deps]\n");
     prompt.push_str("python = \"python3\"\n\n");
     prompt.push_str("[[tasks]]\n");
@@ -1330,7 +1357,9 @@ fn generate_flow_toml_with_agent_streaming(
     prompt.push_str("command = \"pip install -e .\"  # or pip install -r requirements.txt\n\n");
     prompt.push_str("[[tasks]]\n");
     prompt.push_str("name = \"dev\"\n");
-    prompt.push_str("command = \"python main.py\"  # use entry point from pyproject.toml or main .py file\n\n");
+    prompt.push_str(
+        "command = \"python main.py\"  # use entry point from pyproject.toml or main .py file\n\n",
+    );
     prompt.push_str("## Go project (go.mod exists):\n");
     prompt.push_str("[deps]\n");
     prompt.push_str("go = \"go\"\n\n");
@@ -1597,10 +1626,7 @@ fn setup_script_mismatch_reason(project_root: &Path, setup: &str) -> Option<Stri
     None
 }
 
-fn host_config_name_mismatch(
-    project_root: &Path,
-    host_cfg: &deploy::HostConfig,
-) -> Option<String> {
+fn host_config_name_mismatch(project_root: &Path, host_cfg: &deploy::HostConfig) -> Option<String> {
     let expected_names = expected_project_names(project_root);
     if expected_names.is_empty() {
         return None;
@@ -1619,9 +1645,7 @@ fn host_config_name_mismatch(
         *counts.entry(token).or_insert(0) += 1;
     }
 
-    let (token, count) = counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)?;
+    let (token, count) = counts.into_iter().max_by_key(|(_, count)| *count)?;
     if count < 2 {
         return None;
     }
@@ -1645,10 +1669,7 @@ fn expected_project_names(project_root: &Path) -> HashSet<String> {
     if let Some(name) = package_json_name(project_root) {
         names.insert(name.to_ascii_lowercase());
     }
-    if let Some(folder) = project_root
-        .file_name()
-        .and_then(|name| name.to_str())
-    {
+    if let Some(folder) = project_root.file_name().and_then(|name| name.to_str()) {
         names.insert(folder.to_ascii_lowercase());
     }
     for name in cargo_bin_names(project_root) {
@@ -1718,12 +1739,11 @@ fn host_name_tokens(host: &deploy::HostConfig) -> Vec<String> {
 fn extract_run_binary(run: &str) -> Option<String> {
     let first = run.trim().split_whitespace().next()?;
     let trimmed = first.trim_matches(|c| c == '"' || c == '\'');
-    let name = Path::new(trimmed).file_name()?.to_string_lossy().to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    let name = Path::new(trimmed)
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
+    if name.is_empty() { None } else { Some(name) }
 }
 
 fn extract_env_name(env_file: &str) -> Option<String> {
@@ -1737,16 +1757,11 @@ fn extract_env_name(env_file: &str) -> Option<String> {
     if let Some(stripped) = stem.strip_suffix(".env") {
         stem = stripped.to_string();
     }
-    if stem.is_empty() {
-        None
-    } else {
-        Some(stem)
-    }
+    if stem.is_empty() { None } else { Some(stem) }
 }
 
 fn normalize_host_token(token: &str) -> Option<String> {
-    let trimmed = token
-        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+    let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
     if trimmed.len() < 2 {
         return None;
     }
@@ -1922,11 +1937,7 @@ fn suggest_latex_commands(project_path: &Path, subdir: Option<&str>) -> Option<S
     let tex_files: Vec<_> = fs::read_dir(project_path)
         .ok()?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "tex")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "tex"))
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
 
@@ -1939,8 +1950,8 @@ fn suggest_latex_commands(project_path: &Path, subdir: Option<&str>) -> Option<S
 
     // Check for Makefile or latexmk config
     let has_makefile = project_path.join("Makefile").exists();
-    let has_latexmkrc = project_path.join(".latexmkrc").exists()
-        || project_path.join("latexmkrc").exists();
+    let has_latexmkrc =
+        project_path.join(".latexmkrc").exists() || project_path.join("latexmkrc").exists();
 
     if has_makefile {
         return Some(SuggestedCommands {
@@ -1973,7 +1984,14 @@ fn suggest_latex_commands(project_path: &Path, subdir: Option<&str>) -> Option<S
 /// Priority: main.tex > document.tex > single .tex file > first alphabetically
 fn detect_main_tex_file(project_path: &Path, tex_files: &[String]) -> String {
     // Common main file names
-    for name in ["main.tex", "document.tex", "paper.tex", "thesis.tex", "cv.tex", "resume.tex"] {
+    for name in [
+        "main.tex",
+        "document.tex",
+        "paper.tex",
+        "thesis.tex",
+        "cv.tex",
+        "resume.tex",
+    ] {
         if tex_files.contains(&name.to_string()) {
             return name.to_string();
         }
@@ -1998,7 +2016,10 @@ fn detect_main_tex_file(project_path: &Path, tex_files: &[String]) -> String {
     // Fallback to first file alphabetically
     let mut sorted = tex_files.to_vec();
     sorted.sort();
-    sorted.first().cloned().unwrap_or_else(|| "main.tex".to_string())
+    sorted
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "main.tex".to_string())
 }
 
 /// Detect package manager from package.json content.
@@ -2076,7 +2097,11 @@ fn has_catalog_protocol(value: &serde_json::Value) -> bool {
     }
 
     // Also check workspaces.catalog (pnpm/yarn workspace catalog definition)
-    if value.get("workspaces").and_then(|v| v.get("catalog")).is_some() {
+    if value
+        .get("workspaces")
+        .and_then(|v| v.get("catalog"))
+        .is_some()
+    {
         return true;
     }
 
@@ -2155,16 +2180,29 @@ fn project_guidance(project_root: &Path) -> Option<String> {
         return Some("Detected LaTeX project (.tex files). Use pdflatex or latexmk to compile; avoid bun/npm/pnpm/yarn/cargo.".to_string());
     }
 
-    match (cargo_found, package_found, &subdir_projects.cargo, &subdir_projects.package) {
+    match (
+        cargo_found,
+        package_found,
+        &subdir_projects.cargo,
+        &subdir_projects.package,
+    ) {
         (true, false, Some(subdir), _) => Some(format!(
             "Detected Rust project in {subdir}/. Run cargo commands from that directory (cd {subdir} && cargo build). Avoid bun/npm/pnpm/yarn."
         )),
-        (true, false, None, _) => Some("Detected Rust project (Cargo.toml). Use cargo commands; avoid bun/npm/pnpm/yarn.".to_string()),
+        (true, false, None, _) => Some(
+            "Detected Rust project (Cargo.toml). Use cargo commands; avoid bun/npm/pnpm/yarn."
+                .to_string(),
+        ),
         (false, true, _, Some(subdir)) => Some(format!(
             "Detected Node project in {subdir}/. Run npm/pnpm/yarn/bun commands from that directory. Avoid cargo."
         )),
-        (false, true, _, None) => Some("Detected Node project (package.json). Use npm/pnpm/yarn/bun commands; avoid cargo.".to_string()),
-        (true, true, _, _) => Some("Detected Rust + Node. Use the right tool for each step.".to_string()),
+        (false, true, _, None) => Some(
+            "Detected Node project (package.json). Use npm/pnpm/yarn/bun commands; avoid cargo."
+                .to_string(),
+        ),
+        (true, true, _, _) => {
+            Some("Detected Rust + Node. Use the right tool for each step.".to_string())
+        }
         _ => None,
     }
 }
@@ -2188,7 +2226,7 @@ fn find_subdir_projects(project_root: &Path) -> SubdirProjects {
                 cargo: None,
                 package: None,
                 latex: None,
-            }
+            };
         }
     };
 
@@ -2228,11 +2266,9 @@ fn find_subdir_projects(project_root: &Path) -> SubdirProjects {
 fn has_tex_files(path: &Path) -> bool {
     fs::read_dir(path)
         .map(|entries| {
-            entries.flatten().any(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "tex")
-            })
+            entries
+                .flatten()
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "tex"))
         })
         .unwrap_or(false)
 }
@@ -2295,7 +2331,9 @@ fn detect_node_server(project_root: &Path) -> Option<String> {
         }
     }
 
-    let server_deps = ["express", "fastify", "koa", "hono", "next", "remix", "nestjs"];
+    let server_deps = [
+        "express", "fastify", "koa", "hono", "next", "remix", "nestjs",
+    ];
     for dep in server_deps {
         if deps.contains(dep) {
             return Some(format!("Node server framework detected: {dep}"));
@@ -2335,7 +2373,10 @@ fn ai_flow_toml_mismatch_reason(project_root: &Path, toml_content: &str) -> Opti
     }
 
     if cargo_found && !package_found && uses_node {
-        return Some("AI suggested Node tooling (bun/npm/pnpm/yarn), but no package.json was found.".to_string());
+        return Some(
+            "AI suggested Node tooling (bun/npm/pnpm/yarn), but no package.json was found."
+                .to_string(),
+        );
     }
     if package_found && !cargo_found && uses_cargo {
         return Some("AI suggested Cargo commands, but no Cargo.toml was found.".to_string());
@@ -2358,15 +2399,17 @@ fn command_uses_cargo_tool(command: &str) -> bool {
 }
 
 fn command_uses_latex_tool(command: &str) -> bool {
-    ["pdflatex", "xelatex", "lualatex", "latexmk", "latex", "bibtex", "biber"]
-        .iter()
-        .any(|tool| command_mentions_tool(command, tool))
+    [
+        "pdflatex", "xelatex", "lualatex", "latexmk", "latex", "bibtex", "biber",
+    ]
+    .iter()
+    .any(|tool| command_mentions_tool(command, tool))
 }
 
 fn command_mentions_tool(command: &str, tool: &str) -> bool {
     command.split_whitespace().any(|part| {
-        let trimmed = part
-            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+        let trimmed =
+            part.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
         trimmed.eq_ignore_ascii_case(tool)
     })
 }
@@ -2559,10 +2602,7 @@ fn prompt_u16_optional(message: &str, default: Option<u16>) -> Result<Option<u16
     let default_str = default.map(|v| v.to_string());
     let value = prompt_line_optional(message, default_str.as_deref())?;
     match value {
-        Some(text) => text
-            .parse::<u16>()
-            .map(Some)
-            .context("invalid port value"),
+        Some(text) => text.parse::<u16>().map(Some).context("invalid port value"),
         None => Ok(None),
     }
 }

@@ -29,10 +29,21 @@ pub fn run(cmd: TodoCommand) -> Result<()> {
             session,
             no_session,
             status,
-        } => add(&title, note.as_deref(), session.as_deref(), no_session, status),
+        } => add(
+            &title,
+            note.as_deref(),
+            session.as_deref(),
+            no_session,
+            status,
+        ),
         TodoAction::List { all } => list(all),
         TodoAction::Done { id } => set_status(&id, TodoStatusArg::Completed),
-        TodoAction::Edit { id, title, status, note } => edit(&id, title.as_deref(), status, note),
+        TodoAction::Edit {
+            id,
+            title,
+            status,
+            note,
+        } => edit(&id, title.as_deref(), status, note),
         TodoAction::Remove { id } => remove(&id),
     }
 }
@@ -93,7 +104,12 @@ fn list(show_all: bool) -> Result<()> {
     Ok(())
 }
 
-fn edit(id: &str, title: Option<&str>, status: Option<TodoStatusArg>, note: Option<String>) -> Result<()> {
+fn edit(
+    id: &str,
+    title: Option<&str>,
+    status: Option<TodoStatusArg>,
+    note: Option<String>,
+) -> Result<()> {
     let (path, mut items) = load_items()?;
     let idx = find_item_index(&items, id)?;
     let item_id = {
@@ -164,8 +180,8 @@ fn load_items() -> Result<(PathBuf, Vec<TodoItem>)> {
         return Ok((path, Vec::new()));
     }
 
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     if content.trim().is_empty() {
         return Ok((path, Vec::new()));
     }

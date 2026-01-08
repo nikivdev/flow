@@ -36,7 +36,6 @@ pub fn run() -> Result<()> {
 
 /// Bootstrap a project at the provided root path.
 pub fn run_at(project_root: &Path) -> Result<()> {
-
     // Create .ai/ folder structure
     if !has_checkpoint(&project_root, checkpoints::AI_FOLDER_CREATED) {
         create_ai_folder(&project_root)?;
@@ -152,7 +151,6 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-
 /// Materialize .claude/, .codex/, and .flox/ folders with symlinks to .ai/
 fn materialize_tool_folders(project_root: &Path) -> Result<()> {
     use std::os::unix::fs::symlink;
@@ -196,22 +194,32 @@ fn materialize_tool_folders(project_root: &Path) -> Result<()> {
         // Create env.json files that flox expects
         let env_json = flox_dir.join("env.json");
         if !env_json.exists() {
-            fs::write(&env_json, r#"{
+            fs::write(
+                &env_json,
+                r#"{
   "version": 1,
   "manifest": "env/manifest.toml",
   "lockfile": "env/manifest.lock"
-}"#)?;
+}"#,
+            )?;
         }
 
         let env_env_json = flox_env_dir.join("env.json");
         if !env_env_json.exists() {
             let manifest_path = flox_env_dir.join("manifest.toml");
             let lockfile_path = flox_env_dir.join("manifest.lock");
-            fs::write(&env_env_json, format!(r#"{{
+            fs::write(
+                &env_env_json,
+                format!(
+                    r#"{{
   "version": 1,
   "manifest": "{}",
   "lockfile": "{}"
-}}"#, manifest_path.display(), lockfile_path.display()))?;
+}}"#,
+                    manifest_path.display(),
+                    lockfile_path.display()
+                ),
+            )?;
         }
     }
 
@@ -357,13 +365,7 @@ fn update_gitignore(project_root: &Path) -> Result<()> {
         String::new()
     };
 
-    let required_entries = [
-        ".ai/internal/",
-        ".ai/web/",
-        ".claude/",
-        ".codex/",
-        ".flox/",
-    ];
+    let required_entries = [".ai/internal/", ".ai/web/", ".claude/", ".codex/", ".flox/"];
 
     // If flow section already exists, make sure required entries are present.
     if content.contains("# flow") {
@@ -505,7 +507,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
-        fs::write(root.join(".gitignore"), "# flow\n.ai/internal/\n.claude/\n.codex/\n").unwrap();
+        fs::write(
+            root.join(".gitignore"),
+            "# flow\n.ai/internal/\n.claude/\n.codex/\n",
+        )
+        .unwrap();
 
         update_gitignore(root).unwrap();
 

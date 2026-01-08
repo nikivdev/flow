@@ -2,8 +2,8 @@
 
 use std::io::{self, Write};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -154,7 +154,13 @@ impl ParallelRunner {
                 }
             }
             TaskStatus::Failure => {
-                format!("{} {}(exit {}){}", prefix, DIM, task.exit_code.unwrap_or(-1), RESET)
+                format!(
+                    "{} {}(exit {}){}",
+                    prefix,
+                    DIM,
+                    task.exit_code.unwrap_or(-1),
+                    RESET
+                )
             }
             TaskStatus::Skipped => {
                 format!("{} {}(skipped){}", prefix, DIM, RESET)
@@ -229,7 +235,9 @@ impl ParallelRunner {
                 let mut tasks = self.tasks.lock().await;
                 tasks[task_idx].status = TaskStatus::Failure;
                 tasks[task_idx].exit_code = Some(-1);
-                tasks[task_idx].output.push(format!("Failed to spawn: {}", e));
+                tasks[task_idx]
+                    .output
+                    .push(format!("Failed to spawn: {}", e));
                 tasks[task_idx].duration = Some(start.elapsed());
 
                 if self.fail_fast {
@@ -340,7 +348,10 @@ impl ParallelRunner {
                     if runner.should_stop.load(Ordering::Relaxed) {
                         let tasks = runner.tasks.lock().await;
                         if tasks.iter().all(|t| {
-                            matches!(t.status, TaskStatus::Success | TaskStatus::Failure | TaskStatus::Skipped)
+                            matches!(
+                                t.status,
+                                TaskStatus::Success | TaskStatus::Failure | TaskStatus::Skipped
+                            )
                         }) {
                             break;
                         }
@@ -352,7 +363,10 @@ impl ParallelRunner {
 
                     let tasks = runner.tasks.lock().await;
                     if tasks.iter().all(|t| {
-                        matches!(t.status, TaskStatus::Success | TaskStatus::Failure | TaskStatus::Skipped)
+                        matches!(
+                            t.status,
+                            TaskStatus::Success | TaskStatus::Failure | TaskStatus::Skipped
+                        )
                     }) {
                         break;
                     }
@@ -373,12 +387,22 @@ impl ParallelRunner {
 
         // Print failures
         let tasks = self.tasks.lock().await;
-        let failed: Vec<_> = tasks.iter().filter(|t| t.status == TaskStatus::Failure).collect();
+        let failed: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Failure)
+            .collect();
 
         if !failed.is_empty() {
             println!();
             for task in failed {
-                println!("{}{}━━━ {} (exit {}) ━━━{}", RED, BOLD, task.label, task.exit_code.unwrap_or(-1), RESET);
+                println!(
+                    "{}{}━━━ {} (exit {}) ━━━{}",
+                    RED,
+                    BOLD,
+                    task.label,
+                    task.exit_code.unwrap_or(-1),
+                    RESET
+                );
                 let output = task.output.join("");
                 if !output.trim().is_empty() {
                     print!("{}", output);
@@ -456,7 +480,10 @@ pub fn run(cmd: crate::cli::ParallelCommand) -> Result<()> {
 
     let rt = Runtime::new()?;
     rt.block_on(async {
-        let task_refs: Vec<(&str, &str)> = tasks.iter().map(|(l, c)| (l.as_str(), c.as_str())).collect();
+        let task_refs: Vec<(&str, &str)> = tasks
+            .iter()
+            .map(|(l, c)| (l.as_str(), c.as_str()))
+            .collect();
         run_parallel(task_refs, max_jobs, cmd.fail_fast).await
     })
 }
@@ -478,10 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parallel_failure() {
-        let tasks = vec![
-            Task::new("fail", "exit 1"),
-            Task::new("pass", "echo ok"),
-        ];
+        let tasks = vec![Task::new("fail", "exit 1"), Task::new("pass", "echo ok")];
         let runner = Arc::new(ParallelRunner::new(tasks, 4, false));
         let code = runner.run().await;
         assert_eq!(code, 1);

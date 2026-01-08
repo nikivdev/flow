@@ -6,9 +6,10 @@ use clap::{Parser, error::ErrorKind};
 use flowd::{
     agents, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    commit, commits, daemon, deploy, docs, doctor, env, fixup, gh_release, history, home, hub, init,
-    init_tracing, log_server, notify, palette, parallel, processes, projects, publish, repos, setup,
-    ssh_keys, skills, storage, sync, task_match, tasks, todo, tools, upgrade, upstream, deps, web,
+    commit, commits, daemon, deploy, deps, docs, doctor, env, fixup, gh_release, history, home,
+    hub, init, init_tracing, log_server, notify, palette, parallel, processes, projects, publish,
+    repos, services, setup, skills, ssh_keys, storage, sync, task_match, tasks, todo, tools,
+    upgrade, upstream, web,
 };
 
 fn main() -> Result<()> {
@@ -169,6 +170,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Env(cmd)) => {
             env::run(cmd.action)?;
+        }
+        Some(Commands::Services(cmd)) => {
+            services::run(cmd)?;
         }
         Some(Commands::Ssh(cmd)) => {
             ssh_keys::run(cmd.action)?;

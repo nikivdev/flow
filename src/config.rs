@@ -848,8 +848,7 @@ fn ensure_dir(path: &Path) -> Result<()> {
         );
     }
 
-    fs::create_dir_all(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
     Ok(())
 }
 
@@ -868,10 +867,7 @@ fn is_dir_path(path: &Path) -> bool {
 }
 
 fn backup_path(path: &Path) -> PathBuf {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("flow");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("flow");
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

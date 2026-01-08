@@ -130,6 +130,31 @@ pub fn ensure_git_ssh_command_for_sock(sock: &Path, force: bool) -> Result<bool>
     Ok(true)
 }
 
+pub fn ensure_git_ssh_command_wrapper(wrapper: &Path, force: bool) -> Result<bool> {
+    if !git_config_writable() {
+        return Ok(false);
+    }
+    let desired = shell_escape(wrapper);
+
+    if !force {
+        if let Some(current) = git_config_get("core.sshCommand")? {
+            let current = current.trim();
+            if current == desired {
+                return Ok(false);
+            }
+            if !current.is_empty()
+                && !current.contains("IdentityAgent=")
+                && !current.contains("flow-ssh")
+            {
+                return Ok(false);
+            }
+        }
+    }
+
+    git_config_set("core.sshCommand", &desired)?;
+    Ok(true)
+}
+
 pub fn ensure_git_https_insteadof() -> Result<bool> {
     if !git_config_writable() {
         return Ok(false);
@@ -248,9 +273,7 @@ fn ssh_mode_from_config() -> Option<SshMode> {
 
     let cfg = config::load(&path).ok()?;
     let ssh = cfg.ssh?;
-    ssh.mode
-        .as_deref()
-        .and_then(parse_mode)
+    ssh.mode.as_deref().and_then(parse_mode)
 }
 
 fn parse_mode(raw: &str) -> Option<SshMode> {
@@ -269,15 +292,15 @@ struct FlowAgentState {
 }
 
 fn flow_agent_sock() -> PathBuf {
-    config::global_config_dir()
-        .join("ssh")
-        .join("agent.sock")
+    config::global_config_dir().join("ssh").join("agent.sock")
+}
+
+pub fn flow_agent_sock_path() -> PathBuf {
+    flow_agent_sock()
 }
 
 fn flow_agent_state_path() -> PathBuf {
-    config::global_config_dir()
-        .join("ssh")
-        .join("agent.json")
+    config::global_config_dir().join("ssh").join("agent.json")
 }
 
 fn load_flow_agent_state() -> Option<FlowAgentState> {

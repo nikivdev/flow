@@ -8,7 +8,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{DocsCommand, DocsAction};
+use crate::cli::{DocsAction, DocsCommand};
 
 /// Docs directory relative to project root.
 const DOCS_DIR: &str = ".ai/docs";
@@ -21,7 +21,9 @@ pub fn run(cmd: DocsCommand) -> Result<()> {
     match cmd.action {
         Some(DocsAction::List) | None => list_docs(&docs_dir),
         Some(DocsAction::Status) => show_status(&project_root, &docs_dir),
-        Some(DocsAction::Sync { commits, dry }) => sync_docs(&project_root, &docs_dir, commits, dry),
+        Some(DocsAction::Sync { commits, dry }) => {
+            sync_docs(&project_root, &docs_dir, commits, dry)
+        }
         Some(DocsAction::Edit { name }) => edit_doc(&docs_dir, &name),
     }
 }
@@ -52,7 +54,8 @@ fn list_docs(docs_dir: &Path) -> Result<()> {
         let title = fs::read_to_string(&path)
             .ok()
             .and_then(|content| {
-                content.lines()
+                content
+                    .lines()
                     .find(|l| l.starts_with("# "))
                     .map(|l| l.trim_start_matches("# ").to_string())
             })
@@ -111,7 +114,8 @@ fn show_status(project_root: &Path, docs_dir: &Path) -> Result<()> {
     for entry in entries {
         let path = entry.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let modified = entry.metadata()
+        let modified = entry
+            .metadata()
             .and_then(|m| m.modified())
             .map(|t| {
                 let duration = t.elapsed().unwrap_or_default();

@@ -31,8 +31,9 @@ use crate::{
     discover,
     flox::{self, FloxEnv},
     history::{self, InvocationRecord},
-    hub, init, projects, task_match,
+    hub, init, projects,
     running::{self, RunningProcess},
+    task_match,
 };
 
 /// Global state for cancel cleanup handler.
@@ -166,12 +167,25 @@ fn needs_interactive_mode(command: &str) -> bool {
 
     // Standalone interactive commands (check first line's first word)
     let interactive_commands = [
-        "vim", "nvim", "nano", "emacs",
-        "htop", "top", "btop",
-        "less", "more",
-        "psql", "mysql", "sqlite3",
-        "node", "python", "python3", "irb", "ghci",
-        "lazygit", "lazydocker",
+        "vim",
+        "nvim",
+        "nano",
+        "emacs",
+        "htop",
+        "top",
+        "btop",
+        "less",
+        "more",
+        "psql",
+        "mysql",
+        "sqlite3",
+        "node",
+        "python",
+        "python3",
+        "irb",
+        "ghci",
+        "lazygit",
+        "lazydocker",
     ];
 
     let first_line = command.lines().next().unwrap_or("").trim();
@@ -217,7 +231,9 @@ pub fn run_global(opts: GlobalCommand) -> Result<()> {
     if let Some(action) = opts.action {
         match action {
             GlobalAction::List => {
-                return list(TasksOpts { config: config_path });
+                return list(TasksOpts {
+                    config: config_path,
+                });
             }
             GlobalAction::Run { task, args } => {
                 return run(TaskRunOpts {
@@ -241,7 +257,9 @@ pub fn run_global(opts: GlobalCommand) -> Result<()> {
     }
 
     if opts.list {
-        return list(TasksOpts { config: config_path });
+        return list(TasksOpts {
+            config: config_path,
+        });
     }
 
     if let Some(task) = opts.task {
@@ -255,7 +273,9 @@ pub fn run_global(opts: GlobalCommand) -> Result<()> {
         });
     }
 
-    list(TasksOpts { config: config_path })
+    list(TasksOpts {
+        config: config_path,
+    })
 }
 
 /// Run a task, searching nested flow.toml files if not found in root.
@@ -557,10 +577,8 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
 pub(crate) fn load_project_config(path: PathBuf) -> Result<(PathBuf, Config)> {
     let config_path = resolve_path(path)?;
     if !config_path.exists() {
-        let is_default = config_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some("flow.toml");
+        let is_default =
+            config_path.file_name().and_then(|name| name.to_str()) == Some("flow.toml");
         if is_default {
             init::write_template(&config_path)?;
             println!("Created starter flow.toml at {}", config_path.display());
@@ -2386,6 +2404,8 @@ mod tests {
         assert!(!command_references_args("echo ${HOME}"));
         assert!(!command_references_args("echo $$")); // PID
         assert!(!command_references_args("echo $?")); // exit code
-        assert!(!command_references_args("source .env && bun script.ts --delete"));
+        assert!(!command_references_args(
+            "source .env && bun script.ts --delete"
+        ));
     }
 }
