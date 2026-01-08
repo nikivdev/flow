@@ -195,6 +195,16 @@ pub enum Commands {
         long_about = "Track, list, and resume Claude Code sessions for the current project. Sessions are stored in .ai/sessions/claude/ and can be named for easy recall."
     )]
     Ai(AiCommand),
+    #[command(about = "Start or continue Codex session.", alias = "cx")]
+    Codex {
+        #[command(subcommand)]
+        action: Option<ProviderAiAction>,
+    },
+    #[command(about = "Start or continue Claude session.", alias = "cl")]
+    Claude {
+        #[command(subcommand)]
+        action: Option<ProviderAiAction>,
+    },
     #[command(
         about = "Manage project env vars and 1focus sync.",
         long_about = "With no arguments, lists project env vars for the current environment. Use subcommands to manage env vars via 1focus or run the sync workflow."
@@ -746,6 +756,8 @@ pub enum JazzStorageKind {
     Mirror,
     /// Env store worker account (1focus env store).
     EnvStore,
+    /// App data worker account (1focus app store).
+    AppStore,
 }
 
 #[derive(Args, Debug, Clone)]

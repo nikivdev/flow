@@ -327,6 +327,25 @@ f env run --personal -k ANTHROPIC_API_KEY -- ./my-script
 
 ---
 
+## Env Space Overrides
+
+You can store project envs under a named 1focus space by configuring `env_space`
+and `env_space_kind` in `flow.toml`.
+
+```toml
+# flow.toml
+env_space = "nikiv"
+env_space_kind = "personal"
+```
+
+- `env_space_kind = "project"` (default) uses the project name.
+- `env_space_kind = "personal"` routes project envs to your personal space.
+
+This affects `f env pull`, `f env push`, `f env list`, `f env apply`, and service
+token creation.
+
+---
+
 ## Examples
 
 ### Typical Workflow

@@ -32,17 +32,19 @@ fn list_projects() -> Result<Vec<DesktopProject>, String> {
 }
 
 #[tauri::command]
-fn discover_projects(root: String) -> Result<Vec<DesktopProject>, String> {
+async fn discover_projects(root: String) -> Result<Vec<DesktopProject>, String> {
+    tauri::async_runtime::spawn_blocking(move || discover_projects_sync(root))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+fn discover_projects_sync(root: String) -> Result<Vec<DesktopProject>, String> {
     let root_path = flowd::config::expand_path(&root);
     if !root_path.exists() {
         return Ok(Vec::new());
     }
 
     let mut configs = Vec::new();
-    let root_flow = root_path.join("flow.toml");
-    if root_flow.exists() {
-        configs.push(root_flow);
-    }
 
     let walker = WalkBuilder::new(&root_path)
         .hidden(true)
@@ -80,12 +82,10 @@ fn discover_projects(root: String) -> Result<Vec<DesktopProject>, String> {
 
     for entry in walker.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let flow_toml = path.join("flow.toml");
-        if flow_toml.exists() {
-            configs.push(flow_toml);
+        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+            && entry.file_name() == "flow.toml"
+        {
+            configs.push(path.to_path_buf());
         }
     }
 

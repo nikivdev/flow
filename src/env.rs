@@ -12,6 +12,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::blocking::Client;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_setup;
@@ -328,6 +329,112 @@ fn require_env_read_unlock() -> Result<()> {
     unlock_env_read()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvScope {
+    Project,
+    Personal,
+}
+
+#[derive(Debug, Clone)]
+struct EnvTargetConfig {
+    project_name: String,
+    env_space: Option<String>,
+    env_space_kind: EnvScope,
+}
+
+#[derive(Debug, Clone)]
+enum EnvTarget {
+    Project { name: String },
+    Personal { space: Option<String> },
+}
+
+fn parse_env_space_kind(value: Option<&str>) -> EnvScope {
+    match value.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(ref v) if v == "personal" || v == "user" || v == "private" => EnvScope::Personal,
+        _ => EnvScope::Project,
+    }
+}
+
+fn load_env_target_config() -> Result<EnvTargetConfig> {
+    let cwd = std::env::current_dir()?;
+    if let Some(flow_path) = find_flow_toml(&cwd) {
+        let cfg = config::load(&flow_path)?;
+        let project_name = if let Some(name) = cfg.project_name {
+            name
+        } else if let Some(parent) = flow_path.parent() {
+            parent
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unnamed".to_string())
+        } else {
+            "unnamed".to_string()
+        };
+        let env_space = cfg
+            .env_space
+            .and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+        let env_space_kind = parse_env_space_kind(cfg.env_space_kind.as_deref());
+        return Ok(EnvTargetConfig {
+            project_name,
+            env_space,
+            env_space_kind,
+        });
+    }
+
+    let project_name = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unnamed".to_string());
+    Ok(EnvTargetConfig {
+        project_name,
+        env_space: None,
+        env_space_kind: EnvScope::Project,
+    })
+}
+
+fn resolve_env_target() -> Result<EnvTarget> {
+    let cfg = load_env_target_config()?;
+    Ok(match cfg.env_space_kind {
+        EnvScope::Personal => EnvTarget::Personal { space: cfg.env_space },
+        EnvScope::Project => EnvTarget::Project {
+            name: cfg.env_space.unwrap_or(cfg.project_name),
+        },
+    })
+}
+
+fn resolve_personal_target() -> Result<EnvTarget> {
+    let cfg = load_env_target_config()?;
+    Ok(EnvTarget::Personal { space: cfg.env_space })
+}
+
+fn env_target_label(target: &EnvTarget) -> String {
+    match target {
+        EnvTarget::Project { name } => name.clone(),
+        EnvTarget::Personal { space } => {
+            space.clone().unwrap_or_else(|| "personal".to_string())
+        }
+    }
+}
+
+fn env_target_name_for_tokens(target: &EnvTarget) -> Result<String> {
+    match target {
+        EnvTarget::Project { name } => Ok(name.clone()),
+        EnvTarget::Personal { space } => space.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Personal env space name required for service tokens. Set env_space in flow.toml."
+            )
+        }),
+    }
+}
+
 /// Get the project name from flow.toml.
 fn get_project_name() -> Result<String> {
     let cwd = std::env::current_dir()?;
@@ -412,14 +519,21 @@ pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
     require_env_read_unlock()?;
 
     let api_url = get_api_url(&auth);
-    let url = format!("{}/api/env/personal?keys={}", api_url, key);
+    let target = resolve_personal_target()?;
+    let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
+    url.query_pairs_mut().append_pair("keys", key);
+    if let EnvTarget::Personal { space } = target {
+        if let Some(space) = space {
+            url.query_pairs_mut().append_pair("space", &space);
+        }
+    }
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
 
     let resp = client
-        .get(&url)
+        .get(url)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .context("failed to connect to 1focus")?;
@@ -443,7 +557,8 @@ fn fuzzy_select_env() -> Result<()> {
     require_env_read_unlock()?;
 
     // Fetch all personal env vars
-    let vars = fetch_env_vars(true, "production", &[])?;
+    let target = resolve_personal_target()?;
+    let vars = fetch_env_vars(&target, "production", &[], false)?;
     if vars.is_empty() {
         println!("No personal env vars found.");
         println!("Set one with: f env set KEY=VALUE");
@@ -635,11 +750,17 @@ pub(crate) fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/env/personal", api_url);
+    let target = resolve_personal_target()?;
+    let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
+    if let EnvTarget::Personal { space } = target {
+        if let Some(space) = space {
+            url.query_pairs_mut().append_pair("space", &space);
+        }
+    }
     let body = serde_json::json!({ "keys": keys });
 
     let resp = client
-        .delete(&url)
+        .delete(url)
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
@@ -666,20 +787,29 @@ fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
         bail!("No keys specified");
     }
 
-    let project = get_project_name()?;
     let api_url = get_api_url(&auth);
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
+    let target = resolve_env_target()?;
 
-    let url = format!("{}/api/env/{}", api_url, project);
+    let mut url = match &target {
+        EnvTarget::Personal { space } => {
+            let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
+            if let Some(space) = space {
+                url.query_pairs_mut().append_pair("space", space);
+            }
+            url
+        }
+        EnvTarget::Project { name } => Url::parse(&format!("{}/api/env/{}", api_url, name))?,
+    };
     let body = serde_json::json!({
         "keys": keys,
         "environment": environment,
     });
 
     let resp = client
-        .delete(&url)
+        .delete(url)
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
@@ -691,10 +821,16 @@ fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
         bail!("API error {}: {}", status, body);
     }
 
+    let target_label = match target {
+        EnvTarget::Personal { space } => {
+            format!("personal{}", space.map(|s| format!(":{}", s)).unwrap_or_default())
+        }
+        EnvTarget::Project { name } => name,
+    };
     println!(
         "✓ Deleted {} key(s) from {} ({})",
         keys.len(),
-        project,
+        target_label,
         environment
     );
     Ok(())
@@ -753,53 +889,14 @@ fn login() -> Result<()> {
 
 /// Pull env vars from 1focus and write to .env.
 fn pull(environment: &str) -> Result<()> {
-    let auth = load_auth_config()?;
-    let token = auth
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
-    require_env_read_unlock()?;
+    let target = resolve_env_target()?;
+    let label = env_target_label(&target);
+    println!("Fetching envs for '{}' ({})...", label, environment);
 
-    let project = get_project_name()?;
-    let api_url = get_api_url(&auth);
+    let vars = fetch_env_vars(&target, environment, &[], true)?;
 
-    println!("Fetching envs for '{}' ({})...", project, environment);
-
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-
-    let url = format!(
-        "{}/api/env/{}?environment={}",
-        api_url, project, environment
-    );
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .context("failed to connect to 1focus")?;
-
-    if resp.status() == 401 {
-        bail!("Unauthorized. Check your token with `f env login`.");
-    }
-
-    if resp.status() == 404 {
-        bail!(
-            "Project '{}' not found. Create it with `f env push` first.",
-            project
-        );
-    }
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        bail!("API error {}: {}", status, body);
-    }
-
-    let data: EnvResponse = resp.json().context("failed to parse response")?;
-
-    if data.env.is_empty() {
-        println!("No env vars found for '{}' ({})", project, environment);
+    if vars.is_empty() {
+        println!("No env vars found for '{}' ({})", label, environment);
         return Ok(());
     }
 
@@ -809,14 +906,14 @@ fn pull(environment: &str) -> Result<()> {
         "# Environment: {} (pulled from 1focus)\n",
         environment
     ));
-    content.push_str(&format!("# Project: {}\n", project));
+    content.push_str(&format!("# Space: {}\n", label));
     content.push_str("#\n");
 
-    let mut keys: Vec<_> = data.env.keys().collect();
+    let mut keys: Vec<_> = vars.keys().collect();
     keys.sort();
 
     for key in keys {
-        let value = &data.env[key];
+        let value = &vars[key];
         // Escape quotes in value
         let escaped = value.replace('\"', "\\\"");
         content.push_str(&format!("{}=\"{}\"\n", key, escaped));
@@ -830,7 +927,7 @@ fn pull(environment: &str) -> Result<()> {
 
     println!(
         "✓ Wrote {} env vars to {}",
-        data.env.len(),
+        vars.len(),
         env_path.display()
     );
 
@@ -866,13 +963,14 @@ fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
         .token
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
-    let project = get_project_name()?;
     let api_url = get_api_url(&auth);
+    let target = resolve_env_target()?;
+    let label = env_target_label(&target);
 
     println!(
         "Pushing {} env vars to '{}' ({})...",
         vars.len(),
-        project,
+        label,
         environment
     );
 
@@ -880,14 +978,23 @@ fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/env/{}", api_url, project);
+    let mut url = match &target {
+        EnvTarget::Personal { space } => {
+            let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
+            if let Some(space) = space {
+                url.query_pairs_mut().append_pair("space", space);
+            }
+            url
+        }
+        EnvTarget::Project { name } => Url::parse(&format!("{}/api/env/{}", api_url, name))?,
+    };
     let body = serde_json::json!({
         "vars": vars,
         "environment": environment,
     });
 
     let resp = client
-        .post(&url)
+        .post(url)
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
@@ -903,7 +1010,9 @@ fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
         bail!("API error {}: {}", status, body);
     }
 
-    let _: SetEnvResponse = resp.json().context("failed to parse response")?;
+    if matches!(target, EnvTarget::Project { .. }) {
+        let _: SetEnvResponse = resp.json().context("failed to parse response")?;
+    }
 
     println!("✓ Pushed {} env vars to 1focus", vars.len());
 
@@ -1323,12 +1432,15 @@ fn show_keys() -> Result<()> {
         .as_ref()
         .context("No [cloudflare] section in flow.toml")?;
 
-    let project = cfg
-        .project_name
-        .clone()
-        .unwrap_or_else(|| get_project_name().unwrap_or_else(|_| "unknown".to_string()));
+    let label = resolve_env_target()
+        .map(|target| env_target_label(&target))
+        .unwrap_or_else(|_| {
+            cfg.project_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        });
 
-    println!("Env keys for {}", project);
+    println!("Env keys for {}", label);
     println!("─────────────────────────────");
     if let Some(source) = cf_cfg.env_source.as_deref() {
         println!("Source: {}", source);
@@ -1408,19 +1520,33 @@ fn list(environment: &str) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
     require_env_read_unlock()?;
 
-    let project = get_project_name()?;
     let api_url = get_api_url(&auth);
+    let target = resolve_env_target()?;
+    let label = env_target_label(&target);
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!(
-        "{}/api/env/{}?environment={}",
-        api_url, project, environment
-    );
+    let mut url = match &target {
+        EnvTarget::Personal { space } => {
+            let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
+            url.query_pairs_mut()
+                .append_pair("environment", environment);
+            if let Some(space) = space {
+                url.query_pairs_mut().append_pair("space", space);
+            }
+            url
+        }
+        EnvTarget::Project { name } => {
+            let mut url = Url::parse(&format!("{}/api/env/{}", api_url, name))?;
+            url.query_pairs_mut()
+                .append_pair("environment", environment);
+            url
+        }
+    };
     let resp = client
-        .get(&url)
+        .get(url)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .context("failed to connect to 1focus")?;
@@ -1430,7 +1556,10 @@ fn list(environment: &str) -> Result<()> {
     }
 
     if resp.status() == 404 {
-        bail!("Project '{}' not found.", project);
+        match target {
+            EnvTarget::Personal { .. } => bail!("Personal env vars not found."),
+            EnvTarget::Project { .. } => bail!("Project '{}' not found.", label),
+        }
     }
 
     if !resp.status().is_success() {
@@ -1439,22 +1568,31 @@ fn list(environment: &str) -> Result<()> {
         bail!("API error {}: {}", status, body);
     }
 
-    let data: EnvResponse = resp.json().context("failed to parse response")?;
+    let (vars, descriptions) = match target {
+        EnvTarget::Personal { .. } => {
+            let data: PersonalEnvResponse = resp.json().context("failed to parse response")?;
+            (data.env, None)
+        }
+        EnvTarget::Project { .. } => {
+            let data: EnvResponse = resp.json().context("failed to parse response")?;
+            (data.env, Some(data.descriptions))
+        }
+    };
 
-    println!("Project: {}", data.project);
-    println!("Environment: {}", data.environment);
+    println!("Space: {}", label);
+    println!("Environment: {}", environment);
     println!("─────────────────────────────");
 
-    if data.env.is_empty() {
+    if vars.is_empty() {
         println!("No env vars set.");
         return Ok(());
     }
 
-    let mut keys: Vec<_> = data.env.keys().collect();
+    let mut keys: Vec<_> = vars.keys().collect();
     keys.sort();
 
     for key in keys {
-        let value = &data.env[key];
+        let value = &vars[key];
         // Mask the value (show first 4 chars if long enough)
         let masked = if value.len() > 8 {
             format!("{}...", &value[..4])
@@ -1463,7 +1601,7 @@ fn list(environment: &str) -> Result<()> {
         };
 
         // Show description if available
-        if let Some(desc) = data.descriptions.get(key) {
+        if let Some(desc) = descriptions.as_ref().and_then(|map| map.get(key)) {
             println!("  {} = {}  # {}", key, masked, desc);
         } else {
             println!("  {} = {}", key, masked);
@@ -1471,7 +1609,7 @@ fn list(environment: &str) -> Result<()> {
     }
 
     println!();
-    println!("{} env var(s)", data.env.len());
+    println!("{} env var(s)", vars.len());
 
     Ok(())
 }
@@ -1489,12 +1627,18 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
     }
 
     let api_url = get_api_url(&auth);
+    let target = resolve_personal_target()?;
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/env/personal", api_url);
+    let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
+    if let EnvTarget::Personal { space } = target {
+        if let Some(space) = space {
+            url.query_pairs_mut().append_pair("space", &space);
+        }
+    }
     let mut vars = HashMap::new();
     vars.insert(key.to_string(), value.to_string());
 
@@ -1503,7 +1647,7 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
     });
 
     let resp = client
-        .post(&url)
+        .post(url)
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
@@ -1548,15 +1692,24 @@ fn set_project_env_var_internal(
         bail!("Key cannot be empty");
     }
 
-    let project = get_project_name()?;
     let api_url = get_api_url(&auth);
     let resolved_value = value.to_string();
+    let target = resolve_env_target()?;
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = format!("{}/api/env/{}", api_url, project);
+    let mut url = match &target {
+        EnvTarget::Personal { space } => {
+            let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
+            if let Some(space) = space {
+                url.query_pairs_mut().append_pair("space", space);
+            }
+            url
+        }
+        EnvTarget::Project { name } => Url::parse(&format!("{}/api/env/{}", api_url, name))?,
+    };
     let mut vars = HashMap::new();
     vars.insert(key.to_string(), resolved_value.clone());
 
@@ -1573,7 +1726,7 @@ fn set_project_env_var_internal(
     }
 
     let resp = client
-        .post(&url)
+        .post(url)
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
@@ -1622,8 +1775,8 @@ fn status() -> Result<()> {
         return Ok(());
     }
 
-    if let Ok(project) = get_project_name() {
-        println!("Project: {}", project);
+    if let Ok(target) = resolve_env_target() {
+        println!("Space: {}", env_target_label(&target));
     }
 
     println!();
@@ -1678,9 +1831,10 @@ pub(crate) fn parse_env_file(content: &str) -> HashMap<String, String> {
 
 /// Fetch env vars from 1focus (personal or project).
 fn fetch_env_vars(
-    personal: bool,
+    target: &EnvTarget,
     environment: &str,
     keys: &[String],
+    include_environment: bool,
 ) -> Result<HashMap<String, String>> {
     let auth = load_auth_config()?;
     let token = auth
@@ -1694,27 +1848,32 @@ fn fetch_env_vars(
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let url = if personal {
-        if keys.is_empty() {
-            format!("{}/api/env/personal", api_url)
-        } else {
-            format!("{}/api/env/personal?keys={}", api_url, keys.join(","))
+    let mut url = match target {
+        EnvTarget::Personal { space } => {
+            let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
+            if include_environment {
+                url.query_pairs_mut()
+                    .append_pair("environment", environment);
+            }
+            if let Some(space) = space {
+                url.query_pairs_mut().append_pair("space", space);
+            }
+            url
         }
-    } else {
-        let project = get_project_name()?;
-        let base = format!(
-            "{}/api/env/{}?environment={}",
-            api_url, project, environment
-        );
-        if keys.is_empty() {
-            base
-        } else {
-            format!("{}&keys={}", base, keys.join(","))
+        EnvTarget::Project { name } => {
+            let mut url = Url::parse(&format!("{}/api/env/{}", api_url, name))?;
+            url.query_pairs_mut()
+                .append_pair("environment", environment);
+            url
         }
     };
 
+    if !keys.is_empty() {
+        url.query_pairs_mut().append_pair("keys", &keys.join(","));
+    }
+
     let resp = client
-        .get(&url)
+        .get(url)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .context("failed to connect to 1focus")?;
@@ -1724,10 +1883,11 @@ fn fetch_env_vars(
     }
 
     if resp.status() == 404 {
-        if personal {
-            bail!("Personal env vars not found.");
-        } else {
-            bail!("Project not found. Create it with `f env push` first.");
+        match target {
+            EnvTarget::Personal { .. } => bail!("Personal env vars not found."),
+            EnvTarget::Project { .. } => {
+                bail!("Project not found. Create it with `f env push` first.")
+            }
         }
     }
 
@@ -1737,12 +1897,15 @@ fn fetch_env_vars(
         bail!("API error {}: {}", status, body);
     }
 
-    if personal {
-        let data: PersonalEnvResponse = resp.json().context("failed to parse response")?;
-        Ok(data.env)
-    } else {
-        let data: EnvResponse = resp.json().context("failed to parse response")?;
-        Ok(data.env)
+    match target {
+        EnvTarget::Personal { .. } => {
+            let data: PersonalEnvResponse = resp.json().context("failed to parse response")?;
+            Ok(data.env)
+        }
+        EnvTarget::Project { .. } => {
+            let data: EnvResponse = resp.json().context("failed to parse response")?;
+            Ok(data.env)
+        }
     }
 }
 
@@ -1750,16 +1913,23 @@ pub fn fetch_project_env_vars(
     environment: &str,
     keys: &[String],
 ) -> Result<HashMap<String, String>> {
-    fetch_env_vars(false, environment, keys)
+    let target = resolve_env_target()?;
+    fetch_env_vars(&target, environment, keys, true)
 }
 
 pub fn fetch_personal_env_vars(keys: &[String]) -> Result<HashMap<String, String>> {
-    fetch_env_vars(true, "production", keys)
+    let target = resolve_personal_target()?;
+    fetch_env_vars(&target, "production", keys, false)
 }
 
 /// Get specific env vars and print to stdout.
 fn get_vars(keys: &[String], personal: bool, environment: &str, format: &str) -> Result<()> {
-    let vars = fetch_env_vars(personal, environment, keys)?;
+    let target = if personal {
+        resolve_personal_target()?
+    } else {
+        resolve_env_target()?
+    };
+    let vars = fetch_env_vars(&target, environment, keys, !personal)?;
 
     if vars.is_empty() {
         bail!("No env vars found");
@@ -1808,7 +1978,12 @@ fn run_with_env(
         bail!("No command specified");
     }
 
-    let vars = fetch_env_vars(personal, environment, keys)?;
+    let target = if personal {
+        resolve_personal_target()?
+    } else {
+        resolve_env_target()?
+    };
+    let vars = fetch_env_vars(&target, environment, keys, !personal)?;
 
     let (cmd, args) = command.split_first().unwrap();
 
@@ -1869,7 +2044,8 @@ fn token_create(name: Option<&str>, permissions: &str) -> Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
 
-    let project = get_project_name()?;
+    let target = resolve_env_target()?;
+    let project = env_target_name_for_tokens(&target)?;
     let default_name = format!("{}-service", project);
     let token_name = name.unwrap_or(&default_name);
     let api_url = get_api_url(&auth);
@@ -1999,7 +2175,8 @@ fn token_revoke(name: &str) -> Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
 
-    let project = get_project_name()?;
+    let target = resolve_env_target()?;
+    let project = env_target_name_for_tokens(&target)?;
     let api_url = get_api_url(&auth);
 
     println!("Revoking token '{}' for project '{}'...", name, project);

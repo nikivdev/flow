@@ -152,6 +152,23 @@ struct SessionMessage {
     content: Option<serde_json::Value>,
 }
 
+/// Run a provider-specific action (for top-level `f codex` / `f claude` commands).
+pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Result<()> {
+    match action {
+        None => quick_start_session(provider)?,
+        Some(ProviderAiAction::List) => list_sessions(provider)?,
+        Some(ProviderAiAction::New) => new_session(provider)?,
+        Some(ProviderAiAction::Resume { session }) => resume_session(session, provider)?,
+        Some(ProviderAiAction::Copy { session }) => copy_session(session, provider)?,
+        Some(ProviderAiAction::Context {
+            session,
+            count,
+            path,
+        }) => copy_context(session, provider, count, path)?,
+    }
+    Ok(())
+}
+
 /// Run the ai subcommand.
 pub fn run(action: Option<AiAction>) -> Result<()> {
     let action = action.unwrap_or(AiAction::List);
@@ -1979,8 +1996,8 @@ fn run_session_fzf(entries: &[FzfSessionEntry]) -> Result<Option<&FzfSessionEntr
     Ok(entries.iter().find(|e| e.display == selection))
 }
 
-/// Launch a session with the appropriate CLI.
-fn launch_session(session_id: &str, provider: Provider) -> Result<()> {
+/// Launch a session with the appropriate CLI. Returns true if successful, false if failed.
+fn launch_session(session_id: &str, provider: Provider) -> Result<bool> {
     let status = match provider {
         Provider::Claude | Provider::All => {
             // Claude uses: claude --resume <session_id> --dangerously-skip-permissions
@@ -2002,20 +2019,11 @@ fn launch_session(session_id: &str, provider: Provider) -> Result<()> {
         }
     };
 
-    let name = match provider {
-        Provider::Claude | Provider::All => "claude",
-        Provider::Codex => "codex",
-    };
-
-    if !status.success() {
-        bail!("{} exited with status {}", name, status);
-    }
-
-    Ok(())
+    Ok(status.success())
 }
 
 /// Quick start: continue last session or create new one with dangerous flags.
-fn quick_start_session(provider: Provider) -> Result<()> {
+pub fn quick_start_session(provider: Provider) -> Result<()> {
     // Auto-import any new sessions silently
     let _ = auto_import_sessions();
 
@@ -2027,7 +2035,12 @@ fn quick_start_session(provider: Provider) -> Result<()> {
             "Resuming session {}...",
             &sess.session_id[..8.min(sess.session_id.len())]
         );
-        launch_session(&sess.session_id, sess.provider)?;
+        let launched = launch_session(&sess.session_id, sess.provider)?;
+        if !launched {
+            // Session not found (empty/deleted), start a new one
+            println!("Session not found, starting new session...");
+            new_session(provider)?;
+        }
     } else {
         // No sessions - start new one
         new_session(provider)?;

@@ -948,12 +948,13 @@ fn maybe_bootstrap_secrets(
         return Ok(());
     }
 
+    let mut env_store_missing = false;
     let existing = match crate::env::fetch_project_env_vars(env_name, &cf_cfg.bootstrap_secrets) {
         Ok(vars) => vars,
         Err(err) => {
             let msg = format!("{err:#}");
-            if msg.contains("Project not found.") {
-                println!("Project not found yet; bootstrap secrets will initialize it.");
+            if msg.contains("Project not found.") || msg.contains("Personal env vars not found.") {
+                env_store_missing = true;
                 HashMap::new()
             } else {
                 eprintln!("⚠ Unable to check bootstrap secrets: {err}");
@@ -988,6 +989,10 @@ fn maybe_bootstrap_secrets(
             println!("Run `f env bootstrap` if you want to rotate/store them in 1focus.");
             return Ok(());
         }
+    }
+
+    if env_store_missing {
+        println!("1focus env space not found yet; bootstrap will initialize it.");
     }
 
     println!("Bootstrap secrets missing: {}", missing.join(", "));
