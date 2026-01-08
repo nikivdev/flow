@@ -972,6 +972,8 @@ pub enum ProviderAiAction {
     /// List sessions for this provider.
     #[command(alias = "ls")]
     List,
+    /// Start a new session (ignores existing sessions).
+    New,
     /// Resume a session.
     Resume {
         /// Session name or ID to resume.
