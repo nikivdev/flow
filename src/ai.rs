@@ -161,6 +161,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Claude { action } => match action {
             None => quick_start_session(Provider::Claude)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Claude)?,
+            Some(ProviderAiAction::New) => new_session(Provider::Claude)?,
             Some(ProviderAiAction::Resume { session }) => {
                 resume_session(session, Provider::Claude)?
             }
@@ -174,6 +175,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Codex { action } => match action {
             None => quick_start_session(Provider::Codex)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Codex)?,
+            Some(ProviderAiAction::New) => new_session(Provider::Codex)?,
             Some(ProviderAiAction::Resume { session }) => {
                 resume_session(session, Provider::Codex)?
             }
@@ -2027,29 +2029,36 @@ fn quick_start_session(provider: Provider) -> Result<()> {
         );
         launch_session(&sess.session_id, sess.provider)?;
     } else {
-        // No sessions - start new one with dangerous flags
-        println!("No sessions found. Starting new session...");
-        let status = match provider {
-            Provider::Claude | Provider::All => Command::new("claude")
-                .arg("--dangerously-skip-permissions")
-                .status()
-                .with_context(|| "failed to launch claude")?,
-            Provider::Codex => Command::new("codex")
-                .arg("--yolo")
-                .arg("--sandbox")
-                .arg("danger-full-access")
-                .status()
-                .with_context(|| "failed to launch codex")?,
-        };
+        // No sessions - start new one
+        new_session(provider)?;
+    }
 
-        let name = match provider {
-            Provider::Claude | Provider::All => "claude",
-            Provider::Codex => "codex",
-        };
+    Ok(())
+}
 
-        if !status.success() {
-            bail!("{} exited with status {}", name, status);
-        }
+/// Start a new session with dangerous flags (ignores existing sessions).
+fn new_session(provider: Provider) -> Result<()> {
+    println!("Starting new session...");
+    let status = match provider {
+        Provider::Claude | Provider::All => Command::new("claude")
+            .arg("--dangerously-skip-permissions")
+            .status()
+            .with_context(|| "failed to launch claude")?,
+        Provider::Codex => Command::new("codex")
+            .arg("--yolo")
+            .arg("--sandbox")
+            .arg("danger-full-access")
+            .status()
+            .with_context(|| "failed to launch codex")?,
+    };
+
+    let name = match provider {
+        Provider::Claude | Provider::All => "claude",
+        Provider::Codex => "codex",
+    };
+
+    if !status.success() {
+        bail!("{} exited with status {}", name, status);
     }
 
     Ok(())
