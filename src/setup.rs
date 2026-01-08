@@ -34,7 +34,7 @@ pub fn run(opts: SetupOpts) -> Result<()> {
     }
 
     if !config_path.exists() {
-        create_flow_toml_interactive(&project_root, &config_path)?;
+        create_flow_toml_auto(&project_root, &config_path)?;
         created_flow_toml = true;
     }
 
@@ -42,19 +42,7 @@ pub fn run(opts: SetupOpts) -> Result<()> {
 
     if tasks::find_task(&cfg, "setup").is_some() {
         if created_flow_toml {
-            if io::stdin().is_terminal() {
-                if !prompt_yes_no("Run setup task now?", false)? {
-                    println!(
-                        "Skipping setup. Review flow.toml, then run `f setup` or `f run setup`."
-                    );
-                    return Ok(());
-                }
-            } else {
-                println!(
-                    "Skipping setup for newly created flow.toml. Run `f setup` or `f run setup` when ready."
-                );
-                return Ok(());
-            }
+            println!("Running setup task...");
         }
         return tasks::run(TaskRunOpts {
             config: config_path,
@@ -449,13 +437,17 @@ fn create_flow_toml_interactive(project_root: &Path, config_path: &Path) -> Resu
         println!("{}", content);
     }
     write_flow_toml(config_path, &content)?;
+    println!("Created flow.toml");
     Ok(())
 }
 
 fn create_flow_toml_auto(project_root: &Path, config_path: &Path) -> Result<()> {
-    println!("No flow.toml found. Creating defaults.");
+    println!("No flow.toml found. Creating with detected defaults.\n");
     let content = ensure_trailing_newline(default_flow_template(project_root));
-    write_flow_toml(config_path, &content)
+    println!("{}", content);
+    write_flow_toml(config_path, &content)?;
+    println!("Created flow.toml");
+    Ok(())
 }
 
 fn repair_existing_host_config(
@@ -1191,7 +1183,6 @@ fn display_relative(project_root: &Path, path: &Path) -> String {
 
 fn write_flow_toml(path: &Path, content: &str) -> Result<()> {
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
-    println!("Created flow.toml");
     Ok(())
 }
 
