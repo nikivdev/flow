@@ -939,6 +939,89 @@ fn is_1focus_source(source: Option<&str>) -> bool {
     )
 }
 
+fn maybe_bootstrap_secrets(
+    worker_path: &Path,
+    cf_cfg: &CloudflareConfig,
+    env_name: &str,
+) -> Result<()> {
+    if cf_cfg.bootstrap_secrets.is_empty() {
+        return Ok(());
+    }
+
+    let existing = match crate::env::fetch_project_env_vars(env_name, &cf_cfg.bootstrap_secrets) {
+        Ok(vars) => vars,
+        Err(err) => {
+            let msg = format!("{err:#}");
+            if msg.contains("Project not found.") {
+                println!("Project not found yet; bootstrap secrets will initialize it.");
+                HashMap::new()
+            } else {
+                eprintln!("⚠ Unable to check bootstrap secrets: {err}");
+                println!("Run `f env bootstrap` later if needed.");
+                return Ok(());
+            }
+        }
+    };
+
+    let missing: Vec<String> = cf_cfg
+        .bootstrap_secrets
+        .iter()
+        .filter(|key| {
+            existing
+                .get(*key)
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+
+    if missing.is_empty() {
+        println!("Bootstrap secrets already configured; skipping.");
+        return Ok(());
+    }
+
+    if let Ok(present) = list_cloudflare_secret_keys(worker_path, cf_cfg.environment.as_deref()) {
+        if missing.iter().all(|key| present.contains(key)) {
+            println!(
+                "Bootstrap secrets missing in 1focus but already present in Cloudflare; skipping."
+            );
+            println!("Run `f env bootstrap` if you want to rotate/store them in 1focus.");
+            return Ok(());
+        }
+    }
+
+    println!("Bootstrap secrets missing: {}", missing.join(", "));
+    println!("==> Bootstrapping secrets (optional)...");
+    crate::env::run(Some(EnvAction::Bootstrap))?;
+    Ok(())
+}
+
+fn list_cloudflare_secret_keys(
+    worker_path: &Path,
+    env_name: Option<&str>,
+) -> Result<HashSet<String>> {
+    let mut cmd = wrangler_command(worker_path);
+    cmd.args(["secret", "list", "--json"]);
+    if let Some(env) = env_name {
+        cmd.args(["--env", env]);
+    }
+    let output = cmd.output()?;
+    if !output.status.success() {
+        bail!("wrangler secret list failed");
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("failed to parse wrangler secret list output")?;
+    let mut keys = HashSet::new();
+    if let Some(items) = value.as_array() {
+        for item in items {
+            if let Some(name) = item.get("name").and_then(|val| val.as_str()) {
+                keys.insert(name.to_string());
+            }
+        }
+    }
+    Ok(keys)
+}
+
 fn set_wrangler_env_map(
     worker_path: &Path,
     env_name: Option<&str>,
@@ -1034,15 +1117,11 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
         ensure_wrangler_config(&worker_path)?;
         println!("Using Cloudflare worker: {}", worker_path.display());
 
-        if !cf_cfg.bootstrap_secrets.is_empty() {
-            println!("==> Bootstrapping secrets (optional)...");
-            crate::env::run(Some(EnvAction::Bootstrap))?;
-        }
-
         let env_name = cf_cfg
             .environment
             .clone()
             .unwrap_or_else(|| "production".to_string());
+        maybe_bootstrap_secrets(&worker_path, cf_cfg, &env_name)?;
         let keys = collect_cloudflare_env_keys(cf_cfg);
         let env_store_ok = if keys.is_empty() {
             true
@@ -1102,15 +1181,11 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
 
     if result.apply_secrets {
         if is_1focus_source(cf_cfg.env_source.as_deref()) {
-            if !cf_cfg.bootstrap_secrets.is_empty() {
-                println!("==> Bootstrapping secrets (optional)...");
-                crate::env::run(Some(EnvAction::Bootstrap))?;
-            }
-
             let env_name = result
                 .environment
                 .clone()
                 .unwrap_or_else(|| "production".to_string());
+            maybe_bootstrap_secrets(&result.worker_path, cf_cfg, &env_name)?;
             crate::env::run(Some(EnvAction::Guide {
                 environment: env_name,
             }))?;
