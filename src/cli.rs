@@ -911,12 +911,12 @@ pub enum AiAction {
     /// List all AI sessions for this project (Claude + Codex).
     #[command(alias = "ls")]
     List,
-    /// Claude Code sessions only.
+    /// Claude Code: continue last session or start new one.
     Claude {
         #[command(subcommand)]
         action: Option<ProviderAiAction>,
     },
-    /// Codex sessions only.
+    /// Codex: continue last session or start new one.
     Codex {
         #[command(subcommand)]
         action: Option<ProviderAiAction>,
