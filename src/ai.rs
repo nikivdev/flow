@@ -2032,19 +2032,12 @@ pub fn quick_start_session(provider: Provider) -> Result<()> {
     let sessions = read_sessions_for_project(provider)?;
 
     if let Some(sess) = sessions.first() {
-        // Resume most recent session
-        println!(
-            "Resuming session {}...",
-            &sess.session_id[..8.min(sess.session_id.len())]
-        );
         let launched = launch_session(&sess.session_id, sess.provider)?;
         if !launched {
             // Session not found (empty/deleted), start a new one
-            println!("Session not found, starting new session...");
             new_session(provider)?;
         }
     } else {
-        // No sessions - start new one
         new_session(provider)?;
     }
 
@@ -2053,7 +2046,6 @@ pub fn quick_start_session(provider: Provider) -> Result<()> {
 
 /// Start a new session with dangerous flags (ignores existing sessions).
 fn new_session(provider: Provider) -> Result<()> {
-    println!("Starting new session...");
     let status = match provider {
         Provider::Claude | Provider::All => Command::new("claude")
             .arg("--dangerously-skip-permissions")
