@@ -2031,10 +2031,15 @@ pub fn quick_start_session(provider: Provider) -> Result<()> {
 
     let sessions = read_sessions_for_project(provider)?;
 
-    if let Some(sess) = sessions.first() {
+    // Find first session that has actual content (messages)
+    let valid_session = sessions
+        .iter()
+        .find(|s| s.last_message.is_some() || s.first_message.is_some());
+
+    if let Some(sess) = valid_session {
         let launched = launch_session(&sess.session_id, sess.provider)?;
         if !launched {
-            // Session not found (empty/deleted), start a new one
+            // Session not found, start a new one
             new_session(provider)?;
         }
     } else {
