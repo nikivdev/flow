@@ -193,9 +193,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             None => quick_start_session(Provider::Codex)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Codex)?,
             Some(ProviderAiAction::New) => new_session(Provider::Codex)?,
-            Some(ProviderAiAction::Resume { session }) => {
-                resume_session(session, Provider::Codex)?
-            }
+            Some(ProviderAiAction::Resume { session }) => resume_session(session, Provider::Codex)?,
             Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Codex)?,
             Some(ProviderAiAction::Context {
                 session,

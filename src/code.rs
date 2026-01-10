@@ -7,9 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::cli::{
-    CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts, CodeNewOpts,
-};
+use crate::cli::{CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts, CodeNewOpts};
 use crate::config;
 
 const DEFAULT_CODE_ROOT: &str = "~/code";
@@ -212,7 +210,10 @@ fn new_project(opts: CodeNewOpts, root: &str) -> Result<()> {
         bail!("Template not found: {}", template_dir.display());
     }
     if !template_dir.is_dir() {
-        bail!("Template path is not a directory: {}", template_dir.display());
+        bail!(
+            "Template path is not a directory: {}",
+            template_dir.display()
+        );
     }
 
     let relative = normalize_relative_path(&opts.name)?;
@@ -239,7 +240,11 @@ fn new_project(opts: CodeNewOpts, root: &str) -> Result<()> {
         );
         if opts.ignored {
             if let Some((repo_root, entry)) = gitignore_entry_for_target(&target)? {
-                println!("Would add {} to {}", entry, repo_root.join(".gitignore").display());
+                println!(
+                    "Would add {} to {}",
+                    entry,
+                    repo_root.join(".gitignore").display()
+                );
             } else {
                 bail!("--ignored requires the target to be inside a git repository");
             }
@@ -482,8 +487,8 @@ fn copy_symlink(target: &Path, dest: &Path) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let metadata = fs::metadata(target)
-            .with_context(|| format!("failed to read {}", target.display()))?;
+        let metadata =
+            fs::metadata(target).with_context(|| format!("failed to read {}", target.display()))?;
         if metadata.is_dir() {
             copy_dir_all(target, dest)?;
         } else {
@@ -494,7 +499,6 @@ fn copy_symlink(target: &Path, dest: &Path) -> Result<()> {
     }
 }
 
-
 fn relink_bin_symlinks(from: &Path, to: &Path, dry_run: bool) -> Result<usize> {
     let bin_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -504,9 +508,9 @@ fn relink_bin_symlinks(from: &Path, to: &Path, dry_run: bool) -> Result<usize> {
     }
 
     let mut updated = 0;
-    for entry in fs::read_dir(&bin_dir).with_context(|| {
-        format!("failed to read bin directory {}", bin_dir.display())
-    })? {
+    for entry in fs::read_dir(&bin_dir)
+        .with_context(|| format!("failed to read bin directory {}", bin_dir.display()))?
+    {
         let entry = entry?;
         let path = entry.path();
         let meta = fs::symlink_metadata(&path)?;
@@ -531,7 +535,11 @@ fn relink_bin_symlinks(from: &Path, to: &Path, dry_run: bool) -> Result<usize> {
         };
         let new_target = to.join(suffix);
         if dry_run {
-            println!("Would relink {} -> {}", path.display(), new_target.display());
+            println!(
+                "Would relink {} -> {}",
+                path.display(),
+                new_target.display()
+            );
         } else {
             relink_symlink(&path, &new_target)?;
         }
@@ -542,8 +550,7 @@ fn relink_bin_symlinks(from: &Path, to: &Path, dry_run: bool) -> Result<usize> {
 }
 
 fn relink_symlink(path: &Path, target: &Path) -> Result<()> {
-    fs::remove_file(path)
-        .with_context(|| format!("failed to remove {}", path.display()))?;
+    fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, path)
@@ -763,8 +770,7 @@ fn update_codex_session_file(
     let tmp_path = path.with_extension("jsonl.tmp");
     fs::write(&tmp_path, output.as_bytes())
         .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path)
-        .with_context(|| format!("failed to replace {}", path.display()))?;
+    fs::rename(&tmp_path, path).with_context(|| format!("failed to replace {}", path.display()))?;
     let remaining = file_has_session_meta_cwd(path, from)?;
     Ok(CodexFileUpdate {
         updated: true,
@@ -775,7 +781,9 @@ fn update_codex_session_file(
 fn file_has_session_meta_cwd(path: &Path, from: &str) -> Result<bool> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(content.lines().any(|line| session_meta_cwd_matches(line, from)))
+    Ok(content
+        .lines()
+        .any(|line| session_meta_cwd_matches(line, from)))
 }
 
 fn session_meta_cwd_matches(line: &str, from: &str) -> bool {

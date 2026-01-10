@@ -11,8 +11,11 @@ Manage documentation for a project. There are two doc systems:
 # Create docs/ with starter files
 f docs new
 
-# Run the docs hub (aggregates docs from ~/code and ~/org)
-f docs hub
+# Open docs for the current project (auto-starts the hub)
+f docs
+
+# Deploy the current project's docs to Cloudflare Pages
+f docs deploy
 ```
 
 ## Commands
@@ -20,6 +23,8 @@ f docs hub
 ### f docs new
 
 Creates a `docs/` folder in the current project using the template in `~/new/docs`.
+If `docs/` already exists, it merges in any missing template files and leaves
+existing content untouched.
 
 Options:
 
@@ -29,6 +34,7 @@ Options:
 ### f docs hub
 
 Runs a single dev server that aggregates docs from `~/code` and `~/org`.
+Use `FLOW_DOCS_FOCUS=1` to only index the current project for faster startup.
 
 Options:
 
@@ -41,6 +47,16 @@ Options:
 - `--no-ai`: Skip `.ai/docs`.
 - `--no-open`: Do not open the browser.
 - `--sync-only`: Sync docs content and exit.
+
+### f docs deploy
+
+Deploys the current project's docs to Cloudflare Pages (uses the docs hub template).
+
+Options:
+
+- `--project <NAME>`: Pages project name (defaults to the flow.toml name).
+- `--domain <DOMAIN>`: Attach a custom domain (optional).
+- `--yes`: Skip confirmation prompts.
 
 ### f docs sync
 

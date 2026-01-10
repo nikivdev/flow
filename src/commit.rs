@@ -2104,7 +2104,11 @@ fn generate_commit_message_opencode_run(
     for line in stdout.lines() {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
             if json.get("type").and_then(|t| t.as_str()) == Some("text") {
-                if let Some(text) = json.get("part").and_then(|p| p.get("text")).and_then(|t| t.as_str()) {
+                if let Some(text) = json
+                    .get("part")
+                    .and_then(|p| p.get("text"))
+                    .and_then(|t| t.as_str())
+                {
                     message.push_str(text);
                 }
             }
@@ -2120,11 +2124,7 @@ fn generate_commit_message_opencode_run(
 }
 
 /// Generate commit message using Claude Code CLI.
-fn generate_commit_message_claude(
-    diff: &str,
-    status: &str,
-    truncated: bool,
-) -> Result<String> {
+fn generate_commit_message_claude(diff: &str, status: &str, truncated: bool) -> Result<String> {
     let mut prompt = String::from(
         "Write a git commit message for these changes. Output ONLY the commit message, nothing else.\n\n\
          Guidelines:\n\
@@ -2177,7 +2177,8 @@ fn generate_commit_message_openrouter(
     // Strip "openrouter/" prefix to get the actual model ID
     let model_id = model.strip_prefix("openrouter/").unwrap_or(model);
 
-    let mut user_prompt = String::from("Write a git commit message for the staged changes.\n\nGit diff:\n");
+    let mut user_prompt =
+        String::from("Write a git commit message for the staged changes.\n\nGit diff:\n");
     user_prompt.push_str(diff);
 
     if truncated {

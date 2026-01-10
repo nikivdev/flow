@@ -432,7 +432,9 @@ fn resolve_project_root(path: Option<&PathBuf>) -> Result<(PathBuf, PathBuf, con
         Some(path) => path.clone(),
         None => std::env::current_dir().context("failed to read current directory")?,
     };
-    let flow_path = if start.is_file() && start.file_name().and_then(|name| name.to_str()) == Some("flow.toml") {
+    let flow_path = if start.is_file()
+        && start.file_name().and_then(|name| name.to_str()) == Some("flow.toml")
+    {
         start.clone()
     } else {
         find_flow_toml(&start)

@@ -1909,6 +1909,8 @@ pub enum DocsAction {
     New(DocsNewOpts),
     /// Run the docs hub that aggregates docs from ~/code and ~/org.
     Hub(DocsHubOpts),
+    /// Deploy the docs hub to Cloudflare Pages.
+    Deploy(DocsDeployOpts),
     /// Sync documentation with recent commits.
     Sync {
         /// Number of commits to analyze (default: 10).
@@ -1938,6 +1940,19 @@ pub struct DocsNewOpts {
     /// Overwrite if docs/ already exists.
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DocsDeployOpts {
+    /// Cloudflare Pages project name (defaults to flow.toml name).
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Custom domain to attach (optional).
+    #[arg(long)]
+    pub domain: Option<String>,
+    /// Skip confirmation prompts.
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug, Clone)]

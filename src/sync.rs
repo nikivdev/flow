@@ -29,7 +29,10 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
     let unmerged = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
     if !unmerged.trim().is_empty() {
         let unmerged_files: Vec<&str> = unmerged.lines().filter(|l| !l.is_empty()).collect();
-        println!("==> Found {} unmerged files, resolving...", unmerged_files.len());
+        println!(
+            "==> Found {} unmerged files, resolving...",
+            unmerged_files.len()
+        );
 
         let should_fix = auto_fix || prompt_for_auto_fix()?;
         if should_fix {
@@ -44,7 +47,9 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
                 // Couldn't resolve - reset the conflicted files to HEAD
                 println!("  Could not auto-resolve. Resetting unmerged files...");
                 for file in &unmerged_files {
-                    let _ = Command::new("git").args(["checkout", "HEAD", "--", file]).output();
+                    let _ = Command::new("git")
+                        .args(["checkout", "HEAD", "--", file])
+                        .output();
                 }
                 if is_merge_in_progress() {
                     let _ = Command::new("git").args(["merge", "--abort"]).output();
@@ -54,7 +59,9 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
             // User declined - reset the files
             println!("  Resetting unmerged files...");
             for file in &unmerged_files {
-                let _ = Command::new("git").args(["checkout", "HEAD", "--", file]).output();
+                let _ = Command::new("git")
+                    .args(["checkout", "HEAD", "--", file])
+                    .output();
             }
             if is_merge_in_progress() {
                 let _ = Command::new("git").args(["merge", "--abort"]).output();
