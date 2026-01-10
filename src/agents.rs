@@ -207,7 +207,11 @@ fn copy_agent_instructions(agent_name: Option<&str>) -> Result<()> {
     }
 
     child.wait()?;
-    println!("Copied '{}' agent instructions to clipboard ({} bytes)", selected.name, content.len());
+    println!(
+        "Copied '{}' agent instructions to clipboard ({} bytes)",
+        selected.name,
+        content.len()
+    );
     Ok(())
 }
 
@@ -248,7 +252,8 @@ fn run_agent_fzf_simple<'a>(entries: &'a [AgentEntry]) -> Result<Option<&'a Agen
 fn get_agent_content(name: &str, path: Option<&Path>) -> Result<String> {
     // If path is provided, read directly
     if let Some(p) = path {
-        return fs::read_to_string(p).context(format!("failed to read agent file: {}", p.display()));
+        return fs::read_to_string(p)
+            .context(format!("failed to read agent file: {}", p.display()));
     }
 
     // Special case: flow agent has built-in instructions
@@ -266,8 +271,10 @@ fn get_agent_content(name: &str, path: Option<&Path>) -> Result<String> {
     for loc in locations.into_iter().flatten() {
         let agent_path = loc.join(format!("{}.md", name));
         if agent_path.exists() {
-            return fs::read_to_string(&agent_path)
-                .context(format!("failed to read agent file: {}", agent_path.display()));
+            return fs::read_to_string(&agent_path).context(format!(
+                "failed to read agent file: {}",
+                agent_path.display()
+            ));
         }
     }
 

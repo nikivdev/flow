@@ -1,8 +1,8 @@
 # flow
 
-> Project-level config for insanely fast feedback loops
+> Everything you need to move your project faster
 
-CLI that parses `flow.toml` files to define and run project tasks with AI-assisted workflows.
+CLI that parses `flow.toml` files to define and run project tasks with AI-assisted workflows. And more.
 
 ## Install
 
@@ -188,9 +188,7 @@ Lightweight CLI that reads project-local `flow.toml` files, surfaces tasks, and 
 
 ## Contributing
 
-Make issues with bugs/features. Any PR to improve project is welcome. Ideally with **working** & **useful** patches but non finished ideas are great too. If idea/feature is sound, it will be merged eventually.
-
-[This](https://nikiv.dev/how-i-code) is nice overview of a coding workflow that works that you can adapt.
+Make issues with bugs/features or PRs. Unfinished work will be merged too if the idea is good. Software or docs can always be better. Thank you. Can see [this](https://nikiv.dev/how-i-code) for how to code fast with AI.
 
 ### 🖤
 

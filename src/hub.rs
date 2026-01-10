@@ -11,7 +11,7 @@ use reqwest::blocking::Client;
 
 use crate::{
     cli::{HubAction, HubCommand, HubOpts},
-    config, doctor,
+    config, docs, doctor,
     lin_runtime::{self, LinRuntime},
 };
 
@@ -22,8 +22,27 @@ pub fn run(cmd: HubCommand) -> Result<()> {
     let runtime = ensure_hub_runtime()?;
 
     match action {
-        HubAction::Start => ensure_daemon(opts, &runtime),
-        HubAction::Stop => stop_daemon(&runtime),
+        HubAction::Start => {
+            ensure_daemon(opts, &runtime)?;
+            let docs_opts = crate::cli::DocsHubOpts {
+                host: "127.0.0.1".to_string(),
+                port: 4410,
+                hub_root: "~/.config/flow/docs-hub".to_string(),
+                template_root: "~/new/docs".to_string(),
+                code_root: "~/code".to_string(),
+                org_root: "~/org".to_string(),
+                no_ai: true,
+                no_open: true,
+                sync_only: false,
+            };
+            docs::ensure_docs_hub_daemon(&docs_opts)?;
+            Ok(())
+        }
+        HubAction::Stop => {
+            stop_daemon(&runtime)?;
+            docs::stop_docs_hub_daemon()?;
+            Ok(())
+        }
     }
 }
 

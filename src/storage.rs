@@ -286,9 +286,10 @@ fn jazz_new(
             JazzStorageKind::EnvStore => {
                 ("JAZZ_SYNC_SERVER", "Custom Jazz sync server for env worker")
             }
-            JazzStorageKind::AppStore => {
-                ("JAZZ_APP_SYNC_SERVER", "Custom Jazz sync server for app worker")
-            }
+            JazzStorageKind::AppStore => (
+                "JAZZ_APP_SYNC_SERVER",
+                "Custom Jazz sync server for app worker",
+            ),
         };
         env::set_project_env_var(key, &peer, environment, Some(desc))?;
     }

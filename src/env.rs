@@ -11,8 +11,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, TimeZone, Utc};
-use reqwest::blocking::Client;
 use reqwest::Url;
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_setup;
@@ -368,16 +368,14 @@ fn load_env_target_config() -> Result<EnvTargetConfig> {
         } else {
             "unnamed".to_string()
         };
-        let env_space = cfg
-            .env_space
-            .and_then(|value| {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            });
+        let env_space = cfg.env_space.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
         let env_space_kind = parse_env_space_kind(cfg.env_space_kind.as_deref());
         return Ok(EnvTargetConfig {
             project_name,
@@ -401,7 +399,9 @@ fn load_env_target_config() -> Result<EnvTargetConfig> {
 fn resolve_env_target() -> Result<EnvTarget> {
     let cfg = load_env_target_config()?;
     Ok(match cfg.env_space_kind {
-        EnvScope::Personal => EnvTarget::Personal { space: cfg.env_space },
+        EnvScope::Personal => EnvTarget::Personal {
+            space: cfg.env_space,
+        },
         EnvScope::Project => EnvTarget::Project {
             name: cfg.env_space.unwrap_or(cfg.project_name),
         },
@@ -410,15 +410,15 @@ fn resolve_env_target() -> Result<EnvTarget> {
 
 fn resolve_personal_target() -> Result<EnvTarget> {
     let cfg = load_env_target_config()?;
-    Ok(EnvTarget::Personal { space: cfg.env_space })
+    Ok(EnvTarget::Personal {
+        space: cfg.env_space,
+    })
 }
 
 fn env_target_label(target: &EnvTarget) -> String {
     match target {
         EnvTarget::Project { name } => name.clone(),
-        EnvTarget::Personal { space } => {
-            space.clone().unwrap_or_else(|| "personal".to_string())
-        }
+        EnvTarget::Personal { space } => space.clone().unwrap_or_else(|| "personal".to_string()),
     }
 }
 
@@ -798,7 +798,10 @@ fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
 
     let target_label = match target {
         EnvTarget::Personal { space } => {
-            format!("personal{}", space.map(|s| format!(":{}", s)).unwrap_or_default())
+            format!(
+                "personal{}",
+                space.map(|s| format!(":{}", s)).unwrap_or_default()
+            )
         }
         EnvTarget::Project { name } => name,
     };
@@ -900,11 +903,7 @@ fn pull(environment: &str) -> Result<()> {
     }
     fs::write(&env_path, &content)?;
 
-    println!(
-        "✓ Wrote {} env vars to {}",
-        vars.len(),
-        env_path.display()
-    );
+    println!("✓ Wrote {} env vars to {}", vars.len(), env_path.display());
 
     Ok(())
 }

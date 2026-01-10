@@ -65,6 +65,11 @@ command = "FLOW_PROFILE=release ./scripts/deploy.sh"
 description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
 
 [[tasks]]
+name = "deploy-with-hub-reload"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh && f hub stop && FLOW_DOCS_FOCUS=1 f hub"
+description = "Deploy and restart hub daemons (lin + docs)"
+
+[[tasks]]
 name = "release-build"
 command = "bash ./scripts/package-release.sh"
 description = "Build signed release artifacts into dist/ (set FLOW_VERSION, CODESIGN_IDENTITY env vars as needed)"
