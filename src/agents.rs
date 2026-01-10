@@ -15,6 +15,7 @@ use serde_json::Value;
 use shell_words;
 
 use crate::cli::{AgentsAction, AgentsCommand};
+use crate::config;
 use crate::discover;
 
 /// Default gen repository location.
@@ -28,6 +29,7 @@ pub fn run(cmd: AgentsCommand) -> Result<()> {
         Some(AgentsAction::List) => list_agents(),
         Some(AgentsAction::Run { agent, prompt }) => run_agent(&agent, prompt),
         Some(AgentsAction::Global { agent, prompt }) => run_agent_optional(&agent, prompt),
+        Some(AgentsAction::Copy { agent }) => copy_agent_instructions(agent.as_deref()),
         None => {
             if cmd.agent.is_empty() {
                 run_fuzzy_agents()
@@ -114,6 +116,7 @@ fn list_agents() -> Result<()> {
 struct AgentEntry {
     name: String,
     display: String,
+    path: Option<PathBuf>,
 }
 
 struct FzfAgentResult<'a> {
@@ -135,14 +138,17 @@ fn run_fuzzy_agents() -> Result<()> {
     }
 
     if let Some(result) = run_agent_fzf(&entries)? {
-        let mut prompt_args = if result.with_args {
+        let prompt_args = if result.with_args {
             prompt_for_agent_prompt(&result.entry.name)?
+        } else if DIR_AGENTS.contains(&result.entry.name.as_str()) {
+            // Directory-based agents use cwd by default
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string());
+            vec![cwd]
         } else {
-            Vec::new()
+            prompt_for_agent_prompt(&result.entry.name)?
         };
-        if prompt_args.is_empty() {
-            prompt_args = prompt_for_agent_prompt(&result.entry.name)?;
-        }
         if prompt_args.is_empty() {
             bail!("No prompt provided.");
         }
@@ -150,6 +156,141 @@ fn run_fuzzy_agents() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Copy agent instructions to clipboard.
+fn copy_agent_instructions(agent_name: Option<&str>) -> Result<()> {
+    let entries = build_agent_entries()?;
+    if entries.is_empty() {
+        println!("No agents available.");
+        return Ok(());
+    }
+
+    let selected = if let Some(name) = agent_name {
+        // Find agent by name
+        entries
+            .iter()
+            .find(|e| e.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Agent '{}' not found", name))?
+    } else {
+        // Fuzzy select
+        if which::which("fzf").is_err() {
+            bail!("fzf not found on PATH – install it to use fuzzy selection.");
+        }
+        match run_agent_fzf_simple(&entries)? {
+            Some(entry) => entry,
+            None => return Ok(()),
+        }
+    };
+
+    // Get agent file content
+    let content = get_agent_content(&selected.name, selected.path.as_deref())?;
+
+    // Copy to clipboard using pbcopy (macOS) or xclip (Linux)
+    let mut cmd = if cfg!(target_os = "macos") {
+        Command::new("pbcopy")
+    } else {
+        let mut c = Command::new("xclip");
+        c.args(["-selection", "clipboard"]);
+        c
+    };
+
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("failed to run clipboard command")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(content.as_bytes())
+            .context("failed to write to clipboard")?;
+    }
+
+    child.wait()?;
+    println!("Copied '{}' agent instructions to clipboard ({} bytes)", selected.name, content.len());
+    Ok(())
+}
+
+/// Run fzf and return selected entry (simplified, no args prompt).
+fn run_agent_fzf_simple<'a>(entries: &'a [AgentEntry]) -> Result<Option<&'a AgentEntry>> {
+    let mut child = Command::new("fzf")
+        .arg("--prompt")
+        .arg("copy agent> ")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to spawn fzf")?;
+
+    {
+        let stdin = child.stdin.as_mut().context("failed to open fzf stdin")?;
+        for entry in entries {
+            writeln!(stdin, "{}", entry.display)?;
+        }
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let selection = String::from_utf8(output.stdout)
+        .context("fzf output was not valid UTF-8")?
+        .trim()
+        .to_string();
+
+    if selection.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(entries.iter().find(|entry| entry.display == selection))
+}
+
+/// Get agent file content by name and optional path.
+fn get_agent_content(name: &str, path: Option<&Path>) -> Result<String> {
+    // If path is provided, read directly
+    if let Some(p) = path {
+        return fs::read_to_string(p).context(format!("failed to read agent file: {}", p.display()));
+    }
+
+    // Special case: flow agent has built-in instructions
+    if name == FLOW_AGENT_NAME {
+        return Ok(get_flow_agent_instructions());
+    }
+
+    // Try to find agent in common locations
+    let locations = [
+        dirs::home_dir().map(|h| h.join(".config/opencode/agent")),
+        dirs::home_dir().map(|h| h.join(".opencode/agent")),
+        Some(PathBuf::from(GEN_REPO).join(".opencode/agent")),
+    ];
+
+    for loc in locations.into_iter().flatten() {
+        let agent_path = loc.join(format!("{}.md", name));
+        if agent_path.exists() {
+            return fs::read_to_string(&agent_path)
+                .context(format!("failed to read agent file: {}", agent_path.display()));
+        }
+    }
+
+    bail!("Could not find agent file for '{}'", name)
+}
+
+/// Get built-in flow agent instructions.
+fn get_flow_agent_instructions() -> String {
+    r#"You are a Flow-aware agent with full context about flow.toml, tasks, and the Flow CLI.
+
+## Capabilities
+- Read and modify flow.toml configuration
+- Create, update, and run tasks
+- Understand the flow.toml schema and best practices
+- Help with CI/CD workflows, dependencies, and project setup
+
+## Guidelines
+- Always read the existing flow.toml before making changes
+- Preserve existing configuration when adding new items
+- Use appropriate task names and descriptions
+- Follow TOML formatting conventions
+"#
+    .to_string()
 }
 
 fn run_agent_fzf<'a>(entries: &'a [AgentEntry]) -> Result<Option<FzfAgentResult<'a>>> {
@@ -218,6 +359,7 @@ fn build_agent_entries() -> Result<Vec<AgentEntry>> {
     entries.push(AgentEntry {
         name: FLOW_AGENT_NAME.to_string(),
         display: flow_display.to_string(),
+        path: None, // flow agent is built-in, no file
     });
 
     if let Ok(gen_entries) = fetch_gen_agent_entries() {
@@ -319,7 +461,11 @@ fn collect_agent_entries(
         let summary = desc.unwrap_or_else(|| "No description".to_string());
         let display = format!("[{label}] {} - {}", name, summary);
         if seen.insert(display.clone()) {
-            entries.push(AgentEntry { name, display });
+            entries.push(AgentEntry {
+                name,
+                display,
+                path: Some(path.to_path_buf()),
+            });
         }
     }
 
@@ -365,10 +511,23 @@ fn trim_yaml_scalar(value: &str) -> String {
     trimmed.trim_matches('"').trim_matches('\'').to_string()
 }
 
+/// Agents that operate on the current directory by default.
+const DIR_AGENTS: &[&str] = &["docker-to-flox"];
+
 fn run_agent_optional(agent: &str, prompt: Option<Vec<String>>) -> Result<()> {
     let prompt_args = match prompt {
         Some(p) if !p.is_empty() => p,
-        _ => prompt_for_agent_prompt(agent)?,
+        _ => {
+            // For directory-based agents, use cwd as default
+            if DIR_AGENTS.contains(&agent) {
+                let cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| ".".to_string());
+                vec![cwd]
+            } else {
+                prompt_for_agent_prompt(agent)?
+            }
+        }
     };
 
     if prompt_args.is_empty() {
@@ -467,7 +626,11 @@ fn parse_gen_agent_list(stdout: &str) -> Vec<AgentEntry> {
                 continue;
             }
             let display = format!("[gen] {} ({})", name, mode);
-            entries.push(AgentEntry { name, display });
+            entries.push(AgentEntry {
+                name,
+                display,
+                path: None, // gen agents - path resolved separately
+            });
         }
     }
     entries
@@ -493,15 +656,21 @@ fn parse_agent_list_line(line: &str) -> Option<(String, String)> {
     Some((name.trim().to_string(), mode.to_string()))
 }
 
+/// Get the configured agent tool and model.
+fn get_agent_config() -> (String, Option<String>) {
+    if let Some(ts_config) = config::load_ts_config() {
+        if let Some(flow) = ts_config.flow {
+            if let Some(agents) = flow.agents {
+                let tool = agents.tool.unwrap_or_else(|| "gen".to_string());
+                return (tool, agents.model);
+            }
+        }
+    }
+    ("gen".to_string(), None)
+}
+
 /// Run an agent with a prompt.
 fn run_agent(agent: &str, prompt: Vec<String>) -> Result<()> {
-    let gen_loc = find_gen().ok_or_else(|| {
-        anyhow::anyhow!(
-            "gen not found. Install with:\n  cd {} && f install\n  # or set GEN_REPO env var",
-            GEN_REPO
-        )
-    })?;
-
     let prompt_str = prompt.join(" ");
     if prompt_str.is_empty() {
         bail!(
@@ -523,13 +692,53 @@ fn run_agent(agent: &str, prompt: Vec<String>) -> Result<()> {
 
     println!("Invoking {} agent...\n", agent);
 
-    let status = invoke_gen(&gen_loc, &full_prompt)?;
+    let (tool, model) = get_agent_config();
+    let status = match tool.as_str() {
+        "claude" => invoke_claude(&full_prompt)?,
+        "opencode" => invoke_opencode(&full_prompt, model.as_deref())?,
+        _ => {
+            let gen_loc = find_gen().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "gen not found. Install with:\n  cd {} && f install\n  # or set GEN_REPO env var",
+                    GEN_REPO
+                )
+            })?;
+            invoke_gen(&gen_loc, &full_prompt)?
+        }
+    };
 
     if !status.success() {
         bail!("Agent exited with status: {}", status);
     }
 
     Ok(())
+}
+
+/// Invoke Claude Code with a prompt.
+fn invoke_claude(prompt: &str) -> Result<std::process::ExitStatus> {
+    Command::new("claude")
+        .args(["-p", prompt])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run claude")
+}
+
+/// Invoke opencode with a prompt and optional model.
+fn invoke_opencode(prompt: &str, model: Option<&str>) -> Result<std::process::ExitStatus> {
+    let mut cmd = Command::new("opencode");
+    cmd.arg("run");
+    if let Some(m) = model {
+        cmd.args(["--model", m]);
+    }
+    // Use default format (not json) for interactive output
+    cmd.arg(prompt)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run opencode")
 }
 
 /// Run the flow agent and capture the final text output.
@@ -566,11 +775,38 @@ pub fn run_flow_agent_capture_streaming(prompt: &str) -> Result<String> {
     invoke_gen_capture_streaming(&gen_loc, &full_prompt)
 }
 
-/// Invoke gen with a prompt.
+/// Fallback model if not configured.
+const FALLBACK_AGENT_MODEL: &str = "openrouter/moonshotai/kimi-k2:free";
+
+/// Get the agent model from config or use fallback.
+fn get_agent_model() -> String {
+    if let Some(ts_config) = config::load_ts_config() {
+        if let Some(flow) = ts_config.flow {
+            if let Some(agents) = flow.agents {
+                if let Some(model) = agents.model {
+                    return model;
+                }
+            }
+        }
+    }
+    FALLBACK_AGENT_MODEL.to_string()
+}
+
+/// Invoke gen with a prompt and model.
 fn invoke_gen(location: &GenLocation, prompt: &str) -> Result<std::process::ExitStatus> {
+    let model = get_agent_model();
+    invoke_gen_with_model(location, prompt, &model)
+}
+
+/// Invoke gen with a prompt and specific model.
+fn invoke_gen_with_model(
+    location: &GenLocation,
+    prompt: &str,
+    model: &str,
+) -> Result<std::process::ExitStatus> {
     match location {
         GenLocation::Binary(path) => Command::new(path)
-            .args(["run", prompt])
+            .args(["run", "--model", model, prompt])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -586,6 +822,8 @@ fn invoke_gen(location: &GenLocation, prompt: &str) -> Result<std::process::Exit
                 "--conditions=browser",
                 "src/index.ts",
                 "run",
+                "--model",
+                model,
                 prompt,
             ])
             .env("GEN_MODE", "1")

@@ -1113,13 +1113,17 @@ pub fn run_with_check_sync(
     // Truncate diff if needed
     let (diff_for_prompt, truncated) = truncate_diff(&diff);
 
-    // Generate commit message (use opencode if that's the review tool)
+    // Generate commit message based on the review tool
     print!("Generating commit message... ");
     io::stdout().flush()?;
-    let message = if let ReviewSelection::Opencode { ref model } = review_selection {
-        generate_commit_message_opencode(&diff_for_prompt, &status, truncated, model)?
-    } else {
-        generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?
+    let message = match &review_selection {
+        ReviewSelection::Opencode { model } => {
+            generate_commit_message_opencode(&diff_for_prompt, &status, truncated, model)?
+        }
+        ReviewSelection::Claude(_) => {
+            generate_commit_message_claude(&diff_for_prompt, &status, truncated)?
+        }
+        _ => generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?,
     };
     println!("done\n");
 
@@ -1635,11 +1639,14 @@ fn run_claude_review(
             .spawn()
             .context("failed to run claude - is Claude Code SDK installed?")?;
 
-        // Write prompt to stdin
-        if let Some(mut stdin) = child.stdin.take() {
+        // Write prompt to stdin and explicitly close it
+        {
+            let mut stdin = child.stdin.take().context("failed to get stdin")?;
             stdin
                 .write_all(prompt.as_bytes())
                 .context("failed to write prompt to claude stdin")?;
+            stdin.flush().context("failed to flush stdin")?;
+            drop(stdin); // Explicitly close stdin to signal EOF
         }
 
         let stdout = child.stdout.take().unwrap();
@@ -2036,7 +2043,7 @@ fn truncate_context(context: &str, max_chars: usize) -> String {
     }
 }
 
-/// Generate commit message using opencode with a specified model.
+/// Generate commit message using opencode or OpenRouter directly.
 #[allow(dead_code)]
 fn generate_commit_message_opencode(
     diff: &str,
@@ -2044,14 +2051,28 @@ fn generate_commit_message_opencode(
     truncated: bool,
     model: &str,
 ) -> Result<String> {
+    // For OpenRouter models, call API directly to avoid tool use issues
+    if model.starts_with("openrouter/") {
+        return generate_commit_message_openrouter(diff, status, truncated, model);
+    }
+
+    // For zen models (and others), use opencode run with --print flag
+    generate_commit_message_opencode_run(diff, status, truncated, model)
+}
+
+/// Generate commit message using opencode run command.
+fn generate_commit_message_opencode_run(
+    diff: &str,
+    status: &str,
+    truncated: bool,
+    model: &str,
+) -> Result<String> {
     let mut prompt = String::from(
-        "You are an expert software engineer. Write a clear, concise git commit message for these changes.\n\n\
+        "Write a git commit message for these changes. Output ONLY the commit message, nothing else.\n\n\
          Guidelines:\n\
          - Use imperative mood (\"Add feature\" not \"Added feature\")\n\
-         - First line: concise summary of WHAT and WHY (under 72 chars)\n\
-         - Focus on the semantic meaning and purpose, not just listing changed files/functions\n\
-         - If multiple logical changes, use bullet points in body\n\
-         - Never include secrets or sensitive data\n\n\
+         - First line: concise summary under 72 chars\n\
+         - Focus on WHAT and WHY, not just listing files\n\n\
          Git diff:\n",
     );
     prompt.push_str(diff);
@@ -2066,10 +2087,9 @@ fn generate_commit_message_opencode(
         prompt.push_str(status);
     }
 
-    prompt.push_str("\n\nWrite only the commit message, nothing else:");
-
+    // Use --format json to get output in non-interactive mode
     let output = Command::new("opencode")
-        .args(["run", "--model", model, &prompt])
+        .args(["run", "--model", model, "--format", "json", &prompt])
         .output()
         .context("failed to run opencode for commit message")?;
 
@@ -2078,10 +2098,143 @@ fn generate_commit_message_opencode(
         bail!("opencode failed: {}", stderr.trim());
     }
 
+    // Parse JSON lines to extract text content
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut message = String::new();
+    for line in stdout.lines() {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+            if json.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(text) = json.get("part").and_then(|p| p.get("text")).and_then(|t| t.as_str()) {
+                    message.push_str(text);
+                }
+            }
+        }
+    }
+
+    let message = message.trim().to_string();
+    if message.is_empty() {
+        bail!("opencode returned empty commit message");
+    }
+
+    Ok(trim_quotes(&message))
+}
+
+/// Generate commit message using Claude Code CLI.
+fn generate_commit_message_claude(
+    diff: &str,
+    status: &str,
+    truncated: bool,
+) -> Result<String> {
+    let mut prompt = String::from(
+        "Write a git commit message for these changes. Output ONLY the commit message, nothing else.\n\n\
+         Guidelines:\n\
+         - Use imperative mood (\"Add feature\" not \"Added feature\")\n\
+         - First line: concise summary under 72 chars\n\
+         - Focus on WHAT and WHY, not just listing files\n\n\
+         Git diff:\n",
+    );
+    prompt.push_str(diff);
+
+    if truncated {
+        prompt.push_str("\n\n[Diff truncated]");
+    }
+
+    let status = status.trim();
+    if !status.is_empty() {
+        prompt.push_str("\n\nGit status:\n");
+        prompt.push_str(status);
+    }
+
+    let output = Command::new("claude")
+        .args(["-p", &prompt])
+        .output()
+        .context("failed to run claude for commit message")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("claude failed: {}", stderr.trim());
+    }
+
     let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     if message.is_empty() {
-        bail!("opencode returned empty commit message");
+        bail!("claude returned empty commit message");
+    }
+
+    Ok(trim_quotes(&message))
+}
+
+/// Generate commit message using OpenRouter API directly.
+fn generate_commit_message_openrouter(
+    diff: &str,
+    status: &str,
+    truncated: bool,
+    model: &str,
+) -> Result<String> {
+    let api_key = std::env::var("OPENROUTER_API_KEY")
+        .context("OPENROUTER_API_KEY not set. Get one at https://openrouter.ai/keys")?;
+
+    // Strip "openrouter/" prefix to get the actual model ID
+    let model_id = model.strip_prefix("openrouter/").unwrap_or(model);
+
+    let mut user_prompt = String::from("Write a git commit message for the staged changes.\n\nGit diff:\n");
+    user_prompt.push_str(diff);
+
+    if truncated {
+        user_prompt.push_str("\n\n[Diff truncated]");
+    }
+
+    let status = status.trim();
+    if !status.is_empty() {
+        user_prompt.push_str("\n\nGit status:\n");
+        user_prompt.push_str(status);
+    }
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("failed to create HTTP client")?;
+
+    let body = ChatRequest {
+        model: model_id.to_string(),
+        messages: vec![
+            Message {
+                role: "system".to_string(),
+                content: SYSTEM_PROMPT.to_string(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: user_prompt,
+            },
+        ],
+        temperature: 0.3,
+    };
+
+    let resp = client
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("HTTP-Referer", "https://github.com/nikitavoloboev/flow")
+        .json(&body)
+        .send()
+        .context("failed to call OpenRouter API")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        bail!("OpenRouter API error {}: {}", status, text);
+    }
+
+    let parsed: ChatResponse = resp.json().context("failed to parse OpenRouter response")?;
+
+    let message = parsed
+        .choices
+        .first()
+        .and_then(|c| c.message.as_ref())
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default();
+
+    if message.is_empty() {
+        bail!("OpenRouter returned empty commit message");
     }
 
     Ok(trim_quotes(&message))

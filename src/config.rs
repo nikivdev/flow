@@ -133,9 +133,22 @@ pub struct TsConfig {
 pub struct TsFlowConfig {
     #[serde(default)]
     pub commit: Option<TsCommitConfig>,
+    #[serde(default)]
+    pub agents: Option<TsAgentsConfig>,
     /// Enable gitedit.dev hash in commit messages. Default false.
     #[serde(default)]
     pub gitedit: Option<bool>,
+}
+
+/// Agents settings from TypeScript config.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TsAgentsConfig {
+    /// Tool to use: "claude", "gen", "opencode"
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// Default model for agents (e.g., "openrouter/moonshotai/kimi-k2:free")
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Commit settings from TypeScript config.
