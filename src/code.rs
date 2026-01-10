@@ -7,14 +7,18 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::cli::{CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts};
+use crate::cli::{
+    CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts, CodeNewOpts,
+};
 use crate::config;
 
 const DEFAULT_CODE_ROOT: &str = "~/code";
+const DEFAULT_TEMPLATE_ROOT: &str = "~/new";
 
 pub fn run(cmd: CodeCommand) -> Result<()> {
     match cmd.action {
         Some(CodeAction::List) => list_code(&cmd.root),
+        Some(CodeAction::New(opts)) => new_project(opts, &cmd.root),
         Some(CodeAction::Migrate(opts)) => migrate_project(opts, &cmd.root),
         Some(CodeAction::MoveSessions(opts)) => move_sessions(opts),
         None => fuzzy_select_code(&cmd.root),
@@ -197,6 +201,61 @@ fn open_in_zed(path: &Path) -> Result<()> {
         .arg(path)
         .status()
         .context("failed to open Zed")?;
+    Ok(())
+}
+
+fn new_project(opts: CodeNewOpts, root: &str) -> Result<()> {
+    let root = normalize_root(root)?;
+    let template_root = config::expand_path(DEFAULT_TEMPLATE_ROOT);
+    let template_dir = template_root.join(opts.template.trim());
+    if !template_dir.exists() {
+        bail!("Template not found: {}", template_dir.display());
+    }
+    if !template_dir.is_dir() {
+        bail!("Template path is not a directory: {}", template_dir.display());
+    }
+
+    let relative = normalize_relative_path(&opts.name)?;
+    let target = root.join(&relative);
+    let target_display = target.display().to_string();
+    let mut planned_dirs = Vec::new();
+
+    if target.exists() {
+        bail!("Destination already exists: {}", target.display());
+    }
+
+    ensure_dir(&root, opts.dry_run, &mut planned_dirs)?;
+    if let Some(parent) = target.parent() {
+        if parent != root {
+            ensure_dir(parent, opts.dry_run, &mut planned_dirs)?;
+        }
+    }
+
+    if opts.dry_run {
+        println!(
+            "Would copy template {} -> {}",
+            template_dir.display(),
+            target_display
+        );
+        if opts.ignored {
+            if let Some((repo_root, entry)) = gitignore_entry_for_target(&target)? {
+                println!("Would add {} to {}", entry, repo_root.join(".gitignore").display());
+            } else {
+                bail!("--ignored requires the target to be inside a git repository");
+            }
+        }
+        return Ok(());
+    }
+
+    copy_dir_all(&template_dir, &target)?;
+    println!("Created {}", target_display);
+    if opts.ignored {
+        if let Some((repo_root, entry)) = gitignore_entry_for_target(&target)? {
+            ensure_gitignore_entry(&repo_root, &entry)?;
+        } else {
+            bail!("--ignored requires the target to be inside a git repository");
+        }
+    }
     Ok(())
 }
 
@@ -752,5 +811,69 @@ fn ensure_dir(path: &Path, dry_run: bool, planned: &mut Vec<PathBuf>) -> Result<
     }
     fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
     planned.push(path.to_path_buf());
+    Ok(())
+}
+
+fn gitignore_entry_for_target(target: &Path) -> Result<Option<(PathBuf, String)>> {
+    let root = find_git_root(target)?;
+    let Some(repo_root) = root else {
+        return Ok(None);
+    };
+    let relative = target
+        .strip_prefix(&repo_root)
+        .unwrap_or(target)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut entry = relative.trim().trim_start_matches("./").to_string();
+    if entry.is_empty() {
+        return Ok(None);
+    }
+    if !entry.ends_with('/') {
+        entry.push('/');
+    }
+    Ok(Some((repo_root, entry)))
+}
+
+fn find_git_root(start: &Path) -> Result<Option<PathBuf>> {
+    let mut current = start.to_path_buf();
+    if !current.exists() {
+        if let Some(parent) = current.parent() {
+            current = parent.to_path_buf();
+        }
+    }
+    loop {
+        let git_dir = current.join(".git");
+        if git_dir.is_dir() || git_dir.is_file() {
+            return Ok(Some(current));
+        }
+        if !current.pop() {
+            return Ok(None);
+        }
+    }
+}
+
+fn ensure_gitignore_entry(repo_root: &Path, entry: &str) -> Result<()> {
+    let gitignore = repo_root.join(".gitignore");
+    let entry_trimmed = entry.trim().trim_end_matches('/');
+    let entry_with_slash = format!("{}/", entry_trimmed);
+    let mut existing = String::new();
+    if gitignore.exists() {
+        existing = fs::read_to_string(&gitignore)
+            .with_context(|| format!("failed to read {}", gitignore.display()))?;
+        if existing.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == entry_trimmed || trimmed == entry_with_slash
+        }) {
+            return Ok(());
+        }
+    }
+    let mut output = existing;
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&entry_with_slash);
+    output.push('\n');
+    fs::write(&gitignore, output.as_bytes())
+        .with_context(|| format!("failed to write {}", gitignore.display()))?;
     Ok(())
 }
