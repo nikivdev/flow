@@ -206,6 +206,8 @@ fn migrate_project(opts: CodeMigrateOpts, root: &str) -> Result<()> {
     let relative = normalize_relative_path(&opts.relative)?;
     let target = root.join(&relative);
     let target_display = target.display().to_string();
+    let root_display = root.to_string_lossy().to_string();
+    let mut planned_dirs = Vec::new();
 
     if from == target {
         bail!("Source and destination are the same path.");
@@ -223,22 +225,10 @@ fn migrate_project(opts: CodeMigrateOpts, root: &str) -> Result<()> {
         bail!("Destination cannot be inside the source folder.");
     }
 
-    if !root.exists() {
-        if opts.dry_run {
-            println!("Would create {}", root.display());
-        } else {
-            fs::create_dir_all(&root)
-                .with_context(|| format!("failed to create {}", root.display()))?;
-        }
-    }
+    ensure_dir(&root, opts.dry_run, &mut planned_dirs)?;
     if let Some(parent) = target.parent() {
-        if !parent.exists() {
-            if opts.dry_run {
-                println!("Would create {}", parent.display());
-            } else {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
+        if parent.to_string_lossy() != root_display {
+            ensure_dir(parent, opts.dry_run, &mut planned_dirs)?;
         }
     }
 
@@ -247,6 +237,11 @@ fn migrate_project(opts: CodeMigrateOpts, root: &str) -> Result<()> {
     } else {
         move_dir(&from, &target)?;
         println!("Moved {} -> {}", from.display(), target_display);
+    }
+
+    let relinked = relink_bin_symlinks(&from, &target, opts.dry_run)?;
+    if relinked > 0 {
+        println!("Updated {} symlink(s) in ~/bin", relinked);
     }
 
     let session_opts = CodeMoveSessionsOpts {
@@ -273,19 +268,66 @@ fn move_sessions(opts: CodeMoveSessionsOpts) -> Result<()> {
     let mut moved_claude = 0;
     let mut moved_codex = 0;
     let mut updated_codex_files = 0;
+    let mut remaining_codex_files = Vec::new();
 
     if !opts.skip_claude {
-        moved_claude = move_project_dir(&claude_projects_dir(), &from, &to, opts.dry_run)?;
+        let base = claude_projects_dir();
+        let from_dir = base.join(path_to_project_name(&from));
+        let to_dir = base.join(path_to_project_name(&to));
+        let from_exists = from_dir.exists();
+        let to_exists = to_dir.exists();
+        moved_claude = move_project_dir(&base, &from, &to, opts.dry_run)?;
+        if from_exists && !opts.dry_run {
+            if from_dir.exists() {
+                println!(
+                    "WARN Claude session dir still present: {}",
+                    from_dir.display()
+                );
+            }
+            if !to_dir.exists() && !to_exists {
+                println!(
+                    "WARN Claude session dir missing after migration: {}",
+                    to_dir.display()
+                );
+            }
+        }
     }
     if !opts.skip_codex {
-        moved_codex = move_project_dir(&codex_projects_dir(), &from, &to, opts.dry_run)?;
-        updated_codex_files = update_codex_sessions(&from, &to, opts.dry_run)?;
+        let base = codex_projects_dir();
+        let from_dir = base.join(path_to_project_name(&from));
+        let to_dir = base.join(path_to_project_name(&to));
+        let from_exists = from_dir.exists();
+        let to_exists = to_dir.exists();
+        moved_codex = move_project_dir(&base, &from, &to, opts.dry_run)?;
+        let codex_update = update_codex_sessions(&from, &to, opts.dry_run)?;
+        updated_codex_files = codex_update.updated_files;
+        remaining_codex_files = codex_update.remaining_files;
+        if from_exists && !opts.dry_run {
+            if from_dir.exists() {
+                println!(
+                    "WARN Codex session dir still present: {}",
+                    from_dir.display()
+                );
+            }
+            if !to_dir.exists() && !to_exists {
+                println!(
+                    "WARN Codex session dir missing after migration: {}",
+                    to_dir.display()
+                );
+            }
+        }
     }
 
     println!("Session migration summary:");
     println!("  Claude project dirs moved: {}", moved_claude);
     println!("  Codex legacy dirs moved: {}", moved_codex);
     println!("  Codex jsonl files updated: {}", updated_codex_files);
+    if !remaining_codex_files.is_empty() {
+        println!("WARN Codex sessions still reference the old path:");
+        for path in &remaining_codex_files {
+            println!("  {}", path.display());
+        }
+    }
     if opts.dry_run {
         println!("Dry run only; no files were changed.");
     }
@@ -393,6 +435,80 @@ fn copy_symlink(target: &Path, dest: &Path) -> Result<()> {
     }
 }
 
+
+fn relink_bin_symlinks(from: &Path, to: &Path, dry_run: bool) -> Result<usize> {
+    let bin_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("bin");
+    if !bin_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut updated = 0;
+    for entry in fs::read_dir(&bin_dir).with_context(|| {
+        format!("failed to read bin directory {}", bin_dir.display())
+    })? {
+        let entry = entry?;
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path)?;
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+
+        let link_target = fs::read_link(&path)?;
+        let resolved = if link_target.is_absolute() {
+            link_target.clone()
+        } else {
+            path.parent().unwrap_or(&bin_dir).join(&link_target)
+        };
+
+        if !resolved.starts_with(from) {
+            continue;
+        }
+
+        let suffix = match resolved.strip_prefix(from) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let new_target = to.join(suffix);
+        if dry_run {
+            println!("Would relink {} -> {}", path.display(), new_target.display());
+        } else {
+            relink_symlink(&path, &new_target)?;
+        }
+        updated += 1;
+    }
+
+    Ok(updated)
+}
+
+fn relink_symlink(path: &Path, target: &Path) -> Result<()> {
+    fs::remove_file(path)
+        .with_context(|| format!("failed to remove {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        if target.is_dir() {
+            std::os::windows::fs::symlink_dir(target, path)
+                .with_context(|| format!("failed to create {}", path.display()))?;
+        } else {
+            std::os::windows::fs::symlink_file(target, path)
+                .with_context(|| format!("failed to create {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, target);
+        Ok(())
+    }
+}
+
 fn claude_projects_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -454,23 +570,39 @@ fn path_to_project_name(path: &Path) -> String {
     path.to_string_lossy().replace('/', "-")
 }
 
-fn update_codex_sessions(from: &Path, to: &Path, dry_run: bool) -> Result<usize> {
+struct CodexUpdateSummary {
+    updated_files: usize,
+    remaining_files: Vec<PathBuf>,
+}
+
+fn update_codex_sessions(from: &Path, to: &Path, dry_run: bool) -> Result<CodexUpdateSummary> {
     let root = codex_sessions_dir();
     if !root.exists() {
-        return Ok(0);
+        return Ok(CodexUpdateSummary {
+            updated_files: 0,
+            remaining_files: Vec::new(),
+        });
     }
 
     let from_str = from.to_string_lossy().to_string();
     let to_str = to.to_string_lossy().to_string();
     let mut updated_files = 0;
+    let mut remaining_files = Vec::new();
 
     for file_path in collect_codex_session_files(&root) {
-        if update_codex_session_file(&file_path, &from_str, &to_str, dry_run)? {
+        let result = update_codex_session_file(&file_path, &from_str, &to_str, dry_run)?;
+        if result.updated {
             updated_files += 1;
+        }
+        if result.remaining {
+            remaining_files.push(file_path);
         }
     }
 
-    Ok(updated_files)
+    Ok(CodexUpdateSummary {
+        updated_files,
+        remaining_files,
+    })
 }
 
 fn collect_codex_session_files(root: &Path) -> Vec<PathBuf> {
@@ -496,15 +628,21 @@ fn collect_codex_session_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+struct CodexFileUpdate {
+    updated: bool,
+    remaining: bool,
+}
+
 fn update_codex_session_file(
     path: &Path,
     from: &str,
     to: &str,
     dry_run: bool,
-) -> Result<bool> {
+) -> Result<CodexFileUpdate> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut changed = false;
+    let mut matched = false;
     let mut lines = Vec::new();
     let ends_with_newline = content.ends_with('\n');
 
@@ -521,6 +659,7 @@ fn update_codex_session_file(
                     if let Some(payload) = value.get_mut("payload") {
                         if let Some(obj) = payload.as_object_mut() {
                             if obj.get("cwd").and_then(|v| v.as_str()) == Some(from) {
+                                matched = true;
                                 obj.insert("cwd".to_string(), Value::String(to.to_string()));
                                 updated_line = true;
                             }
@@ -539,12 +678,23 @@ fn update_codex_session_file(
     }
 
     if !changed {
-        return Ok(false);
+        let remaining = if matched && !dry_run {
+            file_has_session_meta_cwd(path, from)?
+        } else {
+            false
+        };
+        return Ok(CodexFileUpdate {
+            updated: false,
+            remaining,
+        });
     }
 
     if dry_run {
         println!("Would update {}", path.display());
-        return Ok(true);
+        return Ok(CodexFileUpdate {
+            updated: true,
+            remaining: true,
+        });
     }
 
     let mut output = lines.join("\n");
@@ -556,5 +706,51 @@ fn update_codex_session_file(
         .with_context(|| format!("failed to write {}", tmp_path.display()))?;
     fs::rename(&tmp_path, path)
         .with_context(|| format!("failed to replace {}", path.display()))?;
-    Ok(true)
+    let remaining = file_has_session_meta_cwd(path, from)?;
+    Ok(CodexFileUpdate {
+        updated: true,
+        remaining,
+    })
+}
+
+fn file_has_session_meta_cwd(path: &Path, from: &str) -> Result<bool> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(content.lines().any(|line| session_meta_cwd_matches(line, from)))
+}
+
+fn session_meta_cwd_matches(line: &str, from: &str) -> bool {
+    if line.trim().is_empty() {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    if value.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+        return false;
+    }
+    let Some(payload) = value.get("payload") else {
+        return false;
+    };
+    let Some(obj) = payload.as_object() else {
+        return false;
+    };
+    obj.get("cwd").and_then(|v| v.as_str()) == Some(from)
+}
+
+fn ensure_dir(path: &Path, dry_run: bool, planned: &mut Vec<PathBuf>) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    if planned.iter().any(|p| p == path) {
+        return Ok(());
+    }
+    if dry_run {
+        println!("Would create {}", path.display());
+        planned.push(path.to_path_buf());
+        return Ok(());
+    }
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+    planned.push(path.to_path_buf());
+    Ok(())
 }
