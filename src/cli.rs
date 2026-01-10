@@ -803,6 +803,7 @@ pub enum SecretsFormat {
 pub enum SetupTarget {
     Deploy,
     Release,
+    Docs,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1534,10 +1535,26 @@ pub struct CodeCommand {
 pub enum CodeAction {
     /// List git repos under ~/code.
     List,
+    /// Create a new project from a template in ~/new/<name>.
+    New(CodeNewOpts),
     /// Move a folder into ~/code/<relative-path> and migrate AI sessions.
     Migrate(CodeMigrateOpts),
     /// Move AI sessions when a project path changes.
     MoveSessions(CodeMoveSessionsOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CodeNewOpts {
+    /// Template name under ~/new (e.g., "docs").
+    pub template: String,
+    /// Destination folder name or relative path under the code root.
+    pub name: String,
+    /// Add the new path to .gitignore in the containing repo.
+    #[arg(long)]
+    pub ignored: bool,
+    /// Show what would change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1888,6 +1905,10 @@ pub struct GhReleaseCreateOpts {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum DocsAction {
+    /// Create a docs/ folder with starter markdown files.
+    New(DocsNewOpts),
+    /// Run the docs hub that aggregates docs from ~/code and ~/org.
+    Hub(DocsHubOpts),
     /// Sync documentation with recent commits.
     Sync {
         /// Number of commits to analyze (default: 10).
@@ -1907,4 +1928,45 @@ pub enum DocsAction {
         /// Doc file name (without .md).
         name: String,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DocsNewOpts {
+    /// Path to create docs in (defaults to current directory).
+    #[arg(long)]
+    pub path: Option<PathBuf>,
+    /// Overwrite if docs/ already exists.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DocsHubOpts {
+    /// Host to bind the docs hub to.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+    /// Port for the docs hub.
+    #[arg(long, default_value_t = 4410)]
+    pub port: u16,
+    /// Docs hub root (defaults to ~/.config/flow/docs-hub).
+    #[arg(long, default_value = "~/.config/flow/docs-hub")]
+    pub hub_root: String,
+    /// Template root (defaults to ~/new/docs).
+    #[arg(long, default_value = "~/new/docs")]
+    pub template_root: String,
+    /// Code root to scan for docs (defaults to ~/code).
+    #[arg(long, default_value = "~/code")]
+    pub code_root: String,
+    /// Org root to scan for docs (defaults to ~/org).
+    #[arg(long, default_value = "~/org")]
+    pub org_root: String,
+    /// Skip scanning for .ai/docs.
+    #[arg(long)]
+    pub no_ai: bool,
+    /// Skip opening the browser.
+    #[arg(long)]
+    pub no_open: bool,
+    /// Sync content and exit without running the dev server.
+    #[arg(long)]
+    pub sync_only: bool,
 }

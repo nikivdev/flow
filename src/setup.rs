@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::{
     agents,
     cli::{SetupOpts, SetupTarget, TaskRunOpts},
-    config, deploy, start,
+    config, deploy, docs, start,
     tasks::{self, load_project_config},
 };
 
@@ -24,6 +24,9 @@ pub fn run(opts: SetupOpts) -> Result<()> {
     }
 
     match opts.target {
+        Some(SetupTarget::Docs) => {
+            return docs::create_docs_scaffold_at(&project_root, false);
+        }
         Some(SetupTarget::Deploy) => {
             return setup_deploy(&project_root, &config_path);
         }
