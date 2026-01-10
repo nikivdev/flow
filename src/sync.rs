@@ -25,6 +25,43 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
     // Determine if auto-fix is enabled (--fix is default, --no-fix disables)
     let auto_fix = cmd.fix && !cmd.no_fix;
 
+    // Check for unmerged files (can exist even without active merge/rebase)
+    let unmerged = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+    if !unmerged.trim().is_empty() {
+        let unmerged_files: Vec<&str> = unmerged.lines().filter(|l| !l.is_empty()).collect();
+        println!("==> Found {} unmerged files, resolving...", unmerged_files.len());
+
+        let should_fix = auto_fix || prompt_for_auto_fix()?;
+        if should_fix {
+            if try_resolve_conflicts()? {
+                let _ = git_run(&["add", "-A"]);
+                // Check if we're in a merge
+                if is_merge_in_progress() {
+                    let _ = Command::new("git").args(["commit", "--no-edit"]).output();
+                }
+                println!("  ✓ Unmerged files resolved");
+            } else {
+                // Couldn't resolve - reset the conflicted files to HEAD
+                println!("  Could not auto-resolve. Resetting unmerged files...");
+                for file in &unmerged_files {
+                    let _ = Command::new("git").args(["checkout", "HEAD", "--", file]).output();
+                }
+                if is_merge_in_progress() {
+                    let _ = Command::new("git").args(["merge", "--abort"]).output();
+                }
+            }
+        } else {
+            // User declined - reset the files
+            println!("  Resetting unmerged files...");
+            for file in &unmerged_files {
+                let _ = Command::new("git").args(["checkout", "HEAD", "--", file]).output();
+            }
+            if is_merge_in_progress() {
+                let _ = Command::new("git").args(["merge", "--abort"]).output();
+            }
+        }
+    }
+
     // Check for in-progress rebase/merge and handle it
     if is_rebase_in_progress() {
         println!("==> Rebase in progress, attempting to resolve...");

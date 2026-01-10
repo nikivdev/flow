@@ -1483,6 +1483,12 @@ pub enum AgentsAction {
         #[arg(trailing_var_arg = true)]
         prompt: Option<Vec<String>>,
     },
+    /// Copy agent instructions to clipboard (fuzzy select).
+    #[command(alias = "cp")]
+    Copy {
+        /// Optional agent name (fuzzy select if not provided).
+        agent: Option<String>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]

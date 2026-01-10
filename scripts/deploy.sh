@@ -1,59 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 PROFILE="${FLOW_PROFILE:-debug}"
 TARGET_DIR="debug"
 BUILD_ARGS=()
-if [ "${PROFILE}" = "release" ]; then
-    TARGET_DIR="release"
-    BUILD_ARGS+=("--release")
-fi
+[[ "${PROFILE}" == "release" ]] && TARGET_DIR="release" && BUILD_ARGS+=("--release")
 
-echo "Building flow CLI and daemon (${PROFILE} profile)..."
-if [ "${#BUILD_ARGS[@]}" -gt 0 ]; then
-    cargo build "${BUILD_ARGS[@]}"
-else
-    cargo build
-fi
+# Build
+cargo build "${BUILD_ARGS[@]}" --quiet
 
-INSTALL_DIR="${FLOW_INSTALL_DIR:-$HOME/bin}"
-mkdir -p "${INSTALL_DIR}"
-
-SOURCE_BIN="${ROOT_DIR}/target/${TARGET_DIR}/f"
-TARGET_BIN_F="${INSTALL_DIR}/f"
-TARGET_BIN_FLOW="${INSTALL_DIR}/flow"
+SOURCE_F="${ROOT_DIR}/target/${TARGET_DIR}/f"
 SOURCE_LIN="${ROOT_DIR}/target/${TARGET_DIR}/lin"
-TARGET_BIN_LIN="${INSTALL_DIR}/lin"
 
-for target in "${TARGET_BIN_F}" "${TARGET_BIN_FLOW}"; do
-    echo "Linking ${target} -> ${SOURCE_BIN}"
-    rm -f "${target}"
-    ln -s "${SOURCE_BIN}" "${target}"
+# Install locations (primary + fallback)
+INSTALL_DIRS=("${HOME}/bin" "${HOME}/.local/bin")
+
+installed=false
+for dir in "${INSTALL_DIRS[@]}"; do
+    [[ -d "${dir}" ]] || continue
+
+    # Copy binaries (more reliable than symlinks)
+    cp -f "${SOURCE_F}" "${dir}/f" 2>/dev/null && installed=true
+    cp -f "${SOURCE_F}" "${dir}/flow" 2>/dev/null || true
+    cp -f "${SOURCE_LIN}" "${dir}/lin" 2>/dev/null || true
 done
 
-echo "Linking ${TARGET_BIN_LIN} -> ${SOURCE_LIN}"
-rm -f "${TARGET_BIN_LIN}"
-ln -s "${SOURCE_LIN}" "${TARGET_BIN_LIN}"
+if ! $installed; then
+    mkdir -p "${HOME}/bin"
+    cp -f "${SOURCE_F}" "${HOME}/bin/f"
+    cp -f "${SOURCE_F}" "${HOME}/bin/flow"
+    cp -f "${SOURCE_LIN}" "${HOME}/bin/lin"
+fi
 
-echo "Symlinked CLI to ${TARGET_BIN_F} and ${TARGET_BIN_FLOW}"
-echo "Symlinked watcher daemon to ${TARGET_BIN_LIN}"
-echo "Ensure ${INSTALL_DIR} is on your PATH to run 'f', 'flow', or 'lin' from anywhere."
-
-case ":${PATH}:" in
-    *":${INSTALL_DIR}:"*) ;;
-    *)
-        echo "PATH missing ${INSTALL_DIR}. Add it with:"
-        echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
-        ;;
-esac
-
-current_f="$(command -v f 2>/dev/null || true)"
-if [ -n "${current_f}" ] && [ "${current_f}" != "${TARGET_BIN_F}" ]; then
-    echo "Warning: 'f' resolves to ${current_f} (expected ${TARGET_BIN_F})."
-    echo "Make sure ${INSTALL_DIR} is earlier in PATH or run ${TARGET_BIN_F} directly."
+# Verify
+if command -v f &>/dev/null; then
+    echo "flow ${PROFILE} build installed"
+else
+    echo "Installed to ~/bin - add to PATH: export PATH=\"\$HOME/bin:\$PATH\""
 fi
