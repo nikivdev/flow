@@ -14,6 +14,7 @@ use crate::cli::{ReposAction, ReposCloneOpts, ReposCommand};
 use crate::{config, publish, ssh, ssh_keys, upstream};
 
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
+const REPOS_ROOT_OVERRIDE_ENV: &str = "FLOW_REPOS_ALLOW_ROOT_OVERRIDE";
 
 /// Run the repos subcommand.
 pub fn run(cmd: ReposCommand) -> Result<()> {
@@ -302,12 +303,33 @@ pub(crate) fn parse_github_repo(input: &str) -> Result<RepoRef> {
 
 pub(crate) fn normalize_root(raw: &str) -> Result<PathBuf> {
     let expanded = config::expand_path(raw);
-    if expanded.is_absolute() {
-        return Ok(expanded);
+    let cwd = std::env::current_dir().context("failed to resolve current directory")?;
+    let root = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+
+    let default_root = config::expand_path(DEFAULT_REPOS_ROOT);
+    if root != default_root && !repos_root_override_enabled() {
+        bail!(
+            "repos root is immutable; use {} or set {}=1 to override",
+            default_root.display(),
+            REPOS_ROOT_OVERRIDE_ENV
+        );
     }
 
-    let cwd = std::env::current_dir().context("failed to resolve current directory")?;
-    Ok(cwd.join(expanded))
+    Ok(root)
+}
+
+fn repos_root_override_enabled() -> bool {
+    match std::env::var(REPOS_ROOT_OVERRIDE_ENV) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0"
+        }
+        Err(_) => false,
+    }
 }
 
 fn run_git_clone(url: &str, target_dir: &Path, shallow: bool) -> Result<()> {

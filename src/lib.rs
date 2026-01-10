@@ -4,6 +4,7 @@ pub mod ai;
 pub mod cli;
 pub mod commit;
 pub mod commits;
+pub mod code;
 pub mod config;
 pub mod daemon;
 pub mod db;

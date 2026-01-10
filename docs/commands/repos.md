@@ -7,6 +7,8 @@ Clone repositories into a structured local directory or create new ones.
 `f repos clone` clones GitHub repositories into `~/repos/<owner>/<repo>` using SSH URLs. By default it does a shallow clone for speed, then fetches full history in the background. It always sets up an `upstream` remote and local tracking branch unless you pass `--no-upstream`.
 `f repos create` creates a GitHub repository from the current folder and pushes it.
 
+By default, Flow treats `~/repos` as an immutable managed root. Use `FLOW_REPOS_ALLOW_ROOT_OVERRIDE=1` if you need to point `--root` somewhere else.
+
 ## Quick Start
 
 ```bash
@@ -33,7 +35,7 @@ f repos create
 | Option | Short | Description |
 |--------|-------|-------------|
 | `<URL>` | | Repository URL or `owner/repo` |
-| `--root <PATH>` | | Root directory for clones (default: `~/repos`) |
+| `--root <PATH>` | | Root directory for clones (default: `~/repos`, override requires `FLOW_REPOS_ALLOW_ROOT_OVERRIDE=1`) |
 | `--full` | | Full clone (skip shallow clone + background history fetch) |
 | `--no-upstream` | | Skip upstream setup |
 | `--upstream-url <URL>` | `-u` | Upstream URL override (skips GitHub lookup) |
@@ -68,8 +70,8 @@ When cloning in fast mode (default), flow spawns a background fetch:
 ## Examples
 
 ```bash
-# Clone into a custom root
-f repos clone https://github.com/owner/repo --root ~/work/repos
+# Clone into a custom root (requires override)
+FLOW_REPOS_ALLOW_ROOT_OVERRIDE=1 f repos clone https://github.com/owner/repo --root ~/work/repos
 
 # Override upstream manually
 f repos clone https://github.com/your-user/repo -u git@github.com:upstream-org/repo.git

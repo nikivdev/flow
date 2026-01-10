@@ -295,6 +295,11 @@ pub enum Commands {
     )]
     Repos(ReposCommand),
     #[command(
+        about = "Browse git repos under ~/code.",
+        long_about = "Fuzzy search git repositories under ~/code and open the selected path. Also includes helpers to migrate AI sessions when paths move."
+    )]
+    Code(CodeCommand),
+    #[command(
         about = "Run tasks in parallel with pretty status display.",
         long_about = "Execute multiple shell commands in parallel with a real-time status display showing spinners, progress, and output. Useful for running independent tasks concurrently.",
         alias = "p"
@@ -1514,6 +1519,61 @@ pub struct PublishOpts {
 pub struct ReposCommand {
     #[command(subcommand)]
     pub action: Option<ReposAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CodeCommand {
+    #[command(subcommand)]
+    pub action: Option<CodeAction>,
+    /// Root directory to scan (default: ~/code).
+    #[arg(long, default_value = "~/code")]
+    pub root: String,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodeAction {
+    /// List git repos under ~/code.
+    List,
+    /// Move a folder into ~/code/<relative-path> and migrate AI sessions.
+    Migrate(CodeMigrateOpts),
+    /// Move AI sessions when a project path changes.
+    MoveSessions(CodeMoveSessionsOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CodeMigrateOpts {
+    /// Source folder to migrate.
+    pub from: String,
+    /// Relative path under the code root (e.g., "flow/myflow").
+    pub relative: String,
+    /// Show what would change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip migrating Claude sessions.
+    #[arg(long)]
+    pub skip_claude: bool,
+    /// Skip migrating Codex sessions.
+    #[arg(long)]
+    pub skip_codex: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CodeMoveSessionsOpts {
+    /// Old project path.
+    #[arg(long)]
+    pub from: String,
+    /// New project path.
+    #[arg(long)]
+    pub to: String,
+    /// Show what would change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip migrating Claude sessions.
+    #[arg(long)]
+    pub skip_claude: bool,
+    /// Skip migrating Codex sessions.
+    #[arg(long)]
+    pub skip_codex: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
