@@ -2516,6 +2516,29 @@ fn gitedit_api_url(repo_root: &std::path::Path) -> String {
     "https://gitedit.dev".to_string()
 }
 
+fn gitedit_token(repo_root: &std::path::Path) -> Option<String> {
+    for key in ["GITEDIT_PUBLISH_TOKEN", "GITEDIT_TOKEN", "FLOW_GITEDIT_TOKEN"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            if let Some(token) = cfg.options.gitedit_token {
+                let trimmed = token.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn gitedit_repo_override(repo_root: &std::path::Path) -> Option<(String, String)> {
     let local_config = repo_root.join("flow.toml");
     if !local_config.exists() {
@@ -2668,7 +2691,11 @@ fn sync_to_gitedit(
         Err(_) => return,
     };
 
-    match client.post(&api_url).json(&payload).send() {
+    let mut request = client.post(&api_url).json(&payload);
+    if let Some(token) = gitedit_token(repo_root) {
+        request = request.bearer_auth(token);
+    }
+    match request.send() {
         Ok(resp) if resp.status().is_success() => {
             if session_count > 0 {
                 println!(

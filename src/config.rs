@@ -286,6 +286,9 @@ pub struct OptionsConfig {
         alias = "gitedit-repo-full-name"
     )]
     pub gitedit_repo_full_name: Option<String>,
+    /// Optional token for gitedit sync/publish.
+    #[serde(default, rename = "gitedit_token", alias = "gitedit-token")]
+    pub gitedit_token: Option<String>,
 }
 
 impl OptionsConfig {
@@ -319,6 +322,9 @@ impl OptionsConfig {
         }
         if other.gitedit_repo_full_name.is_some() {
             self.gitedit_repo_full_name = other.gitedit_repo_full_name;
+        }
+        if other.gitedit_token.is_some() {
+            self.gitedit_token = other.gitedit_token;
         }
     }
 }

@@ -24,7 +24,7 @@ pub fn run(cmd: ReposCommand) -> Result<()> {
             open_in_zed(&path)?;
             Ok(())
         }
-        Some(ReposAction::Create(opts)) => publish::run(opts),
+        Some(ReposAction::Create(opts)) => publish::run_github(opts),
         None => fuzzy_select_repo(),
     }
 }

@@ -285,10 +285,10 @@ pub enum Commands {
     )]
     Deploy(DeployCommand),
     #[command(
-        about = "Publish project to GitHub.",
-        long_about = "Create a new GitHub repository and push the current project. Infers repo name from folder, asks for public/private visibility."
+        about = "Publish project to gitedit.dev (default) or GitHub.",
+        long_about = "Publish the current project to gitedit.dev by default. Use `f publish github` to create a GitHub repository and push the project."
     )]
-    Publish(PublishOpts),
+    Publish(PublishCommand),
     #[command(
         about = "Clone repositories into a structured local directory.",
         long_about = "Clone repositories into ~/repos/<owner>/<repo> with SSH URLs and optional upstream setup for forks."
@@ -1502,6 +1502,9 @@ pub struct PublishOpts {
     /// Repository name (defaults to current folder name).
     #[arg(short, long)]
     pub name: Option<String>,
+    /// Repository owner (gitedit.dev only; defaults to config or user).
+    #[arg(long)]
+    pub owner: Option<String>,
     /// Make the repository public.
     #[arg(long)]
     pub public: bool,
@@ -1514,6 +1517,21 @@ pub struct PublishOpts {
     /// Skip confirmation prompts.
     #[arg(short, long)]
     pub yes: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum PublishTarget {
+    Gitedit,
+    Github,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PublishCommand {
+    /// Target to publish to (default: gitedit).
+    #[arg(value_enum, default_value_t = PublishTarget::Gitedit)]
+    pub target: PublishTarget,
+    #[command(flatten)]
+    pub opts: PublishOpts,
 }
 
 #[derive(Args, Debug, Clone)]

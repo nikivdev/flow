@@ -219,8 +219,8 @@ fn main() -> Result<()> {
         Some(Commands::Deploy(cmd)) => {
             deploy::run(cmd)?;
         }
-        Some(Commands::Publish(opts)) => {
-            publish::run(opts)?;
+        Some(Commands::Publish(cmd)) => {
+            publish::run(cmd)?;
         }
         Some(Commands::Repos(cmd)) => {
             repos::run(cmd)?;
