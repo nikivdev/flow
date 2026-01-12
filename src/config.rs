@@ -74,6 +74,9 @@ pub struct Config {
     /// Railway deployment config.
     #[serde(default)]
     pub railway: Option<crate::deploy::RailwayConfig>,
+    /// Release configuration (hosts, npm, etc.).
+    #[serde(default)]
+    pub release: Option<ReleaseConfig>,
     /// Commit workflow config (fixers, review instructions).
     #[serde(default)]
     pub commit: Option<CommitConfig>,
@@ -192,6 +195,7 @@ impl Default for Config {
             host: None,
             cloudflare: None,
             railway: None,
+            release: None,
             commit: None,
             setup: None,
             ssh: None,
@@ -211,6 +215,44 @@ pub struct FlowSettings {
     /// Task to run when invoking `f deploy` with no subcommand.
     #[serde(default, rename = "deploy_task", alias = "deploy-task")]
     pub deploy_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ReleaseConfig {
+    /// Default release provider (e.g., "npm", "task").
+    #[serde(default)]
+    pub default: Option<String>,
+    /// Release host domain.
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// Base URL for release artifacts.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Release host root path.
+    #[serde(default)]
+    pub root: Option<String>,
+    /// Caddyfile path.
+    #[serde(default)]
+    pub caddyfile: Option<String>,
+    /// Readme file path to update.
+    #[serde(default)]
+    pub readme: Option<String>,
+    /// npm release config.
+    #[serde(default)]
+    pub npm: Option<NpmReleaseConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct NpmReleaseConfig {
+    /// npm scope (e.g., "@your-org").
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// npm package name (e.g., "flow" or "@your-org/flow").
+    #[serde(default)]
+    pub package: Option<String>,
+    /// npm access level (public/private).
+    #[serde(default)]
+    pub access: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1153,6 +1195,7 @@ fn merge_config(base: &mut Config, other: Config) {
     if base.flow.deploy_task.is_none() {
         base.flow.deploy_task = other.flow.deploy_task;
     }
+    merge_release_config(base, other.release);
     if base.setup.is_none() {
         base.setup = other.setup;
     } else if let (Some(base_setup), Some(other_setup)) = (base.setup.as_mut(), other.setup) {
@@ -1192,6 +1235,43 @@ fn merge_config(base: &mut Config, other: Config) {
         }
         (None, Some(other_flox)) => base.flox = Some(other_flox),
         _ => {}
+    }
+}
+
+fn merge_release_config(base: &mut Config, other: Option<ReleaseConfig>) {
+    let Some(other) = other else { return; };
+    let base_release = base.release.get_or_insert_with(ReleaseConfig::default);
+
+    if base_release.default.is_none() {
+        base_release.default = other.default;
+    }
+    if base_release.domain.is_none() {
+        base_release.domain = other.domain;
+    }
+    if base_release.base_url.is_none() {
+        base_release.base_url = other.base_url;
+    }
+    if base_release.root.is_none() {
+        base_release.root = other.root;
+    }
+    if base_release.caddyfile.is_none() {
+        base_release.caddyfile = other.caddyfile;
+    }
+    if base_release.readme.is_none() {
+        base_release.readme = other.readme;
+    }
+
+    if let Some(other_npm) = other.npm {
+        let npm = base_release.npm.get_or_insert_with(NpmReleaseConfig::default);
+        if npm.scope.is_none() {
+            npm.scope = other_npm.scope;
+        }
+        if npm.package.is_none() {
+            npm.package = other_npm.package;
+        }
+        if npm.access.is_none() {
+            npm.access = other_npm.access;
+        }
     }
 }
 

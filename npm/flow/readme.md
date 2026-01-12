@@ -14,8 +14,8 @@ This downloads prebuilt binaries from GitHub releases. Falls back to building fr
 
 Or install via npm/bun:
 ```bash
-npm install -g @your-scope/flow
-bun i -g @your-scope/flow
+npm install -g @nikivdev/flow
+bun i -g @nikivdev/flow
 ```
 
 **Environment variables:**

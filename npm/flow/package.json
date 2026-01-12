@@ -1,0 +1,27 @@
+{
+  "bin": {
+    "f": "bin/f.js",
+    "flow": "bin/flow.js",
+    "lin": "bin/lin.js"
+  },
+  "description": "Flow CLI - task runner and developer workflow tool",
+  "engines": {
+    "node": ">=16"
+  },
+  "files": [
+    "bin",
+    "vendor",
+    "README.md",
+    "LICENSE"
+  ],
+  "homepage": "https://myflow.sh",
+  "keywords": [
+    "cli",
+    "task-runner",
+    "workflow",
+    "developer-tools"
+  ],
+  "license": "MIT",
+  "name": "flow",
+  "version": "0.1.0"
+}

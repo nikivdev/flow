@@ -18,8 +18,8 @@ use crate::cli::{AgentsAction, AgentsCommand};
 use crate::config;
 use crate::discover;
 
-/// Default gen repository location.
-const GEN_REPO: &str = "/Users/nikiv/org/gen/gen";
+/// Default gen repository relative path under home dir.
+const DEFAULT_GEN_REPO_REL: &str = "org/gen/gen";
 
 const FLOW_AGENT_NAME: &str = "flow";
 
@@ -61,15 +61,16 @@ fn find_gen() -> Option<GenLocation> {
         return Some(GenLocation::Binary(path));
     }
 
-    // Fall back to repo location
-    let repo = PathBuf::from(GEN_REPO);
-    if repo.join("packages/opencode/src/index.ts").exists() {
-        return Some(GenLocation::Repo(repo));
-    }
-
     // Check GEN_REPO env var
     if let Ok(env_repo) = std::env::var("GEN_REPO") {
         let repo = PathBuf::from(&env_repo);
+        if repo.join("packages/opencode/src/index.ts").exists() {
+            return Some(GenLocation::Repo(repo));
+        }
+    }
+
+    // Fall back to repo location under home dir
+    if let Some(repo) = default_gen_repo() {
         if repo.join("packages/opencode/src/index.ts").exists() {
             return Some(GenLocation::Repo(repo));
         }
@@ -98,8 +99,11 @@ fn list_agents() -> Result<()> {
             println!("⚠ failed to list gen agents: {err}");
         }
     } else {
+        let default_repo = default_gen_repo()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| format!("~/{}", DEFAULT_GEN_REPO_REL));
         println!("⚠ gen not found. Install with:");
-        println!("  cd {} && f install", GEN_REPO);
+        println!("  cd {} && f install", default_repo);
         println!("  # or set GEN_REPO environment variable");
     }
 
@@ -262,11 +266,16 @@ fn get_agent_content(name: &str, path: Option<&Path>) -> Result<String> {
     }
 
     // Try to find agent in common locations
-    let locations = [
+    let mut locations = vec![
         dirs::home_dir().map(|h| h.join(".config/opencode/agent")),
         dirs::home_dir().map(|h| h.join(".opencode/agent")),
-        Some(PathBuf::from(GEN_REPO).join(".opencode/agent")),
     ];
+    if let Some(repo) = gen_repo_from_env() {
+        locations.push(Some(repo.join(".opencode/agent")));
+    }
+    if let Some(repo) = default_gen_repo() {
+        locations.push(Some(repo.join(".opencode/agent")));
+    }
 
     for loc in locations.into_iter().flatten() {
         let agent_path = loc.join(format!("{}.md", name));
@@ -298,6 +307,20 @@ fn get_flow_agent_instructions() -> String {
 - Follow TOML formatting conventions
 "#
     .to_string()
+}
+
+fn default_gen_repo() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(DEFAULT_GEN_REPO_REL))
+}
+
+fn gen_repo_from_env() -> Option<PathBuf> {
+    std::env::var("GEN_REPO").ok().map(PathBuf::from)
+}
+
+fn gen_repo_hint() -> String {
+    default_gen_repo()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| format!("~/{}", DEFAULT_GEN_REPO_REL))
 }
 
 fn run_agent_fzf<'a>(entries: &'a [AgentEntry]) -> Result<Option<FzfAgentResult<'a>>> {
@@ -584,7 +607,7 @@ fn fetch_gen_agent_entries() -> Result<Vec<AgentEntry>> {
     let gen_loc = find_gen().ok_or_else(|| {
         anyhow::anyhow!(
             "gen not found. Install with:\n  cd {} && f install\n  # or set GEN_REPO env var",
-            GEN_REPO
+            gen_repo_hint()
         )
     })?;
 
@@ -707,7 +730,7 @@ fn run_agent(agent: &str, prompt: Vec<String>) -> Result<()> {
             let gen_loc = find_gen().ok_or_else(|| {
                 anyhow::anyhow!(
                     "gen not found. Install with:\n  cd {} && f install\n  # or set GEN_REPO env var",
-                    GEN_REPO
+                    gen_repo_hint()
                 )
             })?;
             invoke_gen(&gen_loc, &full_prompt)?
@@ -753,7 +776,7 @@ pub fn run_flow_agent_capture(prompt: &str) -> Result<String> {
     let gen_loc = find_gen().ok_or_else(|| {
         anyhow::anyhow!(
             "gen not found. Install with:\n  cd {} && f install\n  # or set GEN_REPO env var",
-            GEN_REPO
+            gen_repo_hint()
         )
     })?;
 
@@ -770,7 +793,7 @@ pub fn run_flow_agent_capture_streaming(prompt: &str) -> Result<String> {
     let gen_loc = find_gen().ok_or_else(|| {
         anyhow::anyhow!(
             "gen not found. Install with:\n  cd {} && f install\n  # or set GEN_REPO env var",
-            GEN_REPO
+            gen_repo_hint()
         )
     })?;
 

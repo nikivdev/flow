@@ -1,9 +1,15 @@
 use anyhow::{Result, bail};
 
 use crate::{
-    cli::ReleaseOpts,
+    cli::{GhReleaseCommand, NpmReleaseOpts, ReleaseAction, ReleaseCommand, ReleaseOpts},
+    config::{Config, NpmReleaseConfig},
+    env,
+    gh_release,
+    npm,
     tasks::{self, find_task},
 };
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn available_tasks(cfg: &crate::config::Config) -> String {
     let mut names: Vec<_> = cfg.tasks.iter().map(|task| task.name.clone()).collect();
@@ -41,7 +47,25 @@ fn resolve_release_task(cfg: &crate::config::Config) -> Result<String> {
     );
 }
 
-pub fn run(opts: ReleaseOpts) -> Result<()> {
+pub fn run(cmd: ReleaseCommand) -> Result<()> {
+    if let Some(ReleaseAction::Github(cmd)) = cmd.action.clone() {
+        return gh_release::run(cmd);
+    }
+
+    let (config_path, cfg) = tasks::load_project_config(cmd.config.clone())?;
+
+    match cmd.action {
+        Some(ReleaseAction::Github(cmd)) => gh_release::run(cmd),
+        Some(ReleaseAction::Npm(opts)) => run_npm_release(&config_path, &cfg, opts),
+        Some(ReleaseAction::Task(opts)) => run_task(ReleaseOpts {
+            config: config_path,
+            args: opts.args,
+        }),
+        None => run_default(&config_path, &cfg),
+    }
+}
+
+pub fn run_task(opts: ReleaseOpts) -> Result<()> {
     let (config_path, cfg) = tasks::load_project_config(opts.config)?;
     let task_name = resolve_release_task(&cfg)?;
 
@@ -53,4 +77,173 @@ pub fn run(opts: ReleaseOpts) -> Result<()> {
         name: task_name,
         args: opts.args,
     })
+}
+
+fn run_default(config_path: &Path, cfg: &Config) -> Result<()> {
+    let npm_configured = cfg
+        .release
+        .as_ref()
+        .and_then(|release| release.npm.as_ref())
+        .is_some();
+    let provider = cfg
+        .release
+        .as_ref()
+        .and_then(|release| release.default.as_deref())
+        .or_else(|| if npm_configured { Some("npm") } else { None })
+        .unwrap_or("task");
+
+    match provider {
+        "npm" => run_npm_release(config_path, cfg, NpmReleaseOpts::default()),
+        "task" | "release" => run_task(ReleaseOpts {
+            config: config_path.to_path_buf(),
+            args: Vec::new(),
+        }),
+        "github" | "gh" => gh_release::run(GhReleaseCommand { action: None }),
+        other => bail!(
+            "Unknown release provider '{}'. Expected npm, task, or github.",
+            other
+        ),
+    }
+}
+
+fn run_npm_release(config_path: &Path, cfg: &Config, opts: NpmReleaseOpts) -> Result<()> {
+    let project_root = config_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let npm_config = cfg
+        .release
+        .as_ref()
+        .and_then(|release| release.npm.as_ref());
+    let (scope, package) = resolve_npm_package(cfg, npm_config, &project_root);
+    let full_name = match (scope.as_deref(), package.as_deref()) {
+        (Some(scope), Some(package)) => Some(format!("{}/{}", scope, package)),
+        (None, Some(package)) => Some(package.to_string()),
+        _ => None,
+    };
+
+    let npm_dir = project_root.join("npm");
+    if !npm_dir.exists() {
+        println!("npm/ not found; initializing npm package layout...");
+        npm::init(crate::cli::NpmInitOpts {
+            path: Some(project_root.to_string_lossy().to_string()),
+            scope,
+            name: package,
+        })?;
+    }
+
+    ensure_npm_token()?;
+
+    npm::publish_with_name(
+        crate::cli::NpmPublishOpts {
+            path: Some(project_root.to_string_lossy().to_string()),
+            version: opts.version,
+            access: npm_config.and_then(|cfg| cfg.access.clone()),
+            build: !opts.no_build,
+            all_targets: opts.all_targets,
+            dry_run: opts.dry_run,
+        },
+        full_name,
+    )
+}
+
+fn resolve_npm_package(
+    cfg: &Config,
+    npm_cfg: Option<&NpmReleaseConfig>,
+    project_root: &Path,
+) -> (Option<String>, Option<String>) {
+    let mut scope = npm_cfg.and_then(|cfg| cfg.scope.clone());
+    let mut package = npm_cfg.and_then(|cfg| cfg.package.clone());
+
+    if let Some(pkg) = package.clone() {
+        if let Some((pkg_scope, name)) = pkg.split_once('/') {
+            if pkg_scope.starts_with('@') {
+                scope = Some(pkg_scope.to_string());
+                package = Some(name.to_string());
+            }
+        }
+    }
+
+    if scope.is_none() || package.is_none() {
+        if let Some((owner, repo)) = infer_repo_owner_repo(project_root) {
+            if scope.is_none() {
+                scope = Some(format!("@{}", owner));
+            }
+            if package.is_none() {
+                package = Some(repo);
+            }
+        }
+    }
+
+    if package.is_none() {
+        package = cfg
+            .project_name
+            .clone()
+            .or_else(|| project_root.file_name().and_then(|n| n.to_str()).map(|n| n.to_string()));
+    }
+
+    (scope, package)
+}
+
+fn infer_repo_owner_repo(project_root: &Path) -> Option<(String, String)> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let path = if raw.starts_with("git@") {
+        raw.split_once(':')
+            .map(|(_, p)| p)
+            .unwrap_or(raw.as_str())
+            .to_string()
+    } else if raw.starts_with("https://") || raw.starts_with("http://") {
+        raw.split("://")
+            .nth(1)
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(_, p)| p.to_string())
+            .unwrap_or(raw)
+    } else if raw.starts_with("ssh://") {
+        let trimmed = raw.trim_start_matches("ssh://");
+        trimmed
+            .split_once('/')
+            .map(|(_, p)| p.to_string())
+            .unwrap_or(trimmed.to_string())
+    } else {
+        raw
+    };
+
+    let trimmed = path.trim_end_matches(".git");
+    let mut parts = trimmed.split('/');
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.to_string();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner, repo))
+}
+
+fn ensure_npm_token() -> Result<()> {
+    if std::env::var("NODE_AUTH_TOKEN").is_ok() {
+        return Ok(());
+    }
+
+    let vars = env::fetch_personal_env_vars(&["NODE_AUTH_TOKEN".to_string()])?;
+    if let Some(token) = vars.get("NODE_AUTH_TOKEN") {
+        // Rust 2024 marks env mutation as unsafe; keep scope minimal.
+        unsafe {
+            std::env::set_var("NODE_AUTH_TOKEN", token);
+        }
+        return Ok(());
+    }
+
+    bail!("NODE_AUTH_TOKEN not set. Run `f env new` and choose the npm token.");
 }

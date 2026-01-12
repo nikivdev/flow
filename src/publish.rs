@@ -12,14 +12,70 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use reqwest::blocking::Client;
 use serde::Serialize;
 
-use crate::cli::{PublishCommand, PublishOpts, PublishTarget};
+use crate::cli::{PublishAction, PublishCommand, PublishOpts};
 use crate::config;
+use crate::npm;
 
 /// Run the publish command.
 pub fn run(cmd: PublishCommand) -> Result<()> {
-    match cmd.target {
-        PublishTarget::Gitedit => run_gitedit(cmd.opts),
-        PublishTarget::Github => run_github(cmd.opts),
+    match cmd.action {
+        Some(PublishAction::Gitedit(opts)) => run_gitedit(opts),
+        Some(PublishAction::Github(opts)) => run_github(opts),
+        Some(PublishAction::Npm(npm_cmd)) => npm::run(npm_cmd),
+        None => run_fuzzy_select(),
+    }
+}
+
+/// Show fuzzy picker for publish targets.
+fn run_fuzzy_select() -> Result<()> {
+    let options = vec![
+        ("gitedit", "Publish to gitedit.dev"),
+        ("github", "Publish to GitHub"),
+        ("npm init", "Initialize npm package structure"),
+        ("npm publish", "Build and publish to npm"),
+    ];
+
+    let input = options
+        .iter()
+        .map(|(cmd, desc)| format!("{}\t{}", cmd, desc))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let output = Command::new("fzf")
+        .args(["--height=10", "--reverse", "--delimiter=\t", "--with-nth=1,2"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn fzf")?;
+
+    output
+        .stdin
+        .as_ref()
+        .unwrap()
+        .write_all(input.as_bytes())?;
+
+    let result = output.wait_with_output()?;
+    if !result.status.success() {
+        return Ok(()); // User cancelled
+    }
+
+    let selected = String::from_utf8_lossy(&result.stdout)
+        .trim()
+        .split('\t')
+        .next()
+        .unwrap_or("")
+        .to_string();
+
+    match selected.as_str() {
+        "gitedit" => run_gitedit(PublishOpts::default()),
+        "github" => run_github(PublishOpts::default()),
+        "npm init" => npm::run(crate::cli::NpmCommand {
+            action: Some(crate::cli::NpmAction::Init(Default::default())),
+        }),
+        "npm publish" => npm::run(crate::cli::NpmCommand {
+            action: Some(crate::cli::NpmAction::Publish(Default::default())),
+        }),
+        _ => Ok(()),
     }
 }
 

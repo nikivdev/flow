@@ -7,11 +7,53 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::cli::{CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts, CodeNewOpts};
+use crate::cli::{CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts, CodeNewOpts, NewOpts};
 use crate::config;
 
 const DEFAULT_CODE_ROOT: &str = "~/code";
 const DEFAULT_TEMPLATE_ROOT: &str = "~/new";
+
+/// Create a new project from a template at a specific path.
+/// Usage: f new <template> <path>
+pub fn new_from_template(opts: NewOpts) -> Result<()> {
+    let template_root = config::expand_path(DEFAULT_TEMPLATE_ROOT);
+    let template_dir = template_root.join(opts.template.trim());
+
+    if !template_dir.exists() {
+        bail!("Template not found: {}", template_dir.display());
+    }
+    if !template_dir.is_dir() {
+        bail!("Template path is not a directory: {}", template_dir.display());
+    }
+
+    let target = config::expand_path(&opts.path);
+    let target = if target.is_absolute() {
+        target
+    } else {
+        std::env::current_dir()?.join(&target)
+    };
+
+    if target.exists() {
+        bail!("Destination already exists: {}", target.display());
+    }
+
+    if opts.dry_run {
+        println!("Would copy template {} -> {}", template_dir.display(), target.display());
+        return Ok(());
+    }
+
+    // Create parent directories if needed
+    if let Some(parent) = target.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+        }
+    }
+
+    copy_dir_all(&template_dir, &target)?;
+    println!("Created {}", target.display());
+    Ok(())
+}
 
 pub fn run(cmd: CodeCommand) -> Result<()> {
     match cmd.action {

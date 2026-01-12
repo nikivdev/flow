@@ -661,12 +661,14 @@ fn load_server_setup_template() -> Option<ServerSetupTemplate> {
     }
 
     if host_config.is_none() {
-        let infra_path = PathBuf::from("/Users/nikiv/infra/flow.toml");
-        if infra_path.exists() {
-            if let Ok(cfg) = config::load(&infra_path) {
-                if let Some(host) = cfg.host {
-                    host_config = Some(host);
-                    source = Some(infra_path.display().to_string());
+        if let Ok(template) = std::env::var("FLOW_SETUP_TEMPLATE") {
+            let template_path = config::expand_path(&template);
+            if template_path.exists() {
+                if let Ok(cfg) = config::load(&template_path) {
+                    if let Some(host) = cfg.host {
+                        host_config = Some(host);
+                        source = Some(template_path.display().to_string());
+                    }
                 }
             }
         }
