@@ -34,6 +34,7 @@ pub mod parallel;
 pub mod processes;
 pub mod projects;
 pub mod publish;
+pub mod registry;
 pub mod release;
 pub mod repos;
 pub mod running;

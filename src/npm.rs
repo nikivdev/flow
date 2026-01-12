@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -207,11 +208,14 @@ pub(crate) fn publish_with_name(
     println!("Publishing {}...", pkg_dir.display());
     if !opts.dry_run {
         let access = opts.access.as_deref().unwrap_or("public");
-        let status = Command::new("npm")
-            .args(["publish", "--access", access])
-            .current_dir(&pkg_dir)
-            .status()
-            .context("failed to run npm publish")?;
+        let tag = resolve_publish_tag(&version, opts.tag.as_deref());
+        let mut command = Command::new("npm");
+        command
+            .args(["publish", "--access", access, "--tag", &tag])
+            .current_dir(&pkg_dir);
+
+        let _npmrc = inject_npm_token(&mut command)?;
+        let status = command.status().context("failed to run npm publish")?;
 
         if !status.success() {
             bail!("Failed to publish npm package");
@@ -228,6 +232,32 @@ pub(crate) fn publish_with_name(
     }
 
     Ok(())
+}
+
+fn resolve_publish_tag(version: &str, tag: Option<&str>) -> String {
+    if let Some(tag) = tag {
+        return tag.to_string();
+    }
+    if version.contains('-') {
+        return "latest".to_string();
+    }
+    "latest".to_string()
+}
+
+fn inject_npm_token(command: &mut Command) -> Result<Option<tempfile::NamedTempFile>> {
+    let token = match std::env::var("NODE_AUTH_TOKEN") {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if token.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let mut npmrc = tempfile::NamedTempFile::new().context("failed to create temp npmrc")?;
+    writeln!(npmrc, "//registry.npmjs.org/:_authToken={}", token)
+        .context("failed to write npmrc")?;
+    command.env("NPM_CONFIG_USERCONFIG", npmrc.path());
+    Ok(Some(npmrc))
 }
 
 fn detect_project(root: &Path) -> Result<ProjectMeta> {

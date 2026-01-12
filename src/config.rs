@@ -222,6 +222,12 @@ pub struct ReleaseConfig {
     /// Default release provider (e.g., "npm", "task").
     #[serde(default)]
     pub default: Option<String>,
+    /// Versioning scheme (e.g., "calver").
+    #[serde(default)]
+    pub versioning: Option<String>,
+    /// Optional suffix for calver (appended as pre-release, e.g., "1" -> 2026.1.12-1).
+    #[serde(default)]
+    pub calver_suffix: Option<String>,
     /// Release host domain.
     #[serde(default)]
     pub domain: Option<String>,
@@ -240,6 +246,9 @@ pub struct ReleaseConfig {
     /// npm release config.
     #[serde(default)]
     pub npm: Option<NpmReleaseConfig>,
+    /// Flow registry release config.
+    #[serde(default)]
+    pub registry: Option<RegistryReleaseConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -253,6 +262,31 @@ pub struct NpmReleaseConfig {
     /// npm access level (public/private).
     #[serde(default)]
     pub access: Option<String>,
+    /// npm dist-tag to publish under (e.g., latest, next).
+    #[serde(default)]
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RegistryReleaseConfig {
+    /// Base URL for the registry (e.g., "https://myflow.sh").
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Registry package name (defaults to project name).
+    #[serde(default)]
+    pub package: Option<String>,
+    /// Optional binary names to upload.
+    #[serde(default)]
+    pub bins: Option<Vec<String>>,
+    /// Default binary name to install.
+    #[serde(default)]
+    pub default_bin: Option<String>,
+    /// Env var that holds the registry token.
+    #[serde(default)]
+    pub token_env: Option<String>,
+    /// Whether to update the latest pointer by default.
+    #[serde(default)]
+    pub latest: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1271,6 +1305,32 @@ fn merge_release_config(base: &mut Config, other: Option<ReleaseConfig>) {
         }
         if npm.access.is_none() {
             npm.access = other_npm.access;
+        }
+        if npm.tag.is_none() {
+            npm.tag = other_npm.tag;
+        }
+    }
+
+    if let Some(other_registry) = other.registry {
+        let registry =
+            base_release.registry.get_or_insert_with(RegistryReleaseConfig::default);
+        if registry.url.is_none() {
+            registry.url = other_registry.url;
+        }
+        if registry.package.is_none() {
+            registry.package = other_registry.package;
+        }
+        if registry.bins.is_none() {
+            registry.bins = other_registry.bins;
+        }
+        if registry.default_bin.is_none() {
+            registry.default_bin = other_registry.default_bin;
+        }
+        if registry.token_env.is_none() {
+            registry.token_env = other_registry.token_env;
+        }
+        if registry.latest.is_none() {
+            registry.latest = other_registry.latest;
         }
     }
 }

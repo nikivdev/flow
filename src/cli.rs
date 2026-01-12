@@ -326,6 +326,11 @@ pub enum Commands {
         alias = "rel"
     )]
     Release(ReleaseCommand),
+    #[command(
+        about = "Install a binary from the Flow registry.",
+        long_about = "Download a binary from a Flow registry and install it into your PATH."
+    )]
+    Install(InstallOpts),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1778,6 +1783,8 @@ pub enum ReleaseAction {
     Task(ReleaseTaskOpts),
     /// Publish a release to npm.
     Npm(NpmReleaseOpts),
+    /// Publish a release to a Flow registry.
+    Registry(RegistryReleaseOpts),
     /// Manage GitHub releases.
     #[command(alias = "gh")]
     Github(GhReleaseCommand),
@@ -1798,12 +1805,67 @@ pub struct NpmReleaseOpts {
     /// Skip building binaries before publishing.
     #[arg(long)]
     pub no_build: bool,
+    /// npm dist-tag to publish under (e.g., latest, next).
+    #[arg(long)]
+    pub tag: Option<String>,
     /// Build all supported targets (default: current platform only).
     #[arg(long)]
     pub all_targets: bool,
     /// Dry run: show what would be published without publishing.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct RegistryReleaseOpts {
+    /// Version to publish (auto-detected if omitted).
+    #[arg(long, short)]
+    pub version: Option<String>,
+    /// Registry base URL (overrides flow.toml).
+    #[arg(long)]
+    pub registry: Option<String>,
+    /// Override package name for the registry.
+    #[arg(long)]
+    pub package: Option<String>,
+    /// Override the binary name(s) to upload.
+    #[arg(long, value_name = "BIN")]
+    pub bin: Vec<String>,
+    /// Skip building binaries before publishing.
+    #[arg(long)]
+    pub no_build: bool,
+    /// Mark this version as latest in the registry.
+    #[arg(long, conflicts_with = "no_latest")]
+    pub latest: bool,
+    /// Skip updating the latest pointer.
+    #[arg(long, conflicts_with = "latest")]
+    pub no_latest: bool,
+    /// Dry run: show what would be published without publishing.
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct InstallOpts {
+    /// Package name to install.
+    pub name: String,
+    /// Registry base URL (defaults to FLOW_REGISTRY_URL).
+    #[arg(long)]
+    pub registry: Option<String>,
+    /// Version to install (defaults to latest).
+    #[arg(long, short)]
+    pub version: Option<String>,
+    /// Binary name to install (defaults to the package name or manifest default).
+    #[arg(long)]
+    pub bin: Option<String>,
+    /// Install directory (defaults to ~/bin).
+    #[arg(long)]
+    pub bin_dir: Option<PathBuf>,
+    /// Skip checksum verification.
+    #[arg(long)]
+    pub no_verify: bool,
+    /// Overwrite existing binary if present.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -2104,6 +2166,9 @@ pub struct NpmPublishOpts {
     /// npm access level (public/private).
     #[arg(long)]
     pub access: Option<String>,
+    /// npm dist-tag to publish under (e.g., latest, next).
+    #[arg(long)]
+    pub tag: Option<String>,
     /// Build binaries before publishing.
     #[arg(long, short)]
     pub build: bool,

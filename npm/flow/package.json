@@ -22,6 +22,6 @@
     "developer-tools"
   ],
   "license": "MIT",
-  "name": "flow",
-  "version": "0.1.0"
+  "name": "@nikivdev/flow",
+  "version": "2026.1.12-1"
 }

@@ -8,8 +8,8 @@ use flowd::{
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, fixup, history, home, hub,
     init, init_tracing, log_server, notify, palette, parallel, processes, projects, publish,
-    release, repos, services, setup, skills, ssh_keys, storage, sync, task_match, tasks, todo,
-    tools, upgrade, upstream, web,
+    registry, release, repos, services, setup, skills, ssh_keys, storage, sync, task_match, tasks,
+    todo, tools, upgrade, upstream, web,
 };
 
 fn main() -> Result<()> {
@@ -242,6 +242,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Release(cmd)) => {
             release::run(cmd)?;
+        }
+        Some(Commands::Install(opts)) => {
+            registry::install(opts)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

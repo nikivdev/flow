@@ -691,6 +691,12 @@ struct EnvTemplate {
     key: &'static str,
     description: &'static str,
     instructions: &'static [&'static str],
+    verify: Option<EnvTemplateVerify>,
+}
+
+#[derive(Clone, Copy)]
+enum EnvTemplateVerify {
+    NpmWhoami,
 }
 
 fn env_templates() -> Vec<EnvTemplate> {
@@ -705,6 +711,7 @@ fn env_templates() -> Vec<EnvTemplate> {
             "Scope it to the org/package you need",
             "Copy the token value",
         ],
+        verify: Some(EnvTemplateVerify::NpmWhoami),
     }]
 }
 
@@ -737,11 +744,55 @@ fn new_env_template() -> Result<()> {
     set_personal_env_var(template.key, &value)?;
 
     println!();
+    verify_env_template(&template, &value)?;
+    println!();
     println!("Next:");
-    println!(
-        "  f env run --personal --keys {} -- f publish npm publish --build --version <version>",
-        template.key
-    );
+    println!("  f release --build --version <version>");
+    Ok(())
+}
+
+fn verify_env_template(template: &EnvTemplate, value: &str) -> Result<()> {
+    let Some(verify) = template.verify else {
+        return Ok(());
+    };
+    match verify {
+        EnvTemplateVerify::NpmWhoami => verify_npm_token(value),
+    }
+}
+
+fn verify_npm_token(token: &str) -> Result<()> {
+    if which("npm").is_err() {
+        println!("npm not found; skipping token validation.");
+        return Ok(());
+    }
+
+    let mut npmrc = tempfile::NamedTempFile::new().context("failed to create temp npmrc")?;
+    writeln!(npmrc, "//registry.npmjs.org/:_authToken={}", token)
+        .context("failed to write npmrc")?;
+
+    let output = Command::new("npm")
+        .args(["whoami", "--registry", "https://registry.npmjs.org/"])
+        .env("NPM_CONFIG_USERCONFIG", npmrc.path())
+        .output()
+        .context("failed to run npm whoami")?;
+
+    if output.status.success() {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if name.is_empty() {
+            println!("✓ npm token validated.");
+        } else {
+            println!("✓ npm token validated for user: {}", name);
+        }
+    } else {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if err.is_empty() {
+            println!("WARN npm token validation failed.");
+        } else {
+            println!("WARN npm token validation failed: {}", err);
+        }
+        println!("WARN Check that the token has org access and is not expired.");
+    }
+
     Ok(())
 }
 
