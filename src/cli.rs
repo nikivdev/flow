@@ -263,9 +263,9 @@ pub enum Commands {
     Notify(NotifyCommand),
     #[command(
         about = "Browse and analyze git commits with AI session metadata.",
-        long_about = "Fuzzy search through git commits, showing attached AI sessions and review metadata. Allows jumping between commits to see the context and reasoning behind changes."
+        long_about = "Fuzzy search through git commits, showing attached AI sessions and review metadata. Supports notable commits and quick actions."
     )]
-    Commits(CommitsOpts),
+    Commits(CommitsCommand),
     #[command(
         about = "Bootstrap project and run setup task or aliases.",
         long_about = "Bootstraps the project if needed, creates flow.toml when missing, then runs the 'setup' task or prints shell aliases."
@@ -1742,6 +1742,30 @@ pub struct NotifyCommand {
     /// Expiration time in seconds (default: 300 = 5 minutes).
     #[arg(short, long, default_value = "300")]
     pub expires: u64,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CommitsCommand {
+    #[command(subcommand)]
+    pub action: Option<CommitsAction>,
+    #[command(flatten)]
+    pub opts: CommitsOpts,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CommitsAction {
+    /// List notable commits.
+    Top,
+    /// Mark a commit as notable.
+    Mark {
+        /// Commit hash (short or full).
+        hash: String,
+    },
+    /// Remove a commit from notable list.
+    Unmark {
+        /// Commit hash (short or full).
+        hash: String,
+    },
 }
 
 #[derive(Args, Debug, Clone, Default)]
