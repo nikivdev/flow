@@ -215,8 +215,8 @@ fn main() -> Result<()> {
         Some(Commands::Notify(cmd)) => {
             notify::run(cmd)?;
         }
-        Some(Commands::Commits(opts)) => {
-            commits::run(opts)?;
+        Some(Commands::Commits(cmd)) => {
+            commits::run(cmd)?;
         }
         Some(Commands::Setup(opts)) => {
             setup::run(opts)?;
