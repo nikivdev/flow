@@ -7,7 +7,7 @@ Complete documentation for all `f` (flow) commands.
 | Command | Description |
 |---------|-------------|
 | [`deploy`](deploy.md) | Deploy to Linux hosts, Cloudflare Workers, or Railway |
-| [`release`](release.md) | Publish a release to registry, npm, or GitHub |
+| [`release`](release.md) | Publish a release to registry or GitHub |
 | [`publish`](publish.md) | Publish project to GitHub |
 | [`install`](install.md) | Install a binary from a Flow registry |
 | [`repos`](repos.md) | Clone repositories into ~/repos |

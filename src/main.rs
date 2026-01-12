@@ -6,10 +6,10 @@ use clap::{Parser, error::ErrorKind};
 use flowd::{
     agents, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
-    code, commit, commits, daemon, deploy, deps, docs, doctor, env, fixup, history, home, hub,
-    init, init_tracing, log_server, notify, palette, parallel, processes, projects, publish,
-    registry, release, repos, services, setup, skills, ssh_keys, storage, sync, task_match, tasks,
-    todo, tools, upgrade, upstream, web,
+    code, commit, commits, daemon, deploy, deps, docs, doctor, env, fixup, help_search, history,
+    home, hub, init, init_tracing, log_server, notify, palette, parallel, processes, projects,
+    publish, registry, release, repos, services, setup, skills, ssh_keys, storage, sync,
+    task_match, tasks, todo, tools, upgrade, upstream, web,
 };
 
 fn main() -> Result<()> {
@@ -17,6 +17,17 @@ fn main() -> Result<()> {
     flowd::config::load_global_secrets();
 
     let raw_args: Vec<String> = std::env::args().collect();
+
+    // Handle `f ?` for fuzzy help search before clap parsing
+    if raw_args.get(1).map(|s| s.as_str()) == Some("?") {
+        return help_search::run();
+    }
+
+    // Handle --help-full early for instant output
+    if raw_args.iter().any(|s| s == "--help-full") {
+        return help_search::print_full_json();
+    }
+
     let cli = match Cli::try_parse_from(&raw_args) {
         Ok(cli) => cli,
         Err(err) => {
