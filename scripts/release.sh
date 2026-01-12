@@ -14,7 +14,7 @@ fi
 
 if ! command -v infra >/dev/null 2>&1; then
     echo "release: infra CLI not found. Build it with:" >&2
-    echo "  (cd /Users/nikiv/infra/cli && cargo build --release && cp target/release/infra ~/.local/bin/infra)" >&2
+    echo "  (cd /path/to/infra/cli && cargo build --release && cp target/release/infra ~/.local/bin/infra)" >&2
     exit 1
 fi
 

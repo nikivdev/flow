@@ -35,6 +35,8 @@ past/
 private
 .blade
 .npm-cache
+/npm/**/vendor/
+/npm/flow-*/
 /test-data
 testing/
 desktop/.tauri-dev.json

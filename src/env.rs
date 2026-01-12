@@ -14,6 +14,7 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::Url;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use which::which;
 
 use crate::agent_setup;
 use crate::cli::{EnvAction, ProjectEnvAction, TokenAction};
@@ -624,6 +625,7 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
         EnvAction::Sync => agent_setup::run()?,
         EnvAction::Unlock => unlock_env_read()?,
         EnvAction::Login => login()?,
+        EnvAction::New => new_env_template()?,
         EnvAction::Pull { environment } => pull(&environment)?,
         EnvAction::Push { environment } => push(&environment)?,
         EnvAction::Guide { environment } => guide(&environment)?,
@@ -680,6 +682,145 @@ fn run_token_action(action: TokenAction) -> Result<()> {
         TokenAction::Revoke { name } => token_revoke(&name)?,
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct EnvTemplate {
+    id: &'static str,
+    title: &'static str,
+    key: &'static str,
+    description: &'static str,
+    instructions: &'static [&'static str],
+}
+
+fn env_templates() -> Vec<EnvTemplate> {
+    vec![EnvTemplate {
+        id: "npm",
+        title: "npm publish token",
+        key: "NODE_AUTH_TOKEN",
+        description: "Token used by npm to publish packages.",
+        instructions: &[
+            "Open https://www.npmjs.com/settings/tokens",
+            "Create an Automation token",
+            "Scope it to the org/package you need",
+            "Copy the token value",
+        ],
+    }]
+}
+
+fn new_env_template() -> Result<()> {
+    ensure_env_login()?;
+
+    let templates = env_templates();
+    let Some(template) = select_env_template(&templates)? else {
+        println!("No template selected.");
+        return Ok(());
+    };
+
+    println!("Template: {}", template.title);
+    println!("Key: {}", template.key);
+    println!("{}", template.description);
+    println!();
+    println!("How to get it:");
+    for step in template.instructions {
+        println!("  - {}", step);
+    }
+    println!();
+
+    let label = format!("Enter {} token (input hidden): ", template.id);
+    let value = prompt_secret(&label)?;
+    let Some(value) = value else {
+        println!("No token entered; nothing saved.");
+        return Ok(());
+    };
+
+    set_personal_env_var(template.key, &value)?;
+
+    println!();
+    println!("Next:");
+    println!(
+        "  f env run --personal --keys {} -- f publish npm publish --build --version <version>",
+        template.key
+    );
+    Ok(())
+}
+
+fn select_env_template(templates: &[EnvTemplate]) -> Result<Option<EnvTemplate>> {
+    if templates.is_empty() {
+        return Ok(None);
+    }
+
+    let use_fzf = std::io::stdin().is_terminal() && which("fzf").is_ok();
+    if use_fzf {
+        let mut lines = Vec::new();
+        for template in templates {
+            lines.push(format!("{}\t{}", template.id, template.title));
+        }
+        let input = lines.join("\n");
+
+        let mut child = Command::new("fzf")
+            .args([
+                "--height=40%",
+                "--reverse",
+                "--delimiter=\t",
+                "--with-nth=1,2",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to run fzf. Is it installed?")?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            stdin.write_all(input.as_bytes())?;
+        }
+
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+
+        let selected = String::from_utf8_lossy(&output.stdout);
+        let selected = selected.trim();
+        if selected.is_empty() {
+            return Ok(None);
+        }
+        let id = selected.split('\t').next().unwrap_or(selected);
+        return Ok(templates.iter().copied().find(|t| t.id == id));
+    }
+
+    println!("Available templates:");
+    for (idx, template) in templates.iter().enumerate() {
+        println!("  {}. {} ({})", idx + 1, template.title, template.key);
+    }
+    println!();
+    let selection = prompt_line("Select a template number (blank to cancel): ")?;
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let idx: usize = selection.trim().parse().context("Invalid selection")?;
+    if idx == 0 || idx > templates.len() {
+        bail!("Selection out of range");
+    }
+    Ok(Some(templates[idx - 1]))
+}
+
+fn ensure_env_login() -> Result<()> {
+    let auth = load_auth_config()?;
+    if auth.token.is_some() {
+        return Ok(());
+    }
+
+    if !std::io::stdin().is_terminal() {
+        bail!("Not logged in. Run `f env login` first.");
+    }
+
+    if prompt_confirm("Not logged in. Run `f env login` now? (y/N): ")? {
+        login()?;
+        return Ok(());
+    }
+
+    bail!("Not logged in. Run `f env login` first.");
 }
 
 fn run_project_env_action(action: ProjectEnvAction) -> Result<()> {

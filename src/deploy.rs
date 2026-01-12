@@ -333,7 +333,7 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
         Some(DeployAction::Setup) => setup_cloudflare(&project_root, flow_config.as_ref()),
         Some(DeployAction::Railway) => deploy_railway(&project_root, flow_config.as_ref()),
         Some(DeployAction::Config) => configure_deploy(),
-        Some(DeployAction::Release(opts)) => release::run(opts),
+        Some(DeployAction::Release(opts)) => release::run_task(opts),
         Some(DeployAction::Status) => show_status(&project_root, flow_config.as_ref()),
         Some(DeployAction::Logs {
             follow,

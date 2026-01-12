@@ -28,6 +28,7 @@ pub mod lmstudio;
 pub mod log_server;
 pub mod log_store;
 pub mod notify;
+pub mod npm;
 pub mod palette;
 pub mod parallel;
 pub mod processes;

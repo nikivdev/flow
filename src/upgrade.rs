@@ -22,6 +22,12 @@ const GITHUB_OWNER: &str = "nikivdev";
 const GITHUB_REPO: &str = "flow";
 const UPGRADE_CHECK_INTERVAL_HOURS: u64 = 24;
 
+fn upgrade_repo() -> (String, String) {
+    let owner = env::var("FLOW_GITHUB_OWNER").unwrap_or_else(|_| GITHUB_OWNER.to_string());
+    let repo = env::var("FLOW_GITHUB_REPO").unwrap_or_else(|_| GITHUB_REPO.to_string());
+    (owner, repo)
+}
+
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
     tag_name: String,
@@ -123,9 +129,10 @@ fn detect_platform() -> Result<(String, String)> {
 
 /// Fetch the latest release info from GitHub.
 fn fetch_latest_release(client: &Client) -> Result<GitHubRelease> {
+    let (owner, repo) = upgrade_repo();
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases/latest",
-        GITHUB_OWNER, GITHUB_REPO
+        owner, repo
     );
 
     let response = client

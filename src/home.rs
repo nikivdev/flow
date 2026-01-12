@@ -11,8 +11,6 @@ use serde::Deserialize;
 use crate::cli::HomeOpts;
 use crate::{config, ssh, ssh_keys};
 
-const KAR_REPO_URL_HTTPS: &str = "https://github.com/nikivdev/kar.git";
-const KAR_REPO_URL_SSH: &str = "git@github.com:nikivdev/kar.git";
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
 
 #[derive(Debug, Clone)]
@@ -37,6 +35,10 @@ struct HomeConfigFile {
     internal_repo: Option<String>,
     #[serde(default)]
     internal_repo_url: Option<String>,
+    #[serde(default)]
+    kar_repo: Option<String>,
+    #[serde(default)]
+    kar_repo_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -45,6 +47,10 @@ struct HomeConfigSection {
     internal_repo: Option<String>,
     #[serde(default)]
     internal_repo_url: Option<String>,
+    #[serde(default)]
+    kar_repo: Option<String>,
+    #[serde(default)]
+    kar_repo_url: Option<String>,
 }
 
 pub fn run(opts: HomeOpts) -> Result<()> {
@@ -102,7 +108,11 @@ pub fn run(opts: HomeOpts) -> Result<()> {
             Err(err) => println!("warning: failed to configure git https rewrites: {}", err),
         }
     }
-    ensure_kar_repo(&flow_bin, prefer_ssh)?;
+    if let Some(kar_repo) = resolve_kar_repo(&config_dir)? {
+        ensure_kar_repo(&flow_bin, prefer_ssh, &kar_repo)?;
+    } else {
+        println!("No kar repo configured; skipping kar deploy.");
+    }
     validate_setup(&config_dir)?;
 
     if !archived.is_empty() {
@@ -361,13 +371,9 @@ fn create_symlink(source: &Path, dest: &Path) -> Result<()> {
     }
 }
 
-fn ensure_kar_repo(flow_bin: &Path, prefer_ssh: bool) -> Result<()> {
-    let repo_url = if prefer_ssh {
-        KAR_REPO_URL_SSH
-    } else {
-        KAR_REPO_URL_HTTPS
-    };
-    let repo = parse_repo_input(repo_url)?;
+fn ensure_kar_repo(flow_bin: &Path, prefer_ssh: bool, repo_url: &str) -> Result<()> {
+    let repo_url = coerce_repo_url(repo_url, prefer_ssh);
+    let repo = parse_repo_input(&repo_url)?;
     let root = config::expand_path(DEFAULT_REPOS_ROOT);
     let owner_dir = root.join(&repo.owner);
     let repo_path = owner_dir.join(&repo.repo);
@@ -624,6 +630,41 @@ fn read_internal_repo(config_dir: &Path) -> Result<Option<String>> {
             .as_ref()
             .and_then(|h| h.internal_repo.clone().or(h.internal_repo_url.clone()));
         let flat = parsed.internal_repo.or(parsed.internal_repo_url);
+        if from_section.is_some() {
+            return Ok(from_section);
+        }
+        if flat.is_some() {
+            return Ok(flat);
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_kar_repo(config_dir: &Path) -> Result<Option<String>> {
+    if let Ok(value) = std::env::var("FLOW_HOME_KAR_REPO") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(trimmed.to_string()));
+        }
+    }
+    read_kar_repo(config_dir)
+}
+
+fn read_kar_repo(config_dir: &Path) -> Result<Option<String>> {
+    let candidates = [config_dir.join("home.toml"), config_dir.join(".home.toml")];
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed: HomeConfigFile =
+            toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
+        let from_section = parsed
+            .home
+            .as_ref()
+            .and_then(|h| h.kar_repo.clone().or(h.kar_repo_url.clone()));
+        let flat = parsed.kar_repo.or(parsed.kar_repo_url);
         if from_section.is_some() {
             return Ok(from_section);
         }
