@@ -219,7 +219,7 @@ pub struct FlowSettings {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ReleaseConfig {
-    /// Default release provider (e.g., "npm", "task").
+    /// Default release provider (e.g., "registry", "task").
     #[serde(default)]
     pub default: Option<String>,
     /// Versioning scheme (e.g., "calver").
@@ -243,28 +243,9 @@ pub struct ReleaseConfig {
     /// Readme file path to update.
     #[serde(default)]
     pub readme: Option<String>,
-    /// npm release config.
-    #[serde(default)]
-    pub npm: Option<NpmReleaseConfig>,
     /// Flow registry release config.
     #[serde(default)]
     pub registry: Option<RegistryReleaseConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct NpmReleaseConfig {
-    /// npm scope (e.g., "@your-org").
-    #[serde(default)]
-    pub scope: Option<String>,
-    /// npm package name (e.g., "flow" or "@your-org/flow").
-    #[serde(default)]
-    pub package: Option<String>,
-    /// npm access level (public/private).
-    #[serde(default)]
-    pub access: Option<String>,
-    /// npm dist-tag to publish under (e.g., latest, next).
-    #[serde(default)]
-    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1293,22 +1274,6 @@ fn merge_release_config(base: &mut Config, other: Option<ReleaseConfig>) {
     }
     if base_release.readme.is_none() {
         base_release.readme = other.readme;
-    }
-
-    if let Some(other_npm) = other.npm {
-        let npm = base_release.npm.get_or_insert_with(NpmReleaseConfig::default);
-        if npm.scope.is_none() {
-            npm.scope = other_npm.scope;
-        }
-        if npm.package.is_none() {
-            npm.package = other_npm.package;
-        }
-        if npm.access.is_none() {
-            npm.access = other_npm.access;
-        }
-        if npm.tag.is_none() {
-            npm.tag = other_npm.tag;
-        }
     }
 
     if let Some(other_registry) = other.registry {

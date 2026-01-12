@@ -7,7 +7,6 @@ Release a project based on `flow.toml` defaults or explicit subcommands.
 ```bash
 f release
 f release registry
-f release npm
 f release gh
 ```
 
@@ -40,22 +39,6 @@ latest = true
 - `--bin <NAME>`: override the binaries to upload (repeatable).
 - `--no-build`: skip building binaries.
 - `--latest` / `--no-latest`: control latest pointer updates.
-
-## npm releases
-
-```bash
-f release npm
-```
-
-### flow.toml
-
-```toml
-[release.npm]
-scope = "@your-org"
-package = "your-package"
-access = "public"
-tag = "latest"
-```
 
 ## GitHub releases
 

@@ -14,14 +14,12 @@ use serde::Serialize;
 
 use crate::cli::{PublishAction, PublishCommand, PublishOpts};
 use crate::config;
-use crate::npm;
 
 /// Run the publish command.
 pub fn run(cmd: PublishCommand) -> Result<()> {
     match cmd.action {
         Some(PublishAction::Gitedit(opts)) => run_gitedit(opts),
         Some(PublishAction::Github(opts)) => run_github(opts),
-        Some(PublishAction::Npm(npm_cmd)) => npm::run(npm_cmd),
         None => run_fuzzy_select(),
     }
 }
@@ -31,8 +29,6 @@ fn run_fuzzy_select() -> Result<()> {
     let options = vec![
         ("gitedit", "Publish to gitedit.dev"),
         ("github", "Publish to GitHub"),
-        ("npm init", "Initialize npm package structure"),
-        ("npm publish", "Build and publish to npm"),
     ];
 
     let input = options
@@ -69,12 +65,6 @@ fn run_fuzzy_select() -> Result<()> {
     match selected.as_str() {
         "gitedit" => run_gitedit(PublishOpts::default()),
         "github" => run_github(PublishOpts::default()),
-        "npm init" => npm::run(crate::cli::NpmCommand {
-            action: Some(crate::cli::NpmAction::Init(Default::default())),
-        }),
-        "npm publish" => npm::run(crate::cli::NpmCommand {
-            action: Some(crate::cli::NpmAction::Publish(Default::default())),
-        }),
         _ => Ok(()),
     }
 }

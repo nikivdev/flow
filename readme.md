@@ -12,12 +12,6 @@ curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.
 
 This downloads prebuilt binaries from GitHub releases. Falls back to building from source if no binary is available for your platform.
 
-Or install via npm/bun:
-```bash
-npm install -g @your-scope/flow
-bun i -g @your-scope/flow
-```
-
 **Environment variables:**
 - `FLOW_VERSION=v0.1.0` - Install specific version
 - `FLOW_BIN_DIR=/custom/path` - Custom install location (default: `~/.local/bin`)

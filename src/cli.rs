@@ -15,6 +15,10 @@ use crate::commit::ReviewModelArg;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// Output all commands in machine-readable JSON format for external tools.
+    #[arg(long, global = true)]
+    pub help_full: bool,
 }
 
 /// Returns version string with relative build time (e.g., "0.1.0 (built 5m ago)")
@@ -290,7 +294,7 @@ pub enum Commands {
     )]
     Deploy(DeployCommand),
     #[command(
-        about = "Publish project to gitedit.dev, GitHub, or npm.",
+        about = "Publish project to gitedit.dev or GitHub.",
         long_about = "Publish the current project. Without a subcommand, shows a fuzzy picker to choose the target."
     )]
     Publish(PublishCommand),
@@ -321,8 +325,8 @@ pub enum Commands {
     )]
     Upgrade(UpgradeOpts),
     #[command(
-        about = "Release a project (npm, GitHub, or task).",
-        long_about = "Release a project based on flow.toml defaults. Supports npm releases, GitHub releases, or running a release task.",
+        about = "Release a project (registry, GitHub, or task).",
+        long_about = "Release a project based on flow.toml defaults. Supports Flow registry releases, GitHub releases, or running a release task.",
         alias = "rel"
     )]
     Release(ReleaseCommand),
@@ -1066,7 +1070,7 @@ pub enum EnvAction {
     Sync,
     /// Unlock env read access (Touch ID on macOS).
     Unlock,
-    /// Create a new env token from templates (npm, etc.).
+    /// Create a new env token from available templates.
     New,
     /// Authenticate with 1focus to fetch env vars.
     Login,
@@ -1554,8 +1558,6 @@ pub enum PublishAction {
     Gitedit(PublishOpts),
     /// Publish to GitHub.
     Github(PublishOpts),
-    /// Publish binaries to npm registry.
-    Npm(NpmCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1781,8 +1783,6 @@ pub struct ReleaseCommand {
 pub enum ReleaseAction {
     /// Run the configured release task.
     Task(ReleaseTaskOpts),
-    /// Publish a release to npm.
-    Npm(NpmReleaseOpts),
     /// Publish a release to a Flow registry.
     Registry(RegistryReleaseOpts),
     /// Manage GitHub releases.
@@ -1795,25 +1795,6 @@ pub struct ReleaseTaskOpts {
     /// Additional arguments passed to the release task command.
     #[arg(value_name = "ARGS", trailing_var_arg = true)]
     pub args: Vec<String>,
-}
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct NpmReleaseOpts {
-    /// Version to publish (auto-detected if omitted).
-    #[arg(long, short)]
-    pub version: Option<String>,
-    /// Skip building binaries before publishing.
-    #[arg(long)]
-    pub no_build: bool,
-    /// npm dist-tag to publish under (e.g., latest, next).
-    #[arg(long)]
-    pub tag: Option<String>,
-    /// Build all supported targets (default: current platform only).
-    #[arg(long)]
-    pub all_targets: bool,
-    /// Dry run: show what would be published without publishing.
-    #[arg(long, short = 'n')]
-    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -2126,56 +2107,4 @@ pub struct DocsHubOpts {
     /// Sync content and exit without running the dev server.
     #[arg(long)]
     pub sync_only: bool,
-}
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct NpmCommand {
-    #[command(subcommand)]
-    pub action: Option<NpmAction>,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub enum NpmAction {
-    /// Initialize npm package structure for a project.
-    Init(NpmInitOpts),
-    /// Build and publish to npm.
-    Publish(NpmPublishOpts),
-}
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct NpmInitOpts {
-    /// Project path (defaults to current directory).
-    #[arg(value_name = "PATH")]
-    pub path: Option<String>,
-    /// npm scope (e.g., @your-org).
-    #[arg(long, short)]
-    pub scope: Option<String>,
-    /// Override package name (defaults to Cargo.toml/package.json name).
-    #[arg(long, short)]
-    pub name: Option<String>,
-}
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct NpmPublishOpts {
-    /// Project path (defaults to current directory).
-    #[arg(value_name = "PATH")]
-    pub path: Option<String>,
-    /// Version to publish (auto-detected from Cargo.toml or package.json).
-    #[arg(long, short)]
-    pub version: Option<String>,
-    /// npm access level (public/private).
-    #[arg(long)]
-    pub access: Option<String>,
-    /// npm dist-tag to publish under (e.g., latest, next).
-    #[arg(long)]
-    pub tag: Option<String>,
-    /// Build binaries before publishing.
-    #[arg(long, short)]
-    pub build: bool,
-    /// Build all supported targets (default: current platform only).
-    #[arg(long)]
-    pub all_targets: bool,
-    /// Dry run: show what would be published without publishing.
-    #[arg(long, short = 'n')]
-    pub dry_run: bool,
 }

@@ -19,8 +19,8 @@ commit_with_check_review_url = "http://100.114.156.47:3000/review"
 
 [release]
 # Default release provider for `f release`.
-default = "npm"
-# Use calendar versioning for npm releases (YYYY.M.D).
+default = "registry"
+# Use calendar versioning for registry releases (YYYY.M.D).
 versioning = "calver"
 # Set these to your release host values.
 domain = "flow.yourdomain.com"
@@ -28,11 +28,6 @@ base_url = "https://flow.yourdomain.com"
 root = "/var/www/flow"
 caddyfile = "/etc/caddy/Caddyfile"
 readme = "readme.md"
-
-[release.npm]
-scope = "@nikivdev"
-package = "flow"
-access = "public"
 
 [release.registry]
 url = "https://myflow.sh"
