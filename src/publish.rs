@@ -181,7 +181,13 @@ pub fn run_github(opts: PublishOpts) -> Result<()> {
                 println!("Updating visibility to {}...", target_visibility);
                 let visibility_flag = format!("--visibility={}", target_visibility);
                 let update_result = Command::new("gh")
-                    .args(["repo", "edit", &full_name, &visibility_flag])
+                    .args([
+                        "repo",
+                        "edit",
+                        &full_name,
+                        &visibility_flag,
+                        "--accept-visibility-change-consequences",
+                    ])
                     .status()
                     .context("failed to update repository visibility")?;
 
@@ -892,10 +898,14 @@ fn push_to_origin() -> Result<()> {
         branch
     };
 
-    Command::new("git")
+    let status = Command::new("git")
         .args(["push", "-u", "origin", &branch])
         .status()
         .context("failed to push to origin")?;
+
+    if !status.success() {
+        bail!("git push failed");
+    }
 
     Ok(())
 }
