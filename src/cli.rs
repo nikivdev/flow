@@ -964,19 +964,24 @@ pub struct SupervisorCommand {
     #[command(subcommand)]
     pub action: Option<SupervisorAction>,
     /// Socket path for supervisor IPC (defaults to ~/.config/flow/supervisor.sock).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub socket: Option<PathBuf>,
-    /// Start boot daemons in addition to autostart daemons.
-    #[arg(long)]
-    pub boot: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SupervisorAction {
     /// Start the supervisor in the background.
-    Start,
+    Start {
+        /// Start boot daemons in addition to autostart daemons.
+        #[arg(long)]
+        boot: bool,
+    },
     /// Run the supervisor in the foreground (blocking).
-    Run,
+    Run {
+        /// Start boot daemons in addition to autostart daemons.
+        #[arg(long)]
+        boot: bool,
+    },
     /// Stop the supervisor if running.
     Stop,
     /// Show supervisor status.
