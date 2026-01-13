@@ -18,6 +18,7 @@ import {
   Trash2,
 } from "lucide-react"
 import { Streamdown, defaultRehypePlugins, defaultRemarkPlugins } from "streamdown"
+import FlowLogsView from "./components/FlowLogsView"
 
 const TOOL_LINE_PREFIXES = ["[tool_use]", "[tool_result]", "[thinking]"]
 const ROOTS_STORAGE_KEY = "flow.desktop.roots"
@@ -66,21 +67,6 @@ type WebSessionMessage = {
 type SessionWithProject = WebSession & {
   projectName?: string
   projectRoot?: string
-}
-
-type LogEntry = {
-  project: string
-  content: string
-  timestamp: number
-  log_type: string
-  service: string
-  stack?: string | null
-  format: string
-}
-
-type StoredLogEntry = {
-  id: number
-  entry: LogEntry
 }
 
 type ServerSnapshot = {
@@ -750,12 +736,10 @@ const App = () => {
   const [roots, setRoots] = useState<string[]>([])
   const [selectedProjectRoot, setSelectedProjectRoot] = useState<string | null>(null)
   const [sessions, setSessions] = useState<SessionWithProject[]>([])
-  const [logs, setLogs] = useState<StoredLogEntry[]>([])
   const [view, setView] = useState<"sessions" | "logs" | "servers">("sessions")
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set())
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState(false)
-  const [loadingLogs, setLoadingLogs] = useState(false)
   const [servers, setServers] = useState<ServerSnapshot[]>([])
   const [serverLogs, setServerLogs] = useState<Record<string, ServerLogEntry[]>>({})
   const [loadingServers, setLoadingServers] = useState(false)
@@ -916,23 +900,6 @@ const App = () => {
     }
   }, [projects, selectedProjectRoot, selectedProject])
 
-  const loadLogs = useCallback(async () => {
-    setLoadingLogs(true)
-    try {
-      const projectName = selectedProject?.name && selectedProjectRoot ? selectedProject.name : null
-      const data = (await invoke("logs_for_project", {
-        project: projectName,
-        limit: 200,
-      })) as StoredLogEntry[]
-      setLogs(data)
-    } catch (error) {
-      console.error("Failed to load logs", error)
-      setLogs([])
-    } finally {
-      setLoadingLogs(false)
-    }
-  }, [selectedProject, selectedProjectRoot])
-
   const fetchServers = useCallback(async () => {
     setLoadingServers(true)
     setServerError(null)
@@ -987,13 +954,6 @@ const App = () => {
     if (view !== "sessions") return
     loadSessions()
   }, [view, loadSessions])
-
-  useEffect(() => {
-    if (view !== "logs") return
-    loadLogs()
-    const interval = window.setInterval(loadLogs, 5000)
-    return () => window.clearInterval(interval)
-  }, [view, loadLogs])
 
   useEffect(() => {
     if (view !== "servers") return
@@ -1118,7 +1078,7 @@ const App = () => {
       {
         id: "refresh",
         label: "Refresh projects",
-        hint: "Reload sessions and logs",
+        hint: "Reload sessions + servers",
         run: refreshProjects,
       },
       {
@@ -1128,7 +1088,7 @@ const App = () => {
       },
       {
         id: "view-logs",
-        label: "Show logs",
+        label: "Show flow logs",
         run: () => setView("logs"),
       },
       {
@@ -1166,10 +1126,16 @@ const App = () => {
   }, [addRoot, refreshProjects, selectedProject, projects])
 
   const headerTitle =
-    view === "servers" ? "Servers" : selectedProject?.name ?? "All projects"
+    view === "servers"
+      ? "Servers"
+      : view === "logs"
+        ? "Flow logs"
+        : selectedProject?.name ?? "All projects"
   const headerMeta =
     view === "servers"
       ? `Lin daemon: ${normalizedLinBaseUrl}`
+      : view === "logs"
+        ? "Live Lin stream + local flow trace"
       : selectedProject
         ? shortenPath(selectedProject.project_root)
         : "Watching every flow.toml you added"
@@ -1233,7 +1199,7 @@ const App = () => {
               className={`tab ${view === "logs" ? "active" : ""}`}
               onClick={() => setView("logs")}
             >
-              Logs
+              Flow logs
             </button>
             <button
               className={`tab ${view === "servers" ? "active" : ""}`}
@@ -1308,26 +1274,7 @@ const App = () => {
               })}
             </div>
           ) : view === "logs" ? (
-            <div className="logs-panel">
-              {loadingLogs ? <div className="empty-state">Loading logs…</div> : null}
-              {!loadingLogs && logs.length === 0 ? (
-                <div className="empty-state">No logs yet for this selection.</div>
-              ) : null}
-              {logs.map((log) => (
-                <div key={log.id} className="log-row">
-                  <div className="log-time">
-                    {new Date(log.entry.timestamp).toLocaleTimeString()}
-                  </div>
-                  <div className="log-service">{log.entry.service}</div>
-                  <div className="log-content">
-                    {selectedProjectRoot ? null : (
-                      <div className="meta">{log.entry.project}</div>
-                    )}
-                    {log.entry.content}
-                  </div>
-                </div>
-              ))}
-            </div>
+            <FlowLogsView />
           ) : (
             <div className="servers-view">
               <div className="servers-topbar">

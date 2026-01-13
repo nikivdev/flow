@@ -661,6 +661,12 @@ input {
   gap: 6px;
 }
 
+.ghost-button.small {
+  padding: 6px 10px;
+  font-size: 11px;
+  border-radius: 10px;
+}
+
 .ghost-button.active {
   border-color: rgba(77, 194, 180, 0.6);
   color: var(--accent-strong);
@@ -908,5 +914,398 @@ input {
 
   .servers-layout {
     grid-template-columns: 1fr;
+  }
+}
+
+.flow-logs-view {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.flow-logs-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.flow-logs-title {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.flow-logs-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.flow-logs-subtitle {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.flow-logs-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.flow-logs-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.flow-logs-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.flow-logs-pill {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.flow-logs-pill.ok {
+  border-color: rgba(77, 194, 180, 0.6);
+  color: var(--accent-strong);
+  background: rgba(77, 194, 180, 0.12);
+}
+
+.flow-logs-pill.warn {
+  border-color: rgba(245, 158, 11, 0.6);
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.flow-logs-pill.error {
+  border-color: rgba(248, 113, 113, 0.6);
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.flow-logs-pill.success {
+  border-color: rgba(16, 185, 129, 0.6);
+  color: #6ee7b7;
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.flow-logs-pill.idle {
+  border-color: rgba(148, 163, 184, 0.4);
+  color: var(--soft);
+}
+
+.flow-logs-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: #fca5a5;
+  font-size: 12px;
+}
+
+.flow-logs-controls {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  padding: 12px;
+  background: var(--panel);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+}
+
+.flow-logs-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 140px;
+}
+
+.flow-logs-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--soft);
+}
+
+.flow-logs-input,
+.flow-logs-select {
+  background: rgba(10, 14, 18, 0.6);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.flow-logs-input:focus,
+.flow-logs-select:focus {
+  outline: none;
+  border-color: rgba(77, 194, 180, 0.6);
+  box-shadow: 0 0 0 2px rgba(77, 194, 180, 0.15);
+}
+
+.flow-logs-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.flow-logs-toggle input {
+  accent-color: var(--accent);
+}
+
+.flow-logs-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+}
+
+.flow-logs-stream {
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 380px;
+}
+
+.flow-logs-stream-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.flow-logs-stream-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(8, 11, 14, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.flow-logs-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flow-logs-row {
+  display: grid;
+  grid-template-columns: 80px 80px 70px 1fr;
+  gap: 10px;
+  font-size: 12px;
+  align-items: flex-start;
+}
+
+.flow-logs-time {
+  color: var(--soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.flow-logs-tag {
+  color: var(--accent-strong);
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
+.flow-logs-stream-tag {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.flow-logs-stream-tag.err {
+  color: #fca5a5;
+}
+
+.flow-logs-stream-tag.out {
+  color: #93c5fd;
+}
+
+.flow-logs-message {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.flow-logs-side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.flow-logs-card {
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.flow-logs-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.flow-logs-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--soft);
+}
+
+.flow-logs-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.flow-logs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.flow-logs-empty {
+  font-size: 12px;
+  color: var(--soft);
+  padding: 12px 0;
+}
+
+.flow-logs-command {
+  background: rgba(15, 20, 26, 0.7);
+  border-radius: 14px;
+  border: 1px solid transparent;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flow-logs-command.running {
+  border-color: rgba(77, 194, 180, 0.4);
+}
+
+.flow-logs-command.success {
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.flow-logs-command.error {
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.flow-logs-command-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.flow-logs-command-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.flow-logs-command-meta {
+  font-size: 11px;
+  color: var(--soft);
+}
+
+.flow-logs-command-preview {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.flow-logs-history {
+  background: rgba(15, 20, 26, 0.7);
+  border-radius: 12px;
+  border: 1px solid transparent;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.flow-logs-history-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--soft);
+}
+
+.pulse {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (max-width: 1100px) {
+  .flow-logs-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .flow-logs-row {
+    grid-template-columns: 1fr;
+  }
+
+  .flow-logs-controls {
+    align-items: stretch;
   }
 }
