@@ -33,6 +33,13 @@
   },
   "plugins": {
     "dialog": null,
+    "fs": {
+      "scope": [
+        "$HOME/.flow/**",
+        "$HOME/.config/flow/**",
+        "$HOME/.lin/**"
+      ]
+    },
     "http": null,
     "opener": null
   }
