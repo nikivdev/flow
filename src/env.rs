@@ -1,7 +1,7 @@
-//! Environment variable management via 1focus.
+//! Environment variable management via 1focus with local fallback.
 //!
 //! Fetches, sets, and manages environment variables for projects
-//! using the 1focus API.
+//! using the 1focus API, with optional local storage when needed.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -27,6 +27,7 @@ use crate::storage::{
 use uuid::Uuid;
 
 const DEFAULT_API_URL: &str = "https://1focus.ai";
+const LOCAL_ENV_DIR: &str = "env-local";
 
 /// Auth config stored in ~/.config/flow/auth.toml
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -423,6 +424,123 @@ fn env_target_label(target: &EnvTarget) -> String {
     }
 }
 
+fn local_env_enabled() -> bool {
+    if let Some(backend) = config::preferred_env_backend() {
+        match backend.as_str() {
+            "local" => return true,
+            "1focus" | "remote" => return false,
+            _ => {}
+        }
+    }
+
+    match std::env::var("FLOW_ENV_BACKEND")
+        .ok()
+        .map(|v| v.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("local") => true,
+        Some("1focus") | Some("remote") => false,
+        _ => std::env::var("FLOW_ENV_LOCAL")
+            .ok()
+            .map(|v| {
+                let v = v.to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes"
+            })
+            .unwrap_or(false),
+    }
+}
+
+fn local_env_root() -> Result<PathBuf> {
+    let base = config::ensure_global_config_dir()?;
+    let path = base.join(LOCAL_ENV_DIR);
+    fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+fn sanitize_env_segment(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_sep = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+            last_sep = false;
+        } else if !last_sep {
+            out.push('_');
+            last_sep = true;
+        }
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        "unnamed".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn local_env_path(target: &EnvTarget, environment: &str) -> Result<PathBuf> {
+    let root = local_env_root()?;
+    let target_label = sanitize_env_segment(&env_target_label(target));
+    let env_label = sanitize_env_segment(if environment.trim().is_empty() {
+        "production"
+    } else {
+        environment
+    });
+    let dir = root.join(target_label);
+    fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("{env_label}.env")))
+}
+
+fn read_local_env_vars(target: &EnvTarget, environment: &str) -> Result<HashMap<String, String>> {
+    let path = local_env_path(target, environment)?;
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let content = fs::read_to_string(&path)?;
+    Ok(parse_env_file(&content))
+}
+
+fn write_local_env_vars(
+    target: &EnvTarget,
+    environment: &str,
+    vars: &HashMap<String, String>,
+) -> Result<PathBuf> {
+    let path = local_env_path(target, environment)?;
+    let mut keys: Vec<_> = vars.keys().collect();
+    keys.sort();
+
+    let mut content = String::new();
+    content.push_str(&format!(
+        "# Local env store (flow)\n# Target: {}\n# Environment: {}\n",
+        env_target_label(target),
+        environment
+    ));
+    for key in keys {
+        let value = &vars[key];
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        content.push_str(&format!("{key}=\"{escaped}\"\n"));
+    }
+    fs::write(&path, content)?;
+    Ok(path)
+}
+
+fn set_local_env_var(
+    target: &EnvTarget,
+    environment: &str,
+    key: &str,
+    value: &str,
+) -> Result<PathBuf> {
+    let mut vars = read_local_env_vars(target, environment)?;
+    vars.insert(key.to_string(), value.to_string());
+    write_local_env_vars(target, environment, &vars)
+}
+
+fn is_local_fallback_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("not logged in")
+        || msg.contains("failed to connect to 1focus")
+        || msg.contains("unauthorized")
+}
+
 fn env_target_name_for_tokens(target: &EnvTarget) -> Result<String> {
     match target {
         EnvTarget::Project { name } => Ok(name.clone()),
@@ -498,8 +616,8 @@ pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
     let target = resolve_personal_target()?;
     let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
     url.query_pairs_mut().append_pair("keys", key);
-    if let EnvTarget::Personal { space } = target {
-        if let Some(space) = space {
+    if let EnvTarget::Personal { ref space } = target {
+        if let Some(space) = space.as_ref() {
             url.query_pairs_mut().append_pair("space", &space);
         }
     }
@@ -694,7 +812,21 @@ struct EnvTemplate {
 }
 
 fn env_templates() -> Vec<EnvTemplate> {
-    Vec::new()
+    vec![
+        EnvTemplate {
+            id: "cloudflare",
+            title: "Cloudflare API token",
+            key: "CLOUDFLARE_API_TOKEN",
+            description: "Token used by wrangler to deploy Workers/Pages.",
+            instructions: &[
+                "Open https://dash.cloudflare.com/profile/api-tokens",
+                "Create a token (Template: Edit Cloudflare Workers or Custom)",
+                "Permissions: Workers Scripts:Edit, Workers Routes:Edit, Pages:Edit",
+                "Add Zone:Read + DNS:Edit for your domain",
+                "Copy the token value",
+            ],
+        },
+    ]
 }
 
 fn new_env_template() -> Result<()> {
@@ -857,9 +989,9 @@ pub(crate) fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
 
     let target = resolve_personal_target()?;
     let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
-    if let EnvTarget::Personal { space } = target {
-        if let Some(space) = space {
-            url.query_pairs_mut().append_pair("space", &space);
+    if let EnvTarget::Personal { ref space } = target {
+        if let Some(space) = space.as_ref() {
+            url.query_pairs_mut().append_pair("space", space);
         }
     }
     let body = serde_json::json!({ "keys": keys });
@@ -1720,27 +1852,51 @@ fn list(environment: &str) -> Result<()> {
 
 /// Set a personal (global) env var.
 pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
-    let auth = load_auth_config()?;
-    let token = auth
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
-
     if key.is_empty() {
         bail!("Key cannot be empty");
     }
 
-    let api_url = get_api_url(&auth);
     let target = resolve_personal_target()?;
+    let environment = "production";
+
+    if local_env_enabled() {
+        let path = set_local_env_var(&target, environment, key, value)?;
+        println!(
+            "✓ Set personal env var locally: {} (stored at {})",
+            key,
+            path.display()
+        );
+        return Ok(());
+    }
+
+    let auth = load_auth_config()?;
+    let token = match auth.token.as_ref() {
+        Some(token) => token,
+        None => {
+            if std::io::stdin().is_terminal()
+                && prompt_confirm("Not logged in to 1focus. Store locally instead? (y/N): ")? {
+                let path = set_local_env_var(&target, environment, key, value)?;
+                println!(
+                    "✓ Set personal env var locally: {} (stored at {})",
+                    key,
+                    path.display()
+                );
+                return Ok(());
+            }
+            bail!("Not logged in. Run `f env login` first.");
+        }
+    };
+
+    let api_url = get_api_url(&auth);
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
     let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
-    if let EnvTarget::Personal { space } = target {
-        if let Some(space) = space {
-            url.query_pairs_mut().append_pair("space", &space);
+    if let EnvTarget::Personal { ref space } = target {
+        if let Some(space) = space.as_ref() {
+            url.query_pairs_mut().append_pair("space", space);
         }
     }
     let mut vars = HashMap::new();
@@ -1758,13 +1914,35 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
         .context("failed to connect to 1focus")?;
 
     if resp.status() == 401 {
+        if std::io::stdin().is_terminal()
+            && prompt_confirm("1focus auth failed. Store locally instead? (y/N): ")? {
+            let path = set_local_env_var(&target, environment, key, value)?;
+            println!(
+                "✓ Set personal env var locally: {} (stored at {})",
+                key,
+                path.display()
+            );
+            return Ok(());
+        }
         bail!("Unauthorized. Check your token with `f env login`.");
     }
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        bail!("API error {}: {}", status, body);
+        let err = anyhow::anyhow!("API error {}: {}", status, body);
+        if is_local_fallback_error(&err)
+            && std::io::stdin().is_terminal()
+            && prompt_confirm("1focus unavailable. Store locally instead? (y/N): ")? {
+            let path = set_local_env_var(&target, environment, key, value)?;
+            println!(
+                "✓ Set personal env var locally: {} (stored at {})",
+                key,
+                path.display()
+            );
+            return Ok(());
+        }
+        return Err(err);
     }
 
     println!("✓ Set personal env var: {}", key);
@@ -1786,19 +1964,43 @@ fn set_project_env_var_internal(
     environment: &str,
     description: Option<&str>,
 ) -> Result<()> {
-    let auth = load_auth_config()?;
-    let token = auth
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
-
     if key.is_empty() {
         bail!("Key cannot be empty");
     }
 
+    let target = resolve_env_target()?;
+    if local_env_enabled() {
+        let path = set_local_env_var(&target, environment, key, value)?;
+        println!(
+            "✓ Set env var locally: {} ({} stored at {})",
+            key,
+            environment,
+            path.display()
+        );
+        return Ok(());
+    }
+
+    let auth = load_auth_config()?;
+    let token = match auth.token.as_ref() {
+        Some(token) => token,
+        None => {
+            if std::io::stdin().is_terminal()
+                && prompt_confirm("Not logged in to 1focus. Store locally instead? (y/N): ")? {
+                let path = set_local_env_var(&target, environment, key, value)?;
+                println!(
+                    "✓ Set env var locally: {} ({} stored at {})",
+                    key,
+                    environment,
+                    path.display()
+                );
+                return Ok(());
+            }
+            bail!("Not logged in. Run `f env login` first.");
+        }
+    };
+
     let api_url = get_api_url(&auth);
     let resolved_value = value.to_string();
-    let target = resolve_env_target()?;
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -1839,7 +2041,20 @@ fn set_project_env_var_internal(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        bail!("API error {}: {}", status, body);
+        let err = anyhow::anyhow!("API error {}: {}", status, body);
+        if is_local_fallback_error(&err)
+            && std::io::stdin().is_terminal()
+            && prompt_confirm("1focus unavailable. Store locally instead? (y/N): ")? {
+            let path = set_local_env_var(&target, environment, key, value)?;
+            println!(
+                "✓ Set env var locally: {} ({} stored at {})",
+                key,
+                environment,
+                path.display()
+            );
+            return Ok(());
+        }
+        return Err(err);
     }
 
     let masked = if resolved_value.len() > 8 {
@@ -1940,11 +2155,21 @@ fn fetch_env_vars(
     keys: &[String],
     include_environment: bool,
 ) -> Result<HashMap<String, String>> {
+    if local_env_enabled() {
+        return read_local_env_vars(target, environment);
+    }
+
     let auth = load_auth_config()?;
-    let token = auth
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
+    let token = match auth.token.as_ref() {
+        Some(token) => token,
+        None => {
+            if std::io::stdin().is_terminal()
+                && prompt_confirm("Not logged in to 1focus. Read local envs instead? (y/N): ")? {
+                return read_local_env_vars(target, environment);
+            }
+            bail!("Not logged in. Run `f env login` first.");
+        }
+    };
     require_env_read_unlock()?;
 
     let api_url = get_api_url(&auth);
@@ -1983,6 +2208,10 @@ fn fetch_env_vars(
         .context("failed to connect to 1focus")?;
 
     if resp.status() == 401 {
+        if std::io::stdin().is_terminal()
+            && prompt_confirm("1focus auth failed. Read local envs instead? (y/N): ")? {
+            return read_local_env_vars(target, environment);
+        }
         bail!("Unauthorized. Check your token with `f env login`.");
     }
 
@@ -1998,7 +2227,13 @@ fn fetch_env_vars(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        bail!("API error {}: {}", status, body);
+        let err = anyhow::anyhow!("API error {}: {}", status, body);
+        if is_local_fallback_error(&err)
+            && std::io::stdin().is_terminal()
+            && prompt_confirm("1focus unavailable. Read local envs instead? (y/N): ")? {
+            return read_local_env_vars(target, environment);
+        }
+        return Err(err);
     }
 
     match target {

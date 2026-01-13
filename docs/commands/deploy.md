@@ -29,6 +29,9 @@ f deploy railway
 
 # Configure deployment defaults
 f deploy config
+
+# Deploy web site
+f deploy web
 ```
 
 ## Subcommands
@@ -37,6 +40,7 @@ f deploy config
 |---------|-------|-------------|
 | `host` | `h` | Deploy to Linux host via SSH |
 | `cloudflare` | `cf` | Deploy to Cloudflare Workers |
+| `web` | | Deploy the web site (Cloudflare) |
 | `setup` | | Interactive deploy setup (Cloudflare) |
 | `railway` | | Deploy to Railway |
 | `config` | | Configure deployment defaults (Linux host) |
@@ -51,6 +55,44 @@ f deploy config
 | `health` | | Check if deployment is healthy |
 
 ---
+
+## Web Deployment
+
+Deploys the web site using Cloudflare and your project tasks. Flow will:
+- Ensure `[web]` exists in `flow.toml` (auto-fills `path` when possible).
+- Add the `web.route` (or `web.domain/*`) to your wrangler config.
+- Optionally create/update the Cloudflare DNS record for the domain/route.
+- Apply env vars from 1focus if `web.env_source = "1focus"` is set.
+- Run `deploy-web` (or `deploy` as fallback).
+
+```bash
+f deploy web
+```
+
+If the Cloudflare API token is missing, Flow will guide you to create one and
+store it in your env store as `CLOUDFLARE_API_TOKEN`.
+
+If `web.domain`/`web.route` or `web.path` is missing, Flow will prompt for them
+and update `flow.toml`.
+
+If you opt into DNS management, Flow will prompt for record type/target and
+create or update the Cloudflare DNS record (default: `A` to `192.0.2.1`,
+proxied).
+
+If 1focus is unavailable, Flow can store envs locally when you choose
+`web.env_source = "local"`.
+
+Example `flow.toml`:
+
+```toml
+[web]
+path = "packages/web"
+domain = "example.com"
+env_source = "1focus"
+env_apply = "always"
+env_keys = ["PUBLIC_API_URL"]
+env_vars = ["PUBLIC_API_URL"]
+```
 
 ## Host Deployment (Linux via SSH)
 

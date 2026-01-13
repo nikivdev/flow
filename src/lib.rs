@@ -43,6 +43,7 @@ pub mod setup;
 pub mod skills;
 pub mod ssh;
 pub mod ssh_keys;
+pub mod supervisor;
 pub mod start;
 pub mod storage;
 pub mod sync;

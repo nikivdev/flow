@@ -74,6 +74,9 @@ pub struct Config {
     /// Railway deployment config.
     #[serde(default)]
     pub railway: Option<crate::deploy::RailwayConfig>,
+    /// Web deployment config.
+    #[serde(default)]
+    pub web: Option<crate::deploy::WebConfig>,
     /// Release configuration (hosts, npm, etc.).
     #[serde(default)]
     pub release: Option<ReleaseConfig>,
@@ -138,9 +141,19 @@ pub struct TsFlowConfig {
     pub commit: Option<TsCommitConfig>,
     #[serde(default)]
     pub agents: Option<TsAgentsConfig>,
+    #[serde(default)]
+    pub env: Option<TsEnvConfig>,
     /// Enable gitedit.dev hash in commit messages. Default false.
     #[serde(default)]
     pub gitedit: Option<bool>,
+}
+
+/// Env settings from TypeScript config.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TsEnvConfig {
+    /// Preferred env backend: "1focus" or "local".
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 /// Agents settings from TypeScript config.
@@ -195,6 +208,7 @@ impl Default for Config {
             host: None,
             cloudflare: None,
             railway: None,
+            web: None,
             release: None,
             commit: None,
             setup: None,
@@ -1027,6 +1041,17 @@ pub fn load_ts_config() -> Option<TsConfig> {
             None
         }
     }
+}
+
+/// Preferred env backend from ~/.config/flow/config.ts ("1focus" or "local").
+pub fn preferred_env_backend() -> Option<String> {
+    let config = load_ts_config()?;
+    let backend = config.flow?.env?.backend?;
+    let trimmed = backend.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
 }
 
 pub fn expand_path(raw: &str) -> PathBuf {
