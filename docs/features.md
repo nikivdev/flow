@@ -198,6 +198,25 @@ f daemon list
 f daemon ls
 ```
 
+Daemon config supports autostart, boot-only daemons, restart policies, and
+readiness checks:
+
+```toml
+[[daemon]]
+name = "lin"
+binary = "lin"
+command = "daemon"
+args = ["--host", "127.0.0.1", "--port", "9050"]
+health_url = "http://127.0.0.1:9050/health"
+autostart = true
+autostop = true
+boot = true
+restart = "on-failure"
+retry = 3
+ready_output = "ready"
+ready_delay = 500
+```
+
 ---
 
 ## Environment Variables

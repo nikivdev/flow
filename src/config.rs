@@ -755,6 +755,15 @@ pub struct StreamConfig {
     pub toggle_url: Option<String>,
 }
 
+/// Restart behavior for managed daemons.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DaemonRestartPolicy {
+    Never,
+    OnFailure,
+    Always,
+}
+
 /// Configuration for a background daemon that flow can manage.
 ///
 /// Example in flow.toml:
@@ -804,6 +813,24 @@ pub struct DaemonConfig {
     /// Whether to start this daemon automatically when flow starts.
     #[serde(default)]
     pub autostart: bool,
+    /// Whether to stop this daemon when leaving the project.
+    #[serde(default)]
+    pub autostop: bool,
+    /// Whether to start this daemon during boot/startup sessions.
+    #[serde(default)]
+    pub boot: bool,
+    /// Restart policy (never, on-failure, always).
+    #[serde(default)]
+    pub restart: Option<DaemonRestartPolicy>,
+    /// Maximum restart attempts (optional).
+    #[serde(default)]
+    pub retry: Option<u32>,
+    /// Milliseconds to wait before considering the daemon ready.
+    #[serde(default)]
+    pub ready_delay: Option<u64>,
+    /// Output pattern (string or regex) to match for readiness.
+    #[serde(default)]
+    pub ready_output: Option<String>,
     /// Description of what this daemon does.
     #[serde(default)]
     pub description: Option<String>,

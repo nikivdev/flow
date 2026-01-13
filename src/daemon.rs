@@ -4,17 +4,19 @@
 
 use std::{
     fs,
+    fs::OpenOptions,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use regex::Regex;
 use reqwest::blocking::Client;
 
 use crate::{
     cli::{DaemonAction, DaemonCommand},
-    config::{self, DaemonConfig},
+    config::{self, DaemonConfig, DaemonRestartPolicy},
     supervisor,
 };
 
@@ -53,7 +55,6 @@ pub fn start_daemon_with_path(name: &str, config_path: Option<&Path>) -> Result<
 }
 
 fn start_daemon_inner(daemon: &DaemonConfig) -> Result<()> {
-
     // Check if already running
     if let Some(url) = daemon.effective_health_url() {
         if check_health(&url) {
@@ -73,42 +74,6 @@ fn start_daemon_inner(daemon: &DaemonConfig) -> Result<()> {
     // Find the binary
     let binary = find_binary(&daemon.binary)?;
 
-    // Build the command
-    let mut cmd = Command::new(&binary);
-
-    if let Some(subcommand) = &daemon.command {
-        cmd.arg(subcommand);
-    }
-
-    for arg in &daemon.args {
-        cmd.arg(arg);
-    }
-
-    // Set working directory
-    if let Some(wd) = &daemon.working_dir {
-        let expanded = config::expand_path(wd);
-        if expanded.exists() {
-            cmd.current_dir(&expanded);
-        }
-    }
-
-    // Set environment variables
-    for (key, value) in &daemon.env {
-        cmd.env(key, value);
-    }
-
-    // Detach from terminal
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    // Start in own process group so we can kill all children
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-
     println!(
         "Starting {} using {}{}",
         daemon.name,
@@ -120,18 +85,11 @@ fn start_daemon_inner(daemon: &DaemonConfig) -> Result<()> {
             .unwrap_or_default()
     );
 
-    let child = cmd.spawn().with_context(|| {
-        format!(
-            "failed to start {} from {}",
-            daemon.name,
-            binary.display()
-        )
-    })?;
-
-    persist_daemon_pid(&daemon.name, child.id())?;
+    let spawned = spawn_daemon_process(daemon, &binary)?;
+    persist_daemon_pid(&daemon.name, spawned.pid)?;
 
     // Wait a moment and check health
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for_daemon_ready(daemon, &spawned.stdout_log)?;
 
     if let Some(url) = daemon.effective_health_url() {
         if check_health(&url) {
@@ -284,6 +242,146 @@ pub fn get_daemon_status(daemon: &DaemonConfig) -> DaemonStatus {
     DaemonStatus { running, pid }
 }
 
+pub fn restart_policy_for(daemon: &DaemonConfig) -> DaemonRestartPolicy {
+    match daemon.restart {
+        Some(ref policy) => policy.clone(),
+        None => {
+            if daemon.retry.unwrap_or(0) > 0 {
+                DaemonRestartPolicy::OnFailure
+            } else {
+                DaemonRestartPolicy::Never
+            }
+        }
+    }
+}
+
+pub fn daemon_log_dir(name: &str) -> Result<PathBuf> {
+    let base = config::ensure_global_state_dir()?;
+    let dir = base.join("daemons").join(sanitize_daemon_name(name));
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+    Ok(dir)
+}
+
+pub fn daemon_log_paths(name: &str) -> Result<(PathBuf, PathBuf)> {
+    let dir = daemon_log_dir(name)?;
+    Ok((dir.join("stdout.log"), dir.join("stderr.log")))
+}
+
+fn sanitize_daemon_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "daemon".to_string()
+    } else {
+        out
+    }
+}
+
+struct SpawnedDaemon {
+    pid: u32,
+    stdout_log: PathBuf,
+}
+
+fn spawn_daemon_process(daemon: &DaemonConfig, binary: &Path) -> Result<SpawnedDaemon> {
+    let mut cmd = Command::new(binary);
+
+    if let Some(subcommand) = &daemon.command {
+        cmd.arg(subcommand);
+    }
+
+    for arg in &daemon.args {
+        cmd.arg(arg);
+    }
+
+    if let Some(wd) = &daemon.working_dir {
+        let expanded = config::expand_path(wd);
+        if expanded.exists() {
+            cmd.current_dir(&expanded);
+        }
+    }
+
+    for (key, value) in &daemon.env {
+        cmd.env(key, value);
+    }
+
+    let (stdout_log, stderr_log) = daemon_log_paths(&daemon.name)?;
+    let stdout_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stdout_log)
+        .with_context(|| format!("failed to open {}", stdout_log.display()))?;
+    let stderr_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_log)
+        .with_context(|| format!("failed to open {}", stderr_log.display()))?;
+
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(stdout_file)
+        .stderr(stderr_file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let child = cmd.spawn().with_context(|| {
+        format!(
+            "failed to start {} from {}",
+            daemon.name,
+            binary.display()
+        )
+    })?;
+
+    Ok(SpawnedDaemon {
+        pid: child.id(),
+        stdout_log,
+    })
+}
+
+fn wait_for_daemon_ready(daemon: &DaemonConfig, stdout_log: &Path) -> Result<()> {
+    if let Some(delay) = daemon.ready_delay {
+        std::thread::sleep(Duration::from_millis(delay));
+    } else {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    let Some(pattern) = daemon.ready_output.as_ref() else {
+        return Ok(());
+    };
+
+    let regex = Regex::new(pattern).with_context(|| "invalid ready_output regex")?;
+    let timeout = Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    let mut seen_len = 0usize;
+
+    while start.elapsed() < timeout {
+        if let Ok(contents) = fs::read_to_string(stdout_log) {
+            if contents.len() > seen_len {
+                let slice = &contents[seen_len..];
+                if regex.is_match(slice) {
+                    return Ok(());
+                }
+                seen_len = contents.len();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    eprintln!(
+        "WARN ready_output '{}' not found for {} (continuing).",
+        pattern, daemon.name
+    );
+    Ok(())
+}
 /// Find a daemon config by name from merged configs.
 fn find_daemon_config_with_path(
     name: &str,

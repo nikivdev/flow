@@ -1,14 +1,16 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{DaemonAction, SupervisorAction, SupervisorCommand};
-use crate::{config, daemon, running};
+use crate::{config, daemon, projects, running};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct IpcRequest {
@@ -55,16 +57,33 @@ struct DaemonStatusView {
     description: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ManagedDaemon {
+    name: String,
+    config_path: Option<PathBuf>,
+    restart: config::DaemonRestartPolicy,
+    retry_remaining: Option<u32>,
+    autostop: bool,
+    disabled: bool,
+}
+
+#[derive(Default)]
+struct SupervisorState {
+    managed: HashMap<String, ManagedDaemon>,
+}
+
+type SharedState = Arc<Mutex<SupervisorState>>;
+
 pub fn run(cmd: SupervisorCommand) -> Result<()> {
     let action = cmd.action.unwrap_or(SupervisorAction::Status);
     let socket_path = resolve_socket_path(cmd.socket.as_deref())?;
 
     match action {
         SupervisorAction::Start => {
-            ensure_supervisor_running(&socket_path, true)?;
+            ensure_supervisor_running(&socket_path, true, cmd.boot)?;
             Ok(())
         }
-        SupervisorAction::Run => run_server(&socket_path),
+        SupervisorAction::Run => run_server(&socket_path, cmd.boot),
         SupervisorAction::Stop => stop_supervisor(&socket_path),
         SupervisorAction::Status => show_status(&socket_path),
     }
@@ -76,7 +95,7 @@ pub fn try_handle_daemon_action(
 ) -> Result<bool> {
     let socket_path = resolve_socket_path(None)?;
     if !supervisor_running(&socket_path) {
-        if !ensure_supervisor_running(&socket_path, false).unwrap_or(false) {
+        if !ensure_supervisor_running(&socket_path, false, false).unwrap_or(false) {
             return Ok(false);
         }
     }
@@ -158,7 +177,7 @@ fn supervisor_running(socket_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn ensure_supervisor_running(socket_path: &Path, announce: bool) -> Result<bool> {
+fn ensure_supervisor_running(socket_path: &Path, announce: bool, boot: bool) -> Result<bool> {
     if supervisor_running(socket_path) {
         if announce {
             println!("Supervisor already running.");
@@ -170,6 +189,9 @@ fn ensure_supervisor_running(socket_path: &Path, announce: bool) -> Result<bool>
     let mut cmd = Command::new(exe);
     cmd.arg("supervisor").arg("run");
     cmd.arg("--socket").arg(socket_path);
+    if boot {
+        cmd.arg("--boot");
+    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -226,7 +248,7 @@ fn stop_supervisor(socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_server(socket_path: &Path) -> Result<()> {
+fn run_server(socket_path: &Path, boot: bool) -> Result<()> {
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -244,12 +266,23 @@ fn run_server(socket_path: &Path) -> Result<()> {
         bail!("Supervisor IPC is only supported on unix platforms right now.");
     }
 
+    let state = Arc::new(Mutex::new(SupervisorState::default()));
+    let active_path = resolve_active_project_config_path();
+    bootstrap_daemons(&state, active_path.as_deref(), boot)?;
+
+    let monitor_state = Arc::clone(&state);
+    std::thread::spawn(move || {
+        if let Err(err) = monitor_daemons(monitor_state) {
+            eprintln!("WARN supervisor monitor failed: {err}");
+        }
+    });
+
     #[cfg(unix)]
     {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    if let Err(err) = handle_client(stream) {
+                    if let Err(err) = handle_client(stream, &state) {
                         eprintln!("WARN supervisor request failed: {err}");
                     }
                 }
@@ -264,7 +297,7 @@ fn run_server(socket_path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn handle_client(stream: std::os::unix::net::UnixStream) -> Result<()> {
+fn handle_client(stream: std::os::unix::net::UnixStream, state: &SharedState) -> Result<()> {
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -274,7 +307,7 @@ fn handle_client(stream: std::os::unix::net::UnixStream) -> Result<()> {
     }
 
     let request: IpcRequest = serde_json::from_str(line.trim())?;
-    let response = handle_request(request)?;
+    let response = handle_request(request, state)?;
 
     let mut writer = &stream;
     let payload = serde_json::to_string(&response)?;
@@ -284,7 +317,7 @@ fn handle_client(stream: std::os::unix::net::UnixStream) -> Result<()> {
     Ok(())
 }
 
-fn handle_request(request: IpcRequest) -> Result<IpcResponse> {
+fn handle_request(request: IpcRequest, state: &SharedState) -> Result<IpcResponse> {
     match request.action {
         SupervisorIpcAction::Ping => Ok(IpcResponse {
             ok: true,
@@ -293,7 +326,9 @@ fn handle_request(request: IpcRequest) -> Result<IpcResponse> {
         }),
         SupervisorIpcAction::StartDaemon { name, config_path } => {
             let path = resolve_config_path(config_path.as_deref());
+            let daemon_cfg = resolve_daemon_config(&name, path.as_deref())?;
             daemon::start_daemon_with_path(&name, path.as_deref())?;
+            register_managed_daemon(state, &daemon_cfg, path.as_deref(), false)?;
             Ok(IpcResponse {
                 ok: true,
                 message: Some(format!("{} started", name)),
@@ -303,6 +338,7 @@ fn handle_request(request: IpcRequest) -> Result<IpcResponse> {
         SupervisorIpcAction::StopDaemon { name, config_path } => {
             let path = resolve_config_path(config_path.as_deref());
             daemon::stop_daemon_with_path(&name, path.as_deref())?;
+            disable_managed_daemon(state, &name, path.as_deref())?;
             Ok(IpcResponse {
                 ok: true,
                 message: Some(format!("{} stopped", name)),
@@ -311,9 +347,11 @@ fn handle_request(request: IpcRequest) -> Result<IpcResponse> {
         }
         SupervisorIpcAction::RestartDaemon { name, config_path } => {
             let path = resolve_config_path(config_path.as_deref());
+            let daemon_cfg = resolve_daemon_config(&name, path.as_deref())?;
             daemon::stop_daemon_with_path(&name, path.as_deref()).ok();
             std::thread::sleep(Duration::from_millis(300));
             daemon::start_daemon_with_path(&name, path.as_deref())?;
+            register_managed_daemon(state, &daemon_cfg, path.as_deref(), false)?;
             Ok(IpcResponse {
                 ok: true,
                 message: Some(format!("{} restarted", name)),
@@ -360,6 +398,250 @@ fn build_status_views(config_path: Option<&Path>) -> Result<Vec<DaemonStatusView
 
 fn resolve_config_path(config_path: Option<&str>) -> Option<PathBuf> {
     config_path.map(|path| config::expand_path(path))
+}
+
+fn resolve_active_project_config_path() -> Option<PathBuf> {
+    let name = projects::get_active_project()?;
+    let entry = projects::resolve_project(&name).ok().flatten()?;
+    Some(entry.config_path)
+}
+
+fn bootstrap_daemons(
+    state: &SharedState,
+    active_config_path: Option<&Path>,
+    boot: bool,
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+
+    let global_path = config::default_config_path();
+    if global_path.exists() {
+        if let Ok(cfg) = config::load(&global_path) {
+            start_daemon_set(state, cfg.daemons, None, boot, &mut seen)?;
+        }
+    }
+
+    if let Some(path) = active_config_path {
+        if path.exists() {
+            if let Ok(cfg) = config::load(path) {
+                start_daemon_set(state, cfg.daemons, Some(path), boot, &mut seen)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn start_daemon_set(
+    state: &SharedState,
+    daemons: Vec<config::DaemonConfig>,
+    config_path: Option<&Path>,
+    boot: bool,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    for daemon_cfg in daemons {
+        if !should_start_daemon(&daemon_cfg, boot) {
+            continue;
+        }
+
+        let key = daemon_key(&daemon_cfg.name, config_path);
+        if !seen.insert(key) {
+            continue;
+        }
+
+        match daemon::start_daemon_with_path(&daemon_cfg.name, config_path) {
+            Ok(()) => {
+                register_managed_daemon(state, &daemon_cfg, config_path, false)?;
+            }
+            Err(err) => {
+                eprintln!(
+                    "WARN failed to autostart {}: {}",
+                    daemon_cfg.name, err
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn should_start_daemon(daemon_cfg: &config::DaemonConfig, boot: bool) -> bool {
+    if daemon_cfg.autostart {
+        return true;
+    }
+    if boot && daemon_cfg.boot {
+        return true;
+    }
+    false
+}
+
+fn should_restart(entry: &ManagedDaemon) -> bool {
+    match entry.restart {
+        config::DaemonRestartPolicy::Never => false,
+        config::DaemonRestartPolicy::Always => true,
+        config::DaemonRestartPolicy::OnFailure => true,
+    }
+}
+
+fn monitor_daemons(state: SharedState) -> Result<()> {
+    let mut last_active = resolve_active_project_config_path()
+        .as_deref()
+        .map(normalize_path);
+
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+
+        let active_path = resolve_active_project_config_path()
+            .as_deref()
+            .map(normalize_path);
+        if active_path != last_active {
+            bootstrap_daemons(&state, active_path.as_deref(), false).ok();
+            last_active = active_path.clone();
+        }
+
+        let entries: Vec<ManagedDaemon> = {
+            let state = state.lock().expect("supervisor state lock");
+            state.managed.values().cloned().collect()
+        };
+
+        let mut to_restart: Vec<(String, Option<PathBuf>)> = Vec::new();
+        let mut to_stop: Vec<(String, Option<PathBuf>)> = Vec::new();
+        let mut updates: Vec<(String, Option<u32>, bool)> = Vec::new();
+
+        for entry in entries {
+            if entry.disabled {
+                continue;
+            }
+
+            if entry.autostop {
+                if let Some(ref path) = entry.config_path {
+                    if !active_path_matches(&active_path, path) {
+                        to_stop.push((entry.name.clone(), entry.config_path.clone()));
+                        updates.push((daemon_key(&entry.name, entry.config_path.as_deref()), entry.retry_remaining, true));
+                        continue;
+                    }
+                }
+            }
+
+            let config_path = entry.config_path.clone();
+            let daemon_cfg = match resolve_daemon_config(&entry.name, config_path.as_deref()) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    eprintln!("WARN supervisor missing daemon config for {}: {}", entry.name, err);
+                    continue;
+                }
+            };
+
+            let status = daemon::get_daemon_status(&daemon_cfg);
+            if status.running {
+                continue;
+            }
+
+            let key = daemon_key(&entry.name, config_path.as_deref());
+            if !should_restart(&entry) {
+                continue;
+            }
+
+            let mut retry_remaining = entry.retry_remaining;
+            if let Some(remaining) = retry_remaining {
+                if remaining == 0 {
+                    continue;
+                }
+                retry_remaining = Some(remaining.saturating_sub(1));
+            }
+
+            updates.push((key, retry_remaining, false));
+            to_restart.push((entry.name.clone(), config_path));
+        }
+
+        if !updates.is_empty() {
+            let mut state = state.lock().expect("supervisor state lock");
+            for (key, retry_remaining, disabled) in updates {
+                if let Some(entry) = state.managed.get_mut(&key) {
+                    entry.retry_remaining = retry_remaining;
+                    entry.disabled = disabled;
+                }
+            }
+        }
+
+        for (name, config_path) in to_stop {
+            daemon::stop_daemon_with_path(&name, config_path.as_deref()).ok();
+        }
+
+        for (name, config_path) in to_restart {
+            daemon::start_daemon_with_path(&name, config_path.as_deref()).ok();
+        }
+    }
+}
+
+fn active_path_matches(active: &Option<PathBuf>, candidate: &Path) -> bool {
+    match active {
+        Some(active_path) => active_path == &normalize_path(candidate),
+        None => false,
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn resolve_daemon_config(name: &str, config_path: Option<&Path>) -> Result<config::DaemonConfig> {
+    let cfg = daemon::load_merged_config_with_path(config_path)?;
+    cfg.daemons
+        .into_iter()
+        .find(|daemon| daemon.name == name)
+        .ok_or_else(|| anyhow::anyhow!("daemon '{}' not found in config", name))
+}
+
+fn register_managed_daemon(
+    state: &SharedState,
+    daemon_cfg: &config::DaemonConfig,
+    config_path: Option<&Path>,
+    disabled: bool,
+) -> Result<()> {
+    let mut state = state.lock().expect("supervisor state lock");
+    let key = daemon_key(&daemon_cfg.name, config_path);
+    let entry = ManagedDaemon {
+        name: daemon_cfg.name.clone(),
+        config_path: config_path.map(|path| path.to_path_buf()),
+        restart: daemon::restart_policy_for(daemon_cfg),
+        retry_remaining: daemon_cfg.retry,
+        autostop: daemon_cfg.autostop,
+        disabled,
+    };
+    state.managed.insert(key, entry);
+    Ok(())
+}
+
+fn disable_managed_daemon(
+    state: &SharedState,
+    name: &str,
+    config_path: Option<&Path>,
+) -> Result<()> {
+    let mut state = state.lock().expect("supervisor state lock");
+    let key = daemon_key(name, config_path);
+    if let Some(entry) = state.managed.get_mut(&key) {
+        entry.disabled = true;
+        return Ok(());
+    }
+
+    if let Ok(cfg) = resolve_daemon_config(name, config_path) {
+        let entry = ManagedDaemon {
+            name: cfg.name.clone(),
+            config_path: config_path.map(|path| path.to_path_buf()),
+            restart: daemon::restart_policy_for(&cfg),
+            retry_remaining: cfg.retry,
+            autostop: cfg.autostop,
+            disabled: true,
+        };
+        state.managed.insert(key, entry);
+    }
+    Ok(())
+}
+
+fn daemon_key(name: &str, config_path: Option<&Path>) -> String {
+    match config_path {
+        Some(path) => format!("{}::{}", name, path.display()),
+        None => name.to_string(),
+    }
 }
 
 fn print_status_views(daemons: &[DaemonStatusView]) {
