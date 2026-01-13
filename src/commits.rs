@@ -284,7 +284,7 @@ fn run_commits_fzf(commits: &[CommitEntry]) -> Result<Option<CommitSelection<'_>
         .arg("--with-nth")
         .arg("2..")
         .arg("--preview")
-        .arg("git show --stat --color=always {1}")
+        .arg("git -c log.showSignature=false show --stat --color=always {1}")
         .arg("--preview-window")
         .arg("down:50%:wrap")
         .stdin(Stdio::piped())

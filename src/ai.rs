@@ -2079,6 +2079,17 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
     // Auto-import any new sessions silently
     auto_import_sessions()?;
 
+    // Handle provider shortcuts: "claude" or "codex" -> copy last session for that provider
+    if let Some(ref query) = session {
+        let q = query.to_lowercase();
+        if q == "claude" || q == "c" {
+            return copy_last_session(Provider::Claude);
+        }
+        if q == "codex" || q == "x" {
+            return copy_last_session(Provider::Codex);
+        }
+    }
+
     let index = load_index()?;
     let sessions = read_sessions_for_project(provider)?;
 
@@ -2254,18 +2265,19 @@ fn copy_last_session(provider: Provider) -> Result<()> {
 
 /// Read full session history from JSONL file and format as conversation.
 fn read_session_history(session_id: &str, provider: Provider) -> Result<String> {
-    let cwd = std::env::current_dir()?;
-    let cwd_str = cwd.to_string_lossy().to_string();
-    let project_folder = path_to_project_name(&cwd_str);
-
-    let projects_dir = match provider {
-        Provider::Claude | Provider::All => get_claude_projects_dir(),
-        Provider::Codex => get_codex_projects_dir(),
+    let session_file = if provider == Provider::Codex {
+        // Codex stores sessions in ~/.codex/sessions/ with different structure
+        find_codex_session_file(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Codex session file not found: {}", session_id))?
+    } else {
+        let cwd = std::env::current_dir()?;
+        let cwd_str = cwd.to_string_lossy().to_string();
+        let project_folder = path_to_project_name(&cwd_str);
+        let projects_dir = get_claude_projects_dir();
+        projects_dir
+            .join(&project_folder)
+            .join(format!("{}.jsonl", session_id))
     };
-
-    let session_file = projects_dir
-        .join(&project_folder)
-        .join(format!("{}.jsonl", session_id));
 
     if !session_file.exists() {
         bail!("Session file not found: {}", session_file.display());

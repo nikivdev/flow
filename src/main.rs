@@ -335,7 +335,13 @@ function f
     if test (count $argv) -eq 0
         ~/bin/f
     else
-        ~/bin/f match $argv
+        # Check if first arg is a known subcommand
+        switch "$argv[1]"
+            case ai env commit commits hub init home doctor tasks run search ps kill logs projects sessions active server web match daemon supervisor ai codex claude services ssh todo skills deps db tools notify setup agents sync upstream deploy publish repos code parallel docs upgrade release install global fixup rerun new
+                ~/bin/f $argv
+            case '*'
+                ~/bin/f match $argv
+        end
     end
 end
 # flow:end
