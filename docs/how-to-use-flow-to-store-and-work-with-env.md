@@ -1,10 +1,97 @@
 # How to Use Flow to Store and Work With Env Vars
 
-Flow stores project env vars in 1focus and can apply them to runtimes like
-Cloudflare Workers. You can also fetch and inject them locally without ever
-printing the values.
+Flow stores project env vars either in 1focus (cloud) or locally on disk. You can
+inject them into commands without ever printing values to stdout.
 
-## Prerequisites
+## Storage Backends
+
+Flow supports two backends:
+
+| Backend | Storage Location | Use Case |
+|---------|-----------------|----------|
+| `1focus` | Cloud (1focus.ai) | Team sharing, Cloudflare deploys |
+| `local` | `~/.config/flow/env-local/` | Solo dev, offline, no account needed |
+
+### Choosing a Backend
+
+Set in `~/.config/flow/config.ts`:
+
+```ts
+export default {
+  flow: {
+    env: {
+      backend: "local"  // or "1focus"
+    }
+  }
+}
+```
+
+Or set the environment variable:
+
+```bash
+export FLOW_ENV_BACKEND=local
+```
+
+If neither is set, Flow tries 1focus first and prompts to fall back to local
+storage when unavailable.
+
+---
+
+## Local Storage (No Account Needed)
+
+The simplest way to use env vars without any cloud service.
+
+### Quick Start
+
+```bash
+# Force local backend
+export FLOW_ENV_BACKEND=local
+
+# Store a secret
+f env set API_KEY=sk-xxx
+
+# Store a personal/global secret
+f env set --personal ANTHROPIC_API_KEY=sk-xxx
+
+# Run with secrets injected
+f env run -- npm start
+f env run --personal -k ANTHROPIC_API_KEY -- ./my-script
+```
+
+### How Local Storage Works
+
+Env vars are stored as plain `.env` files:
+
+```
+~/.config/flow/env-local/
+├── <project-name>/
+│   ├── production.env
+│   ├── staging.env
+│   └── dev.env
+└── personal/
+    └── production.env
+```
+
+Each file is a standard `.env` format:
+
+```bash
+# Environment: production
+API_KEY=sk-xxx
+DATABASE_URL=postgres://...
+```
+
+### Security Note
+
+Local env files are **not encrypted**. They rely on filesystem permissions.
+For sensitive production secrets, consider using 1focus with Touch ID gating.
+
+---
+
+## 1focus Cloud Storage
+
+For team sharing and Cloudflare deployments.
+
+### Prerequisites
 
 1) Create a 1focus API token.
 2) Login once:

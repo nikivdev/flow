@@ -24,7 +24,6 @@ pub mod history;
 pub mod home;
 pub mod hub;
 pub mod init;
-pub mod lin_runtime;
 pub mod lmstudio;
 pub mod log_server;
 pub mod log_store;

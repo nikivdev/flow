@@ -4,16 +4,45 @@ Sync project environment and manage environment variables.
 
 ## Overview
 
-Manage environment variables via 1focus with optional local fallback. Supports:
+Manage environment variables via 1focus (cloud) or local storage. Supports:
 - Project-level environment variables
 - Personal/global variables
 - Multiple environments (dev, staging, production)
 - Direct injection into commands
-- Touch ID gating for env reads on macOS
+- Touch ID gating for env reads on macOS (1focus only)
 
-If 1focus is unavailable, Flow can fall back to a local env store under
-`~/.config/flow/env-local`. You can force local storage by setting
-`FLOW_ENV_BACKEND=local`.
+## Storage Backends
+
+| Backend | Location | Config |
+|---------|----------|--------|
+| `1focus` | Cloud (1focus.ai) | Default, requires login |
+| `local` | `~/.config/flow/env-local/` | No account needed |
+
+Force local backend:
+
+```bash
+# Via environment variable
+export FLOW_ENV_BACKEND=local
+
+# Or in ~/.config/flow/config.ts
+export default {
+  flow: { env: { backend: "local" } }
+}
+```
+
+### Local Storage Structure
+
+```
+~/.config/flow/env-local/
+├── <project-name>/
+│   ├── production.env
+│   ├── staging.env
+│   └── dev.env
+└── personal/
+    └── production.env
+```
+
+Files are plain `.env` format (not encrypted).
 
 ## Quick Start
 
