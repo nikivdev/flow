@@ -53,6 +53,9 @@ fn main() -> Result<()> {
         Some(Commands::Init(opts)) => {
             init::run(opts)?;
         }
+        Some(Commands::ShellInit(opts)) => {
+            shell_init(&opts.shell);
+        }
         Some(Commands::New(opts)) => {
             code::new_from_template(opts)?;
         }
@@ -301,4 +304,135 @@ fn rerun(opts: RerunOpts) -> Result<()> {
         name: task_name,
         args,
     })
+}
+
+fn shell_init(shell: &str) {
+    use std::fs;
+    use std::io::Write;
+
+    let home = dirs::home_dir().expect("no home directory");
+    let config_dir = home.join("config");
+
+    match shell {
+        "fish" => {
+            let config_fish = config_dir.join("fish").join("config.fish");
+
+            // Check if already set up
+            if config_fish.exists() {
+                let content = fs::read_to_string(&config_fish).unwrap_or_default();
+                if content.contains("# flow:start") {
+                    println!("Already set up in {}", config_fish.display());
+                    return;
+                }
+            }
+
+            let snippet = r#"
+# flow:start
+function f
+    set -l bin
+    if test -x ~/.local/bin/f
+        set bin ~/.local/bin/f
+    else
+        set bin (command -v f)
+    end
+
+    switch "$argv[1]"
+        case new
+            set -l output ($bin $argv 2>&1)
+            echo $output
+            set -l created (echo $output | string match -r 'Created (.+)' | tail -1)
+            if test -n "$created" -a -d "$created"
+                cd "$created"
+            end
+        case '*'
+            $bin $argv
+    end
+end
+# flow:end
+"#;
+
+            let mut file = match fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&config_fish)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to open {}: {}", config_fish.display(), e);
+                    return;
+                }
+            };
+
+            if let Err(e) = file.write_all(snippet.as_bytes()) {
+                eprintln!("Failed to write to {}: {}", config_fish.display(), e);
+                return;
+            }
+
+            println!("Added flow integration to {}", config_fish.display());
+            println!("Restart fish or run: source {}", config_fish.display());
+        }
+        "zsh" => {
+            let zshrc = config_dir.join("zsh").join(".zshrc");
+
+            if zshrc.exists() {
+                let content = fs::read_to_string(&zshrc).unwrap_or_default();
+                if content.contains("# flow:start") {
+                    println!("Already set up in {}", zshrc.display());
+                    return;
+                }
+            }
+
+            let snippet = r#"
+# flow:start
+f() {
+    local bin
+    if [[ -x ~/.local/bin/f ]]; then
+        bin=~/.local/bin/f
+    else
+        bin=$(command -v f)
+    fi
+
+    case "$1" in
+        new)
+            local output
+            output=$("$bin" "$@" 2>&1)
+            echo "$output"
+            local created
+            created=$(echo "$output" | grep -oE 'Created .+' | cut -d' ' -f2-)
+            if [[ -n "$created" && -d "$created" ]]; then
+                cd "$created"
+            fi
+            ;;
+        *)
+            "$bin" "$@"
+            ;;
+    esac
+}
+# flow:end
+"#;
+
+            let mut file = match fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&zshrc)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to open {}: {}", zshrc.display(), e);
+                    return;
+                }
+            };
+
+            if let Err(e) = file.write_all(snippet.as_bytes()) {
+                eprintln!("Failed to write to {}: {}", zshrc.display(), e);
+                return;
+            }
+
+            println!("Added flow integration to {}", zshrc.display());
+        }
+        _ => {
+            eprintln!("Unsupported shell: {}", shell);
+            eprintln!("Supported: fish, zsh");
+        }
+    }
 }

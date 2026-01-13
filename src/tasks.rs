@@ -987,6 +987,20 @@ fn command_references_args(command: &str) -> bool {
     false
 }
 
+fn has_tty_access() -> bool {
+    if std::io::stdin().is_terminal() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        std::fs::File::open("/dev/tty").is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn run_host_command(
     workdir: &Path,
     command: &str,
@@ -996,7 +1010,7 @@ fn run_host_command(
     // For interactive tasks, run directly with inherited stdio
     // This ensures proper TTY handling for readline, prompts, etc.
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
-    let is_tty = std::io::stdin().is_terminal();
+    let is_tty = has_tty_access();
 
     if interactive && is_tty {
         return run_interactive_command(workdir, command, args, ctx);
@@ -1100,7 +1114,7 @@ fn run_flox_command(
     // For interactive tasks, run directly with inherited stdio
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
 
-    if interactive && std::io::stdin().is_terminal() {
+    if interactive && has_tty_access() {
         return run_flox_interactive_command(env, workdir, command, args, ctx);
     }
 
