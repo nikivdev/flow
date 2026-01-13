@@ -79,11 +79,11 @@ pub fn run(cmd: SupervisorCommand) -> Result<()> {
     let socket_path = resolve_socket_path(cmd.socket.as_deref())?;
 
     match action {
-        SupervisorAction::Start => {
-            ensure_supervisor_running(&socket_path, true, cmd.boot)?;
+        SupervisorAction::Start { boot } => {
+            ensure_supervisor_running(&socket_path, true, boot)?;
             Ok(())
         }
-        SupervisorAction::Run => run_server(&socket_path, cmd.boot),
+        SupervisorAction::Run { boot } => run_server(&socket_path, boot),
         SupervisorAction::Stop => stop_supervisor(&socket_path),
         SupervisorAction::Status => show_status(&socket_path),
     }
@@ -164,6 +164,11 @@ fn supervisor_pid_path() -> Result<PathBuf> {
     Ok(base.join("supervisor.pid"))
 }
 
+fn supervisor_log_path() -> Result<PathBuf> {
+    let base = config::ensure_global_state_dir()?;
+    Ok(base.join("supervisor.log"))
+}
+
 fn supervisor_running(socket_path: &Path) -> bool {
     if !socket_path.exists() {
         return false;
@@ -192,9 +197,29 @@ fn ensure_supervisor_running(socket_path: &Path, announce: bool, boot: bool) -> 
     if boot {
         cmd.arg("--boot");
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    cmd.stdin(Stdio::null());
+
+    let log_path = supervisor_log_path().ok();
+    if let Some(path) = &log_path {
+        let log_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok();
+        if let Some(file) = log_file {
+            let file_err = file.try_clone().ok();
+            cmd.stdout(file);
+            if let Some(err) = file_err {
+                cmd.stderr(err);
+            } else {
+                cmd.stderr(Stdio::null());
+            }
+        } else {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    } else {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
 
     #[cfg(unix)]
     {
@@ -206,9 +231,16 @@ fn ensure_supervisor_running(socket_path: &Path, announce: bool, boot: bool) -> 
     persist_supervisor_pid(child.id())?;
 
     // Give the socket a moment to come up.
-    std::thread::sleep(Duration::from_millis(300));
+    let mut ready = false;
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(150));
+        if supervisor_running(socket_path) {
+            ready = true;
+            break;
+        }
+    }
 
-    if supervisor_running(socket_path) {
+    if ready {
         if announce {
             println!("Supervisor started.");
         }
@@ -216,7 +248,14 @@ fn ensure_supervisor_running(socket_path: &Path, announce: bool, boot: bool) -> 
     }
 
     if announce {
-        eprintln!("WARN supervisor did not respond after launch.");
+        if let Some(path) = log_path {
+            eprintln!(
+                "WARN supervisor did not respond after launch. Check {}",
+                path.display()
+            );
+        } else {
+            eprintln!("WARN supervisor did not respond after launch.");
+        }
     }
     Ok(false)
 }
