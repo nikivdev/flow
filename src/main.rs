@@ -332,23 +332,10 @@ fn shell_init(shell: &str) {
             let snippet = r#"
 # flow:start
 function f
-    set -l bin
-    if test -x ~/.local/bin/f
-        set bin ~/.local/bin/f
+    if test (count $argv) -eq 0
+        ~/bin/f
     else
-        set bin (command -v f)
-    end
-
-    switch "$argv[1]"
-        case new
-            set -l output ($bin $argv 2>&1)
-            echo $output
-            set -l created (echo $output | string match -r 'Created (.+)' | tail -1)
-            if test -n "$created" -a -d "$created"
-                cd "$created"
-            end
-        case '*'
-            $bin $argv
+        ~/bin/f match $argv
     end
 end
 # flow:end
