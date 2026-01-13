@@ -15,11 +15,17 @@ use reqwest::blocking::Client;
 use crate::{
     cli::{DaemonAction, DaemonCommand},
     config::{self, DaemonConfig},
+    supervisor,
 };
 
 /// Run the daemon command.
 pub fn run(cmd: DaemonCommand) -> Result<()> {
     let action = cmd.action.unwrap_or(DaemonAction::Status);
+    let config_path = resolve_flow_toml_path();
+
+    if supervisor::try_handle_daemon_action(&action, config_path.as_deref())? {
+        return Ok(());
+    }
 
     match action {
         DaemonAction::Start { name } => start_daemon(&name)?,
@@ -38,22 +44,30 @@ pub fn run(cmd: DaemonCommand) -> Result<()> {
 
 /// Start a daemon by name.
 pub fn start_daemon(name: &str) -> Result<()> {
-    let daemon = find_daemon_config(name)?;
+    start_daemon_with_path(name, resolve_flow_toml_path().as_deref())
+}
+
+pub fn start_daemon_with_path(name: &str, config_path: Option<&Path>) -> Result<()> {
+    let daemon = find_daemon_config_with_path(name, config_path)?;
+    start_daemon_inner(&daemon)
+}
+
+fn start_daemon_inner(daemon: &DaemonConfig) -> Result<()> {
 
     // Check if already running
     if let Some(url) = daemon.effective_health_url() {
         if check_health(&url) {
-            println!("✓ {} is already running", name);
+            println!("✓ {} is already running", daemon.name);
             return Ok(());
         }
     }
 
     // Check if there's a stale PID
-    if let Some(pid) = load_daemon_pid(name)? {
+    if let Some(pid) = load_daemon_pid(&daemon.name)? {
         if process_alive(pid)? {
             terminate_process(pid).ok();
         }
-        remove_daemon_pid(name).ok();
+        remove_daemon_pid(&daemon.name).ok();
     }
 
     // Find the binary
@@ -97,7 +111,7 @@ pub fn start_daemon(name: &str) -> Result<()> {
 
     println!(
         "Starting {} using {}{}",
-        name,
+        daemon.name,
         binary.display(),
         daemon
             .command
@@ -106,26 +120,30 @@ pub fn start_daemon(name: &str) -> Result<()> {
             .unwrap_or_default()
     );
 
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("failed to start {} from {}", name, binary.display()))?;
+    let child = cmd.spawn().with_context(|| {
+        format!(
+            "failed to start {} from {}",
+            daemon.name,
+            binary.display()
+        )
+    })?;
 
-    persist_daemon_pid(name, child.id())?;
+    persist_daemon_pid(&daemon.name, child.id())?;
 
     // Wait a moment and check health
     std::thread::sleep(Duration::from_millis(500));
 
     if let Some(url) = daemon.effective_health_url() {
         if check_health(&url) {
-            println!("✓ {} started successfully", name);
+            println!("✓ {} started successfully", daemon.name);
         } else {
             println!(
                 "⚠ {} started but health check failed (may need more time)",
-                name
+                daemon.name
             );
         }
     } else {
-        println!("✓ {} started (no health check configured)", name);
+        println!("✓ {} started (no health check configured)", daemon.name);
     }
 
     Ok(())
@@ -133,7 +151,11 @@ pub fn start_daemon(name: &str) -> Result<()> {
 
 /// Stop a daemon by name.
 pub fn stop_daemon(name: &str) -> Result<()> {
-    let daemon = find_daemon_config(name).ok();
+    stop_daemon_with_path(name, resolve_flow_toml_path().as_deref())
+}
+
+pub fn stop_daemon_with_path(name: &str, config_path: Option<&Path>) -> Result<()> {
+    let daemon = find_daemon_config_with_path(name, config_path).ok();
 
     if let Some(pid) = load_daemon_pid(name)? {
         if process_alive(pid)? {
@@ -164,7 +186,11 @@ pub fn stop_daemon(name: &str) -> Result<()> {
 
 /// Show status of all configured daemons.
 pub fn show_status() -> Result<()> {
-    let config = load_merged_config()?;
+    show_status_with_path(resolve_flow_toml_path().as_deref())
+}
+
+pub fn show_status_with_path(config_path: Option<&Path>) -> Result<()> {
+    let config = load_merged_config_with_path(config_path)?;
 
     if config.daemons.is_empty() {
         println!("No daemons configured.");
@@ -211,7 +237,11 @@ pub fn show_status() -> Result<()> {
 
 /// List available daemons.
 pub fn list_daemons() -> Result<()> {
-    let config = load_merged_config()?;
+    list_daemons_with_path(resolve_flow_toml_path().as_deref())
+}
+
+pub fn list_daemons_with_path(config_path: Option<&Path>) -> Result<()> {
+    let config = load_merged_config_with_path(config_path)?;
 
     if config.daemons.is_empty() {
         println!("No daemons configured.");
@@ -255,8 +285,11 @@ pub fn get_daemon_status(daemon: &DaemonConfig) -> DaemonStatus {
 }
 
 /// Find a daemon config by name from merged configs.
-fn find_daemon_config(name: &str) -> Result<DaemonConfig> {
-    let config = load_merged_config()?;
+fn find_daemon_config_with_path(
+    name: &str,
+    config_path: Option<&Path>,
+) -> Result<DaemonConfig> {
+    let config = load_merged_config_with_path(config_path)?;
 
     config
         .daemons
@@ -266,7 +299,9 @@ fn find_daemon_config(name: &str) -> Result<DaemonConfig> {
 }
 
 /// Load merged config from global and local sources.
-fn load_merged_config() -> Result<config::Config> {
+pub fn load_merged_config_with_path(
+    config_path: Option<&Path>,
+) -> Result<config::Config> {
     let mut merged = config::Config::default();
 
     // Load global config
@@ -278,17 +313,28 @@ fn load_merged_config() -> Result<config::Config> {
     }
 
     // Load local config if it exists
-    let local_path = std::env::current_dir()
-        .map(|d| d.join("flow.toml"))
-        .unwrap_or_else(|_| PathBuf::from("flow.toml"));
-
-    if local_path.exists() {
-        if let Ok(local_cfg) = config::load(&local_path) {
-            merged.daemons.extend(local_cfg.daemons);
+    if let Some(local_path) = config_path {
+        if local_path.exists() {
+            if let Ok(local_cfg) = config::load(local_path) {
+                merged.daemons.extend(local_cfg.daemons);
+            }
         }
     }
 
     Ok(merged)
+}
+
+fn resolve_flow_toml_path() -> Option<PathBuf> {
+    let mut current = std::env::current_dir().ok()?;
+    loop {
+        let candidate = current.join("flow.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 /// Find a binary on PATH or as an absolute path.

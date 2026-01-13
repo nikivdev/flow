@@ -8,8 +8,8 @@ use flowd::{
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, fixup, help_search, history,
     home, hub, init, init_tracing, log_server, notify, palette, parallel, processes, projects,
-    publish, registry, release, repos, services, setup, skills, ssh_keys, storage, sync,
-    task_match, tasks, todo, tools, upgrade, upstream, web,
+    publish, registry, release, repos, services, setup, skills, ssh_keys, storage, supervisor,
+    sync, task_match, tasks, todo, tools, upgrade, upstream, web,
 };
 
 fn main() -> Result<()> {
@@ -178,6 +178,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Daemon(cmd)) => {
             daemon::run(cmd)?;
+        }
+        Some(Commands::Supervisor(cmd)) => {
+            supervisor::run(cmd)?;
         }
         Some(Commands::Ai(cmd)) => {
             ai::run(cmd.action)?;

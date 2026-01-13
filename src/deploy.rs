@@ -7,13 +7,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use reqwest::blocking::Client;
+use serde_json::Value;
 use serde::{Deserialize, Serialize};
+use rpassword::prompt_password;
 
 use crate::cli::{DeployAction, DeployCommand, EnvAction, TaskRunOpts};
 use crate::config::Config;
@@ -157,6 +160,33 @@ pub struct CloudflareConfig {
     pub dev: Option<String>,
     /// URL for health checks (e.g., https://my-worker.workers.dev).
     pub url: Option<String>,
+}
+
+/// Web deployment config from flow.toml [web] section.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebConfig {
+    /// Path to web app directory (relative to project root).
+    pub path: Option<String>,
+    /// Domain for the site (used to derive route).
+    pub domain: Option<String>,
+    /// Explicit route to add in wrangler config (e.g., example.com/*).
+    pub route: Option<String>,
+    /// Env source for secrets ("1focus" or "file").
+    pub env_source: Option<String>,
+    /// Specific env keys to fetch when env_source = "1focus".
+    #[serde(default)]
+    pub env_keys: Vec<String>,
+    /// Env keys to set as non-secret vars when env_source = "1focus".
+    #[serde(default)]
+    pub env_vars: Vec<String>,
+    /// Default values for env vars (key/value).
+    #[serde(default)]
+    pub env_defaults: HashMap<String, String>,
+    /// Env apply mode: "always", "auto", or "never".
+    pub env_apply: Option<String>,
+    /// Wrangler environment name (e.g., staging).
+    #[serde(default, alias = "env")]
+    pub environment: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,6 +360,7 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
         Some(DeployAction::Cloudflare { secrets, dev }) => {
             deploy_cloudflare(&project_root, flow_config.as_ref(), secrets, dev)
         }
+        Some(DeployAction::Web) => deploy_web(&project_root, flow_config.as_ref()),
         Some(DeployAction::Setup) => setup_cloudflare(&project_root, flow_config.as_ref()),
         Some(DeployAction::Railway) => deploy_railway(&project_root, flow_config.as_ref()),
         Some(DeployAction::Config) => configure_deploy(),
@@ -500,6 +531,24 @@ fn prompt_line(message: &str, default: Option<&str>) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+fn prompt_yes_no(message: &str, default_yes: bool) -> Result<bool> {
+    let prompt = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("{message} {prompt}: ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    if answer.is_empty() {
+        return Ok(default_yes);
+    }
+    Ok(answer == "y" || answer == "yes")
+}
+
+fn prompt_secret(message: &str) -> Result<String> {
+    let value = prompt_password(message)?;
+    Ok(value)
+}
+
 fn available_tasks(cfg: &crate::config::Config) -> String {
     let mut names: Vec<_> = cfg.tasks.iter().map(|task| task.name.clone()).collect();
     names.sort();
@@ -539,6 +588,114 @@ fn auto_deploy(project_root: &Path, config: Option<&Config>) -> Result<()> {
         Or run:\n\
         f deploy setup"
     );
+}
+
+fn deploy_web(project_root: &Path, config: Option<&Config>) -> Result<()> {
+    let (web_root, flow_path, mut cfg) = resolve_deploy_root(project_root, config)?;
+
+    let mut changed = false;
+    if ensure_web_config(&flow_path, &web_root, &cfg)? {
+        changed = true;
+        cfg = crate::config::load(&flow_path)?;
+    }
+
+    let web_cfg = cfg
+        .web
+        .as_ref()
+        .context("No [web] section in flow.toml")?;
+
+    if ensure_web_domain_or_route(&flow_path, web_cfg)? {
+        changed = true;
+        cfg = crate::config::load(&flow_path)?;
+    }
+    let web_cfg = cfg
+        .web
+        .as_ref()
+        .context("No [web] section in flow.toml")?;
+
+    if ensure_web_env_source(&flow_path, web_cfg)? {
+        changed = true;
+        cfg = crate::config::load(&flow_path)?;
+    }
+    let web_cfg = cfg
+        .web
+        .as_ref()
+        .context("No [web] section in flow.toml")?;
+
+    if ensure_web_routes(&web_root, web_cfg)? {
+        changed = true;
+    }
+
+    if changed {
+        println!("Updated web deployment config.");
+    }
+
+    ensure_cloudflare_api_token()?;
+    ensure_web_dns(web_cfg)?;
+
+    if let Err(err) = apply_web_env(&web_root, web_cfg) {
+        eprintln!("WARN env apply skipped: {err}");
+        eprintln!("Hint: run `f env setup` to store missing web env vars.");
+    }
+
+    if tasks::find_task(&cfg, "deploy-web").is_some() {
+        return tasks::run(TaskRunOpts {
+            config: flow_path,
+            delegate_to_hub: false,
+            hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+            hub_port: 9050,
+            name: "deploy-web".to_string(),
+            args: Vec::new(),
+        });
+    }
+
+    if tasks::find_task(&cfg, "deploy").is_some() {
+        eprintln!("WARN deploy-web task not found; running deploy.");
+        return tasks::run(TaskRunOpts {
+            config: flow_path,
+            delegate_to_hub: false,
+            hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+            hub_port: 9050,
+            name: "deploy".to_string(),
+            args: Vec::new(),
+        });
+    }
+
+    bail!("No deploy task found. Add 'deploy-web' or 'deploy' to flow.toml.");
+}
+
+fn resolve_deploy_root(
+    project_root: &Path,
+    config: Option<&Config>,
+) -> Result<(PathBuf, PathBuf, Config)> {
+    let Some(flow_path) = find_flow_toml_from(project_root) else {
+        bail!("flow.toml not found. Run from your repo root.");
+    };
+
+    let root = flow_path.parent().unwrap_or(project_root).to_path_buf();
+    let cfg = if root == project_root {
+        match config {
+            Some(existing) => existing.clone(),
+            None => crate::config::load(&flow_path)?,
+        }
+    } else {
+        crate::config::load(&flow_path)?
+    };
+
+    Ok((root, flow_path, cfg))
+}
+
+fn find_flow_toml_from(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        let candidate = current.join("flow.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 /// Deploy to a Linux host via SSH.
@@ -1904,6 +2061,681 @@ fn relative_path(project_root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+fn ensure_web_config(flow_path: &Path, project_root: &Path, cfg: &Config) -> Result<bool> {
+    let existing_path = cfg.web.as_ref().and_then(|web| web.path.clone());
+    if existing_path.is_some() {
+        return Ok(false);
+    }
+
+    let web_path = match detect_web_path(project_root)? {
+        Some(path) => path,
+        None => {
+            if !std::io::stdin().is_terminal() {
+                bail!(
+                    "No [web] section found and unable to infer web path. Add [web] path = \"...\"."
+                );
+            }
+            let input = prompt_line("Web path (relative to repo root)", None)?;
+            if input.trim().is_empty() {
+                bail!("Web path required. Add [web] path = \"...\" in flow.toml.");
+            }
+            input
+        }
+    };
+
+    ensure_web_path(flow_path, &web_path)
+}
+
+fn ensure_web_domain_or_route(flow_path: &Path, web_cfg: &WebConfig) -> Result<bool> {
+    if web_cfg.domain.is_some() || web_cfg.route.is_some() {
+        return Ok(false);
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!("web.domain or web.route is required in flow.toml.");
+    }
+
+    println!("Web routing setup");
+    println!("-----------------");
+    let domain = prompt_line("Domain (e.g., example.com)", None)?;
+    if !domain.trim().is_empty() {
+        return ensure_web_key(flow_path, "domain", &domain);
+    }
+
+    let route = prompt_line("Route (e.g., example.com/*)", None)?;
+    if route.trim().is_empty() {
+        bail!("web.domain or web.route is required to deploy web.");
+    }
+    ensure_web_key(flow_path, "route", &route)
+}
+
+fn ensure_web_env_source(flow_path: &Path, web_cfg: &WebConfig) -> Result<bool> {
+    if web_cfg.env_source.is_some() {
+        return Ok(false);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+
+    if prompt_yes_no("Use 1focus for web env vars?", true)? {
+        let mut changed = false;
+        if ensure_web_key(flow_path, "env_source", "1focus")? {
+            changed = true;
+        }
+        if ensure_web_key(flow_path, "env_apply", "always")? {
+            changed = true;
+        }
+        return Ok(changed);
+    }
+
+    if prompt_yes_no("Use local env store instead?", true)? {
+        let mut changed = false;
+        if ensure_web_key(flow_path, "env_source", "local")? {
+            changed = true;
+        }
+        if ensure_web_key(flow_path, "env_apply", "always")? {
+            changed = true;
+        }
+        return Ok(changed);
+    }
+
+    Ok(false)
+}
+
+fn detect_web_path(project_root: &Path) -> Result<Option<String>> {
+    let packages_web = project_root.join("packages").join("web");
+    if packages_web.join("wrangler.jsonc").exists()
+        || packages_web.join("wrangler.json").exists()
+        || packages_web.join("wrangler.toml").exists()
+    {
+        return Ok(Some("packages/web".to_string()));
+    }
+
+    if project_root.join("wrangler.jsonc").exists()
+        || project_root.join("wrangler.json").exists()
+        || project_root.join("wrangler.toml").exists()
+    {
+        return Ok(Some(".".to_string()));
+    }
+
+    let configs = discover_wrangler_configs(project_root)?;
+    if configs.len() == 1 {
+        let rel = relative_path(project_root, &configs[0]);
+        if rel.is_empty() {
+            return Ok(Some(".".to_string()));
+        }
+        return Ok(Some(rel));
+    }
+
+    Ok(None)
+}
+
+fn ensure_web_path(flow_path: &Path, web_path: &str) -> Result<bool> {
+    ensure_web_key(flow_path, "path", web_path)
+}
+
+fn ensure_web_key(flow_path: &Path, key: &str, value: &str) -> Result<bool> {
+    let contents = fs::read_to_string(flow_path)?;
+    let mut lines: Vec<String> = contents.lines().map(|line| line.to_string()).collect();
+    let had_trailing_newline = contents.ends_with('\n');
+
+    let mut changed = false;
+    if let Some(start) = lines.iter().position(|line| line.trim() == "[web]") {
+        let end = find_section_end(&lines, start + 1);
+        let mut section_lines = lines[start + 1..end].to_vec();
+        if !section_has_key(&section_lines, key) {
+            section_lines.push(format!("{key} = \"{}\"", value.trim()));
+            changed = true;
+        }
+
+        let mut updated = Vec::new();
+        updated.extend_from_slice(&lines[..start + 1]);
+        updated.extend(section_lines);
+        updated.extend_from_slice(&lines[end..]);
+        lines = updated;
+    } else {
+        if !lines.is_empty()
+            && !lines
+                .last()
+                .map(|line| line.trim().is_empty())
+                .unwrap_or(false)
+        {
+            lines.push(String::new());
+        }
+        lines.push("[web]".to_string());
+        lines.push(format!("{key} = \"{}\"", value.trim()));
+        changed = true;
+    }
+
+    if changed {
+        let mut updated = lines.join("\n");
+        if had_trailing_newline {
+            updated.push('\n');
+        }
+        fs::write(flow_path, updated)?;
+    }
+
+    Ok(changed)
+}
+
+fn section_has_key(lines: &[String], key: &str) -> bool {
+    let key_prefix = format!("{key} ");
+    let key_eq = format!("{key}=");
+    lines.iter().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with(&key_prefix) || trimmed.starts_with(&key_eq)
+    })
+}
+
+fn ensure_web_routes(project_root: &Path, web_cfg: &WebConfig) -> Result<bool> {
+    let Some(route) = resolve_web_route(web_cfg) else {
+        eprintln!("WARN web route not set. Add web.route or web.domain in flow.toml.");
+        return Ok(false);
+    };
+
+    let web_path = web_cfg.path.as_deref().unwrap_or(".");
+    let web_root = project_root.join(web_path);
+    ensure_wrangler_config(&web_root)?;
+
+    let Some(config_path) = find_wrangler_route_file(&web_root) else {
+        eprintln!(
+            "WARN No wrangler.json/jsonc found in {}; add route manually.",
+            web_root.display()
+        );
+        return Ok(false);
+    };
+
+    ensure_wrangler_routes_jsonc(&config_path, &route)
+}
+
+fn ensure_web_dns(web_cfg: &WebConfig) -> Result<()> {
+    let Some(domain) = resolve_web_domain(web_cfg) else {
+        return Ok(());
+    };
+    if !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+
+    println!("DNS setup");
+    println!("---------");
+    println!("Domain: {}", domain);
+    if !prompt_yes_no("Manage DNS record in Cloudflare?", true)? {
+        return Ok(());
+    }
+
+    let token = std::env::var("CLOUDFLARE_API_TOKEN")
+        .context("Cloudflare API token missing. Run `f env new` -> Cloudflare token.")?;
+    let client = cloudflare_api_client()?;
+    let lookup_domain = domain.trim_start_matches("*.");
+    let Some((zone_id, zone_name)) = find_cloudflare_zone(&client, &token, lookup_domain)? else {
+        eprintln!("WARN No Cloudflare zone found for {}.", lookup_domain);
+        return Ok(());
+    };
+
+    let record_type = prompt_line("DNS record type (A or CNAME)", Some("A"))?;
+    let record_type = record_type.trim().to_ascii_uppercase();
+    if record_type.is_empty() {
+        bail!("DNS record type required.");
+    }
+
+    let default_target = if record_type == "CNAME" {
+        zone_name.clone()
+    } else {
+        "192.0.2.1".to_string()
+    };
+    let target = prompt_line("DNS record target", Some(&default_target))?;
+    let target = target.trim();
+    if target.is_empty() {
+        bail!("DNS record target required.");
+    }
+    let proxied = prompt_yes_no("Proxy through Cloudflare?", true)?;
+
+    upsert_cloudflare_dns_record(
+        &client,
+        &token,
+        &zone_id,
+        &domain,
+        &record_type,
+        target,
+        proxied,
+    )?;
+    println!("OK DNS record configured for {}", domain);
+    Ok(())
+}
+
+fn resolve_web_route(web_cfg: &WebConfig) -> Option<String> {
+    if let Some(route) = web_cfg.route.as_ref() {
+        return Some(route.clone());
+    }
+    web_cfg
+        .domain
+        .as_ref()
+        .map(|domain| format!("{}/*", domain.trim()))
+}
+
+fn resolve_web_domain(web_cfg: &WebConfig) -> Option<String> {
+    if let Some(domain) = web_cfg.domain.as_ref() {
+        let trimmed = domain.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(trimmed.to_string());
+    }
+    let route = web_cfg.route.as_ref()?.trim();
+    if route.is_empty() {
+        return None;
+    }
+    let route = route
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = route.split('/').next().unwrap_or(route).trim();
+    if host.is_empty() || host == "*" {
+        return None;
+    }
+    let host = host.trim_end_matches("/*").trim_end_matches('/');
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_string())
+}
+
+fn find_wrangler_route_file(web_root: &Path) -> Option<PathBuf> {
+    let jsonc = web_root.join("wrangler.jsonc");
+    if jsonc.exists() {
+        return Some(jsonc);
+    }
+    let json = web_root.join("wrangler.json");
+    if json.exists() {
+        return Some(json);
+    }
+    None
+}
+
+fn apply_web_env(project_root: &Path, web_cfg: &WebConfig) -> Result<()> {
+    let env_apply_mode = env_apply_mode_from_str(web_cfg.env_apply.as_deref());
+    if env_apply_mode == EnvApplyMode::Never {
+        return Ok(());
+    }
+    let source = web_cfg.env_source.as_deref();
+    if !is_1focus_source(source) && !is_local_source(source) {
+        return Ok(());
+    }
+
+    if is_local_source(source) {
+        unsafe {
+            std::env::set_var("FLOW_ENV_BACKEND", "local");
+        }
+    }
+
+    let keys = collect_web_env_keys(web_cfg);
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let env_name = web_cfg.environment.as_deref().unwrap_or("production");
+    let mut vars: HashMap<String, String> = HashMap::new();
+    for key in &keys {
+        if let Some(value) = web_cfg.env_defaults.get(key) {
+            if !value.trim().is_empty() {
+                vars.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    match crate::env::fetch_project_env_vars(env_name, &keys) {
+        Ok(fetched) => {
+            vars.extend(fetched);
+        }
+        Err(err) => {
+            if env_apply_mode == EnvApplyMode::Auto {
+                eprintln!("WARN env sync skipped: {err}");
+                return Ok(());
+            }
+            return Err(err);
+        }
+    }
+
+    let web_path = web_cfg.path.as_deref().unwrap_or(".");
+    let web_root = project_root.join(web_path);
+    ensure_wrangler_config(&web_root)?;
+
+    let var_keys: HashSet<String> = web_cfg.env_vars.iter().cloned().collect();
+    set_wrangler_env_map(&web_root, web_cfg.environment.as_deref(), &vars, &var_keys)?;
+    Ok(())
+}
+
+fn collect_web_env_keys(web_cfg: &WebConfig) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut seen = HashSet::new();
+    for key in web_cfg.env_keys.iter().chain(web_cfg.env_vars.iter()) {
+        if seen.insert(key.clone()) {
+            keys.push(key.clone());
+        }
+    }
+    keys
+}
+
+fn is_local_source(source: Option<&str>) -> bool {
+    matches!(
+        source.map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("local")
+    )
+}
+
+fn ensure_cloudflare_api_token() -> Result<()> {
+    if std::env::var("CLOUDFLARE_API_TOKEN")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let key = "CLOUDFLARE_API_TOKEN".to_string();
+    let mut token = fetch_personal_env_value(&key)?;
+    if token.is_none() && std::io::stdin().is_terminal() {
+        println!("Cloudflare API token required for deploy.");
+        println!("How to get it:");
+        println!("  - Open https://dash.cloudflare.com/profile/api-tokens");
+        println!("  - Create a token (Template: Edit Cloudflare Workers or Custom)");
+        println!("  - Permissions: Workers Scripts:Edit, Workers Routes:Edit, Pages:Edit");
+        println!("  - Add Zone:Read + DNS:Edit for your domain");
+        println!("  - Copy the token value");
+        println!();
+
+        if !prompt_yes_no("Save token now?", true)? {
+            bail!("Cloudflare token required to deploy.");
+        }
+        let default_store = if wants_local_env_backend() {
+            "local"
+        } else {
+            "1focus"
+        };
+        let store = prompt_line("Store token in (1focus/local)", Some(default_store))?;
+        let store = store.trim().to_ascii_lowercase();
+        let store_local = matches!(store.as_str(), "local" | "l");
+        let store_1focus = matches!(store.as_str(), "1focus" | "1f" | "onefocus");
+        if !store_local && !store_1focus {
+            bail!("Store token in 1focus or local.");
+        }
+
+        let input = prompt_secret("Enter Cloudflare API token (input hidden): ")?;
+        if input.trim().is_empty() {
+            bail!("Cloudflare token required to deploy.");
+        }
+        if store_local {
+            with_local_env_backend(|| crate::env::set_personal_env_var(&key, input.trim()))?;
+        } else {
+            crate::env::set_personal_env_var(&key, input.trim())?;
+        }
+        token = Some(input);
+        println!("Saved {} to env store.", key);
+    }
+
+    let Some(token) = token else {
+        bail!("Cloudflare API token required. Store it as personal env key {}.", key);
+    };
+
+    unsafe {
+        std::env::set_var("CLOUDFLARE_API_TOKEN", token.trim());
+    }
+
+    Ok(())
+}
+
+fn wants_local_env_backend() -> bool {
+    if let Some(backend) = crate::config::preferred_env_backend() {
+        return backend == "local";
+    }
+    if let Ok(value) = std::env::var("FLOW_ENV_BACKEND") {
+        return value.trim().eq_ignore_ascii_case("local");
+    }
+    std::env::var("FLOW_ENV_LOCAL")
+        .ok()
+        .map(|value| value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn with_local_env_backend<T>(action: impl FnOnce() -> Result<T>) -> Result<T> {
+    let previous = std::env::var("FLOW_ENV_BACKEND").ok();
+    unsafe {
+        std::env::set_var("FLOW_ENV_BACKEND", "local");
+    }
+    let result = action();
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("FLOW_ENV_BACKEND", value),
+            None => std::env::remove_var("FLOW_ENV_BACKEND"),
+        }
+    }
+    result
+}
+
+fn cloudflare_api_client() -> Result<Client> {
+    Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .context("failed to build Cloudflare API client")
+}
+
+fn find_cloudflare_zone(client: &Client, token: &str, domain: &str) -> Result<Option<(String, String)>> {
+    for candidate in cloudflare_zone_candidates(domain) {
+        let resp = client
+            .get("https://api.cloudflare.com/client/v4/zones")
+            .bearer_auth(token)
+            .query(&[("name", candidate.as_str()), ("status", "active")])
+            .send()
+            .context("failed to query Cloudflare zones")?;
+        let json: Value = resp.json().context("failed to parse Cloudflare zones response")?;
+        cloudflare_api_check(&json, "listing zones")?;
+        if let Some(zone) = json["result"].as_array().and_then(|arr| arr.first()) {
+            if let (Some(id), Some(name)) = (zone["id"].as_str(), zone["name"].as_str()) {
+                return Ok(Some((id.to_string(), name.to_string())));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn cloudflare_zone_candidates(domain: &str) -> Vec<String> {
+    let trimmed = domain.trim().trim_end_matches('.');
+    let parts: Vec<&str> = trimmed.split('.').filter(|part| !part.is_empty()).collect();
+    if parts.len() < 2 {
+        return vec![trimmed.to_string()];
+    }
+    let mut candidates = Vec::new();
+    for i in 0..parts.len() - 1 {
+        let candidate = parts[i..].join(".");
+        if candidate.split('.').count() >= 2 {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn upsert_cloudflare_dns_record(
+    client: &Client,
+    token: &str,
+    zone_id: &str,
+    domain: &str,
+    record_type: &str,
+    target: &str,
+    proxied: bool,
+) -> Result<()> {
+    if let Some(existing) =
+        fetch_cloudflare_dns_record(client, token, zone_id, domain, record_type)?
+    {
+        if existing.content == target && existing.proxied == proxied {
+            println!("OK DNS record already set for {}", domain);
+            return Ok(());
+        }
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/zones/{}/dns_records/{}",
+            zone_id, existing.id
+        );
+        let resp = client
+            .put(&url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "type": record_type,
+                "name": domain,
+                "content": target,
+                "proxied": proxied,
+                "ttl": 1,
+            }))
+            .send()
+            .context("failed to update Cloudflare DNS record")?;
+        let json: Value = resp.json().context("failed to parse DNS update response")?;
+        cloudflare_api_check(&json, "updating DNS record")?;
+        return Ok(());
+    }
+
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
+        zone_id
+    );
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "type": record_type,
+            "name": domain,
+            "content": target,
+            "proxied": proxied,
+            "ttl": 1,
+        }))
+        .send()
+        .context("failed to create Cloudflare DNS record")?;
+    let json: Value = resp.json().context("failed to parse DNS create response")?;
+    cloudflare_api_check(&json, "creating DNS record")?;
+    Ok(())
+}
+
+struct CloudflareDnsRecord {
+    id: String,
+    content: String,
+    proxied: bool,
+}
+
+fn fetch_cloudflare_dns_record(
+    client: &Client,
+    token: &str,
+    zone_id: &str,
+    domain: &str,
+    record_type: &str,
+) -> Result<Option<CloudflareDnsRecord>> {
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
+        zone_id
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .query(&[("type", record_type), ("name", domain)])
+        .send()
+        .context("failed to query Cloudflare DNS records")?;
+    let json: Value = resp.json().context("failed to parse DNS record response")?;
+    cloudflare_api_check(&json, "listing DNS records")?;
+    let Some(record) = json["result"].as_array().and_then(|arr| arr.first()) else {
+        return Ok(None);
+    };
+    let id = record["id"].as_str().unwrap_or_default().to_string();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let content = record["content"].as_str().unwrap_or_default().to_string();
+    let proxied = record["proxied"].as_bool().unwrap_or(false);
+    Ok(Some(CloudflareDnsRecord {
+        id,
+        content,
+        proxied,
+    }))
+}
+
+fn cloudflare_api_check(payload: &Value, action: &str) -> Result<()> {
+    if payload["success"].as_bool().unwrap_or(false) {
+        return Ok(());
+    }
+    let message = payload["errors"]
+        .as_array()
+        .and_then(|errs| errs.first())
+        .and_then(|err| err.get("message"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("Unknown error");
+    bail!("Cloudflare API error while {}: {}", action, message)
+}
+
+fn fetch_personal_env_value(key: &str) -> Result<Option<String>> {
+    let keys = vec![key.to_string()];
+    match crate::env::fetch_personal_env_vars(&keys) {
+        Ok(vars) => Ok(vars.get(key).cloned()),
+        Err(err) => {
+            if is_not_logged_in_err(&err) || is_1focus_unavailable(&err) {
+                return Ok(None);
+            }
+            Err(err)
+        }
+    }
+}
+
+fn is_not_logged_in_err(err: &anyhow::Error) -> bool {
+    err.to_string().to_ascii_lowercase().contains("not logged in")
+}
+
+fn is_1focus_unavailable(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains("failed to connect to 1focus")
+}
+
+fn ensure_wrangler_routes_jsonc(path: &Path, route: &str) -> Result<bool> {
+    let contents = fs::read_to_string(path)?;
+    if contents.contains(route) {
+        return Ok(false);
+    }
+    if contents.contains("\"routes\"") {
+        eprintln!(
+            "WARN {} has routes configured; add '{}' manually if needed.",
+            path.display(),
+            route
+        );
+        return Ok(false);
+    }
+
+    let insert_block = format!(
+        "\"routes\": [\n  \"{}\"\n]",
+        route
+    );
+
+    let mut lines: Vec<String> = contents.lines().map(|line| line.to_string()).collect();
+    let had_trailing_newline = contents.ends_with('\n');
+    if let Some(pos) = lines.iter().rposition(|line| line.trim() == "}") {
+        let needs_comma = lines
+            .iter()
+            .take(pos)
+            .rfind(|line| !line.trim().is_empty())
+            .map(|line| !line.trim_end().ends_with(',') && !line.trim_end().ends_with('{'))
+            .unwrap_or(false);
+        if needs_comma {
+            if let Some(last) = lines.iter_mut().take(pos).rfind(|line| !line.trim().is_empty())
+            {
+                if !last.trim_end().ends_with(',') {
+                    last.push(',');
+                }
+            }
+        }
+        let mut block_lines: Vec<String> =
+            insert_block.lines().map(|line| format!("  {line}")).collect();
+        lines.splice(pos..pos, block_lines.drain(..));
+        let mut updated = lines.join("\n");
+        if had_trailing_newline {
+            updated.push('\n');
+        }
+        fs::write(path, updated)?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 fn relative_dir(project_root: &Path, path: &Path) -> Option<String> {

@@ -4,12 +4,16 @@ Sync project environment and manage environment variables.
 
 ## Overview
 
-Manage environment variables securely via 1focus. Supports:
+Manage environment variables via 1focus with optional local fallback. Supports:
 - Project-level environment variables
 - Personal/global variables
 - Multiple environments (dev, staging, production)
 - Direct injection into commands
 - Touch ID gating for env reads on macOS
+
+If 1focus is unavailable, Flow can fall back to a local env store under
+`~/.config/flow/env-local`. You can force local storage by setting
+`FLOW_ENV_BACKEND=local`.
 
 ## Quick Start
 

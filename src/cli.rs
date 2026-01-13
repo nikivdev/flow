@@ -200,6 +200,11 @@ pub enum Commands {
     )]
     Daemon(DaemonCommand),
     #[command(
+        about = "Run the Flow supervisor (daemon manager).",
+        long_about = "Starts or checks the Flow supervisor, which manages background daemons via IPC."
+    )]
+    Supervisor(SupervisorCommand),
+    #[command(
         about = "Manage AI coding sessions (Claude Code).",
         long_about = "Track, list, and resume Claude Code sessions for the current project. Sessions are stored in .ai/sessions/claude/ and can be named for easy recall."
     )]
@@ -941,6 +946,27 @@ pub enum DaemonAction {
     /// List available daemons.
     #[command(alias = "ls")]
     List,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SupervisorCommand {
+    #[command(subcommand)]
+    pub action: Option<SupervisorAction>,
+    /// Socket path for supervisor IPC (defaults to ~/.config/flow/supervisor.sock).
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SupervisorAction {
+    /// Start the supervisor in the background.
+    Start,
+    /// Run the supervisor in the foreground (blocking).
+    Run,
+    /// Stop the supervisor if running.
+    Stop,
+    /// Show supervisor status.
+    Status,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1895,6 +1921,8 @@ pub enum DeployAction {
         #[arg(long)]
         dev: bool,
     },
+    /// Deploy the web site (Cloudflare).
+    Web,
     /// Interactive deploy setup (Cloudflare Workers for now).
     Setup,
     /// Deploy to Railway.

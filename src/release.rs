@@ -93,7 +93,7 @@ fn run_default(config_path: &Path, cfg: &Config) -> Result<()> {
         .unwrap_or("task");
 
     match provider {
-        "registry" | "myflow" => registry::publish(
+        "registry" => registry::publish(
             config_path,
             cfg,
             crate::cli::RegistryReleaseOpts::default(),
