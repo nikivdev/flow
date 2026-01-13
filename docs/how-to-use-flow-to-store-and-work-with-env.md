@@ -87,7 +87,7 @@ For sensitive production secrets, consider using cloud with Touch ID gating.
 
 ---
 
-## cloud Cloud Storage
+## Cloud Storage
 
 For team sharing and Cloudflare deployments.
 
@@ -95,6 +95,22 @@ For team sharing and Cloudflare deployments.
 
 1) Create a cloud API token.
 2) Login once:
+
+```bash
+f env login
+```
+
+### Bootstrapping cloud (first deploy)
+
+If the cloud backend is not deployed yet, use local storage to deploy it once:
+
+```bash
+export FLOW_ENV_BACKEND=local
+f env set --personal CLOUDFLARE_API_TOKEN=...
+f deploy web
+```
+
+After `https://myflow.sh` is live, create a cloud token there and run:
 
 ```bash
 f env login
