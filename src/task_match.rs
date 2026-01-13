@@ -12,7 +12,7 @@ use crate::{
     discover::{self, DiscoveredTask},
     lmstudio, tasks,
 };
-use clap::CommandFactory;
+use clap::{CommandFactory, Parser};
 
 /// Options for the match command.
 #[derive(Debug, Clone)]
@@ -85,6 +85,20 @@ fn is_cli_subcommand(args: &[String]) -> bool {
         .any(|cmd| cmd.eq_ignore_ascii_case(&first_lower))
 }
 
+fn should_passthrough_cli(args: &[String]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+    if args[0].eq_ignore_ascii_case("match") {
+        return false;
+    }
+
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push("f".to_string());
+    argv.extend(args.iter().cloned());
+    Cli::try_parse_from(argv).is_ok() || is_cli_subcommand(args)
+}
+
 /// Re-invoke the CLI with the original arguments (bypassing match)
 fn passthrough_to_cli(args: &[String]) -> Result<()> {
     use std::process::Command;
@@ -143,7 +157,7 @@ fn run_with_tasks(
     allow_passthrough: bool,
 ) -> Result<()> {
     // Check if this is a CLI subcommand that should bypass matching
-    if allow_passthrough && is_cli_subcommand(&opts.args) {
+    if allow_passthrough && should_passthrough_cli(&opts.args) {
         return passthrough_to_cli(&opts.args);
     }
 

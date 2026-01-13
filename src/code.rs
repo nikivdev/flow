@@ -13,11 +13,75 @@ use crate::config;
 const DEFAULT_CODE_ROOT: &str = "~/code";
 const DEFAULT_TEMPLATE_ROOT: &str = "~/new";
 
+/// List available templates from ~/new/.
+fn list_templates() -> Result<Vec<String>> {
+    let template_root = config::expand_path(DEFAULT_TEMPLATE_ROOT);
+    if !template_root.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut templates = Vec::new();
+    for entry in fs::read_dir(&template_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if !name.starts_with('.') {
+                    templates.push(name.to_string());
+                }
+            }
+        }
+    }
+    templates.sort();
+    Ok(templates)
+}
+
+/// Fuzzy select a template from ~/new/.
+fn fuzzy_select_template() -> Result<Option<String>> {
+    let templates = list_templates()?;
+    if templates.is_empty() {
+        bail!("No templates found in ~/new/");
+    }
+
+    let input = templates.join("\n");
+
+    let mut fzf = Command::new("fzf")
+        .args(["--height=50%", "--reverse", "--prompt=Template: "])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to spawn fzf")?;
+
+    fzf.stdin.as_mut().unwrap().write_all(input.as_bytes())?;
+
+    let output = fzf.wait_with_output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(selected))
+}
+
 /// Create a new project from a template at a specific path.
-/// Usage: f new <template> <path>
+/// Usage: f new [template] [path]
 pub fn new_from_template(opts: NewOpts) -> Result<()> {
     let template_root = config::expand_path(DEFAULT_TEMPLATE_ROOT);
-    let template_dir = template_root.join(opts.template.trim());
+
+    // Get template name (fuzzy select if not provided)
+    let template_name = match opts.template {
+        Some(t) => t,
+        None => match fuzzy_select_template()? {
+            Some(t) => t,
+            None => return Ok(()), // User cancelled
+        },
+    };
+
+    let template_dir = template_root.join(template_name.trim());
 
     if !template_dir.exists() {
         bail!("Template not found: {}", template_dir.display());
@@ -26,7 +90,9 @@ pub fn new_from_template(opts: NewOpts) -> Result<()> {
         bail!("Template path is not a directory: {}", template_dir.display());
     }
 
-    let target = config::expand_path(&opts.path);
+    // Default path to ./<template_name> in current directory
+    let target_path = opts.path.unwrap_or_else(|| template_name.clone());
+    let target = config::expand_path(&target_path);
     let target = if target.is_absolute() {
         target
     } else {

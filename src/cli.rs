@@ -89,6 +89,11 @@ pub enum Commands {
     )]
     Init(InitOpts),
     #[command(
+        about = "Output shell integration script.",
+        long_about = "Prints shell wrapper functions for commands like `f new` that need to cd. Add `eval (f shell-init fish)` to your fish config."
+    )]
+    ShellInit(ShellInitOpts),
+    #[command(
         about = "Create a new project from a template.",
         long_about = "Create a new project from ~/new/<template> at the specified path."
     )]
@@ -644,11 +649,17 @@ pub struct InitOpts {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct ShellInitOpts {
+    /// Shell to generate init script for (fish, zsh, bash).
+    pub shell: String,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct NewOpts {
-    /// Template name (e.g., web, docs).
-    pub template: String,
-    /// Destination path for the new project.
-    pub path: String,
+    /// Template name (e.g., web, docs). If omitted, shows fuzzy picker.
+    pub template: Option<String>,
+    /// Destination path for the new project. Defaults to ./<template>.
+    pub path: Option<String>,
     /// Show what would change without writing.
     #[arg(long)]
     pub dry_run: bool,
