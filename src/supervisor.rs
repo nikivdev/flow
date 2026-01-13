@@ -89,6 +89,18 @@ pub fn run(cmd: SupervisorCommand) -> Result<()> {
     }
 }
 
+pub fn ensure_running(boot: bool, announce: bool) -> Result<()> {
+    let socket_path = resolve_socket_path(None)?;
+    ensure_supervisor_running(&socket_path, announce, boot)?;
+    Ok(())
+}
+
+pub fn is_running() -> bool {
+    resolve_socket_path(None)
+        .map(|path| supervisor_running(&path))
+        .unwrap_or(false)
+}
+
 pub fn try_handle_daemon_action(
     action: &DaemonAction,
     config_path: Option<&Path>,
