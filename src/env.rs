@@ -1,7 +1,7 @@
-//! Environment variable management via 1focus with local fallback.
+//! Environment variable management via the cloud backend with local fallback.
 //!
 //! Fetches, sets, and manages environment variables for projects
-//! using the 1focus API, with optional local storage when needed.
+//! using the cloud API, with optional local storage when needed.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -26,7 +26,7 @@ use crate::storage::{
 };
 use uuid::Uuid;
 
-const DEFAULT_API_URL: &str = "https://1focus.ai";
+const DEFAULT_API_URL: &str = "https://myflow.sh";
 const LOCAL_ENV_DIR: &str = "env-local";
 
 /// Auth config stored in ~/.config/flow/auth.toml
@@ -122,7 +122,7 @@ fn save_auth_config(config: &AuthConfig) -> Result<()> {
 }
 
 fn keychain_service(api_url: &str) -> String {
-    format!("flow-1focus-token:{}", api_url)
+    format!("flow-cloud-token:{}", api_url)
 }
 
 fn set_keychain_token(api_url: &str, token: &str) -> Result<()> {
@@ -428,7 +428,7 @@ fn local_env_enabled() -> bool {
     if let Some(backend) = config::preferred_env_backend() {
         match backend.as_str() {
             "local" => return true,
-            "1focus" | "remote" => return false,
+            "cloud" | "remote" => return false,
             _ => {}
         }
     }
@@ -439,7 +439,7 @@ fn local_env_enabled() -> bool {
         .as_deref()
     {
         Some("local") => true,
-        Some("1focus") | Some("remote") => false,
+        Some("cloud") | Some("remote") => false,
         _ => std::env::var("FLOW_ENV_LOCAL")
             .ok()
             .map(|v| {
@@ -537,7 +537,7 @@ fn set_local_env_var(
 fn is_local_fallback_error(err: &anyhow::Error) -> bool {
     let msg = err.to_string().to_ascii_lowercase();
     msg.contains("not logged in")
-        || msg.contains("failed to connect to 1focus")
+        || msg.contains("failed to connect to cloud")
         || msg.contains("unauthorized")
 }
 
@@ -593,10 +593,10 @@ fn find_flow_toml(start: &PathBuf) -> Option<PathBuf> {
     }
 }
 
-fn is_1focus_source(source: Option<&str>) -> bool {
+fn is_cloud_source(source: Option<&str>) -> bool {
     matches!(
         source.map(|s| s.to_ascii_lowercase()).as_deref(),
-        Some("1focus") | Some("1f") | Some("onefocus")
+        Some("cloud") | Some("remote") | Some("myflow")
     )
 }
 
@@ -630,7 +630,7 @@ pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
         .get(url)
         .header("Authorization", format!("Bearer {}", token))
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if resp.status() == 401 {
         return Ok(None);
@@ -1001,7 +1001,7 @@ pub(crate) fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -1050,7 +1050,7 @@ fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -1080,7 +1080,7 @@ fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
 fn login() -> Result<()> {
     let mut auth = load_auth_config_raw()?;
 
-    println!("1focus Environment Manager");
+    println!("Cloud Environment Manager");
     println!("─────────────────────────────");
     println!();
     println!("To get a token:");
@@ -1105,8 +1105,8 @@ fn login() -> Result<()> {
         bail!("Token cannot be empty");
     }
 
-    if !token.starts_with("1f_") {
-        println!("Warning: Token doesn't start with '1f_' - are you sure this is correct?");
+    if !token.starts_with("cloud_") {
+        println!("Warning: Token doesn't start with 'cloud_' - are you sure this is correct?");
     }
 
     store_auth_token(&mut auth, token)?;
@@ -1121,13 +1121,13 @@ fn login() -> Result<()> {
     println!();
     println!("You can now use:");
     println!("  f env pull    - Fetch env vars for this project");
-    println!("  f env push    - Push local .env to 1focus");
+    println!("  f env push    - Push local .env to cloud");
     println!("  f env list    - List env vars");
 
     Ok(())
 }
 
-/// Pull env vars from 1focus and write to .env.
+/// Pull env vars from cloud and write to .env.
 fn pull(environment: &str) -> Result<()> {
     let target = resolve_env_target()?;
     let label = env_target_label(&target);
@@ -1143,7 +1143,7 @@ fn pull(environment: &str) -> Result<()> {
     // Write to .env
     let mut content = String::new();
     content.push_str(&format!(
-        "# Environment: {} (pulled from 1focus)\n",
+        "# Environment: {} (pulled from cloud)\n",
         environment
     ));
     content.push_str(&format!("# Space: {}\n", label));
@@ -1170,7 +1170,7 @@ fn pull(environment: &str) -> Result<()> {
     Ok(())
 }
 
-/// Push local .env to 1focus.
+/// Push local .env to cloud.
 fn push(environment: &str) -> Result<()> {
     let env_path = resolve_env_file_path()?;
     if !env_path.exists() {
@@ -1234,7 +1234,7 @@ fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if resp.status() == 401 {
         bail!("Unauthorized. Check your token with `f env login`.");
@@ -1250,7 +1250,7 @@ fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
         let _: SetEnvResponse = resp.json().context("failed to parse response")?;
     }
 
-    println!("✓ Pushed {} env vars to 1focus", vars.len());
+    println!("✓ Pushed {} env vars to cloud", vars.len());
 
     Ok(())
 }
@@ -1357,7 +1357,7 @@ fn bootstrap_cloudflare_secrets(project_root: &Path, cfg: &config::Config) -> Re
         let project = storage_project_name()?;
         let default_env_name = format!("{}-jazz-env", sanitize_name(&project));
         let default_auth_name = format!("{}-jazz-auth", sanitize_name(&project));
-        let default_peer = "wss://cloud.jazz.tools/?key=1focus@1focus.app";
+        let default_peer = "wss://cloud.jazz.tools/?key=cloud@myflow.sh";
 
         if needs_env_account {
             if prompt_confirm("Generate a new Jazz env-store account now? (y/N): ")? {
@@ -1572,7 +1572,7 @@ fn prompt_confirm(label: &str) -> Result<bool> {
 }
 
 fn generate_env_api_token() -> String {
-    format!("1f_{}", Uuid::new_v4().simple())
+    format!("cloud_{}", Uuid::new_v4().simple())
 }
 
 fn prompt_secret(label: &str) -> Result<Option<String>> {
@@ -1603,7 +1603,7 @@ fn setup(env_file: Option<PathBuf>, environment: Option<String>) -> Result<()> {
 
     if env_file.is_none() {
         if let Some(cfg) = cf_cfg {
-            if is_1focus_source(cfg.env_source.as_deref()) {
+            if is_cloud_source(cfg.env_source.as_deref()) {
                 let env = default_env.unwrap_or_else(|| "production".to_string());
                 return guide(&env);
             }
@@ -1785,7 +1785,7 @@ fn list(environment: &str) -> Result<()> {
         .get(url)
         .header("Authorization", format!("Bearer {}", token))
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if resp.status() == 401 {
         bail!("Unauthorized. Check your token with `f env login`.");
@@ -1874,7 +1874,7 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
         Some(token) => token,
         None => {
             if std::io::stdin().is_terminal()
-                && prompt_confirm("Not logged in to 1focus. Store locally instead? (y/N): ")? {
+                && prompt_confirm("Not logged in to cloud. Store locally instead? (y/N): ")? {
                 let path = set_local_env_var(&target, environment, key, value)?;
                 println!(
                     "✓ Set personal env var locally: {} (stored at {})",
@@ -1911,11 +1911,11 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if resp.status() == 401 {
         if std::io::stdin().is_terminal()
-            && prompt_confirm("1focus auth failed. Store locally instead? (y/N): ")? {
+            && prompt_confirm("Cloud auth failed. Store locally instead? (y/N): ")? {
             let path = set_local_env_var(&target, environment, key, value)?;
             println!(
                 "✓ Set personal env var locally: {} (stored at {})",
@@ -1933,7 +1933,7 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
         let err = anyhow::anyhow!("API error {}: {}", status, body);
         if is_local_fallback_error(&err)
             && std::io::stdin().is_terminal()
-            && prompt_confirm("1focus unavailable. Store locally instead? (y/N): ")? {
+            && prompt_confirm("Cloud unavailable. Store locally instead? (y/N): ")? {
             let path = set_local_env_var(&target, environment, key, value)?;
             println!(
                 "✓ Set personal env var locally: {} (stored at {})",
@@ -1985,7 +1985,7 @@ fn set_project_env_var_internal(
         Some(token) => token,
         None => {
             if std::io::stdin().is_terminal()
-                && prompt_confirm("Not logged in to 1focus. Store locally instead? (y/N): ")? {
+                && prompt_confirm("Not logged in to cloud. Store locally instead? (y/N): ")? {
                 let path = set_local_env_var(&target, environment, key, value)?;
                 println!(
                     "✓ Set env var locally: {} ({} stored at {})",
@@ -2036,7 +2036,7 @@ fn set_project_env_var_internal(
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -2044,7 +2044,7 @@ fn set_project_env_var_internal(
         let err = anyhow::anyhow!("API error {}: {}", status, body);
         if is_local_fallback_error(&err)
             && std::io::stdin().is_terminal()
-            && prompt_confirm("1focus unavailable. Store locally instead? (y/N): ")? {
+            && prompt_confirm("Cloud unavailable. Store locally instead? (y/N): ")? {
             let path = set_local_env_var(&target, environment, key, value)?;
             println!(
                 "✓ Set env var locally: {} ({} stored at {})",
@@ -2076,7 +2076,7 @@ fn set_project_env_var_internal(
 fn status() -> Result<()> {
     let auth = load_auth_config_raw()?;
 
-    println!("1focus Environment Manager");
+    println!("Cloud Environment Manager");
     println!("─────────────────────────────");
 
     let api_url = get_api_url(&auth);
@@ -2103,9 +2103,9 @@ fn status() -> Result<()> {
     println!("  f env sync    - Sync project settings");
     println!("  f env unlock  - Unlock env reads (Touch ID on macOS)");
     println!("  f env pull    - Fetch env vars");
-    println!("  f env push    - Push .env to 1focus");
+    println!("  f env push    - Push .env to cloud");
     println!("  f env guide   - Guided env setup from flow.toml");
-    println!("  f env apply   - Apply 1focus envs to Cloudflare");
+    println!("  f env apply   - Apply cloud envs to Cloudflare");
     println!("  f env bootstrap - Bootstrap Cloudflare secrets");
     println!("  f env setup   - Interactive env setup");
     println!("  f env list    - List env vars");
@@ -2148,7 +2148,7 @@ pub(crate) fn parse_env_file(content: &str) -> HashMap<String, String> {
     vars
 }
 
-/// Fetch env vars from 1focus (personal or project).
+/// Fetch env vars from cloud (personal or project).
 fn fetch_env_vars(
     target: &EnvTarget,
     environment: &str,
@@ -2164,7 +2164,7 @@ fn fetch_env_vars(
         Some(token) => token,
         None => {
             if std::io::stdin().is_terminal()
-                && prompt_confirm("Not logged in to 1focus. Read local envs instead? (y/N): ")? {
+                && prompt_confirm("Not logged in to cloud. Read local envs instead? (y/N): ")? {
                 return read_local_env_vars(target, environment);
             }
             bail!("Not logged in. Run `f env login` first.");
@@ -2205,11 +2205,11 @@ fn fetch_env_vars(
         .get(url)
         .header("Authorization", format!("Bearer {}", token))
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if resp.status() == 401 {
         if std::io::stdin().is_terminal()
-            && prompt_confirm("1focus auth failed. Read local envs instead? (y/N): ")? {
+            && prompt_confirm("Cloud auth failed. Read local envs instead? (y/N): ")? {
             return read_local_env_vars(target, environment);
         }
         bail!("Unauthorized. Check your token with `f env login`.");
@@ -2230,7 +2230,7 @@ fn fetch_env_vars(
         let err = anyhow::anyhow!("API error {}: {}", status, body);
         if is_local_fallback_error(&err)
             && std::io::stdin().is_terminal()
-            && prompt_confirm("1focus unavailable. Read local envs instead? (y/N): ")? {
+            && prompt_confirm("Cloud unavailable. Read local envs instead? (y/N): ")? {
             return read_local_env_vars(target, environment);
         }
         return Err(err);
@@ -2306,7 +2306,7 @@ fn get_vars(keys: &[String], personal: bool, environment: &str, format: &str) ->
     Ok(())
 }
 
-/// Run a command with env vars injected from 1focus.
+/// Run a command with env vars injected from cloud.
 fn run_with_env(
     personal: bool,
     environment: &str,
@@ -2407,7 +2407,7 @@ fn token_create(name: Option<&str>, permissions: &str) -> Result<()> {
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if resp.status() == 401 {
         bail!("Unauthorized. Check your token with `f env login`.");
@@ -2465,7 +2465,7 @@ fn token_list() -> Result<()> {
         .get(&url)
         .header("Authorization", format!("Bearer {}", token))
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if resp.status() == 401 {
         bail!("Unauthorized. Check your token with `f env login`.");
@@ -2535,7 +2535,7 @@ fn token_revoke(name: &str) -> Result<()> {
         .header("Authorization", format!("Bearer {}", token))
         .json(&body)
         .send()
-        .context("failed to connect to 1focus")?;
+        .context("failed to connect to cloud")?;
 
     if resp.status() == 401 {
         bail!("Unauthorized. Check your token with `f env login`.");

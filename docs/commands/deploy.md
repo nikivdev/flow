@@ -62,7 +62,7 @@ Deploys the web site using Cloudflare and your project tasks. Flow will:
 - Ensure `[web]` exists in `flow.toml` (auto-fills `path` when possible).
 - Add the `web.route` (or `web.domain/*`) to your wrangler config.
 - Optionally create/update the Cloudflare DNS record for the domain/route.
-- Apply env vars from 1focus if `web.env_source = "1focus"` is set.
+- Apply env vars from cloud if `web.env_source = "cloud"` is set.
 - Run `deploy-web` (or `deploy` as fallback).
 
 ```bash
@@ -79,7 +79,7 @@ If you opt into DNS management, Flow will prompt for record type/target and
 create or update the Cloudflare DNS record (default: `A` to `192.0.2.1`,
 proxied).
 
-If 1focus is unavailable, Flow can store envs locally when you choose
+If cloud is unavailable, Flow can store envs locally when you choose
 `web.env_source = "local"`.
 
 Example `flow.toml`:
@@ -88,7 +88,7 @@ Example `flow.toml`:
 [web]
 path = "packages/web"
 domain = "example.com"
-env_source = "1focus"
+env_source = "cloud"
 env_apply = "always"
 env_keys = ["PUBLIC_API_URL"]
 env_vars = ["PUBLIC_API_URL"]
@@ -205,8 +205,8 @@ Add to `flow.toml`:
 path = "worker"                    # Path to worker directory (optional, defaults to project root)
 environment = "production"         # Wrangler environment name (optional)
 env_file = ".env.cloudflare"       # Path to .env file for secrets (optional)
-env_source = "1focus"              # Use 1focus for secrets (optional)
-env_keys = ["API_KEY", "SECRET"]   # Specific keys to fetch from 1focus (optional)
+env_source = "cloud"              # Use cloud for secrets (optional)
+env_keys = ["API_KEY", "SECRET"]   # Specific keys to fetch from cloud (optional)
 env_vars = ["PUBLIC_URL"]          # Keys to set as non-secret vars (optional)
 deploy = "wrangler deploy"         # Custom deploy command (optional)
 dev = "wrangler dev"               # Custom dev command (optional)
@@ -250,13 +250,13 @@ This walks you through:
 If your `flow.toml` lists service keys (for example Stripe keys), the setup flow
 will offer to run the matching service onboarding before applying envs.
 
-### Secrets from 1focus
+### Secrets from cloud
 
-If using 1focus for secret management:
+If using cloud for secret management:
 
 ```toml
 [cloudflare]
-env_source = "1focus"
+env_source = "cloud"
 env_keys = ["ANTHROPIC_API_KEY", "DATABASE_URL"]  # Fetched as secrets
 env_vars = ["PUBLIC_API_URL"]                      # Fetched as non-secret vars
 environment = "production"
@@ -392,13 +392,13 @@ f deploy logs -f
 [cloudflare]
 path = "packages/worker"
 environment = "production"
-env_source = "1focus"
+env_source = "cloud"
 env_keys = ["OPENAI_API_KEY", "WEBHOOK_SECRET"]
 url = "https://my-worker.mycompany.workers.dev"
 ```
 
 ```bash
-# Store secrets in 1focus
+# Store secrets in cloud
 f env set OPENAI_API_KEY=sk-... -d "OpenAI API key"
 f env set WEBHOOK_SECRET=whsec_... -d "Webhook signing secret"
 

@@ -119,7 +119,7 @@ fn setup(name: &str, unlock_after: bool) -> Result<()> {
         );
     }
 
-    println!("Stored SSH key in 1focus as '{}' (sealed).", key_name);
+    println!("Stored SSH key in cloud as '{}' (sealed).", key_name);
     println!("Public key:\n{}", public_key.trim());
     println!("Add it to GitHub: https://github.com/settings/keys");
     ensure_global_ssh_config(&key_name)?;
@@ -178,13 +178,13 @@ fn unlock(name: &str, ttl_hours: u64) -> Result<()> {
         unseal_private_key(sealed_b64, nonce_b64, &identity)?
     } else if let Some(private_b64) = vars.get(&env_private_plain) {
         eprintln!(
-            "Warning: using legacy plaintext SSH key from 1focus; run `f ssh setup` to seal it."
+            "Warning: using legacy plaintext SSH key from cloud; run `f ssh setup` to seal it."
         );
         STANDARD
             .decode(private_b64.as_bytes())
             .context("failed to decode SSH private key")?
     } else {
-        bail!("SSH key not found in 1focus. Run `f ssh setup` first.");
+        bail!("SSH key not found in cloud. Run `f ssh setup` first.");
     };
 
     let sock = ssh::ensure_flow_agent()?;
@@ -216,7 +216,7 @@ fn status(name: &str) -> Result<()> {
     ]) {
         Ok(vars) => vars,
         Err(err) => {
-            println!("Unable to query 1focus: {}", err);
+            println!("Unable to query cloud: {}", err);
             return Ok(());
         }
     };
@@ -235,11 +235,11 @@ fn status(name: &str) -> Result<()> {
 
     println!("Key: {}", key_name);
     println!(
-        "Stored in 1focus (sealed): {}",
+        "Stored in cloud (sealed): {}",
         if has_sealed { "yes" } else { "no" }
     );
     println!(
-        "Stored in 1focus (plaintext): {}",
+        "Stored in cloud (plaintext): {}",
         if has_plain { "yes" } else { "no" }
     );
     println!("Public key stored: {}", if has_pub { "yes" } else { "no" });
@@ -283,7 +283,7 @@ fn ensure_global_ssh_config(key_name: &str) -> Result<()> {
         fs::write(&config_path, updated)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
         println!(
-            "Configured Flow to use SSH keys from 1focus (mode={}, key={}).",
+            "Configured Flow to use SSH keys from cloud (mode={}, key={}).",
             DEFAULT_SSH_MODE, key_name
         );
     }

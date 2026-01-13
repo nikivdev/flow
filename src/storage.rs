@@ -14,10 +14,10 @@ use crate::{config, env};
 
 const DEFAULT_JAZZ_API_KEY_MIRROR: &str = "jazz-gitedit-prod";
 const DEFAULT_JAZZ_PEER_MIRROR: &str = "wss://cloud.jazz.tools/?key=jazz-gitedit-prod";
-const DEFAULT_JAZZ_API_KEY_ENV: &str = "1focus@1focus.ai";
-const DEFAULT_JAZZ_PEER_ENV: &str = "wss://cloud.jazz.tools/?key=1focus@1focus.ai";
-const DEFAULT_JAZZ_API_KEY_APP: &str = "1focus@1focus.ai";
-const DEFAULT_JAZZ_PEER_APP: &str = "wss://cloud.jazz.tools/?key=1focus@1focus.ai";
+const DEFAULT_JAZZ_API_KEY_ENV: &str = "cloud@myflow.sh";
+const DEFAULT_JAZZ_PEER_ENV: &str = "wss://cloud.jazz.tools/?key=cloud@myflow.sh";
+const DEFAULT_JAZZ_API_KEY_APP: &str = "cloud@myflow.sh";
+const DEFAULT_JAZZ_PEER_APP: &str = "wss://cloud.jazz.tools/?key=cloud@myflow.sh";
 const DEFAULT_POSTGRES_PROJECT: &str = "~/org/la/la/server";
 
 #[derive(Debug, Deserialize)]

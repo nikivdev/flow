@@ -101,15 +101,15 @@ pub struct HostConfig {
     pub service: Option<String>,
     /// Path to .env file for secrets (used when env_source is not set).
     pub env_file: Option<String>,
-    /// Env source for secrets ("1focus" or "file").
+    /// Env source for secrets ("cloud" or "file").
     pub env_source: Option<String>,
-    /// Specific env keys to fetch when env_source = "1focus".
+    /// Specific env keys to fetch when env_source = "cloud".
     #[serde(default)]
     pub env_keys: Vec<String>,
     /// Fetch from project-scoped env vars instead of personal (default).
     #[serde(default)]
     pub env_project: bool,
-    /// Environment name for 1focus (defaults to "production").
+    /// Environment name for cloud (defaults to "production").
     pub environment: Option<String>,
     /// Service token for fetching env vars on host (set via f env token create).
     pub service_token: Option<String>,
@@ -127,12 +127,12 @@ pub struct CloudflareConfig {
     pub path: Option<String>,
     /// Path to .env file for secrets.
     pub env_file: Option<String>,
-    /// Env source for secrets ("1focus" or "file").
+    /// Env source for secrets ("cloud" or "file").
     pub env_source: Option<String>,
-    /// Specific env keys to fetch when env_source = "1focus".
+    /// Specific env keys to fetch when env_source = "cloud".
     #[serde(default)]
     pub env_keys: Vec<String>,
-    /// Env keys to set as non-secret vars when env_source = "1focus".
+    /// Env keys to set as non-secret vars when env_source = "cloud".
     #[serde(default)]
     pub env_vars: Vec<String>,
     /// Default values for env vars (key/value).
@@ -171,12 +171,12 @@ pub struct WebConfig {
     pub domain: Option<String>,
     /// Explicit route to add in wrangler config (e.g., example.com/*).
     pub route: Option<String>,
-    /// Env source for secrets ("1focus" or "file").
+    /// Env source for secrets ("cloud" or "file").
     pub env_source: Option<String>,
-    /// Specific env keys to fetch when env_source = "1focus".
+    /// Specific env keys to fetch when env_source = "cloud".
     #[serde(default)]
     pub env_keys: Vec<String>,
-    /// Env keys to set as non-secret vars when env_source = "1focus".
+    /// Env keys to set as non-secret vars when env_source = "cloud".
     #[serde(default)]
     pub env_vars: Vec<String>,
     /// Default values for env vars (key/value).
@@ -209,7 +209,7 @@ fn is_tls_connect_error(err: &anyhow::Error) -> bool {
     let msg = format!("{err:#}");
     msg.contains("certificate was not trusted")
         || msg.contains("client error (Connect)")
-        || msg.contains("failed to connect to 1focus")
+        || msg.contains("failed to connect to cloud")
 }
 
 /// Railway deployment config from flow.toml [railway] section.
@@ -728,10 +728,10 @@ fn deploy_host(
     rsync_upload(project_root, conn, dest)?;
 
     // 2. Handle env vars
-    let use_1focus = is_1focus_source(host_cfg.env_source.as_deref());
+    let use_cloud = is_cloud_source(host_cfg.env_source.as_deref());
     let has_service_token = host_cfg.service_token.is_some();
 
-    if use_1focus && has_service_token {
+    if use_cloud && has_service_token {
         // Service token mode: install fetch script, host fetches env vars on startup
         let service_token = host_cfg.service_token.as_ref().unwrap();
         let env_name = host_cfg.environment.as_deref().unwrap_or("production");
@@ -746,7 +746,7 @@ fn deploy_host(
             env_name,
             &host_cfg.env_keys,
         )?;
-    } else if use_1focus {
+    } else if use_cloud {
         // Deploy-time fetch mode: fetch now and copy to host
         let env_name = host_cfg.environment.as_deref().unwrap_or("production");
         let keys = &host_cfg.env_keys;
@@ -758,7 +758,7 @@ fn deploy_host(
             } else {
                 "personal"
             };
-            println!("==> Fetching env vars from 1focus ({})...", source);
+            println!("==> Fetching env vars from cloud ({})...", source);
 
             let result = if use_project {
                 crate::env::fetch_project_env_vars(env_name, keys)
@@ -771,7 +771,7 @@ fn deploy_host(
                     // Generate .env content
                     let mut content = String::new();
                     content.push_str(&format!(
-                        "# Source: 1focus {} (fetched at deploy)\n",
+                        "# Source: cloud {} (fetched at deploy)\n",
                         source
                     ));
                     let mut sorted_keys: Vec<_> = vars.keys().collect();
@@ -792,10 +792,10 @@ fn deploy_host(
                     let _ = fs::remove_file(&temp_env);
                 }
                 Ok(_) => {
-                    eprintln!("⚠ No env vars found in 1focus for {}", source);
+                    eprintln!("⚠ No env vars found in cloud for {}", source);
                 }
                 Err(err) => {
-                    eprintln!("⚠ Failed to fetch env vars from 1focus: {}", err);
+                    eprintln!("⚠ Failed to fetch env vars from cloud: {}", err);
                 }
             }
         }
@@ -875,37 +875,37 @@ fn deploy_cloudflare(
         env_apply_mode_from_str(cf_cfg.env_apply.as_deref())
     };
     let should_apply = matches!(env_apply_mode, EnvApplyMode::Always | EnvApplyMode::Auto);
-    let use_1focus = is_1focus_source(cf_cfg.env_source.as_deref());
+    let use_cloud = is_cloud_source(cf_cfg.env_source.as_deref());
 
-    let onefocus_env = env_name.unwrap_or("production");
-    let mut onefocus_vars: HashMap<String, String> = HashMap::new();
-    let mut onefocus_loaded = false;
+    let cloud_env = env_name.unwrap_or("production");
+    let mut cloud_vars: HashMap<String, String> = HashMap::new();
+    let mut cloud_loaded = false;
 
-    if use_1focus {
+    if use_cloud {
         let keys = collect_cloudflare_env_keys(cf_cfg);
         if !cf_cfg.env_defaults.is_empty() {
             for key in &keys {
                 if let Some(value) = cf_cfg.env_defaults.get(key) {
                     if !value.trim().is_empty() {
-                        onefocus_vars.insert(key.clone(), value.clone());
+                        cloud_vars.insert(key.clone(), value.clone());
                     }
                 }
             }
         }
 
         if !keys.is_empty() {
-            match crate::env::fetch_project_env_vars(onefocus_env, &keys) {
+            match crate::env::fetch_project_env_vars(cloud_env, &keys) {
                 Ok(vars) => {
                     if !vars.is_empty() {
-                        onefocus_loaded = true;
+                        cloud_loaded = true;
                     }
-                    onefocus_vars.extend(vars);
+                    cloud_vars.extend(vars);
                 }
                 Err(err) => {
                     if env_apply_mode == EnvApplyMode::Auto {
                         if is_tls_connect_error(&err) {
                             eprintln!(
-                                "⚠ Unable to reach 1focus (TLS/connect). Skipping env sync for now."
+                                "⚠ Unable to reach cloud (TLS/connect). Skipping env sync for now."
                             );
                         } else {
                             eprintln!("⚠ Env sync skipped: {err}");
@@ -921,13 +921,13 @@ fn deploy_cloudflare(
     }
 
     if should_apply {
-        if use_1focus {
-            if onefocus_loaded {
-                apply_cloudflare_env_map(project_root, cf_cfg, &onefocus_vars)?;
+        if use_cloud {
+            if cloud_loaded {
+                apply_cloudflare_env_map(project_root, cf_cfg, &cloud_vars)?;
             } else if env_apply_mode == EnvApplyMode::Always {
                 eprintln!(
-                    "⚠ No env vars found in 1focus for environment '{}' (using defaults only).",
-                    onefocus_env
+                    "⚠ No env vars found in cloud for environment '{}' (using defaults only).",
+                    cloud_env
                 );
             }
         } else if let Some(env_file) = &cf_cfg.env_file {
@@ -957,8 +957,8 @@ fn deploy_cloudflare(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    if use_1focus && !onefocus_vars.is_empty() {
-        deploy_cmd.envs(&onefocus_vars);
+    if use_cloud && !cloud_vars.is_empty() {
+        deploy_cmd.envs(&cloud_vars);
     }
 
     let status = deploy_cmd.status()?;
@@ -1007,17 +1007,17 @@ pub fn set_cloudflare_secrets(
 }
 
 fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConfig) -> Result<()> {
-    if !is_1focus_source(cf_cfg.env_source.as_deref()) {
-        bail!("cloudflare.env_source must be set to \"1focus\" to apply envs");
+    if !is_cloud_source(cf_cfg.env_source.as_deref()) {
+        bail!("cloudflare.env_source must be set to \"cloud\" to apply envs");
     }
 
-    let onefocus_env = cf_cfg.environment.as_deref().unwrap_or("production");
+    let cloud_env = cf_cfg.environment.as_deref().unwrap_or("production");
     let keys = collect_cloudflare_env_keys(cf_cfg);
-    let vars = crate::env::fetch_project_env_vars(onefocus_env, &keys)?;
+    let vars = crate::env::fetch_project_env_vars(cloud_env, &keys)?;
     if vars.is_empty() {
         bail!(
-            "No env vars found in 1focus for environment '{}'",
-            onefocus_env
+            "No env vars found in cloud for environment '{}'",
+            cloud_env
         );
     }
 
@@ -1050,7 +1050,7 @@ fn apply_cloudflare_env_map(
 
     let wrangler_env = cf_cfg.environment.as_deref();
     let var_keys: HashSet<String> = cf_cfg.env_vars.iter().cloned().collect();
-    println!("==> Applying {} env var(s) from 1focus...", vars.len());
+    println!("==> Applying {} env var(s) from cloud...", vars.len());
     set_wrangler_env_map(&worker_path, wrangler_env, vars, &var_keys)?;
     Ok(())
 }
@@ -1089,10 +1089,10 @@ fn wrangler_command(worker_path: &Path) -> Command {
     cmd
 }
 
-fn is_1focus_source(source: Option<&str>) -> bool {
+fn is_cloud_source(source: Option<&str>) -> bool {
     matches!(
         source.map(|s| s.to_ascii_lowercase()).as_deref(),
-        Some("1focus") | Some("1f") | Some("onefocus")
+        Some("cloud") | Some("remote") | Some("myflow")
     )
 }
 
@@ -1141,15 +1141,15 @@ fn maybe_bootstrap_secrets(
     if let Ok(present) = list_cloudflare_secret_keys(worker_path, cf_cfg.environment.as_deref()) {
         if missing.iter().all(|key| present.contains(key)) {
             println!(
-                "Bootstrap secrets missing in 1focus but already present in Cloudflare; skipping."
+                "Bootstrap secrets missing in cloud but already present in Cloudflare; skipping."
             );
-            println!("Run `f env bootstrap` if you want to rotate/store them in 1focus.");
+            println!("Run `f env bootstrap` if you want to rotate/store them in cloud.");
             return Ok(());
         }
     }
 
     if env_store_missing {
-        println!("1focus env space not found yet; bootstrap will initialize it.");
+        println!("cloud env space not found yet; bootstrap will initialize it.");
     }
 
     println!("Bootstrap secrets missing: {}", missing.join(", "));
@@ -1258,7 +1258,7 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
         .and_then(|c| c.cloudflare.as_ref())
         .unwrap_or(&default_cf);
 
-    if is_1focus_source(cf_cfg.env_source.as_deref()) {
+    if is_cloud_source(cf_cfg.env_source.as_deref()) {
         let worker_path = if let Some(path) = cf_cfg.path.as_ref() {
             project_root.join(path)
         } else {
@@ -1312,7 +1312,7 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
             }))?;
             crate::env::run(Some(EnvAction::Apply))?;
         } else {
-            eprintln!("⚠ Skipping env guide/apply (1focus unavailable).");
+            eprintln!("⚠ Skipping env guide/apply (cloud unavailable).");
         }
 
         println!("\n✓ Cloudflare deploy setup complete.");
@@ -1321,7 +1321,7 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
 
     let defaults = CloudflareSetupDefaults {
         worker_path: cf_cfg.path.as_ref().map(|p| project_root.join(p)),
-        env_file: if is_1focus_source(cf_cfg.env_source.as_deref()) {
+        env_file: if is_cloud_source(cf_cfg.env_source.as_deref()) {
             None
         } else {
             cf_cfg.env_file.as_ref().map(|p| project_root.join(p))
@@ -1342,7 +1342,7 @@ fn setup_cloudflare(project_root: &Path, config: Option<&Config>) -> Result<()> 
     update_flow_toml_cloudflare(&flow_path, project_root, &result)?;
 
     if result.apply_secrets {
-        if is_1focus_source(cf_cfg.env_source.as_deref()) {
+        if is_cloud_source(cf_cfg.env_source.as_deref()) {
             let env_name = result
                 .environment
                 .clone()
@@ -1697,7 +1697,7 @@ fn scp_file(local: &Path, conn: &HostConnection, remote: &str) -> Result<()> {
 }
 
 /// Install the env-fetch script on the host.
-/// This script fetches env vars from 1focus using a service token on startup.
+/// This script fetches env vars from cloud using a service token on startup.
 fn install_env_fetch_script(
     conn: &HostConnection,
     dest: &str,
@@ -1714,17 +1714,17 @@ fn install_env_fetch_script(
     };
 
     // Create the fetch script
-    // The script fetches env vars from 1focus API and writes to .env
+    // The script fetches env vars from cloud API and writes to .env
     let script = format!(
         r##"#!/bin/bash
-# Auto-generated by flow - fetches env vars from 1focus on startup
+# Auto-generated by flow - fetches env vars from cloud on startup
 # This token can ONLY read env vars for project: {project_name}
 
 set -e
 
-TOKEN_FILE="{dest}/.1focus-token"
+TOKEN_FILE="{dest}/.cloud-token"
 ENV_FILE="{dest}/.env"
-API_URL="https://1focus.ai/api/env/{project_name}?environment={environment}{keys_param}"
+API_URL="https://myflow.sh/api/env/{project_name}?environment={environment}{keys_param}"
 
 if [ ! -f "$TOKEN_FILE" ]; then
     echo "ERROR: Service token not found at $TOKEN_FILE" >&2
@@ -1733,16 +1733,16 @@ fi
 
 TOKEN=$(cat "$TOKEN_FILE")
 
-# Fetch env vars from 1focus
+# Fetch env vars from cloud
 RESPONSE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API_URL")
 
 if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to fetch env vars from 1focus" >&2
+    echo "ERROR: Failed to fetch env vars from cloud" >&2
     exit 1
 fi
 
 # Parse JSON and write to .env file
-echo "# Environment: {environment} (fetched from 1focus)" > "$ENV_FILE"
+echo "# Environment: {environment} (fetched from cloud)" > "$ENV_FILE"
 echo "$RESPONSE" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
@@ -1766,13 +1766,13 @@ echo "Fetched env vars for {project_name} ({environment})"
     ssh_run(conn, &format!("chmod +x {}/fetch-env.sh", dest))?;
 
     // Store the service token securely
-    let temp_token = std::env::temp_dir().join(format!(".1focus-token-{}", std::process::id()));
+    let temp_token = std::env::temp_dir().join(format!(".cloud-token-{}", std::process::id()));
     fs::write(&temp_token, service_token)?;
-    scp_file(&temp_token, conn, &format!("{}/.1focus-token", dest))?;
+    scp_file(&temp_token, conn, &format!("{}/.cloud-token", dest))?;
     let _ = fs::remove_file(&temp_token);
 
     // Secure the token file (only readable by root)
-    ssh_run(conn, &format!("chmod 600 {}/.1focus-token", dest))?;
+    ssh_run(conn, &format!("chmod 600 {}/.cloud-token", dest))?;
 
     Ok(())
 }
@@ -1799,18 +1799,18 @@ fn create_systemd_service(
 ) -> Result<()> {
     let exec_start = normalize_exec_start(workdir, exec_start);
 
-    // Determine if we're using 1focus with service token (fetch on startup)
-    let use_1focus = is_1focus_source(config.env_source.as_deref());
+    // Determine if we're using cloud with service token (fetch on startup)
+    let use_cloud = is_cloud_source(config.env_source.as_deref());
     let has_service_token = config.service_token.is_some();
 
-    let env_file_line = if use_1focus || config.env_file.is_some() {
+    let env_file_line = if use_cloud || config.env_file.is_some() {
         format!("EnvironmentFile={}/.env", workdir)
     } else {
         String::new()
     };
 
     // Add ExecStartPre to fetch env vars if using service token
-    let exec_start_pre = if use_1focus && has_service_token {
+    let exec_start_pre = if use_cloud && has_service_token {
         format!("ExecStartPre={}/fetch-env.sh", workdir)
     } else {
         String::new()
@@ -2118,9 +2118,9 @@ fn ensure_web_env_source(flow_path: &Path, web_cfg: &WebConfig) -> Result<bool> 
         return Ok(false);
     }
 
-    if prompt_yes_no("Use 1focus for web env vars?", true)? {
+    if prompt_yes_no("Use cloud for web env vars?", true)? {
         let mut changed = false;
-        if ensure_web_key(flow_path, "env_source", "1focus")? {
+        if ensure_web_key(flow_path, "env_source", "cloud")? {
             changed = true;
         }
         if ensure_web_key(flow_path, "env_apply", "always")? {
@@ -2358,7 +2358,7 @@ fn apply_web_env(project_root: &Path, web_cfg: &WebConfig) -> Result<()> {
         return Ok(());
     }
     let source = web_cfg.env_source.as_deref();
-    if !is_1focus_source(source) && !is_local_source(source) {
+    if !is_cloud_source(source) && !is_local_source(source) {
         return Ok(());
     }
 
@@ -2449,14 +2449,14 @@ fn ensure_cloudflare_api_token() -> Result<()> {
         let default_store = if wants_local_env_backend() {
             "local"
         } else {
-            "1focus"
+            "cloud"
         };
-        let store = prompt_line("Store token in (1focus/local)", Some(default_store))?;
+        let store = prompt_line("Store token in (cloud/local)", Some(default_store))?;
         let store = store.trim().to_ascii_lowercase();
         let store_local = matches!(store.as_str(), "local" | "l");
-        let store_1focus = matches!(store.as_str(), "1focus" | "1f" | "onefocus");
-        if !store_local && !store_1focus {
-            bail!("Store token in 1focus or local.");
+        let store_cloud = matches!(store.as_str(), "cloud" | "c");
+        if !store_local && !store_cloud {
+            bail!("Store token in cloud or local.");
         }
 
         let input = prompt_secret("Enter Cloudflare API token (input hidden): ")?;
@@ -2670,7 +2670,7 @@ fn fetch_personal_env_value(key: &str) -> Result<Option<String>> {
     match crate::env::fetch_personal_env_vars(&keys) {
         Ok(vars) => Ok(vars.get(key).cloned()),
         Err(err) => {
-            if is_not_logged_in_err(&err) || is_1focus_unavailable(&err) {
+            if is_not_logged_in_err(&err) || is_cloud_unavailable(&err) {
                 return Ok(None);
             }
             Err(err)
@@ -2682,10 +2682,10 @@ fn is_not_logged_in_err(err: &anyhow::Error) -> bool {
     err.to_string().to_ascii_lowercase().contains("not logged in")
 }
 
-fn is_1focus_unavailable(err: &anyhow::Error) -> bool {
+fn is_cloud_unavailable(err: &anyhow::Error) -> bool {
     err.to_string()
         .to_ascii_lowercase()
-        .contains("failed to connect to 1focus")
+        .contains("failed to connect to cloud")
 }
 
 fn ensure_wrangler_routes_jsonc(path: &Path, route: &str) -> Result<bool> {

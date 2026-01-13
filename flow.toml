@@ -32,8 +32,8 @@ readme = "readme.md"
 [release.registry]
 url = "https://myflow.sh"
 package = "flow"
-bins = ["flow", "f", "lin"]
-default_bin = "flow"
+bins = ["f", "lin"]
+default_bin = "f"
 token_env = "FLOW_REGISTRY_TOKEN"
 latest = true
 
@@ -133,7 +133,7 @@ command = "git clone https://github.com/nikivdev/flow-testing testing/flow-testi
 description = "Clone the flow-testing repo into testing/"
 
 [storage]
-provider = "1focus.ai"
+provider = "myflow.sh"
 env_var = "FLOW_SECRETS_TOKEN" # optional; defaults to this value
 
 [[storage.envs]]

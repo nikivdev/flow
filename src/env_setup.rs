@@ -369,7 +369,7 @@ fn draw_ui(f: &mut ratatui::Frame<'_>, app: &EnvSetupApp) {
 
     let title = match app.step {
         SetupStep::EnvFile => "Env Setup: Select .env file",
-        SetupStep::EnvTarget => "Select 1focus environment",
+        SetupStep::EnvTarget => "Select cloud environment",
         SetupStep::CustomEnv => "Enter custom environment",
         SetupStep::Keys => "Select keys to push",
         SetupStep::Confirm => "Confirm env setup",

@@ -4,18 +4,18 @@ Sync project environment and manage environment variables.
 
 ## Overview
 
-Manage environment variables via 1focus (cloud) or local storage. Supports:
+Manage environment variables via cloud or local storage. Supports:
 - Project-level environment variables
 - Personal/global variables
 - Multiple environments (dev, staging, production)
 - Direct injection into commands
-- Touch ID gating for env reads on macOS (1focus only)
+- Touch ID gating for env reads on macOS (cloud only)
 
 ## Storage Backends
 
 | Backend | Location | Config |
 |---------|----------|--------|
-| `1focus` | Cloud (1focus.ai) | Default, requires login |
+| `cloud` | Cloud (myflow.sh) | Default, requires login |
 | `local` | `~/.config/flow/env-local/` | No account needed |
 
 Force local backend:
@@ -64,13 +64,13 @@ f env get API_KEY -f value
 
 | Command | Description |
 |---------|-------------|
-| `login` | Authenticate with 1focus |
+| `login` | Authenticate with cloud |
 | `set` | Set a single env var |
 | `get` | Get specific env var(s) |
 | `list` | List env vars for this project |
 | `delete` | Delete env var(s) |
 | `pull` | Fetch env vars and write to .env |
-| `push` | Push local .env to 1focus |
+| `push` | Push local .env to cloud |
 | `apply` | Apply env vars to Cloudflare worker |
 | `setup` | Interactive wizard to push env vars |
 | `run` | Run command with env vars injected |
@@ -223,7 +223,7 @@ Creates or overwrites `.env` in current directory with all project variables.
 
 ## Push
 
-Upload local `.env` file to 1focus:
+Upload local `.env` file to cloud:
 
 ```bash
 f env push
@@ -241,7 +241,7 @@ Interactive wizard for pushing env vars:
 f env setup
 ```
 
-If `[cloudflare] env_source = "1focus"` is set in `flow.toml`, this runs a guided
+If `[cloudflare] env_source = "cloud"` is set in `flow.toml`, this runs a guided
 prompt based on `env_keys`/`env_vars`. Otherwise it guides you through:
 1. Reading your `.env` file
 2. Selecting which keys to push
@@ -265,7 +265,7 @@ f env delete API_KEY DATABASE_URL
 
 ## Login
 
-Authenticate with 1focus:
+Authenticate with cloud:
 
 ```bash
 f env login
@@ -286,9 +286,9 @@ f env status
 
 Output:
 ```
-1focus Status
+cloud Status
   Token: stored in Keychain
-  API: https://1focus.ai
+  API: https://myflow.sh
   Project: myproject
 ```
 
@@ -302,7 +302,7 @@ Apply env vars to Cloudflare worker (uses `[cloudflare]` config in flow.toml):
 f env apply
 ```
 
-Requires `env_source = "1focus"` in your `[cloudflare]` config.
+Requires `env_source = "cloud"` in your `[cloudflare]` config.
 
 ## Keys
 
@@ -362,7 +362,7 @@ f env run --personal -k ANTHROPIC_API_KEY -- ./my-script
 
 ## Env Space Overrides
 
-You can store project envs under a named 1focus space by configuring `env_space`
+You can store project envs under a named cloud space by configuring `env_space`
 and `env_space_kind` in `flow.toml`.
 
 ```toml
@@ -436,7 +436,7 @@ command = "f env run --personal -k TELEGRAM_BOT_TOKEN -- node bot.js"
 
 ### "Not authenticated"
 
-Run `f env login` to authenticate with 1focus.
+Run `f env login` to authenticate with cloud.
 
 ### "No env vars found"
 

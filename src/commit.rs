@@ -1095,8 +1095,8 @@ pub fn run_with_check_sync(
                     alert_msg
                 };
                 let _ = notify::send_warning(&alert_msg);
-                // Also try to POST to 1focus
-                send_to_1focus(&repo_root, &review.issues, review.summary.as_deref());
+                // Also try to POST to cloud
+                send_to_cloud(&repo_root, &review.issues, review.summary.as_deref());
             }
         }
         println!("Proceeding with commit...");
@@ -2410,11 +2410,11 @@ fn parse_review_json(output: &str) -> Option<ReviewJson> {
     serde_json::from_str::<ReviewJson>(candidate).ok()
 }
 
-/// Send critical review issues to 1focus for reactive display.
-fn send_to_1focus(project_path: &std::path::Path, issues: &[String], summary: Option<&str>) {
+/// Send critical review issues to cloud for reactive display.
+fn send_to_cloud(project_path: &std::path::Path, issues: &[String], summary: Option<&str>) {
     // Try production worker first, then local
     let endpoints = [
-        "https://1f-worker.nikiv.workers.dev/api/v1/events", // Production worker
+        "https://myflow.sh/api/v1/events", // Production worker
         "http://localhost:8787/api/v1/events",               // Local dev
     ];
 

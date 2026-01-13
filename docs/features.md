@@ -221,12 +221,12 @@ ready_delay = 500
 
 ## Environment Variables
 
-Manage environment variables via 1focus integration.
+Manage environment variables via cloud integration.
 
 ### Authentication
 
 ```bash
-# Login to 1focus
+# Login to cloud
 f env login
 
 # Check auth status
@@ -240,11 +240,11 @@ f env status
 f env pull
 f env pull -e staging
 
-# Push local .env to 1focus
+# Push local .env to cloud
 f env push
 f env push -e production
 
-# Apply 1focus envs to Cloudflare
+# Apply cloud envs to Cloudflare
 f env apply
 
 # Interactive setup (select env file + keys)

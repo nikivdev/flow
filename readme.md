@@ -44,7 +44,7 @@ version = 1
 name = "ts"
 
 [deps]
-fast = "github.com/1focus-ai/fast"
+fast = "github.com/nikivdev/fast"
 
 [[tasks]]
 name = "setup"

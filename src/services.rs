@@ -205,8 +205,8 @@ fn apply_cloudflare_env(project_root: &Path, flow_cfg: &config::Config) -> Resul
         println!("No [cloudflare] section found; skip apply.");
         return Ok(());
     };
-    if !is_1focus_source(cf.env_source.as_deref()) {
-        println!("cloudflare.env_source is not set to \"1focus\"; skip apply.");
+    if !is_cloud_source(cf.env_source.as_deref()) {
+        println!("cloudflare.env_source is not set to \"cloud\"; skip apply.");
         return Ok(());
     }
     deploy::apply_cloudflare_env(project_root, Some(flow_cfg))
@@ -222,10 +222,10 @@ fn should_apply_env(opts: &StripeServiceOpts) -> bool {
     prompt_yes_no("Apply envs to Cloudflare now?", true).unwrap_or(false)
 }
 
-fn is_1focus_source(source: Option<&str>) -> bool {
+fn is_cloud_source(source: Option<&str>) -> bool {
     matches!(
         source.map(|s| s.to_ascii_lowercase()).as_deref(),
-        Some("1focus") | Some("1f") | Some("onefocus")
+        Some("cloud") | Some("remote") | Some("myflow")
     )
 }
 
@@ -242,7 +242,7 @@ fn fetch_project_env_vars_allow_missing(
                 Ok(HashMap::new())
             } else {
                 println!("Unable to read existing env vars: {err}");
-                println!("Run `f env login` to authenticate with 1focus.");
+                println!("Run `f env login` to authenticate with cloud.");
                 Err(err)
             }
         }

@@ -1,7 +1,7 @@
 # f services
 
 Guided setup flows for third-party services. These commands prompt for required
-env vars, store them in 1focus, and can optionally apply them to Cloudflare.
+env vars, store them in cloud, and can optionally apply them to Cloudflare.
 
 ## Stripe
 

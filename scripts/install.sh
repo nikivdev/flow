@@ -11,12 +11,16 @@ set -euo pipefail
 #   FLOW_REPO_URL=<repo url>             # override repo (default: https://github.com/nikivdev/flow)
 #   FLOW_RELEASE_BASE=<base url>         # override release base (default: GitHub releases)
 #   FLOW_BINARY_URL=<url>                # skip build; download a prebuilt f binary
+#   FLOW_REGISTRY_URL=<url>              # install from Flow registry (e.g., https://myflow.sh)
+#   FLOW_REGISTRY_PACKAGE=<name>         # registry package name (default: flow)
 #   FLOW_INSTALL_LIN=0                   # skip installing the lin helper binary
 #   FLOW_NO_RELEASE=1                    # force source build even if a release exists
 
 REPO_URL="${FLOW_REPO_URL:-https://github.com/nikivdev/flow}"
 REF="${FLOW_REF:-main}"
 INSTALL_LIN="${FLOW_INSTALL_LIN:-1}"
+REGISTRY_URL="${FLOW_REGISTRY_URL:-}"
+REGISTRY_PACKAGE="${FLOW_REGISTRY_PACKAGE:-flow}"
 RESOLVED_VERSION=""
 OS_NAME=""
 ARCH_NAME=""
@@ -130,6 +134,85 @@ resolve_release_version() {
     fi
 }
 
+resolve_registry_version() {
+    if [[ -n "${FLOW_VERSION:-}" ]]; then
+        RESOLVED_VERSION="${FLOW_VERSION}"
+        return 0
+    fi
+
+    local url="${REGISTRY_URL%/}/packages/${REGISTRY_PACKAGE}/latest.json"
+    local manifest
+    manifest="$(curl -fsSL "${url}" 2>/dev/null || true)"
+    if [[ -z "${manifest}" ]]; then
+        return 1
+    fi
+
+    local version
+    version="$(echo "${manifest}" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
+    if [[ -z "${version}" ]]; then
+        return 1
+    fi
+
+    RESOLVED_VERSION="${version}"
+    return 0
+}
+
+install_from_registry() {
+    local registry="${REGISTRY_URL%/}"
+    if [[ -z "${registry}" ]]; then
+        return 1
+    fi
+
+    need_cmd curl
+
+    if ! resolve_registry_version; then
+        info "Failed to resolve latest registry version"
+        return 1
+    fi
+
+    local target=""
+    if [[ "${OS_NAME}" == "darwin" ]]; then
+        target="${ARCH_NAME}-apple-darwin"
+    elif [[ "${OS_NAME}" == "linux" ]]; then
+        target="${ARCH_NAME}-unknown-linux-gnu"
+    else
+        fail "unsupported OS for registry install: ${OS_NAME}"
+    fi
+
+    mkdir -p "${BIN_DIR}"
+    local bins=("${REGISTRY_PACKAGE}")
+    if [[ "${REGISTRY_PACKAGE}" == "flow" ]]; then
+        bins=("f")
+        if [[ "${INSTALL_LIN}" != "0" ]]; then
+            bins+=("lin")
+        fi
+    fi
+
+    local installed=0
+    for bin in "${bins[@]}"; do
+        local url="${registry}/packages/${REGISTRY_PACKAGE}/${RESOLVED_VERSION}/${target}/${bin}"
+        info "Downloading ${bin} from ${url}"
+        if curl -fsSL "${url}" -o "${BIN_DIR}/${bin}"; then
+            chmod +x "${BIN_DIR}/${bin}"
+            installed=1
+        else
+            info "Failed to download ${bin} from registry"
+        fi
+    done
+
+    if [[ "${installed}" -eq 0 ]]; then
+        info "Registry install failed"
+        return 1
+    fi
+
+    if [[ "${REGISTRY_PACKAGE}" == "flow" ]]; then
+        ensure_aliases
+    fi
+
+    info "Installed ${REGISTRY_PACKAGE} ${RESOLVED_VERSION} from registry"
+    return 0
+}
+
 install_from_release() {
     local version="$1"
     local asset="flow_${version}_${OS_NAME}_${ARCH_NAME}.tar.gz"
@@ -238,6 +321,15 @@ main() {
 
     if [[ -n "${FLOW_BINARY_URL:-}" ]]; then
         install_from_binary_url "${FLOW_BINARY_URL}"
+    elif [[ -n "${REGISTRY_URL}" ]]; then
+        if ! install_from_registry; then
+            info "Registry install failed; falling back to release/source."
+            REGISTRY_URL=""
+        else
+            ensure_path_hint
+            info "Done. Launch with \"flow --help\" or \"f --help\"."
+            return
+        fi
     elif [[ -z "${FLOW_NO_RELEASE:-}" ]]; then
         resolve_release_version
         if [[ -n "${RESOLVED_VERSION}" ]] && install_from_release "${RESOLVED_VERSION}"; then
