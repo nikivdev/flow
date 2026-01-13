@@ -274,7 +274,7 @@ fn remove_skill(name: &str) -> Result<()> {
     Ok(())
 }
 
-const SKILLS_API_URL: &str = "https://1focus-io.nikiv.workers.dev/api/skills";
+const SKILLS_API_URL: &str = "https://myflow.sh/api/skills";
 
 /// Install a skill from the global skills registry.
 fn install_skill(name: &str) -> Result<()> {

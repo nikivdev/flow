@@ -102,8 +102,8 @@ f deploy shell      # SSH into the server
 [cloudflare]
 path = "worker"                  # Path to worker directory
 env_file = ".env.cloudflare"     # Secrets to set
-env_source = "1focus"            # Use 1focus as env source (optional)
-env_keys = ["API_KEY"]           # Keys to fetch from 1focus (optional)
+env_source = "cloud"            # Use cloud as env source (optional)
+env_keys = ["API_KEY"]           # Keys to fetch from cloud (optional)
 env_vars = ["APP_BASE_URL"]      # Keys to set as non-secret vars (optional)
 environment = "staging"          # Optional wrangler environment
 deploy = "wrangler deploy"       # Custom deploy command (optional)
@@ -145,7 +145,7 @@ f deploy cf --secrets
 # Sets API_KEY and DATABASE_URL via `wrangler secret put`
 ```
 
-If you set `env_source = "1focus"`, flow will fetch env vars from 1focus instead of a local file:
+If you set `env_source = "cloud"`, flow will fetch env vars from cloud instead of a local file:
 
 ```bash
 f env apply

@@ -1,6 +1,6 @@
 # How to Use Flow to Store and Work With Env Vars
 
-Flow stores project env vars either in 1focus (cloud) or locally on disk. You can
+Flow stores project env vars either in cloud or locally on disk. You can
 inject them into commands without ever printing values to stdout.
 
 ## Storage Backends
@@ -9,7 +9,7 @@ Flow supports two backends:
 
 | Backend | Storage Location | Use Case |
 |---------|-----------------|----------|
-| `1focus` | Cloud (1focus.ai) | Team sharing, Cloudflare deploys |
+| `cloud` | Cloud (myflow.sh) | Team sharing, Cloudflare deploys |
 | `local` | `~/.config/flow/env-local/` | Solo dev, offline, no account needed |
 
 ### Choosing a Backend
@@ -20,7 +20,7 @@ Set in `~/.config/flow/config.ts`:
 export default {
   flow: {
     env: {
-      backend: "local"  // or "1focus"
+      backend: "local"  // or "cloud"
     }
   }
 }
@@ -32,7 +32,7 @@ Or set the environment variable:
 export FLOW_ENV_BACKEND=local
 ```
 
-If neither is set, Flow tries 1focus first and prompts to fall back to local
+If neither is set, Flow tries cloud first and prompts to fall back to local
 storage when unavailable.
 
 ---
@@ -83,24 +83,24 @@ DATABASE_URL=postgres://...
 ### Security Note
 
 Local env files are **not encrypted**. They rely on filesystem permissions.
-For sensitive production secrets, consider using 1focus with Touch ID gating.
+For sensitive production secrets, consider using cloud with Touch ID gating.
 
 ---
 
-## 1focus Cloud Storage
+## cloud Cloud Storage
 
 For team sharing and Cloudflare deployments.
 
 ### Prerequisites
 
-1) Create a 1focus API token.
+1) Create a cloud API token.
 2) Login once:
 
 ```bash
 f env login
 ```
 
-## Store envs in 1focus
+## Store envs in cloud
 
 Push a local .env file:
 
@@ -124,13 +124,13 @@ f env list
 
 ## Interactive setup (TUI)
 
-Use the wizard to pick a .env file, select keys, and push to 1focus:
+Use the wizard to pick a .env file, select keys, and push to cloud:
 
 ```bash
 f env setup
 ```
 
-If your project has `[cloudflare].env_source = "1focus"`, `f env setup` uses
+If your project has `[cloudflare].env_source = "cloud"`, `f env setup` uses
 the keys from `env_keys` and `env_vars` and prompts only for missing values.
 
 ## Guided setup from flow.toml
@@ -190,7 +190,7 @@ Set the Cloudflare section in `flow.toml`:
 ```toml
 [cloudflare]
 path = "packages/web"
-env_source = "1focus"
+env_source = "cloud"
 env_keys = [
   "DATABASE_URL",
   "BETTER_AUTH_SECRET",
@@ -210,12 +210,12 @@ f env apply
 
 - Keys in `env_vars` are set as `wrangler vars set`.
 - Everything else is set as `wrangler secret put`.
-- The 1focus environment defaults to `production` or uses
+- The cloud environment defaults to `production` or uses
   `cloudflare.environment` if set.
 
 ## Example: Provision Jazz worker envs
 
-Create a Jazz worker account and store env vars in 1focus:
+Create a Jazz worker account and store env vars in cloud:
 
 ```bash
 f db jazz new --name gitedit-mirror \
@@ -223,7 +223,7 @@ f db jazz new --name gitedit-mirror \
   --environment production
 ```
 
-This writes `JAZZ_MIRROR_ACCOUNT_ID` and `JAZZ_MIRROR_ACCOUNT_SECRET` to 1focus,
+This writes `JAZZ_MIRROR_ACCOUNT_ID` and `JAZZ_MIRROR_ACCOUNT_SECRET` to cloud,
 which you can then apply to Cloudflare with `f env apply`.
 
 ## Notes

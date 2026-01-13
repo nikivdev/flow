@@ -1980,7 +1980,7 @@ fn dependency_error(command: &str) -> String {
 fn dependency_help(command: &str) -> Option<&'static str> {
     match command {
         "fast" => Some(
-            "Get the fast CLI from https://github.com/1focus-ai/fast and ensure it is on PATH.",
+            "Get the fast CLI from https://github.com/nikivdev/fast and ensure it is on PATH.",
         ),
         _ => None,
     }

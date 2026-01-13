@@ -225,18 +225,18 @@ pub enum Commands {
         action: Option<ProviderAiAction>,
     },
     #[command(
-        about = "Manage project env vars and 1focus sync.",
-        long_about = "With no arguments, lists project env vars for the current environment. Use subcommands to manage env vars via 1focus or run the sync workflow."
+        about = "Manage project env vars and cloud sync.",
+        long_about = "With no arguments, lists project env vars for the current environment. Use subcommands to manage env vars via the cloud backend or run the sync workflow."
     )]
     Env(EnvCommand),
     #[command(
         about = "Onboard third-party services (Stripe, etc.) with guided env setup.",
-        long_about = "Guided setup flows for external services. Prompts for required env vars, stores them in 1focus, and can apply them to Cloudflare."
+        long_about = "Guided setup flows for external services. Prompts for required env vars, stores them in the cloud backend, and can apply them to Cloudflare."
     )]
     Services(ServicesCommand),
     #[command(
-        about = "Manage SSH keys via 1focus.",
-        long_about = "Generate, store, and unlock SSH keys stored in 1focus personal env vars, then wire git to use the Flow SSH agent."
+        about = "Manage SSH keys via the cloud backend.",
+        long_about = "Generate, store, and unlock SSH keys stored in cloud personal env vars, then wire git to use the Flow SSH agent."
     )]
     Ssh(SshCommand),
     #[command(
@@ -345,6 +345,11 @@ pub enum Commands {
         long_about = "Download a binary from a Flow registry and install it into your PATH."
     )]
     Install(InstallOpts),
+    #[command(
+        about = "Manage the Flow registry (tokens, setup).",
+        long_about = "Create registry tokens and wire them into worker secrets and local envs."
+    )]
+    Registry(RegistryCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -741,7 +746,7 @@ pub struct SecretsPullOpts {
     #[arg(value_name = "ENV")]
     pub env: String,
 
-    /// Optional override for the secrets hub URL (default flow.1focus.ai).
+    /// Optional override for the secrets hub URL (default myflow.sh).
     #[arg(long)]
     pub hub: Option<String>,
 
@@ -800,9 +805,9 @@ pub enum JazzStorageAction {
 pub enum JazzStorageKind {
     /// Mirror worker account (gitedit-style mirror sync).
     Mirror,
-    /// Env store worker account (1focus env store).
+    /// Env store worker account (cloud env store).
     EnvStore,
-    /// App data worker account (1focus app store).
+    /// App data worker account (cloud app store).
     AppStore,
 }
 
@@ -1117,15 +1122,15 @@ pub enum EnvAction {
     Unlock,
     /// Create a new env token from available templates.
     New,
-    /// Authenticate with 1focus to fetch env vars.
+    /// Authenticate with cloud to fetch env vars.
     Login,
-    /// Fetch env vars from 1focus and write to .env.
+    /// Fetch env vars from cloud and write to .env.
     Pull {
         /// Environment to fetch (dev, staging, production).
         #[arg(short, long, default_value = "production")]
         environment: String,
     },
-    /// Push local .env to 1focus.
+    /// Push local .env to cloud.
     Push {
         /// Environment to push to (dev, staging, production).
         #[arg(short, long, default_value = "production")]
@@ -1137,7 +1142,7 @@ pub enum EnvAction {
         #[arg(short, long, default_value = "production")]
         environment: String,
     },
-    /// Apply env vars from 1focus to the configured Cloudflare worker.
+    /// Apply env vars from cloud to the configured Cloudflare worker.
     Apply,
     /// Bootstrap Cloudflare secrets from flow.toml (interactive).
     Bootstrap,
@@ -1188,7 +1193,7 @@ pub enum EnvAction {
         #[arg(short, long, default_value = "env")]
         format: String,
     },
-    /// Run a command with env vars injected from 1focus.
+    /// Run a command with env vars injected from cloud.
     Run {
         /// Fetch from personal env vars instead of project.
         #[arg(long)]
@@ -1251,7 +1256,7 @@ pub enum StripeModeArg {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SshAction {
-    /// Generate a new SSH keypair and store it in 1focus personal env vars.
+    /// Generate a new SSH keypair and store it in cloud personal env vars.
     Setup {
         /// Optional key name (default: "default").
         #[arg(long, default_value = "default")]
@@ -1260,7 +1265,7 @@ pub enum SshAction {
         #[arg(long)]
         no_unlock: bool,
     },
-    /// Unlock the SSH key from 1focus and load it into the Flow SSH agent.
+    /// Unlock the SSH key from cloud and load it into the Flow SSH agent.
     Unlock {
         /// Optional key name (default: "default").
         #[arg(long, default_value = "default")]
@@ -1916,6 +1921,40 @@ pub struct InstallOpts {
     /// Overwrite existing binary if present.
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RegistryCommand {
+    #[command(subcommand)]
+    pub action: Option<RegistryAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum RegistryAction {
+    /// Create a registry token and configure worker + env.
+    Init(RegistryInitOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RegistryInitOpts {
+    /// Path to the worker project (defaults to packages/worker).
+    #[arg(long, short)]
+    pub worker: Option<PathBuf>,
+    /// Registry base URL (overrides flow.toml or FLOW_REGISTRY_URL).
+    #[arg(long)]
+    pub registry: Option<String>,
+    /// Env var name for the registry token.
+    #[arg(long)]
+    pub token_env: Option<String>,
+    /// Provide an explicit token instead of generating one.
+    #[arg(long)]
+    pub token: Option<String>,
+    /// Skip updating the worker secret.
+    #[arg(long)]
+    pub no_worker: bool,
+    /// Print the generated token to stdout.
+    #[arg(long)]
+    pub show_token: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]

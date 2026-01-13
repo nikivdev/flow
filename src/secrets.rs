@@ -115,7 +115,7 @@ fn fetch_remote_secrets(
 
     let base_url = hub_override
         .or_else(|| Some(cfg.hub_url.clone()))
-        .unwrap_or_else(|| "https://flow.1focus.ai".to_string());
+        .unwrap_or_else(|| "https://myflow.sh".to_string());
     let base = base_url.trim_end_matches('/');
     let url = format!("{}/api/secrets/{}/{}", base, cfg.provider, env_cfg.name);
 
@@ -298,7 +298,7 @@ mod tests {
             .expect("commit task should exist");
         assert_eq!(
             commit.dependencies,
-            ["github.com/1focus-ai/fast"],
+            ["github.com/nikivdev/fast"],
             "commit task should depend on fast"
         );
 
@@ -306,7 +306,7 @@ mod tests {
             .storage
             .clone()
             .expect("fixture should define a storage provider");
-        assert_eq!(storage.provider, "1focus.ai");
+        assert_eq!(storage.provider, "myflow.sh");
         let env_cfg = storage
             .envs
             .iter()

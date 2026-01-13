@@ -24,7 +24,7 @@ pub struct Config {
         alias = "project-name"
     )]
     pub project_name: Option<String>,
-    /// Optional env store space override for 1focus.
+    /// Optional env store space override for cloud.
     #[serde(default, rename = "env_space", alias = "env-space")]
     pub env_space: Option<String>,
     /// Env store scope: "project" (default) or "personal".
@@ -151,7 +151,7 @@ pub struct TsFlowConfig {
 /// Env settings from TypeScript config.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TsEnvConfig {
-    /// Preferred env backend: "1focus" or "local".
+    /// Preferred env backend: "cloud" or "local".
     #[serde(default)]
     pub backend: Option<String>,
 }
@@ -577,7 +577,7 @@ pub struct StorageConfig {
 }
 
 fn default_hub_url() -> String {
-    "https://flow.1focus.ai".to_string()
+    "https://myflow.sh".to_string()
 }
 
 fn default_storage_env_var() -> String {
@@ -781,7 +781,7 @@ pub enum DaemonRestartPolicy {
 /// command = "jazz"
 /// args = ["--port", "7201"]
 /// health_url = "http://127.0.0.1:7201/health"
-/// working_dir = "~/org/1f/base"
+/// working_dir = "~/code/myflow"
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonConfig {
@@ -1070,7 +1070,7 @@ pub fn load_ts_config() -> Option<TsConfig> {
     }
 }
 
-/// Preferred env backend from ~/.config/flow/config.ts ("1focus" or "local").
+/// Preferred env backend from ~/.config/flow/config.ts ("cloud" or "local").
 pub fn preferred_env_backend() -> Option<String> {
     let config = load_ts_config()?;
     let backend = config.flow?.env?.backend?;
@@ -1404,7 +1404,7 @@ mod tests {
         assert!(watcher.poltergeist.is_none());
 
         let server = &cfg.servers[0];
-        assert_eq!(server.name, "1f");
+        assert_eq!(server.name, "cloud");
         assert_eq!(server.command, "blade");
         assert_eq!(server.args, ["--port", "4000"]);
         let working_dir = server
@@ -1412,7 +1412,7 @@ mod tests {
             .as_ref()
             .expect("server working dir should parse");
         assert!(
-            working_dir.ends_with("src/org/1f/1f"),
+            working_dir.ends_with("code/myflow"),
             "unexpected working dir: {}",
             working_dir.display()
         );
@@ -1484,7 +1484,7 @@ mod tests {
             [[watchers]]
             driver = "poltergeist"
             name = "peekaboo"
-            path = "~/src/org/1f/peekaboo"
+            path = "~/code/myflow/peekaboo"
 
             [watchers.poltergeist]
             binary = "/opt/bin/poltergeist"
@@ -1497,7 +1497,7 @@ mod tests {
         let watcher = &cfg.watchers[0];
         assert_eq!(watcher.driver, WatcherDriver::Poltergeist);
         assert_eq!(watcher.command, None);
-        assert_eq!(watcher.path, "~/src/org/1f/peekaboo");
+        assert_eq!(watcher.path, "~/code/myflow/peekaboo");
 
         let poltergeist = watcher
             .poltergeist

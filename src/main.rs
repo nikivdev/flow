@@ -263,6 +263,9 @@ fn main() -> Result<()> {
         Some(Commands::Install(opts)) => {
             registry::install(opts)?;
         }
+        Some(Commands::Registry(cmd)) => {
+            registry::run(cmd)?;
+        }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
                 bail!("no task name provided");

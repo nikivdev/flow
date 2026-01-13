@@ -13,11 +13,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-use crate::cli::{InstallOpts, RegistryReleaseOpts};
-use crate::config::{Config, RegistryReleaseConfig};
+use crate::cli::{
+    InstallOpts, RegistryAction, RegistryCommand, RegistryInitOpts, RegistryReleaseOpts,
+};
+use crate::config::{self, Config, RegistryReleaseConfig};
 use crate::env as flow_env;
 
 const DEFAULT_TOKEN_ENV: &str = "FLOW_REGISTRY_TOKEN";
+const WORKER_TOKEN_SECRET: &str = "REGISTRY_TOKEN";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryManifest {
@@ -36,6 +39,70 @@ pub struct RegistryTarget {
     pub binaries: BTreeMap<String, String>,
     #[serde(default)]
     pub sha256: BTreeMap<String, String>,
+}
+
+pub fn run(cmd: RegistryCommand) -> Result<()> {
+    match cmd.action {
+        Some(RegistryAction::Init(opts)) => init(opts),
+        None => {
+            println!("Registry commands:");
+            println!("  init  Create a registry token and configure worker secrets");
+            Ok(())
+        }
+    }
+}
+
+pub fn init(opts: RegistryInitOpts) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let flow_path = find_flow_toml(&cwd);
+    let (project_root, flow_cfg) = if let Some(flow_path) = flow_path.as_ref() {
+        let cfg = config::load(flow_path)?;
+        let root = flow_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| cwd.clone());
+        (root, Some(cfg))
+    } else {
+        (cwd.clone(), None)
+    };
+
+    let registry_cfg = flow_cfg
+        .as_ref()
+        .and_then(|cfg| cfg.release.as_ref())
+        .and_then(|release| release.registry.as_ref());
+
+    let token_env = opts
+        .token_env
+        .clone()
+        .or_else(|| registry_cfg.and_then(|cfg| cfg.token_env.clone()))
+        .unwrap_or_else(|| DEFAULT_TOKEN_ENV.to_string());
+
+    let registry_url = resolve_registry_url(opts.registry.as_deref(), registry_cfg).ok();
+
+    let token = opts.token.unwrap_or_else(generate_registry_token);
+    flow_env::set_personal_env_var(&token_env, &token)?;
+
+    if opts.no_worker {
+        println!("Skipped worker secret setup (--no-worker).");
+    } else {
+        let worker_path = resolve_worker_path(opts.worker.as_ref(), &project_root)?
+            .context("worker path not found; pass --worker to set secrets")?;
+        set_worker_secret(&worker_path, &token)?;
+    }
+
+    if let Some(registry_url) = registry_url {
+        println!("Registry URL: {}", registry_url);
+    }
+
+    if opts.show_token {
+        println!("Registry token: {}", token);
+    } else {
+        let preview = token.chars().take(6).collect::<String>();
+        println!("Registry token: {}… (use --show-token to print)", preview);
+    }
+
+    println!("Ready to release with `f release`.");
+    Ok(())
 }
 
 pub fn publish(config_path: &Path, cfg: &Config, opts: RegistryReleaseOpts) -> Result<()> {
@@ -146,7 +213,8 @@ pub fn publish(config_path: &Path, cfg: &Config, opts: RegistryReleaseOpts) -> R
 }
 
 pub fn install(opts: InstallOpts) -> Result<()> {
-    let registry_url = resolve_registry_url(opts.registry.as_deref(), None)?;
+    let global_registry = load_global_registry_config();
+    let registry_url = resolve_registry_url(opts.registry.as_deref(), global_registry.as_ref())?;
     let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
     let version = opts.version.clone();
     let manifest = fetch_manifest(&client, &registry_url, &opts.name, version.as_deref())?;
@@ -217,6 +285,15 @@ fn resolve_registry_url(
             )
         })?;
     Ok(url.trim_end_matches('/').to_string())
+}
+
+fn load_global_registry_config() -> Option<RegistryReleaseConfig> {
+    let path = config::default_config_path();
+    if !path.exists() {
+        return None;
+    }
+    let cfg = config::load(&path).ok()?;
+    cfg.release.and_then(|release| release.registry)
 }
 
 fn resolve_package_name(
@@ -428,6 +505,88 @@ fn resolve_registry_token(token_env: &str) -> Result<String> {
         "{} not set. Add it with `f env new` or export it in your shell.",
         token_env
     );
+}
+
+fn generate_registry_token() -> String {
+    let a = uuid::Uuid::new_v4().simple().to_string();
+    let b = uuid::Uuid::new_v4().simple().to_string();
+    format!("flow_{}{}", a, b)
+}
+
+fn resolve_worker_path(
+    explicit: Option<&PathBuf>,
+    project_root: &Path,
+) -> Result<Option<PathBuf>> {
+    if let Some(path) = explicit {
+        return Ok(Some(path.clone()));
+    }
+
+    let candidates = [
+        project_root.join("packages").join("worker"),
+        project_root.join("worker"),
+        project_root.to_path_buf(),
+    ];
+
+    for candidate in candidates {
+        if has_wrangler_config(&candidate) {
+            return Ok(Some(candidate));
+        }
+    }
+
+    Ok(None)
+}
+
+fn has_wrangler_config(path: &Path) -> bool {
+    ["wrangler.toml", "wrangler.json", "wrangler.jsonc"]
+        .iter()
+        .any(|name| path.join(name).exists())
+}
+
+fn set_worker_secret(worker_path: &Path, token: &str) -> Result<()> {
+    let mut child = Command::new("wrangler")
+        .arg("secret")
+        .arg("put")
+        .arg(WORKER_TOKEN_SECRET)
+        .current_dir(worker_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("failed to run wrangler secret put")?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("failed to open wrangler stdin")?;
+        stdin.write_all(token.as_bytes())?;
+        stdin.write_all(b"\n")?;
+    }
+
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("wrangler secret put failed");
+    }
+
+    println!(
+        "✓ Set {} in worker config ({})",
+        WORKER_TOKEN_SECRET,
+        worker_path.display()
+    );
+    Ok(())
+}
+
+fn find_flow_toml(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        let candidate = current.join("flow.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 fn build_binaries(project_root: &Path, bins: &[String]) -> Result<()> {
