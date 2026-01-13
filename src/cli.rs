@@ -955,6 +955,9 @@ pub struct SupervisorCommand {
     /// Socket path for supervisor IPC (defaults to ~/.config/flow/supervisor.sock).
     #[arg(long)]
     pub socket: Option<PathBuf>,
+    /// Start boot daemons in addition to autostart daemons.
+    #[arg(long)]
+    pub boot: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
