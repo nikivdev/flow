@@ -341,6 +341,20 @@ fn try_direct_match(args: &[String], tasks: &[DiscoveredTask]) -> Option<DirectM
         }
     }
 
+    // Prefix match (only if unambiguous) - e.g., "prime" matches "primes"
+    if needle.len() >= 2 {
+        let mut prefix_matches: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.task.name.to_ascii_lowercase().starts_with(&needle))
+            .collect();
+        if prefix_matches.len() == 1 {
+            return Some(DirectMatchResult {
+                task_name: prefix_matches.remove(0).task.name.clone(),
+                args: rest,
+            });
+        }
+    }
+
     None
 }
 
