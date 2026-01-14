@@ -2292,49 +2292,133 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
             continue;
         }
 
-        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
-            if let Some(ref msg) = entry.message {
-                let role = msg.role.as_deref().unwrap_or("unknown");
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
 
-                // Format role header
-                let role_label = match role {
-                    "user" => "Human",
-                    "assistant" => "Assistant",
-                    _ => role,
-                };
+        // Try Claude format first (entry.message.role + entry.message.content)
+        if let Some(msg) = entry.get("message") {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
+            let role_label = match role {
+                "user" => "Human",
+                "assistant" => "Assistant",
+                _ => role,
+            };
 
-                // Extract content text
-                let content_text = if let Some(ref content) = msg.content {
-                    match content {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Array(arr) => {
-                            // Content might be array of content blocks
-                            arr.iter()
-                                .filter_map(|v| {
-                                    // Handle text blocks
-                                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                                        Some(text.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }
-                        _ => continue,
+            let content_text = extract_content_text(msg.get("content"));
+            let cleaned = strip_system_reminders(&content_text);
+            if !cleaned.is_empty() && !is_session_boilerplate(&cleaned) {
+                history.push_str(&format!("{}: {}\n\n", role_label, cleaned));
+            }
+            continue;
+        }
+
+        // Try Codex format (type: response_item, payload.type: message)
+        if entry.get("type").and_then(|t| t.as_str()) == Some("response_item") {
+            if let Some(payload) = entry.get("payload") {
+                if payload.get("type").and_then(|t| t.as_str()) == Some("message") {
+                    let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
+                    let role_label = match role {
+                        "user" => "Human",
+                        "assistant" => "Assistant",
+                        _ => role,
+                    };
+
+                    let content_text = extract_content_text(payload.get("content"));
+                    let cleaned = strip_system_reminders(&content_text);
+                    if !cleaned.is_empty() && !is_session_boilerplate(&cleaned) {
+                        history.push_str(&format!("{}: {}\n\n", role_label, cleaned));
                     }
-                } else {
-                    continue;
-                };
-
-                if !content_text.is_empty() {
-                    history.push_str(&format!("{}: {}\n\n", role_label, content_text));
                 }
             }
         }
     }
 
     Ok(history)
+}
+
+/// Extract text content from various content formats.
+fn extract_content_text(content: Option<&serde_json::Value>) -> String {
+    let Some(content) = content else {
+        return String::new();
+    };
+
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            arr.iter()
+                .filter_map(|v| {
+                    // Handle text blocks (Claude uses "text", Codex uses "text" in input_text type)
+                    v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        _ => String::new(),
+    }
+}
+
+/// Strip <system-reminder>...</system-reminder> blocks from text.
+fn strip_system_reminders(text: &str) -> String {
+    let mut result = text.to_string();
+    while let Some(start) = result.find("<system-reminder>") {
+        if let Some(end) = result[start..].find("</system-reminder>") {
+            let end_pos = start + end + "</system-reminder>".len();
+            result = format!("{}{}", &result[..start], &result[end_pos..]);
+        } else {
+            // Unclosed tag - remove from start to end
+            result = result[..start].to_string();
+            break;
+        }
+    }
+    result.trim().to_string()
+}
+
+/// Check if content is boilerplate that should be skipped.
+fn is_session_boilerplate(text: &str) -> bool {
+    let trimmed = text.trim();
+
+    // === Codex boilerplate ===
+    // Skip AGENTS.md instructions
+    if trimmed.starts_with("# AGENTS.md instructions") {
+        return true;
+    }
+    // Skip environment context
+    if trimmed.starts_with("<environment_context>") {
+        return true;
+    }
+    // Skip instructions blocks
+    if trimmed.starts_with("<INSTRUCTIONS>") {
+        return true;
+    }
+    // Skip short status messages (likely action summaries)
+    if trimmed.len() < 50 && !trimmed.contains(' ') {
+        return true;
+    }
+    // Skip skill usage announcements
+    if trimmed.starts_with("Using ") && trimmed.contains("skill") {
+        return true;
+    }
+
+    // === Claude boilerplate ===
+    // Skip system reminders
+    if trimmed.starts_with("<system-reminder>") {
+        return true;
+    }
+    // Skip messages that are only system reminders
+    if trimmed.contains("<system-reminder>") && !trimmed.contains("Human:") && !trimmed.contains("Assistant:") {
+        // Check if the non-reminder content is minimal
+        let without_reminders = trimmed
+            .split("<system-reminder>")
+            .next()
+            .unwrap_or("")
+            .trim();
+        if without_reminders.is_empty() {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Copy last prompt and response from a session to clipboard.
