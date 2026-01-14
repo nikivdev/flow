@@ -31,7 +31,7 @@ use crate::{
     discover,
     flox::{self, FloxEnv},
     history::{self, InvocationRecord},
-    hub, init, projects,
+    hub, init, jazz_state, projects,
     running::{self, RunningProcess},
     task_match,
 };
@@ -829,6 +829,10 @@ fn execute_task(
     record.success = status.success();
     record.output = combined_output;
 
+    // Record to jazz2 first (borrows), then history (takes ownership)
+    if let Err(err) = jazz_state::record_task_run(&record) {
+        tracing::warn!(?err, "failed to write jazz2 task run");
+    }
     if let Err(err) = history::record(record) {
         tracing::warn!(?err, "failed to write task history");
     }
@@ -1979,9 +1983,9 @@ fn dependency_error(command: &str) -> String {
 
 fn dependency_help(command: &str) -> Option<&'static str> {
     match command {
-        "fast" => Some(
-            "Get the fast CLI from https://github.com/nikivdev/fast and ensure it is on PATH.",
-        ),
+        "fast" => {
+            Some("Get the fast CLI from https://github.com/nikivdev/fast and ensure it is on PATH.")
+        }
         _ => None,
     }
 }

@@ -80,6 +80,11 @@ command = "FLOW_PROFILE=release ./scripts/deploy.sh"
 description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
 
 [[tasks]]
+name = "deploy-traces"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh"
+description = "Deploy CLI with traces updates (f traces)"
+
+[[tasks]]
 name = "deploy-with-hub-reload"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh && f hub stop && FLOW_DOCS_FOCUS=1 f hub"
 description = "Deploy and restart hub daemons (lin + docs)"

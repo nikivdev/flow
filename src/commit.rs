@@ -1981,10 +1981,7 @@ enum PushResult {
 
 /// Try to push and detect if failure is due to missing remote repo.
 fn git_push_try() -> PushResult {
-    let output = Command::new("git")
-        .args(["push"])
-        .output()
-        .ok();
+    let output = Command::new("git").args(["push"]).output().ok();
 
     let Some(output) = output else {
         return PushResult::RemoteAhead;
@@ -2469,8 +2466,8 @@ fn parse_review_json(output: &str) -> Option<ReviewJson> {
 fn send_to_cloud(project_path: &std::path::Path, issues: &[String], summary: Option<&str>) {
     // Try production worker first, then local
     let endpoints = [
-        "https://myflow.sh/api/v1/events", // Production worker
-        "http://localhost:8787/api/v1/events",               // Local dev
+        "https://myflow.sh/api/v1/events",     // Production worker
+        "http://localhost:8787/api/v1/events", // Local dev
     ];
 
     let project_name = project_path
@@ -2572,7 +2569,11 @@ fn gitedit_api_url(repo_root: &std::path::Path) -> String {
 }
 
 fn gitedit_token(repo_root: &std::path::Path) -> Option<String> {
-    for key in ["GITEDIT_PUBLISH_TOKEN", "GITEDIT_TOKEN", "FLOW_GITEDIT_TOKEN"] {
+    for key in [
+        "GITEDIT_PUBLISH_TOKEN",
+        "GITEDIT_TOKEN",
+        "FLOW_GITEDIT_TOKEN",
+    ] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {

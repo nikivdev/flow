@@ -2298,7 +2298,10 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
 
         // Try Claude format first (entry.message.role + entry.message.content)
         if let Some(msg) = entry.get("message") {
-            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
+            let role = msg
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("unknown");
             let role_label = match role {
                 "user" => "Human",
                 "assistant" => "Assistant",
@@ -2317,7 +2320,10 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
         if entry.get("type").and_then(|t| t.as_str()) == Some("response_item") {
             if let Some(payload) = entry.get("payload") {
                 if payload.get("type").and_then(|t| t.as_str()) == Some("message") {
-                    let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
+                    let role = payload
+                        .get("role")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("unknown");
                     let role_label = match role {
                         "user" => "Human",
                         "assistant" => "Assistant",
@@ -2349,7 +2355,9 @@ fn extract_content_text(content: Option<&serde_json::Value>) -> String {
             arr.iter()
                 .filter_map(|v| {
                     // Handle text blocks (Claude uses "text", Codex uses "text" in input_text type)
-                    v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                    v.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -2406,7 +2414,10 @@ fn is_session_boilerplate(text: &str) -> bool {
         return true;
     }
     // Skip messages that are only system reminders
-    if trimmed.contains("<system-reminder>") && !trimmed.contains("Human:") && !trimmed.contains("Assistant:") {
+    if trimmed.contains("<system-reminder>")
+        && !trimmed.contains("Human:")
+        && !trimmed.contains("Assistant:")
+    {
         // Check if the non-reminder content is minimal
         let without_reminders = trimmed
             .split("<system-reminder>")

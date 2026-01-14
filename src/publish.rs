@@ -38,17 +38,18 @@ fn run_fuzzy_select() -> Result<()> {
         .join("\n");
 
     let output = Command::new("fzf")
-        .args(["--height=10", "--reverse", "--delimiter=\t", "--with-nth=1,2"])
+        .args([
+            "--height=10",
+            "--reverse",
+            "--delimiter=\t",
+            "--with-nth=1,2",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .context("failed to spawn fzf")?;
 
-    output
-        .stdin
-        .as_ref()
-        .unwrap()
-        .write_all(input.as_bytes())?;
+    output.stdin.as_ref().unwrap().write_all(input.as_bytes())?;
 
     let result = output.wait_with_output()?;
     if !result.status.success() {
@@ -565,7 +566,11 @@ fn gitedit_api_url(repo_root: &Path) -> String {
 }
 
 fn gitedit_token(repo_root: &Path) -> Option<String> {
-    for key in ["GITEDIT_PUBLISH_TOKEN", "GITEDIT_TOKEN", "FLOW_GITEDIT_TOKEN"] {
+    for key in [
+        "GITEDIT_PUBLISH_TOKEN",
+        "GITEDIT_TOKEN",
+        "FLOW_GITEDIT_TOKEN",
+    ] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {

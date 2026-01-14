@@ -247,15 +247,15 @@ pub fn install(opts: InstallOpts) -> Result<()> {
         }
     }
 
-    let bin_dir = opts
-        .bin_dir
-        .clone()
-        .unwrap_or_else(default_bin_dir);
+    let bin_dir = opts.bin_dir.clone().unwrap_or_else(default_bin_dir);
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
     let dest = bin_dir.join(&bin);
     if dest.exists() && !opts.force {
-        bail!("{} already exists (use --force to overwrite)", dest.display());
+        bail!(
+            "{} already exists (use --force to overwrite)",
+            dest.display()
+        );
     }
 
     let mut temp = NamedTempFile::new_in(&bin_dir)
@@ -280,9 +280,7 @@ fn resolve_registry_url(
         .or_else(|| cfg.and_then(|cfg| cfg.url.clone()))
         .or_else(|| env::var("FLOW_REGISTRY_URL").ok())
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Registry URL not set. Use --registry or set FLOW_REGISTRY_URL."
-            )
+            anyhow::anyhow!("Registry URL not set. Use --registry or set FLOW_REGISTRY_URL.")
         })?;
     Ok(url.trim_end_matches('/').to_string())
 }
@@ -357,9 +355,7 @@ fn resolve_latest_flag(
     if no_latest {
         return false;
     }
-    registry_cfg
-        .and_then(|cfg| cfg.latest)
-        .unwrap_or(true)
+    registry_cfg.and_then(|cfg| cfg.latest).unwrap_or(true)
 }
 
 fn resolve_registry_version(
@@ -488,7 +484,11 @@ fn resolve_download_url(base: &str, path: &str) -> String {
     if path.starts_with("http://") || path.starts_with("https://") {
         return path.to_string();
     }
-    format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 fn resolve_registry_token(token_env: &str) -> Result<String> {
@@ -513,10 +513,7 @@ fn generate_registry_token() -> String {
     format!("flow_{}{}", a, b)
 }
 
-fn resolve_worker_path(
-    explicit: Option<&PathBuf>,
-    project_root: &Path,
-) -> Result<Option<PathBuf>> {
+fn resolve_worker_path(explicit: Option<&PathBuf>, project_root: &Path) -> Result<Option<PathBuf>> {
     if let Some(path) = explicit {
         return Ok(Some(path.clone()));
     }
@@ -647,8 +644,7 @@ fn default_bin_dir() -> PathBuf {
 }
 
 fn persist_with_permissions(temp: NamedTempFile, dest: &Path) -> Result<()> {
-    temp
-        .persist(dest)
+    temp.persist(dest)
         .map_err(|err| err.error)
         .context("failed to persist binary")?;
     #[cfg(unix)]

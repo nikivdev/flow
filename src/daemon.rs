@@ -258,8 +258,7 @@ pub fn restart_policy_for(daemon: &DaemonConfig) -> DaemonRestartPolicy {
 pub fn daemon_log_dir(name: &str) -> Result<PathBuf> {
     let base = config::ensure_global_state_dir()?;
     let dir = base.join("daemons").join(sanitize_daemon_name(name));
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -333,13 +332,9 @@ fn spawn_daemon_process(daemon: &DaemonConfig, binary: &Path) -> Result<SpawnedD
         cmd.process_group(0);
     }
 
-    let child = cmd.spawn().with_context(|| {
-        format!(
-            "failed to start {} from {}",
-            daemon.name,
-            binary.display()
-        )
-    })?;
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("failed to start {} from {}", daemon.name, binary.display()))?;
 
     Ok(SpawnedDaemon {
         pid: child.id(),
@@ -383,10 +378,7 @@ fn wait_for_daemon_ready(daemon: &DaemonConfig, stdout_log: &Path) -> Result<()>
     Ok(())
 }
 /// Find a daemon config by name from merged configs.
-fn find_daemon_config_with_path(
-    name: &str,
-    config_path: Option<&Path>,
-) -> Result<DaemonConfig> {
+fn find_daemon_config_with_path(name: &str, config_path: Option<&Path>) -> Result<DaemonConfig> {
     let config = load_merged_config_with_path(config_path)?;
 
     config
@@ -397,9 +389,7 @@ fn find_daemon_config_with_path(
 }
 
 /// Load merged config from global and local sources.
-pub fn load_merged_config_with_path(
-    config_path: Option<&Path>,
-) -> Result<config::Config> {
+pub fn load_merged_config_with_path(config_path: Option<&Path>) -> Result<config::Config> {
     let mut merged = config::Config::default();
 
     // Load global config

@@ -9,7 +9,7 @@ use flowd::{
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, fixup, help_search, history,
     home, hub, init, init_tracing, log_server, notify, palette, parallel, processes, projects,
     publish, registry, release, repos, services, setup, skills, ssh_keys, storage, supervisor,
-    sync, task_match, tasks, todo, tools, upgrade, upstream, web,
+    sync, task_match, tasks, todo, tools, traces, upgrade, upstream, web,
 };
 
 fn main() -> Result<()> {
@@ -94,6 +94,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Logs(opts)) => {
             processes::show_task_logs(opts)?;
+        }
+        Some(Commands::Traces(opts)) => {
+            traces::run(opts)?;
         }
         Some(Commands::Projects) => {
             projects::show_projects()?;
