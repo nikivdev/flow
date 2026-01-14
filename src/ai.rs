@@ -53,6 +53,15 @@ pub struct WebSessionMessage {
     pub content: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SessionHistory {
+    pub session_id: String,
+    pub provider: String,
+    pub started_at: Option<String>,
+    pub last_message_at: Option<String>,
+    pub messages: Vec<WebSessionMessage>,
+}
+
 struct SessionMessages {
     messages: Vec<WebSessionMessage>,
     started_at: Option<String>,
@@ -3359,6 +3368,41 @@ pub fn get_latest_session_ref_for_path(project_path: &PathBuf) -> Result<Option<
         Provider::All => "ai",
     };
     Ok(Some(format!("{}:{}", provider, session.session_id)))
+}
+
+/// Return full message history for the latest session matching a path.
+pub fn get_latest_session_history_for_path(
+    project_path: &PathBuf,
+) -> Result<Option<SessionHistory>> {
+    let sessions = read_sessions_for_path(Provider::All, project_path)?;
+    let Some(session) = sessions.first() else {
+        return Ok(None);
+    };
+    let session_messages =
+        read_session_messages_for_path(project_path, &session.session_id, session.provider)?;
+    let provider = match session.provider {
+        Provider::Claude => "claude",
+        Provider::Codex => "codex",
+        Provider::All => "unknown",
+    };
+
+    let started_at = session_messages
+        .started_at
+        .clone()
+        .or_else(|| session.timestamp.clone());
+    let last_message_at = session_messages
+        .last_message_at
+        .clone()
+        .or_else(|| session.last_message_at.clone())
+        .or_else(|| started_at.clone());
+
+    Ok(Some(SessionHistory {
+        session_id: session.session_id.clone(),
+        provider: provider.to_string(),
+        started_at,
+        last_message_at,
+        messages: session_messages.messages,
+    }))
 }
 
 fn maybe_update_summary(

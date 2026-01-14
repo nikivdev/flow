@@ -13,6 +13,7 @@ use crossterm::{
     terminal,
 };
 
+use crate::ai_context;
 use crate::cli::SyncCommand;
 
 /// Run the sync command.
@@ -489,8 +490,18 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
     let content = std::fs::read_to_string(file).unwrap_or_default();
     if content.contains("<<<<<<<") {
         println!("  Trying Claude for {}...", file);
+
+        // Load sync context if available
+        let context = ai_context::load_command_context("sync").unwrap_or_default();
+        let context_section = if !context.is_empty() {
+            format!("## Context\n\n{}\n\n", context)
+        } else {
+            String::new()
+        };
+
         let prompt = format!(
-            "This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
+            "{}This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
+            context_section,
             if content.len() > 8000 {
                 &content[..8000]
             } else {
@@ -609,11 +620,20 @@ fn try_resolve_conflicts() -> Result<bool> {
         needs_claude.len()
     );
 
+    // Load sync context once for all files
+    let context = ai_context::load_command_context("sync").unwrap_or_default();
+    let context_section = if !context.is_empty() {
+        format!("## Context\n\n{}\n\n", context)
+    } else {
+        String::new()
+    };
+
     for file in &needs_claude {
         let content = std::fs::read_to_string(file).unwrap_or_default();
         if content.contains("<<<<<<<") {
             let prompt = format!(
-                "This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
+                "{}This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
+                context_section,
                 if content.len() > 8000 {
                     &content[..8000]
                 } else {

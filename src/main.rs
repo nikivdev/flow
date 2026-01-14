@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
     agents, ai,
-    cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts},
+    cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts, TraceAction},
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, fixup, help_search, history,
     home, hub, init, init_tracing, log_server, notify, palette, parallel, processes, projects,
     publish, registry, release, repos, services, setup, skills, ssh_keys, storage, supervisor,
@@ -95,8 +95,16 @@ fn main() -> Result<()> {
         Some(Commands::Logs(opts)) => {
             processes::show_task_logs(opts)?;
         }
-        Some(Commands::Traces(opts)) => {
-            traces::run(opts)?;
+        Some(Commands::Trace(cmd)) => {
+            if let Some(action) = cmd.action {
+                match action {
+                    TraceAction::Session(opts) => {
+                        traces::run_session(opts)?;
+                    }
+                }
+            } else {
+                traces::run(cmd.events)?;
+            }
         }
         Some(Commands::Projects) => {
             projects::show_projects()?;
@@ -273,7 +281,18 @@ fn main() -> Result<()> {
             let Some(task_name) = args.first() else {
                 bail!("no task name provided");
             };
-            tasks::run_with_discovery(task_name, args[1..].to_vec())?;
+            if let Err(err) = tasks::run_with_discovery(task_name, args[1..].to_vec()) {
+                if is_task_not_found(&err) {
+                    task_match::run(task_match::MatchOpts {
+                        args: args.clone(),
+                        model: None,
+                        port: None,
+                        execute: true,
+                    })?;
+                } else {
+                    return Err(err);
+                }
+            }
         }
         None => {
             palette::run(TasksOpts::default())?;
@@ -310,6 +329,11 @@ fn rerun(opts: RerunOpts) -> Result<()> {
         name: task_name,
         args,
     })
+}
+
+fn is_task_not_found(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("task '") && msg.contains("not found")
 }
 
 fn shell_init(shell: &str) {

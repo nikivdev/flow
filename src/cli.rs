@@ -142,9 +142,10 @@ pub enum Commands {
     Logs(TaskLogsOpts),
     #[command(
         about = "Quick traces for AI + task runs from jazz2 state.",
-        long_about = "Print recent AI agent events and Flow task runs stored in the shared jazz2 state. Use --follow to stream."
+        long_about = "Print recent AI agent events and Flow task runs stored in the shared jazz2 state. Use --follow to stream.",
+        alias = "traces"
     )]
-    Traces(TracesOpts),
+    Trace(TraceCommand),
     #[command(
         about = "List registered projects.",
         long_about = "Shows all projects that have been registered (projects with a 'name' field in flow.toml)."
@@ -357,7 +358,7 @@ pub enum Commands {
     Registry(RegistryCommand),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct TracesOpts {
     /// Max rows per source (default: 40).
     #[arg(short = 'n', long, default_value = "40")]
@@ -374,6 +375,27 @@ pub struct TracesOpts {
     /// Which source to show: all, tasks, ai.
     #[arg(long, value_enum, default_value = "all")]
     pub source: TraceSource,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TraceCommand {
+    #[command(subcommand)]
+    pub action: Option<TraceAction>,
+    #[command(flatten)]
+    pub events: TracesOpts,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum TraceAction {
+    /// Show full history of the last active AI session for a project path.
+    Session(TraceSessionOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TraceSessionOpts {
+    /// Project path to load the latest session for.
+    #[arg(value_name = "PATH")]
+    pub path: PathBuf,
 }
 
 #[derive(ValueEnum, Clone, Debug)]

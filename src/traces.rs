@@ -8,7 +8,8 @@ use groove::ObjectId;
 use groove::sql::{Database, RowValue};
 use groove_rocksdb::RocksEnvironment;
 
-use crate::cli::{TraceSource, TracesOpts};
+use crate::ai;
+use crate::cli::{TraceSessionOpts, TraceSource, TracesOpts};
 use crate::jazz_state;
 
 const DEFAULT_LIMIT: usize = 40;
@@ -35,6 +36,38 @@ pub fn run(opts: TracesOpts) -> Result<()> {
         }
         Ok(())
     }
+}
+
+pub fn run_session(opts: TraceSessionOpts) -> Result<()> {
+    let mut path = opts.path;
+    if path.is_relative() {
+        let cwd = env::current_dir().context("read current dir")?;
+        path = cwd.join(path);
+    }
+    let path = path.canonicalize().unwrap_or(path);
+    let history = ai::get_latest_session_history_for_path(&path)?;
+    let Some(history) = history else {
+        println!("No AI sessions found for {}", path.display());
+        return Ok(());
+    };
+
+    let id_short = &history.session_id[..8.min(history.session_id.len())];
+    println!("# session {}:{}", history.provider, id_short);
+    println!("# path {}", path.display());
+    if let Some(ts) = history.started_at.as_deref() {
+        println!("# started_at {ts}");
+    }
+    if let Some(ts) = history.last_message_at.as_deref() {
+        println!("# last_message_at {ts}");
+    }
+
+    for message in history.messages {
+        println!();
+        println!("[{}]", message.role);
+        println!("{}", message.content);
+    }
+
+    Ok(())
 }
 
 fn follow_traces(
@@ -309,7 +342,7 @@ fn open_db_at(path: &Path) -> Result<Database> {
     }
 
     let env: Arc<dyn Environment> =
-        Arc::new(RocksEnvironment::open_readonly(&path).context("open rocksdb")?);
+        Arc::new(RocksEnvironment::open(&path).context("open rocksdb")?);
     let catalog_id = load_catalog_id(&path).context("load catalog id")?;
     let db = futures::executor::block_on(Database::from_env(env, catalog_id))
         .context("load jazz2 catalog")?;
