@@ -1,6 +1,7 @@
 pub mod agent_setup;
 pub mod agents;
 pub mod ai;
+pub mod ai_context;
 pub mod cli;
 pub mod code;
 pub mod commit;
