@@ -146,6 +146,9 @@ pub struct TsFlowConfig {
     /// Enable gitedit.dev hash in commit messages. Default false.
     #[serde(default)]
     pub gitedit: Option<bool>,
+    /// Log level: "off", "error", "warn", "info", "debug", "trace". Default "warn".
+    #[serde(default)]
+    pub log_level: Option<String>,
 }
 
 /// Env settings from TypeScript config.

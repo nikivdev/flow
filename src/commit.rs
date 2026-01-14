@@ -602,12 +602,16 @@ pub fn run_sync(push: bool) -> Result<()> {
         print!("Pushing... ");
         io::stdout().flush()?;
 
-        match git_try(&["push"]) {
-            Ok(_) => {
+        match git_push_try() {
+            PushResult::Success => {
                 println!("done");
                 info!("pushed to remote");
             }
-            Err(_) => {
+            PushResult::NoRemoteRepo => {
+                println!("skipped (no remote repo)");
+                info!("skipped push - remote repo does not exist");
+            }
+            PushResult::RemoteAhead => {
                 // Push failed, likely remote has new commits
                 println!("failed (remote ahead)");
                 print!("Pulling with rebase... ");
@@ -1222,11 +1226,14 @@ pub fn run_with_check_sync(
         print!("Pushing... ");
         io::stdout().flush()?;
 
-        match git_try(&["push"]) {
-            Ok(_) => {
+        match git_push_try() {
+            PushResult::Success => {
                 println!("done");
             }
-            Err(_) => {
+            PushResult::NoRemoteRepo => {
+                println!("skipped (no remote repo)");
+            }
+            PushResult::RemoteAhead => {
                 println!("failed (remote ahead)");
                 print!("Pulling with rebase... ");
                 io::stdout().flush()?;
@@ -1965,6 +1972,39 @@ fn git_try(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Push result indicating success, remote ahead, or no remote repo.
+enum PushResult {
+    Success,
+    RemoteAhead,
+    NoRemoteRepo,
+}
+
+/// Try to push and detect if failure is due to missing remote repo.
+fn git_push_try() -> PushResult {
+    let output = Command::new("git")
+        .args(["push"])
+        .output()
+        .ok();
+
+    let Some(output) = output else {
+        return PushResult::RemoteAhead;
+    };
+
+    if output.status.success() {
+        return PushResult::Success;
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    if stderr.contains("repository not found")
+        || stderr.contains("does not exist")
+        || stderr.contains("could not read from remote")
+    {
+        PushResult::NoRemoteRepo
+    } else {
+        PushResult::RemoteAhead
+    }
+}
+
 fn git_try_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
     let status = Command::new("git")
         .current_dir(workdir)
@@ -2087,11 +2127,26 @@ fn generate_commit_message_opencode_run(
         prompt.push_str(status);
     }
 
+    info!(
+        model = model,
+        prompt_len = prompt.len(),
+        "calling opencode run for commit message"
+    );
+    let start = std::time::Instant::now();
+
     // Use --format json to get output in non-interactive mode
     let output = Command::new("opencode")
         .args(["run", "--model", model, "--format", "json", &prompt])
         .output()
         .context("failed to run opencode for commit message")?;
+
+    info!(
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        success = output.status.success(),
+        stdout_len = output.stdout.len(),
+        stderr_len = output.stderr.len(),
+        "opencode run completed"
+    );
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
