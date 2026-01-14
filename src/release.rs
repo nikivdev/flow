@@ -3,8 +3,7 @@ use anyhow::{Result, bail};
 use crate::{
     cli::{GhReleaseCommand, ReleaseAction, ReleaseCommand, ReleaseOpts},
     config::Config,
-    gh_release,
-    registry,
+    gh_release, registry,
     tasks::{self, find_task},
 };
 use std::path::Path;
@@ -54,9 +53,7 @@ pub fn run(cmd: ReleaseCommand) -> Result<()> {
 
     match cmd.action {
         Some(ReleaseAction::Github(cmd)) => gh_release::run(cmd),
-        Some(ReleaseAction::Registry(opts)) => {
-            registry::publish(&config_path, &cfg, opts)
-        }
+        Some(ReleaseAction::Registry(opts)) => registry::publish(&config_path, &cfg, opts),
         Some(ReleaseAction::Task(opts)) => run_task(ReleaseOpts {
             config: config_path,
             args: opts.args,
@@ -93,11 +90,9 @@ fn run_default(config_path: &Path, cfg: &Config) -> Result<()> {
         .unwrap_or("task");
 
     match provider {
-        "registry" => registry::publish(
-            config_path,
-            cfg,
-            crate::cli::RegistryReleaseOpts::default(),
-        ),
+        "registry" => {
+            registry::publish(config_path, cfg, crate::cli::RegistryReleaseOpts::default())
+        }
         "task" | "release" => run_task(ReleaseOpts {
             config: config_path.to_path_buf(),
             args: Vec::new(),

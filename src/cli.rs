@@ -141,6 +141,11 @@ pub enum Commands {
     )]
     Logs(TaskLogsOpts),
     #[command(
+        about = "Quick traces for AI + task runs from jazz2 state.",
+        long_about = "Print recent AI agent events and Flow task runs stored in the shared jazz2 state. Use --follow to stream."
+    )]
+    Traces(TracesOpts),
+    #[command(
         about = "List registered projects.",
         long_about = "Shows all projects that have been registered (projects with a 'name' field in flow.toml)."
     )]
@@ -350,6 +355,32 @@ pub enum Commands {
         long_about = "Create registry tokens and wire them into worker secrets and local envs."
     )]
     Registry(RegistryCommand),
+}
+
+#[derive(Args, Debug)]
+pub struct TracesOpts {
+    /// Max rows per source (default: 40).
+    #[arg(short = 'n', long, default_value = "40")]
+    pub limit: usize,
+
+    /// Follow and stream new entries.
+    #[arg(short = 'f', long)]
+    pub follow: bool,
+
+    /// Filter by project path substring.
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Which source to show: all, tasks, ai.
+    #[arg(long, value_enum, default_value = "all")]
+    pub source: TraceSource,
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+pub enum TraceSource {
+    All,
+    Tasks,
+    Ai,
 }
 
 #[derive(Args, Debug, Clone)]

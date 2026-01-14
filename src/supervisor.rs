@@ -101,10 +101,7 @@ pub fn is_running() -> bool {
         .unwrap_or(false)
 }
 
-pub fn try_handle_daemon_action(
-    action: &DaemonAction,
-    config_path: Option<&Path>,
-) -> Result<bool> {
+pub fn try_handle_daemon_action(action: &DaemonAction, config_path: Option<&Path>) -> Result<bool> {
     let socket_path = resolve_socket_path(None)?;
     if !supervisor_running(&socket_path) {
         if !ensure_supervisor_running(&socket_path, false, false).unwrap_or(false) {
@@ -504,10 +501,7 @@ fn start_daemon_set(
                 register_managed_daemon(state, &daemon_cfg, config_path, false)?;
             }
             Err(err) => {
-                eprintln!(
-                    "WARN failed to autostart {}: {}",
-                    daemon_cfg.name, err
-                );
+                eprintln!("WARN failed to autostart {}: {}", daemon_cfg.name, err);
             }
         }
     }
@@ -566,7 +560,11 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
                 if let Some(ref path) = entry.config_path {
                     if !active_path_matches(&active_path, path) {
                         to_stop.push((entry.name.clone(), entry.config_path.clone()));
-                        updates.push((daemon_key(&entry.name, entry.config_path.as_deref()), entry.retry_remaining, true));
+                        updates.push((
+                            daemon_key(&entry.name, entry.config_path.as_deref()),
+                            entry.retry_remaining,
+                            true,
+                        ));
                         continue;
                     }
                 }
@@ -576,7 +574,10 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
             let daemon_cfg = match resolve_daemon_config(&entry.name, config_path.as_deref()) {
                 Ok(cfg) => cfg,
                 Err(err) => {
-                    eprintln!("WARN supervisor missing daemon config for {}: {}", entry.name, err);
+                    eprintln!(
+                        "WARN supervisor missing daemon config for {}: {}",
+                        entry.name, err
+                    );
                     continue;
                 }
             };
@@ -776,11 +777,7 @@ fn load_supervisor_pid(path: &Path) -> Result<Option<u32>> {
     }
     let contents = fs::read_to_string(path)?;
     let pid: u32 = contents.trim().parse().ok().unwrap_or(0);
-    if pid == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(pid))
-    }
+    if pid == 0 { Ok(None) } else { Ok(Some(pid)) }
 }
 
 fn remove_supervisor_pid(path: &Path) -> Result<()> {
@@ -791,10 +788,7 @@ fn remove_supervisor_pid(path: &Path) -> Result<()> {
 }
 
 fn terminate_process(pid: u32) -> Result<()> {
-    let status = Command::new("kill")
-        .arg("-9")
-        .arg(pid.to_string())
-        .status();
+    let status = Command::new("kill").arg("-9").arg(pid.to_string()).status();
     if let Ok(status) = status {
         if status.success() {
             return Ok(());

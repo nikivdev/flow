@@ -812,21 +812,19 @@ struct EnvTemplate {
 }
 
 fn env_templates() -> Vec<EnvTemplate> {
-    vec![
-        EnvTemplate {
-            id: "cloudflare",
-            title: "Cloudflare API token",
-            key: "CLOUDFLARE_API_TOKEN",
-            description: "Token used by wrangler to deploy Workers/Pages.",
-            instructions: &[
-                "Open https://dash.cloudflare.com/profile/api-tokens",
-                "Create a token (Template: Edit Cloudflare Workers or Custom)",
-                "Permissions: Workers Scripts:Edit, Workers Routes:Edit, Pages:Edit",
-                "Add Zone:Read + DNS:Edit for your domain",
-                "Copy the token value",
-            ],
-        },
-    ]
+    vec![EnvTemplate {
+        id: "cloudflare",
+        title: "Cloudflare API token",
+        key: "CLOUDFLARE_API_TOKEN",
+        description: "Token used by wrangler to deploy Workers/Pages.",
+        instructions: &[
+            "Open https://dash.cloudflare.com/profile/api-tokens",
+            "Create a token (Template: Edit Cloudflare Workers or Custom)",
+            "Permissions: Workers Scripts:Edit, Workers Routes:Edit, Pages:Edit",
+            "Add Zone:Read + DNS:Edit for your domain",
+            "Copy the token value",
+        ],
+    }]
 }
 
 fn new_env_template() -> Result<()> {
@@ -1874,7 +1872,8 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
         Some(token) => token,
         None => {
             if std::io::stdin().is_terminal()
-                && prompt_confirm("Not logged in to cloud. Store locally instead? (y/N): ")? {
+                && prompt_confirm("Not logged in to cloud. Store locally instead? (y/N): ")?
+            {
                 let path = set_local_env_var(&target, environment, key, value)?;
                 println!(
                     "✓ Set personal env var locally: {} (stored at {})",
@@ -1915,7 +1914,8 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
 
     if resp.status() == 401 {
         if std::io::stdin().is_terminal()
-            && prompt_confirm("Cloud auth failed. Store locally instead? (y/N): ")? {
+            && prompt_confirm("Cloud auth failed. Store locally instead? (y/N): ")?
+        {
             let path = set_local_env_var(&target, environment, key, value)?;
             println!(
                 "✓ Set personal env var locally: {} (stored at {})",
@@ -1933,7 +1933,8 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
         let err = anyhow::anyhow!("API error {}: {}", status, body);
         if is_local_fallback_error(&err)
             && std::io::stdin().is_terminal()
-            && prompt_confirm("Cloud unavailable. Store locally instead? (y/N): ")? {
+            && prompt_confirm("Cloud unavailable. Store locally instead? (y/N): ")?
+        {
             let path = set_local_env_var(&target, environment, key, value)?;
             println!(
                 "✓ Set personal env var locally: {} (stored at {})",
@@ -1985,7 +1986,8 @@ fn set_project_env_var_internal(
         Some(token) => token,
         None => {
             if std::io::stdin().is_terminal()
-                && prompt_confirm("Not logged in to cloud. Store locally instead? (y/N): ")? {
+                && prompt_confirm("Not logged in to cloud. Store locally instead? (y/N): ")?
+            {
                 let path = set_local_env_var(&target, environment, key, value)?;
                 println!(
                     "✓ Set env var locally: {} ({} stored at {})",
@@ -2044,7 +2046,8 @@ fn set_project_env_var_internal(
         let err = anyhow::anyhow!("API error {}: {}", status, body);
         if is_local_fallback_error(&err)
             && std::io::stdin().is_terminal()
-            && prompt_confirm("Cloud unavailable. Store locally instead? (y/N): ")? {
+            && prompt_confirm("Cloud unavailable. Store locally instead? (y/N): ")?
+        {
             let path = set_local_env_var(&target, environment, key, value)?;
             println!(
                 "✓ Set env var locally: {} ({} stored at {})",
@@ -2164,7 +2167,8 @@ fn fetch_env_vars(
         Some(token) => token,
         None => {
             if std::io::stdin().is_terminal()
-                && prompt_confirm("Not logged in to cloud. Read local envs instead? (y/N): ")? {
+                && prompt_confirm("Not logged in to cloud. Read local envs instead? (y/N): ")?
+            {
                 return read_local_env_vars(target, environment);
             }
             bail!("Not logged in. Run `f env login` first.");
@@ -2209,7 +2213,8 @@ fn fetch_env_vars(
 
     if resp.status() == 401 {
         if std::io::stdin().is_terminal()
-            && prompt_confirm("Cloud auth failed. Read local envs instead? (y/N): ")? {
+            && prompt_confirm("Cloud auth failed. Read local envs instead? (y/N): ")?
+        {
             return read_local_env_vars(target, environment);
         }
         bail!("Unauthorized. Check your token with `f env login`.");
@@ -2230,7 +2235,8 @@ fn fetch_env_vars(
         let err = anyhow::anyhow!("API error {}: {}", status, body);
         if is_local_fallback_error(&err)
             && std::io::stdin().is_terminal()
-            && prompt_confirm("Cloud unavailable. Read local envs instead? (y/N): ")? {
+            && prompt_confirm("Cloud unavailable. Read local envs instead? (y/N): ")?
+        {
             return read_local_env_vars(target, environment);
         }
         return Err(err);

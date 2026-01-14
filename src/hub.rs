@@ -1,7 +1,4 @@
-use std::{
-    net::IpAddr,
-    time::Duration,
-};
+use std::{net::IpAddr, time::Duration};
 
 use anyhow::Result;
 use reqwest::blocking::Client;

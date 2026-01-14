@@ -14,9 +14,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
-use serde_json::Value;
-use serde::{Deserialize, Serialize};
 use rpassword::prompt_password;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::cli::{DeployAction, DeployCommand, EnvAction, TaskRunOpts};
 use crate::config::Config;
@@ -599,28 +599,19 @@ fn deploy_web(project_root: &Path, config: Option<&Config>) -> Result<()> {
         cfg = crate::config::load(&flow_path)?;
     }
 
-    let web_cfg = cfg
-        .web
-        .as_ref()
-        .context("No [web] section in flow.toml")?;
+    let web_cfg = cfg.web.as_ref().context("No [web] section in flow.toml")?;
 
     if ensure_web_domain_or_route(&flow_path, web_cfg)? {
         changed = true;
         cfg = crate::config::load(&flow_path)?;
     }
-    let web_cfg = cfg
-        .web
-        .as_ref()
-        .context("No [web] section in flow.toml")?;
+    let web_cfg = cfg.web.as_ref().context("No [web] section in flow.toml")?;
 
     if ensure_web_env_source(&flow_path, web_cfg)? {
         changed = true;
         cfg = crate::config::load(&flow_path)?;
     }
-    let web_cfg = cfg
-        .web
-        .as_ref()
-        .context("No [web] section in flow.toml")?;
+    let web_cfg = cfg.web.as_ref().context("No [web] section in flow.toml")?;
 
     if ensure_web_routes(&web_root, web_cfg)? {
         changed = true;
@@ -770,10 +761,7 @@ fn deploy_host(
                 Ok(vars) if !vars.is_empty() => {
                     // Generate .env content
                     let mut content = String::new();
-                    content.push_str(&format!(
-                        "# Source: cloud {} (fetched at deploy)\n",
-                        source
-                    ));
+                    content.push_str(&format!("# Source: cloud {} (fetched at deploy)\n", source));
                     let mut sorted_keys: Vec<_> = vars.keys().collect();
                     sorted_keys.sort();
                     for key in sorted_keys {
@@ -1015,10 +1003,7 @@ fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConf
     let keys = collect_cloudflare_env_keys(cf_cfg);
     let vars = crate::env::fetch_project_env_vars(cloud_env, &keys)?;
     if vars.is_empty() {
-        bail!(
-            "No env vars found in cloud for environment '{}'",
-            cloud_env
-        );
+        bail!("No env vars found in cloud for environment '{}'", cloud_env);
     }
 
     apply_cloudflare_env_map(project_root, cf_cfg, &vars)?;
@@ -2473,7 +2458,10 @@ fn ensure_cloudflare_api_token() -> Result<()> {
     }
 
     let Some(token) = token else {
-        bail!("Cloudflare API token required. Store it as personal env key {}.", key);
+        bail!(
+            "Cloudflare API token required. Store it as personal env key {}.",
+            key
+        );
     };
 
     unsafe {
@@ -2518,7 +2506,11 @@ fn cloudflare_api_client() -> Result<Client> {
         .context("failed to build Cloudflare API client")
 }
 
-fn find_cloudflare_zone(client: &Client, token: &str, domain: &str) -> Result<Option<(String, String)>> {
+fn find_cloudflare_zone(
+    client: &Client,
+    token: &str,
+    domain: &str,
+) -> Result<Option<(String, String)>> {
     for candidate in cloudflare_zone_candidates(domain) {
         let resp = client
             .get("https://api.cloudflare.com/client/v4/zones")
@@ -2526,7 +2518,9 @@ fn find_cloudflare_zone(client: &Client, token: &str, domain: &str) -> Result<Op
             .query(&[("name", candidate.as_str()), ("status", "active")])
             .send()
             .context("failed to query Cloudflare zones")?;
-        let json: Value = resp.json().context("failed to parse Cloudflare zones response")?;
+        let json: Value = resp
+            .json()
+            .context("failed to parse Cloudflare zones response")?;
         cloudflare_api_check(&json, "listing zones")?;
         if let Some(zone) = json["result"].as_array().and_then(|arr| arr.first()) {
             if let (Some(id), Some(name)) = (zone["id"].as_str(), zone["name"].as_str()) {
@@ -2679,7 +2673,9 @@ fn fetch_personal_env_value(key: &str) -> Result<Option<String>> {
 }
 
 fn is_not_logged_in_err(err: &anyhow::Error) -> bool {
-    err.to_string().to_ascii_lowercase().contains("not logged in")
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains("not logged in")
 }
 
 fn is_cloud_unavailable(err: &anyhow::Error) -> bool {
@@ -2702,10 +2698,7 @@ fn ensure_wrangler_routes_jsonc(path: &Path, route: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let insert_block = format!(
-        "\"routes\": [\n  \"{}\"\n]",
-        route
-    );
+    let insert_block = format!("\"routes\": [\n  \"{}\"\n]", route);
 
     let mut lines: Vec<String> = contents.lines().map(|line| line.to_string()).collect();
     let had_trailing_newline = contents.ends_with('\n');
@@ -2717,15 +2710,20 @@ fn ensure_wrangler_routes_jsonc(path: &Path, route: &str) -> Result<bool> {
             .map(|line| !line.trim_end().ends_with(',') && !line.trim_end().ends_with('{'))
             .unwrap_or(false);
         if needs_comma {
-            if let Some(last) = lines.iter_mut().take(pos).rfind(|line| !line.trim().is_empty())
+            if let Some(last) = lines
+                .iter_mut()
+                .take(pos)
+                .rfind(|line| !line.trim().is_empty())
             {
                 if !last.trim_end().ends_with(',') {
                     last.push(',');
                 }
             }
         }
-        let mut block_lines: Vec<String> =
-            insert_block.lines().map(|line| format!("  {line}")).collect();
+        let mut block_lines: Vec<String> = insert_block
+            .lines()
+            .map(|line| format!("  {line}"))
+            .collect();
         lines.splice(pos..pos, block_lines.drain(..));
         let mut updated = lines.join("\n");
         if had_trailing_newline {

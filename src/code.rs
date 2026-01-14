@@ -7,7 +7,9 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::cli::{CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts, CodeNewOpts, NewOpts};
+use crate::cli::{
+    CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts, CodeNewOpts, NewOpts,
+};
 use crate::config;
 
 const DEFAULT_CODE_ROOT: &str = "~/code";
@@ -87,7 +89,10 @@ pub fn new_from_template(opts: NewOpts) -> Result<()> {
         bail!("Template not found: {}", template_dir.display());
     }
     if !template_dir.is_dir() {
-        bail!("Template path is not a directory: {}", template_dir.display());
+        bail!(
+            "Template path is not a directory: {}",
+            template_dir.display()
+        );
     }
 
     // Default path to ./<template_name> in current directory
@@ -104,15 +109,20 @@ pub fn new_from_template(opts: NewOpts) -> Result<()> {
     }
 
     if opts.dry_run {
-        println!("Would copy template {} -> {}", template_dir.display(), target.display());
+        println!(
+            "Would copy template {} -> {}",
+            template_dir.display(),
+            target.display()
+        );
         return Ok(());
     }
 
     // Create parent directories if needed
     if let Some(parent) = target.parent() {
         if !parent.exists() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create parent directory {}", parent.display())
+            })?;
         }
     }
 

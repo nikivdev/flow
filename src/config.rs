@@ -1309,7 +1309,9 @@ fn merge_config(base: &mut Config, other: Config) {
 }
 
 fn merge_release_config(base: &mut Config, other: Option<ReleaseConfig>) {
-    let Some(other) = other else { return; };
+    let Some(other) = other else {
+        return;
+    };
     let base_release = base.release.get_or_insert_with(ReleaseConfig::default);
 
     if base_release.default.is_none() {
@@ -1332,8 +1334,9 @@ fn merge_release_config(base: &mut Config, other: Option<ReleaseConfig>) {
     }
 
     if let Some(other_registry) = other.registry {
-        let registry =
-            base_release.registry.get_or_insert_with(RegistryReleaseConfig::default);
+        let registry = base_release
+            .registry
+            .get_or_insert_with(RegistryReleaseConfig::default);
         if registry.url.is_none() {
             registry.url = other_registry.url;
         }
