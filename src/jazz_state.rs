@@ -91,9 +91,6 @@ fn open_db_with_retry() -> Result<Database> {
 }
 
 pub fn state_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("AI_JAZZ2_PATH") {
-        return PathBuf::from(path);
-    }
     if let Ok(path) = std::env::var("FLOW_JAZZ2_PATH") {
         return PathBuf::from(path);
     }

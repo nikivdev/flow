@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::env;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -15,7 +16,9 @@ const DETAIL_LIMIT: usize = 120;
 const FOLLOW_POLL_MS: u64 = 400;
 
 pub fn run(opts: TracesOpts) -> Result<()> {
-    let db = open_db()?;
+    let flow_path = jazz_state::state_dir();
+    let flow_db = open_db_at(&flow_path)?;
+    let ai_db = open_ai_db(&flow_path);
     let limit = if opts.limit == 0 {
         DEFAULT_LIMIT
     } else {
@@ -23,9 +26,9 @@ pub fn run(opts: TracesOpts) -> Result<()> {
     };
 
     if opts.follow {
-        follow_traces(&db, &opts, limit)
+        follow_traces(&flow_db, ai_db.as_ref(), &opts, limit)
     } else {
-        let mut items = fetch_all(&db, &opts, 0, limit, false)?;
+        let mut items = fetch_all(&flow_db, ai_db.as_ref(), &opts, 0, limit, false)?;
         items.sort_by_key(|item| item.timestamp_ms);
         for item in items {
             println!("{}", format_item(&item));
@@ -34,9 +37,14 @@ pub fn run(opts: TracesOpts) -> Result<()> {
     }
 }
 
-fn follow_traces(db: &Database, opts: &TracesOpts, limit: usize) -> Result<()> {
+fn follow_traces(
+    flow_db: &Database,
+    ai_db: Option<&Database>,
+    opts: &TracesOpts,
+    limit: usize,
+) -> Result<()> {
     let mut since = 0u64;
-    let mut initial = fetch_all(db, opts, 0, limit, true)?;
+    let mut initial = fetch_all(flow_db, ai_db, opts, 0, limit, true)?;
     initial.sort_by_key(|item| item.timestamp_ms);
     for item in &initial {
         println!("{}", format_item(item));
@@ -45,7 +53,7 @@ fn follow_traces(db: &Database, opts: &TracesOpts, limit: usize) -> Result<()> {
 
     loop {
         std::thread::sleep(Duration::from_millis(FOLLOW_POLL_MS));
-        let mut items = fetch_all(db, opts, since, limit, true)?;
+        let mut items = fetch_all(flow_db, ai_db, opts, since, limit, true)?;
         items.sort_by_key(|item| item.timestamp_ms);
         for item in &items {
             if item.timestamp_ms > since {
@@ -57,7 +65,8 @@ fn follow_traces(db: &Database, opts: &TracesOpts, limit: usize) -> Result<()> {
 }
 
 fn fetch_all(
-    db: &Database,
+    flow_db: &Database,
+    ai_db: Option<&Database>,
     opts: &TracesOpts,
     since: u64,
     limit: usize,
@@ -67,14 +76,15 @@ fn fetch_all(
     match opts.source {
         TraceSource::All => {
             items.extend(fetch_task_runs(
-                db,
+                flow_db,
                 opts.project.as_deref(),
                 since,
                 limit,
                 ascending,
             )?);
+            let agent_db = ai_db.unwrap_or(flow_db);
             items.extend(fetch_agent_events(
-                db,
+                agent_db,
                 opts.project.as_deref(),
                 since,
                 limit,
@@ -83,7 +93,7 @@ fn fetch_all(
         }
         TraceSource::Tasks => {
             items.extend(fetch_task_runs(
-                db,
+                flow_db,
                 opts.project.as_deref(),
                 since,
                 limit,
@@ -91,8 +101,9 @@ fn fetch_all(
             )?);
         }
         TraceSource::Ai => {
+            let agent_db = ai_db.unwrap_or(flow_db);
             items.extend(fetch_agent_events(
-                db,
+                agent_db,
                 opts.project.as_deref(),
                 since,
                 limit,
@@ -290,10 +301,9 @@ fn truncate(value: &str, limit: usize) -> String {
     format!("{}…", &value[..end])
 }
 
-fn open_db() -> Result<Database> {
+fn open_db_at(path: &Path) -> Result<Database> {
     use groove::Environment;
 
-    let path = jazz_state::state_dir();
     if !path.exists() {
         bail!("jazz2 state not found at {}", path.display());
     }
@@ -304,6 +314,18 @@ fn open_db() -> Result<Database> {
     let db = futures::executor::block_on(Database::from_env(env, catalog_id))
         .context("load jazz2 catalog")?;
     Ok(db)
+}
+
+fn open_ai_db(flow_path: &Path) -> Option<Database> {
+    let path = if let Ok(path) = env::var("AI_JAZZ2_PATH") {
+        PathBuf::from(path)
+    } else {
+        flow_path.join("ai")
+    };
+    if path == flow_path || !path.exists() {
+        return None;
+    }
+    open_db_at(&path).ok()
 }
 
 fn load_catalog_id(base: &Path) -> Result<ObjectId> {
