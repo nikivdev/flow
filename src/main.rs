@@ -259,6 +259,9 @@ fn main() -> Result<()> {
         Some(Commands::Code(cmd)) => {
             code::run(cmd)?;
         }
+        Some(Commands::Migrate(cmd)) => {
+            code::run_migrate(cmd)?;
+        }
         Some(Commands::Parallel(cmd)) => {
             parallel::run(cmd)?;
         }

@@ -771,7 +771,10 @@ pub fn run(action: Option<EnvAction>) -> Result<()> {
             environment,
         } => setup(env_file, environment)?,
         EnvAction::List { environment } => list(&environment)?,
-        EnvAction::Set { pair } => set_personal_env_var_from_pair(&pair)?,
+        EnvAction::Set { pair, personal } => {
+            let _ = personal;
+            set_personal_env_var_from_pair(&pair)?;
+        }
         EnvAction::Delete { keys } => delete_personal_env_vars(&keys)?,
         EnvAction::Project { action } => run_project_env_action(action)?,
         EnvAction::Status => status()?,
