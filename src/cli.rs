@@ -326,7 +326,7 @@ pub enum Commands {
     Code(CodeCommand),
     #[command(
         about = "Move a folder to a new location, preserving symlinks and AI sessions.",
-        long_about = "Migrate a project folder to a new location. Use `f migrate code <relative-path>` to move to ~/code, or `f migrate <target-path>` for any destination. Updates ~/bin symlinks and AI session paths."
+        long_about = "Migrate a project folder to a new location. Usage:\n  f migrate <target>           - move current dir to target\n  f migrate <source> <target>  - move source to target\n  f migrate code <relative>    - move current dir to ~/code/<relative>\nUpdates ~/bin symlinks and AI session paths."
     )]
     Migrate(MigrateCommand),
     #[command(
@@ -1752,7 +1752,9 @@ pub struct CodeMoveSessionsOpts {
 pub struct MigrateCommand {
     #[command(subcommand)]
     pub action: Option<MigrateAction>,
-    /// Target path (when not using a subcommand like 'code').
+    /// Source path (defaults to current directory if only one path given).
+    pub source: Option<String>,
+    /// Target path (if source is given, this is the destination).
     pub target: Option<String>,
     /// Show what would change without writing.
     #[arg(long)]
