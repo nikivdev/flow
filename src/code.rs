@@ -8,7 +8,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::cli::{
-    CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts, CodeNewOpts, NewOpts,
+    CodeAction, CodeCommand, CodeMigrateOpts, CodeMoveSessionsOpts, CodeNewOpts, MigrateAction,
+    MigrateCommand, NewOpts,
 };
 use crate::config;
 
@@ -139,6 +140,107 @@ pub fn run(cmd: CodeCommand) -> Result<()> {
         Some(CodeAction::MoveSessions(opts)) => move_sessions(opts),
         None => fuzzy_select_code(&cmd.root),
     }
+}
+
+/// Migrate current folder to a new location.
+/// `f migrate code <relative>` → moves to ~/code/<relative>
+/// `f migrate <target>` → moves to any specified path
+pub fn run_migrate(cmd: MigrateCommand) -> Result<()> {
+    let from = std::env::current_dir().context("failed to get current directory")?;
+
+    // Handle `f migrate code <relative>` subcommand
+    if let Some(MigrateAction::Code(opts)) = cmd.action {
+        // Merge flags from parent command and subcommand (subcommand takes precedence if set)
+        let dry_run = opts.dry_run || cmd.dry_run;
+        let skip_claude = opts.skip_claude || cmd.skip_claude;
+        let skip_codex = opts.skip_codex || cmd.skip_codex;
+
+        let migrate_opts = CodeMigrateOpts {
+            from: from.to_string_lossy().to_string(),
+            relative: opts.relative,
+            dry_run,
+            skip_claude,
+            skip_codex,
+        };
+        return migrate_project(migrate_opts, DEFAULT_CODE_ROOT);
+    }
+
+    // Handle `f migrate <target>` for arbitrary paths
+    let Some(target_str) = cmd.target else {
+        bail!("Usage: f migrate code <relative-path> OR f migrate <target-path>");
+    };
+
+    let target = config::expand_path(&target_str);
+    let target = if target.is_absolute() {
+        target
+    } else {
+        std::env::current_dir()?.join(&target)
+    };
+
+    migrate_to_path(&from, &target, cmd.dry_run, cmd.skip_claude, cmd.skip_codex)
+}
+
+/// Migrate a folder to an arbitrary target path (not necessarily ~/code).
+fn migrate_to_path(
+    from: &Path,
+    target: &Path,
+    dry_run: bool,
+    skip_claude: bool,
+    skip_codex: bool,
+) -> Result<()> {
+    let target_display = target.display().to_string();
+
+    if from == target {
+        bail!("Source and destination are the same path.");
+    }
+    if !from.exists() {
+        bail!("Source folder does not exist: {}", from.display());
+    }
+    if !from.is_dir() {
+        bail!("Source path is not a directory: {}", from.display());
+    }
+    if target.exists() {
+        bail!("Destination already exists: {}", target.display());
+    }
+    if target.starts_with(from) {
+        bail!("Destination cannot be inside the source folder.");
+    }
+
+    // Create parent directories if needed
+    if let Some(parent) = target.parent() {
+        if !parent.exists() {
+            if dry_run {
+                println!("Would create {}", parent.display());
+            } else {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+        }
+    }
+
+    if dry_run {
+        println!("Would move {} -> {}", from.display(), target_display);
+    } else {
+        move_dir(from, target)?;
+        println!("Moved {} -> {}", from.display(), target_display);
+    }
+
+    let relinked = relink_bin_symlinks(from, target, dry_run)?;
+    if relinked > 0 {
+        println!("Updated {} symlink(s) in ~/bin", relinked);
+    }
+
+    let session_opts = CodeMoveSessionsOpts {
+        from: from.to_string_lossy().to_string(),
+        to: target.to_string_lossy().to_string(),
+        dry_run,
+        skip_claude,
+        skip_codex,
+    };
+    move_sessions(session_opts)
+        .with_context(|| format!("moved to {}, but session migration failed", target_display))?;
+
+    Ok(())
 }
 
 fn list_code(root: &str) -> Result<()> {

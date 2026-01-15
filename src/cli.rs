@@ -325,6 +325,11 @@ pub enum Commands {
     )]
     Code(CodeCommand),
     #[command(
+        about = "Move a folder to a new location, preserving symlinks and AI sessions.",
+        long_about = "Migrate a project folder to a new location. Use `f migrate code <relative-path>` to move to ~/code, or `f migrate <target-path>` for any destination. Updates ~/bin symlinks and AI session paths."
+    )]
+    Migrate(MigrateCommand),
+    #[command(
         about = "Run tasks in parallel with pretty status display.",
         long_about = "Execute multiple shell commands in parallel with a real-time status display showing spinners, progress, and output. Useful for running independent tasks concurrently.",
         alias = "p"
@@ -1219,6 +1224,9 @@ pub enum EnvAction {
     Set {
         /// KEY=VALUE pair to set.
         pair: String,
+        /// Compatibility flag (ignored; set always targets personal env).
+        #[arg(long)]
+        personal: bool,
     },
     /// Delete personal env var(s).
     Delete {
@@ -1729,6 +1737,44 @@ pub struct CodeMoveSessionsOpts {
     /// New project path.
     #[arg(long)]
     pub to: String,
+    /// Show what would change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip migrating Claude sessions.
+    #[arg(long)]
+    pub skip_claude: bool,
+    /// Skip migrating Codex sessions.
+    #[arg(long)]
+    pub skip_codex: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MigrateCommand {
+    #[command(subcommand)]
+    pub action: Option<MigrateAction>,
+    /// Target path (when not using a subcommand like 'code').
+    pub target: Option<String>,
+    /// Show what would change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip migrating Claude sessions.
+    #[arg(long)]
+    pub skip_claude: bool,
+    /// Skip migrating Codex sessions.
+    #[arg(long)]
+    pub skip_codex: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum MigrateAction {
+    /// Move current folder to ~/code/<relative-path>.
+    Code(MigrateCodeOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MigrateCodeOpts {
+    /// Relative path under ~/code (e.g., "flow/myflow").
+    pub relative: String,
     /// Show what would change without writing.
     #[arg(long)]
     pub dry_run: bool,
