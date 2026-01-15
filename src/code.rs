@@ -165,16 +165,38 @@ pub fn run_migrate(cmd: MigrateCommand) -> Result<()> {
         return migrate_project(migrate_opts, DEFAULT_CODE_ROOT);
     }
 
-    // Handle `f migrate <target>` for arbitrary paths
-    let Some(target_str) = cmd.target else {
-        bail!("Usage: f migrate code <relative-path> OR f migrate <target-path>");
-    };
-
-    let target = config::expand_path(&target_str);
-    let target = if target.is_absolute() {
-        target
-    } else {
-        std::env::current_dir()?.join(&target)
+    // Handle `f migrate <source> <target>` or `f migrate <target>`
+    let (from, target) = match (cmd.source, cmd.target) {
+        // Both source and target provided: f migrate <source> <target>
+        (Some(src), Some(tgt)) => {
+            let src_path = config::expand_path(&src);
+            let src_path = if src_path.is_absolute() {
+                src_path
+            } else {
+                std::env::current_dir()?.join(&src_path)
+            };
+            let tgt_path = config::expand_path(&tgt);
+            let tgt_path = if tgt_path.is_absolute() {
+                tgt_path
+            } else {
+                std::env::current_dir()?.join(&tgt_path)
+            };
+            (src_path, tgt_path)
+        }
+        // Only one path: f migrate <target> (source is cwd)
+        (Some(tgt), None) => {
+            let tgt_path = config::expand_path(&tgt);
+            let tgt_path = if tgt_path.is_absolute() {
+                tgt_path
+            } else {
+                std::env::current_dir()?.join(&tgt_path)
+            };
+            (from, tgt_path)
+        }
+        // No paths provided
+        (None, _) => {
+            bail!("Usage: f migrate <target> OR f migrate <source> <target> OR f migrate code <relative>");
+        }
     };
 
     migrate_to_path(&from, &target, cmd.dry_run, cmd.skip_claude, cmd.skip_codex)

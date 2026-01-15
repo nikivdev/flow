@@ -43,6 +43,8 @@ static CANCEL_HANDLER_SET: AtomicBool = AtomicBool::new(false);
 struct CleanupState {
     command: Option<String>,
     workdir: PathBuf,
+    pid: Option<u32>,
+    pgid: Option<u32>,
 }
 
 static CLEANUP_STATE: std::sync::OnceLock<Mutex<CleanupState>> = std::sync::OnceLock::new();
@@ -53,10 +55,13 @@ fn run_cleanup() {
         Mutex::new(CleanupState {
             command: None,
             workdir: PathBuf::from("."),
+            pid: None,
+            pgid: None,
         })
     });
 
     if let Ok(guard) = state.lock() {
+        terminate_tracked_process(&guard);
         if let Some(ref cmd) = guard.command {
             eprintln!("\nRunning cleanup: {}", cmd);
             let _ = Command::new("/bin/sh")
@@ -77,6 +82,8 @@ fn setup_cancel_handler(on_cancel: Option<&str>, workdir: &Path) {
         Mutex::new(CleanupState {
             command: None,
             workdir: PathBuf::from("."),
+            pid: None,
+            pgid: None,
         })
     });
 
@@ -84,6 +91,8 @@ fn setup_cancel_handler(on_cancel: Option<&str>, workdir: &Path) {
     if let Ok(mut guard) = state.lock() {
         guard.command = on_cancel.map(|s| s.to_string());
         guard.workdir = workdir.to_path_buf();
+        guard.pid = None;
+        guard.pgid = None;
     }
 
     // Only set up the handler once
@@ -101,11 +110,63 @@ fn clear_cancel_handler() {
         Mutex::new(CleanupState {
             command: None,
             workdir: PathBuf::from("."),
+            pid: None,
+            pgid: None,
         })
     });
 
     if let Ok(mut guard) = state.lock() {
         guard.command = None;
+        guard.pid = None;
+        guard.pgid = None;
+    }
+}
+
+fn set_cleanup_process(pid: u32, pgid: u32) {
+    let state = CLEANUP_STATE.get_or_init(|| {
+        Mutex::new(CleanupState {
+            command: None,
+            workdir: PathBuf::from("."),
+            pid: None,
+            pgid: None,
+        })
+    });
+
+    if let Ok(mut guard) = state.lock() {
+        guard.pid = Some(pid);
+        guard.pgid = Some(pgid);
+    }
+}
+
+fn terminate_tracked_process(state: &CleanupState) {
+    #[cfg(unix)]
+    {
+        let self_pgid = running::get_pgid(std::process::id()).unwrap_or(0);
+        if let Some(pgid) = state.pgid {
+            if pgid != 0 && pgid != self_pgid {
+                let _ = Command::new("kill")
+                    .arg("-TERM")
+                    .arg(format!("-{}", pgid))
+                    .status();
+                return;
+            }
+        }
+
+        if let Some(pid) = state.pid {
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(pid) = state.pid {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status();
+        }
     }
 }
 
@@ -1197,9 +1258,10 @@ fn run_flox_interactive_command(
         .with_context(|| "failed to spawn interactive flox command")?;
 
     let pid = child.id();
+    let pgid = running::get_pgid(pid).unwrap_or(pid);
+    set_cleanup_process(pid, pgid);
 
     if let Some(ref task_ctx) = ctx {
-        let pgid = running::get_pgid(pid).unwrap_or(pid);
         let entry = RunningProcess {
             pid,
             pgid,
@@ -1341,10 +1403,11 @@ fn run_command_with_script(cmd: Command, ctx: Option<TaskContext>) -> Result<(Ex
         .with_context(|| "failed to spawn script command")?;
 
     let pid = child.id();
+    let pgid = running::get_pgid(pid).unwrap_or(pid);
+    set_cleanup_process(pid, pgid);
 
     // Register the process if we have task context
     if let Some(ref task_ctx) = ctx {
-        let pgid = running::get_pgid(pid).unwrap_or(pid);
         let entry = RunningProcess {
             pid,
             pgid,
@@ -1461,10 +1524,11 @@ fn run_interactive_command(
         .with_context(|| "failed to spawn interactive command")?;
 
     let pid = child.id();
+    let pgid = running::get_pgid(pid).unwrap_or(pid);
+    set_cleanup_process(pid, pgid);
 
     // Register the process if we have task context
     if let Some(ref task_ctx) = ctx {
-        let pgid = running::get_pgid(pid).unwrap_or(pid);
         let entry = RunningProcess {
             pid,
             pgid,
@@ -1545,6 +1609,7 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
     drop(pair.slave);
 
     let pid = child.process_id().unwrap_or(0);
+    set_cleanup_process(pid, pid);
 
     // Register the process if we have task context
     if let Some(ref task_ctx) = ctx {
@@ -1696,10 +1761,11 @@ fn run_command_with_pipes(
             .with_context(|| "failed to spawn interactive command")?;
 
         let pid = child.id();
+        let pgid = running::get_pgid(pid).unwrap_or(pid);
+        set_cleanup_process(pid, pgid);
 
         // Register the process
         if let Some(ref task_ctx) = ctx {
-            let pgid = running::get_pgid(pid).unwrap_or(pid);
             let entry = RunningProcess {
                 pid,
                 pgid,
@@ -1741,10 +1807,11 @@ fn run_command_with_pipes(
         .with_context(|| "failed to spawn command")?;
 
     let pid = child.id();
+    let pgid = running::get_pgid(pid).unwrap_or(pid);
+    set_cleanup_process(pid, pgid);
 
     // Register the process if we have task context
     if let Some(ref task_ctx) = ctx {
-        let pgid = running::get_pgid(pid).unwrap_or(pid);
         let entry = RunningProcess {
             pid,
             pgid,
