@@ -95,7 +95,7 @@ pub enum Commands {
     ShellInit(ShellInitOpts),
     #[command(
         about = "Create a new project from a template.",
-        long_about = "Create a new project from ~/new/<template> at the specified path."
+        long_about = "Create a new project from ~/new/<template>. Path resolution:\n  f new <template>        → ./<template>\n  f new <template> zerg   → ~/code/zerg\n  f new <template> ./foo  → ./foo\n  f new <template> ~/path → ~/path"
     )]
     New(NewOpts),
     #[command(
@@ -721,7 +721,7 @@ pub struct ShellInitOpts {
 pub struct NewOpts {
     /// Template name (e.g., web, docs). If omitted, shows fuzzy picker.
     pub template: Option<String>,
-    /// Destination path for the new project. Defaults to ./<template>.
+    /// Destination path. Plain names go to ~/code/ (e.g., "zerg" → ~/code/zerg). Use ./ for cwd.
     pub path: Option<String>,
     /// Show what would change without writing.
     #[arg(long)]
@@ -763,6 +763,10 @@ pub struct HubOpts {
     /// Skip launching the hub TUI after ensuring the daemon is running.
     #[arg(long, global = true)]
     pub no_ui: bool,
+
+    /// Also start the docs hub (Next.js dev server).
+    #[arg(long, global = true)]
+    pub docs_hub: bool,
 }
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]

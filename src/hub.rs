@@ -15,30 +15,32 @@ pub fn run(cmd: HubCommand) -> Result<()> {
 
     match action {
         HubAction::Start => {
-            ensure_daemon(opts)?;
-            let docs_opts = crate::cli::DocsHubOpts {
-                host: "127.0.0.1".to_string(),
-                port: 4410,
-                hub_root: "~/.config/flow/docs-hub".to_string(),
-                template_root: "~/new/docs".to_string(),
-                code_root: "~/code".to_string(),
-                org_root: "~/org".to_string(),
-                no_ai: true,
-                no_open: true,
-                sync_only: false,
-            };
-            docs::ensure_docs_hub_daemon(&docs_opts)?;
+            ensure_daemon(&opts)?;
+            if opts.docs_hub {
+                let docs_opts = crate::cli::DocsHubOpts {
+                    host: "127.0.0.1".to_string(),
+                    port: 4410,
+                    hub_root: "~/.config/flow/docs-hub".to_string(),
+                    template_root: "~/new/docs".to_string(),
+                    code_root: "~/code".to_string(),
+                    org_root: "~/org".to_string(),
+                    no_ai: true,
+                    no_open: true,
+                    sync_only: false,
+                };
+                docs::ensure_docs_hub_daemon(&docs_opts)?;
+            }
             Ok(())
         }
         HubAction::Stop => {
-            stop_daemon(opts)?;
+            stop_daemon(&opts)?;
             docs::stop_docs_hub_daemon()?;
             Ok(())
         }
     }
 }
 
-fn ensure_daemon(opts: HubOpts) -> Result<()> {
+fn ensure_daemon(opts: &HubOpts) -> Result<()> {
     let host = opts.host;
     let port = opts.port;
 
@@ -67,7 +69,7 @@ fn ensure_daemon(opts: HubOpts) -> Result<()> {
     Ok(())
 }
 
-fn stop_daemon(opts: HubOpts) -> Result<()> {
+fn stop_daemon(opts: &HubOpts) -> Result<()> {
     let action = crate::cli::DaemonAction::Stop {
         name: "lin".to_string(),
     };

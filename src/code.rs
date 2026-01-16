@@ -96,13 +96,31 @@ pub fn new_from_template(opts: NewOpts) -> Result<()> {
         );
     }
 
-    // Default path to ./<template_name> in current directory
-    let target_path = opts.path.unwrap_or_else(|| template_name.clone());
-    let target = config::expand_path(&target_path);
-    let target = if target.is_absolute() {
-        target
-    } else {
-        std::env::current_dir()?.join(&target)
+    // Resolve target path:
+    // - No path: ./<template_name>
+    // - Starts with ./ or ../: relative to cwd
+    // - Starts with ~ or /: absolute path
+    // - Otherwise: relative to ~/code/
+    let target = match opts.path {
+        None => std::env::current_dir()?.join(&template_name),
+        Some(p) => {
+            let trimmed = p.trim();
+            if trimmed.starts_with("./")
+                || trimmed.starts_with("../")
+                || trimmed.starts_with('/')
+                || trimmed.starts_with('~')
+            {
+                let expanded = config::expand_path(trimmed);
+                if expanded.is_absolute() {
+                    expanded
+                } else {
+                    std::env::current_dir()?.join(&expanded)
+                }
+            } else {
+                // Relative name like "zerg" → ~/code/zerg
+                config::expand_path(DEFAULT_CODE_ROOT).join(trimmed)
+            }
+        }
     };
 
     if target.exists() {
