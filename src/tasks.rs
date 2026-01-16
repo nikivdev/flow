@@ -2141,6 +2141,7 @@ fn ensure_hub_running(host: IpAddr, port: u16) -> Result<()> {
         port,
         config: None,
         no_ui: true,
+        docs_hub: false,
     };
     let cmd = HubCommand {
         opts,
