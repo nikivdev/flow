@@ -24,11 +24,16 @@ pub fn record_task_run(record: &InvocationRecord) -> Result<()> {
         return Ok(());
     }
 
-    with_db(|db| {
+    if let Err(err) = with_db(|db| {
         ensure_schema(db).context("ensure jazz2 schema")?;
         insert_task_run(db, record).context("insert task run")?;
         Ok(())
-    })?;
+    }) {
+        if is_lock_error(&err) {
+            return Ok(());
+        }
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -88,6 +93,13 @@ fn open_db_with_retry() -> Result<Database> {
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("open jazz2 failed")))
+}
+
+fn is_lock_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let msg = cause.to_string().to_lowercase();
+        msg.contains("lock") || msg.contains("resource temporarily unavailable")
+    })
 }
 
 pub fn state_dir() -> PathBuf {

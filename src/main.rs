@@ -286,15 +286,9 @@ fn main() -> Result<()> {
             };
             if let Err(err) = tasks::run_with_discovery(task_name, args[1..].to_vec()) {
                 if is_task_not_found(&err) {
-                    task_match::run(task_match::MatchOpts {
-                        args: args.clone(),
-                        model: None,
-                        port: None,
-                        execute: true,
-                    })?;
-                } else {
                     return Err(err);
                 }
+                return Err(err);
             }
         }
         None => {
