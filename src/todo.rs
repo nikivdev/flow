@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -21,31 +22,85 @@ struct TodoItem {
 }
 
 pub fn run(cmd: TodoCommand) -> Result<()> {
-    let action = cmd.action.unwrap_or(TodoAction::List { all: false });
-    match action {
-        TodoAction::Add {
+    match cmd.action {
+        None | Some(TodoAction::Bike) => open_bike(),
+        Some(TodoAction::Add {
             title,
             note,
             session,
             no_session,
             status,
-        } => add(
+        }) => add(
             &title,
             note.as_deref(),
             session.as_deref(),
             no_session,
             status,
         ),
-        TodoAction::List { all } => list(all),
-        TodoAction::Done { id } => set_status(&id, TodoStatusArg::Completed),
-        TodoAction::Edit {
+        Some(TodoAction::List { all }) => list(all),
+        Some(TodoAction::Done { id }) => set_status(&id, TodoStatusArg::Completed),
+        Some(TodoAction::Edit {
             id,
             title,
             status,
             note,
-        } => edit(&id, title.as_deref(), status, note),
-        TodoAction::Remove { id } => remove(&id),
+        }) => edit(&id, title.as_deref(), status, note),
+        Some(TodoAction::Remove { id }) => remove(&id),
     }
+}
+
+fn open_bike() -> Result<()> {
+    let root = project_root();
+    let project_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "project".to_string());
+
+    let dir = root.join(".ai").join("todos");
+    let path = dir.join(format!("{}.bike", project_name));
+    fs::create_dir_all(&dir)?;
+    let needs_init = match fs::read_to_string(&path) {
+        Ok(content) => !looks_like_bike(&content),
+        Err(_) => true,
+    };
+    if needs_init {
+        let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let ul_id = format!("_{}", Uuid::new_v4().simple());
+        let content = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html>\n  <head>\n    <meta charset=\"utf-8\"/>\n  </head>\n  <body>\n    <ul id=\"{}\" data-created=\"{}\" data-modified=\"{}\"/>\n  </body>\n</html>\n",
+            ul_id, now, now
+        );
+        fs::write(&path, content)?;
+    }
+
+    let bike_app = Path::new("/System/Volumes/Data/Applications/Bike.app");
+    if !bike_app.exists() {
+        bail!("Bike.app not found at {}", bike_app.display());
+    }
+
+    let status = Command::new("open")
+        .arg("-a")
+        .arg(bike_app)
+        .arg(&path)
+        .status()
+        .context("failed to launch Bike.app")?;
+    if !status.success() {
+        bail!("Bike.app failed to open {}", path.display());
+    }
+
+    println!("Opened {}", path.display());
+    Ok(())
+}
+
+fn looks_like_bike(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("<?xml") {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("<html") && lower.contains("<body") && lower.contains("<ul")
 }
 
 fn add(
