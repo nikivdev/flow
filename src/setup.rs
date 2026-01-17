@@ -43,6 +43,8 @@ pub fn run(opts: SetupOpts) -> Result<()> {
 
     let (config_path, cfg) = load_project_config(config_path)?;
 
+    ensure_bike_gitignore(&project_root)?;
+
     if tasks::find_task(&cfg, "setup").is_some() {
         if created_flow_toml {
             println!("Running setup task...");
@@ -79,6 +81,10 @@ pub fn run(opts: SetupOpts) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn ensure_bike_gitignore(project_root: &Path) -> Result<()> {
+    add_gitignore_entry(project_root, ".ai/todos/*.bike")
 }
 
 fn resolve_project_root(config_path: &PathBuf) -> Result<(PathBuf, PathBuf)> {

@@ -258,7 +258,7 @@ fn needs_interactive_mode(command: &str) -> bool {
 
 pub fn list(opts: TasksOpts) -> Result<()> {
     // Determine root directory for discovery
-    let root = if opts.config.is_absolute() {
+    let mut root = if opts.config.is_absolute() {
         opts.config
             .parent()
             .map(|p| p.to_path_buf())
@@ -266,6 +266,11 @@ pub fn list(opts: TasksOpts) -> Result<()> {
     } else {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     };
+    if is_default_flow_config(&opts.config) && !root.join("flow.toml").exists() {
+        if let Some(found) = find_flow_toml_upwards(&root) {
+            root = found.parent().unwrap_or(&root).to_path_buf();
+        }
+    }
 
     let discovery = discover::discover_tasks(&root)?;
 
@@ -341,7 +346,12 @@ pub fn run_global(opts: GlobalCommand) -> Result<()> {
 
 /// Run a task, searching nested flow.toml files if not found in root.
 pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
-    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if !root.join("flow.toml").exists() {
+        if let Some(found) = find_flow_toml_upwards(&root) {
+            root = found.parent().unwrap_or(&root).to_path_buf();
+        }
+    }
     let discovery = discover::discover_tasks(&root)?;
 
     // Find the task in discovered tasks
@@ -636,13 +646,20 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
 }
 
 pub(crate) fn load_project_config(path: PathBuf) -> Result<(PathBuf, Config)> {
-    let config_path = resolve_path(path)?;
+    let mut config_path = resolve_path(path)?;
     if !config_path.exists() {
-        let is_default =
-            config_path.file_name().and_then(|name| name.to_str()) == Some("flow.toml");
+        let is_default = is_default_flow_config(&config_path);
         if is_default {
-            init::write_template(&config_path)?;
-            println!("Created starter flow.toml at {}", config_path.display());
+            if let Some(found) = find_flow_toml_upwards(
+                config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new(".")),
+            ) {
+                config_path = found;
+            } else {
+                init::write_template(&config_path)?;
+                println!("Created starter flow.toml at {}", config_path.display());
+            }
         }
     }
     let cfg = config::load(&config_path).with_context(|| {
@@ -664,6 +681,23 @@ fn resolve_path(path: PathBuf) -> Result<PathBuf> {
         Ok(path)
     } else {
         Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn is_default_flow_config(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("flow.toml")
+}
+
+fn find_flow_toml_upwards(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        let candidate = current.join("flow.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !current.pop() {
+            return None;
+        }
     }
 }
 

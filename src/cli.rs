@@ -247,7 +247,7 @@ pub enum Commands {
     Ssh(SshCommand),
     #[command(
         about = "Manage project todos.",
-        long_about = "Create, list, edit, and complete lightweight todos stored in .ai/todos/todos.json."
+        long_about = "Create, list, edit, and complete lightweight todos stored in .ai/todos/todos.json. With no arguments, opens the per-project Bike outliner stored in .ai/todos/<project>.bike."
     )]
     Todo(TodoCommand),
     #[command(
@@ -1403,6 +1403,8 @@ pub struct TodoCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum TodoAction {
+    /// Open the project Bike file.
+    Bike,
     /// Add a new todo.
     Add {
         /// Short title for the todo.

@@ -1,6 +1,7 @@
 # flow
 .ai/internal/
 .ai/web/
+.ai/todos/*.bike
 .claude/
 .codex/
 .flox/
