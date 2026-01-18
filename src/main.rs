@@ -4,11 +4,11 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    agents, ai,
-    cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts, TraceAction},
-    code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fixup, help_search,
-    history, home, hub, init, init_tracing, log_server, notify, palette, parallel, processes,
-    projects,
+    agents, ai, auth,
+    cli::{Cli, Commands, InstallAction, RerunOpts, ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction},
+    code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fixup, health, help_search,
+    history, home, hub, init, init_tracing, install, log_server, notify, palette, parallel,
+    processes, projects,
     publish, registry, release, repos, services, setup, skills, ssh_keys, storage, supervisor,
     sync, task_match, tasks, todo, tools, traces, upgrade, upstream, web,
 };
@@ -57,6 +57,9 @@ fn main() -> Result<()> {
         Some(Commands::ShellInit(opts)) => {
             shell_init(&opts.shell);
         }
+        Some(Commands::Shell(cmd)) => {
+            shell_command(cmd);
+        }
         Some(Commands::New(opts)) => {
             code::new_from_template(opts)?;
         }
@@ -65,6 +68,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Doctor(opts)) => {
             doctor::run(opts)?;
+        }
+        Some(Commands::Health(opts)) => {
+            health::run(opts)?;
         }
         Some(Commands::Tasks(opts)) => {
             tasks::list(opts)?;
@@ -209,6 +215,9 @@ fn main() -> Result<()> {
         Some(Commands::Env(cmd)) => {
             env::run(cmd.action)?;
         }
+        Some(Commands::Auth(opts)) => {
+            auth::run(opts)?;
+        }
         Some(Commands::Services(cmd)) => {
             services::run(cmd)?;
         }
@@ -278,8 +287,12 @@ fn main() -> Result<()> {
         Some(Commands::Release(cmd)) => {
             release::run(cmd)?;
         }
-        Some(Commands::Install(opts)) => {
-            registry::install(opts)?;
+        Some(Commands::Install(cmd)) => {
+            if let Some(InstallAction::Index(opts)) = cmd.action.clone() {
+                install::run_index(opts)?;
+            } else {
+                install::run(cmd.opts)?;
+            }
         }
         Some(Commands::Registry(cmd)) => {
             registry::run(cmd)?;
@@ -337,6 +350,43 @@ fn is_task_not_found(err: &anyhow::Error) -> bool {
     msg.contains("task '") && msg.contains("not found")
 }
 
+fn shell_command(cmd: ShellCommand) {
+    match cmd.action.unwrap_or(ShellAction::Reset) {
+        ShellAction::Reset => {
+            shell_reset();
+        }
+        ShellAction::FixTerminal => {
+            shell_fix_terminal();
+        }
+    }
+}
+
+fn shell_reset() {
+    let home = dirs::home_dir().expect("no home directory");
+    let config_path = home.join("config").join("fish").join("config.fish");
+    if std::env::var("FISH_VERSION").is_ok() {
+        println!("Run: source {}", config_path.display());
+    } else {
+        println!("Refresh your shell session (fish): source {}", config_path.display());
+    }
+}
+
+fn shell_fix_terminal() {
+    let status = std::process::Command::new("fish")
+        .arg("-c")
+        .arg("set -Ua fish_features no-query-term")
+        .status();
+    match status {
+        Ok(status) if status.success() => {
+            println!("Disabled fish terminal query (no-query-term). Restart fish to apply.");
+        }
+        _ => {
+            println!("Run in fish: set -Ua fish_features no-query-term");
+            println!("Then restart fish to apply.");
+        }
+    }
+}
+
 fn shell_init(shell: &str) {
     use std::fs;
     use std::io::Write;
@@ -348,46 +398,8 @@ fn shell_init(shell: &str) {
         "fish" => {
             let config_fish = config_dir.join("fish").join("config.fish");
 
-            // Check if already set up
-            if config_fish.exists() {
-                let content = fs::read_to_string(&config_fish).unwrap_or_default();
-                if content.contains("# flow:start") {
-                    println!("Already set up in {}", config_fish.display());
-                    return;
-                }
-            }
-
-            let snippet = r#"
-# flow:start
-function f
-    if test -z "$argv[1]"
-        ~/bin/f
-    else
-        ~/bin/f match $argv
-    end
-end
-# flow:end
-"#;
-
-            let mut file = match fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&config_fish)
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Failed to open {}: {}", config_fish.display(), e);
-                    return;
-                }
-            };
-
-            if let Err(e) = file.write_all(snippet.as_bytes()) {
-                eprintln!("Failed to write to {}: {}", config_fish.display(), e);
-                return;
-            }
-
-            println!("Added flow integration to {}", config_fish.display());
-            println!("Restart fish or run: source {}", config_fish.display());
+            println!("No fish integration changes applied.");
+            println!("Manage your fish config manually: {}", config_fish.display());
         }
         "zsh" => {
             let zshrc = config_dir.join("zsh").join(".zshrc");

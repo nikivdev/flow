@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 
 use crate::cli::{CommitsAction, CommitsCommand, CommitsOpts};
+use crate::vcs;
 
 const TOP_COMMITS_PATH: &str = ".ai/internal/commits/top.txt";
 
@@ -47,6 +48,7 @@ pub fn run(cmd: CommitsCommand) -> Result<()> {
 }
 
 fn run_list(opts: &CommitsOpts) -> Result<()> {
+    let _ = vcs::ensure_jj_repo()?;
     let top_entries = load_top_entries()?;
     let top_set = top_hashes(&top_entries);
     let commits = list_commits(opts.limit, opts.all, &top_set)?;
