@@ -160,6 +160,23 @@ pub fn run(cmd: CodeCommand) -> Result<()> {
     }
 }
 
+pub(crate) fn migrate_sessions_between_paths(
+    from: &Path,
+    to: &Path,
+    dry_run: bool,
+    skip_claude: bool,
+    skip_codex: bool,
+) -> Result<()> {
+    let opts = CodeMoveSessionsOpts {
+        from: from.display().to_string(),
+        to: to.display().to_string(),
+        dry_run,
+        skip_claude,
+        skip_codex,
+    };
+    move_sessions(opts)
+}
+
 /// Migrate current folder to a new location.
 /// `f migrate code <relative>` → moves to ~/code/<relative>
 /// `f migrate <target>` → moves to any specified path

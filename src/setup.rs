@@ -984,7 +984,7 @@ fn ensure_env_file(
     Ok(())
 }
 
-fn add_gitignore_entry(project_root: &Path, entry: &str) -> Result<()> {
+pub(crate) fn add_gitignore_entry(project_root: &Path, entry: &str) -> Result<()> {
     let gitignore_path = project_root.join(".gitignore");
     let mut content = if gitignore_path.exists() {
         fs::read_to_string(&gitignore_path)?
