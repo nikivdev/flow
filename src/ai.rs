@@ -341,6 +341,57 @@ pub fn log_commit_review(
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct CommitReviewSummary {
+    pub model: String,
+    pub reviewer: String,
+    pub issues_found: bool,
+    pub issues: Vec<String>,
+    pub summary: Option<String>,
+    pub timed_out: bool,
+}
+
+/// Log commit metadata (with optional review data) for later analysis.
+pub fn log_commit_event(
+    project_path: &PathBuf,
+    commit_sha: &str,
+    branch: &str,
+    message: &str,
+    author_name: &str,
+    author_email: &str,
+    command: &str,
+    review: Option<CommitReviewSummary>,
+    context_chars: Option<usize>,
+) {
+    let log_dir = project_path.join(".ai").join("internal").join("commits");
+    let log_path = log_dir.join("log.jsonl");
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let entry = json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "commit_sha": commit_sha,
+        "branch": branch,
+        "message": message,
+        "author": {
+            "name": author_name,
+            "email": author_email,
+        },
+        "command": command,
+        "review": review,
+        "context_chars": context_chars,
+    });
+
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(file, "{}", entry);
+    }
+}
+
 /// Get AI session context since the last commit checkpoint.
 /// Returns all exchanges from the checkpoint timestamp to now.
 pub fn get_context_since_checkpoint() -> Result<Option<String>> {
