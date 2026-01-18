@@ -109,6 +109,11 @@ pub enum Commands {
     )]
     Home(HomeOpts),
     #[command(
+        about = "Archive the current project to ~/archive/code.",
+        long_about = "Copies the current project into ~/archive/code/<project>-<message> so you can keep a snapshot outside git history."
+    )]
+    Archive(ArchiveOpts),
+    #[command(
         about = "Verify required tools and shell integrations.",
         long_about = "Checks for flox (for managed deps), lin (hub helper), and direnv + shell hook presence."
     )]
@@ -774,6 +779,12 @@ pub struct HomeOpts {
     /// Optional internal config repo URL (cloned into ~/config/i).
     #[arg(long)]
     pub internal: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ArchiveOpts {
+    /// Message to include in the archive folder name.
+    pub message: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2116,6 +2127,12 @@ pub struct InstallIndexOpts {
     /// Typesense collection name (overrides FLOW_TYPESENSE_COLLECTION).
     #[arg(long, default_value = "flox-packages")]
     pub collection: String,
+    /// Index server URL (defaults to local base server).
+    #[arg(long, default_value = "http://127.0.0.1:9417")]
+    pub server: String,
+    /// Skip index server and write directly to Typesense.
+    #[arg(long)]
+    pub direct: bool,
     /// Max results per search term.
     #[arg(long, default_value_t = 200)]
     pub per_page: usize,

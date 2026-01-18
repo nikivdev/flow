@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    agents, ai, auth,
+    agents, ai, archive, auth,
     cli::{Cli, Commands, InstallAction, RerunOpts, ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction},
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fixup, health, help_search,
     history, home, hub, init, init_tracing, install, log_server, notify, palette, parallel,
@@ -65,6 +65,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Home(opts)) => {
             home::run(opts)?;
+        }
+        Some(Commands::Archive(opts)) => {
+            archive::run(opts)?;
         }
         Some(Commands::Doctor(opts)) => {
             doctor::run(opts)?;
