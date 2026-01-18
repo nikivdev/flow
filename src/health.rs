@@ -1,18 +1,19 @@
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
 use crate::cli::HealthOpts;
 use crate::doctor;
+use crate::setup::add_gitignore_entry;
 
 pub fn run(_opts: HealthOpts) -> Result<()> {
     println!("Running flow health checks...\n");
 
     ensure_fish_shell()?;
     ensure_fish_flow_init()?;
+    ensure_gitignore()?;
 
     doctor::run(crate::cli::DoctorOpts {})?;
 
@@ -35,34 +36,43 @@ fn ensure_fish_shell() -> Result<()> {
 
 fn ensure_fish_flow_init() -> Result<()> {
     let config_path = fish_config_path()?;
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
     let content = fs::read_to_string(&config_path).unwrap_or_default();
     if content.contains("# flow:start") {
         return Ok(());
     }
 
-    let snippet = flow_fish_snippet();
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&config_path)
-        .with_context(|| format!("failed to open {}", config_path.display()))?;
-
-    if !content.is_empty() && !content.ends_with('\n') {
-        writeln!(file)?;
-    }
-    writeln!(file, "{snippet}")?;
-
     println!(
-        "✅ Added flow fish integration to {}. Restart your shell or run: source {}",
-        config_path.display(),
+        "⚠ flow fish integration missing in {}. Run: f shell-init fish",
         config_path.display()
     );
     Ok(())
+}
+
+fn ensure_gitignore() -> Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(flow_path) = find_flow_toml_upwards(&cwd) else {
+        return Ok(());
+    };
+    let root = flow_path.parent().unwrap_or(&cwd);
+
+    if !root.join(".git").exists() {
+        return Ok(());
+    }
+
+    add_gitignore_entry(root, ".ai/todos/*.bike")?;
+    add_gitignore_entry(root, ".ai/review-log.jsonl")?;
+    Ok(())
+}
+
+fn find_flow_toml_upwards(start: &PathBuf) -> Option<PathBuf> {
+    let mut current = start.as_path();
+    loop {
+        let candidate = current.join("flow.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        current = current.parent()?;
+    }
 }
 
 fn fish_config_path() -> Result<PathBuf> {
@@ -70,24 +80,4 @@ fn fish_config_path() -> Result<PathBuf> {
     Ok(home.join("config").join("fish").join("config.fish"))
 }
 
-fn flow_fish_snippet() -> &'static str {
-    r#"# flow:start
-function f
-    set -l bin ""
-    if test -x ~/.local/bin/f
-        set bin ~/.local/bin/f
-    else if test -x ~/bin/f
-        set bin ~/bin/f
-    else
-        set bin (command -v f)
-    end
-
-    if test -z "$argv[1]"
-        $bin
-    else
-        $bin match $argv
-    end
-end
-# flow:end
-"#
-}
+ 

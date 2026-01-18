@@ -84,7 +84,8 @@ pub fn run(opts: SetupOpts) -> Result<()> {
 }
 
 fn ensure_bike_gitignore(project_root: &Path) -> Result<()> {
-    add_gitignore_entry(project_root, ".ai/todos/*.bike")
+    add_gitignore_entry(project_root, ".ai/todos/*.bike")?;
+    add_gitignore_entry(project_root, ".ai/review-log.jsonl")
 }
 
 fn resolve_project_root(config_path: &PathBuf) -> Result<(PathBuf, PathBuf)> {
