@@ -1866,10 +1866,9 @@ fn show_keys() -> Result<()> {
 
 /// List env vars for this project.
 fn list(environment: &str) -> Result<()> {
-    let target = resolve_env_target()?;
-    let label = env_target_label(&target);
-
     if local_env_enabled() {
+        let target = resolve_personal_target()?;
+        let label = env_target_label(&target);
         let vars = read_local_env_vars(&target, environment)?;
 
         println!("Space: {}", label);
@@ -1899,6 +1898,9 @@ fn list(environment: &str) -> Result<()> {
         println!("{} env var(s)", vars.len());
         return Ok(());
     }
+
+    let target = resolve_env_target()?;
+    let label = env_target_label(&target);
 
     let auth = load_auth_config()?;
     let token = auth
