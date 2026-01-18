@@ -251,6 +251,11 @@ pub enum Commands {
     )]
     Todo(TodoCommand),
     #[command(
+        about = "Copy an external dependency into ext/ and ignore it.",
+        long_about = "Copies a directory into <project>/ext/<name> and adds ext/ to .gitignore."
+    )]
+    Ext(ExtCommand),
+    #[command(
         about = "Manage Codex skills (.ai/skills/).",
         long_about = "Create, list, and manage Codex skills for this project. Skills are stored in .ai/skills/ and help Codex understand project-specific workflows."
     )]
@@ -1399,6 +1404,12 @@ pub enum ProjectEnvAction {
 pub struct TodoCommand {
     #[command(subcommand)]
     pub action: Option<TodoAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ExtCommand {
+    /// Path to the external directory to move.
+    pub path: String,
 }
 
 #[derive(Subcommand, Debug, Clone)]

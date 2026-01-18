@@ -6,8 +6,9 @@ use clap::{Parser, error::ErrorKind};
 use flowd::{
     agents, ai,
     cli::{Cli, Commands, RerunOpts, TaskRunOpts, TasksOpts, TraceAction},
-    code, commit, commits, daemon, deploy, deps, docs, doctor, env, fixup, help_search, history,
-    home, hub, init, init_tracing, log_server, notify, palette, parallel, processes, projects,
+    code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fixup, help_search,
+    history, home, hub, init, init_tracing, log_server, notify, palette, parallel, processes,
+    projects,
     publish, registry, release, repos, services, setup, skills, ssh_keys, storage, supervisor,
     sync, task_match, tasks, todo, tools, traces, upgrade, upstream, web,
 };
@@ -216,6 +217,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Todo(cmd)) => {
             todo::run(cmd)?;
+        }
+        Some(Commands::Ext(cmd)) => {
+            ext::run(cmd)?;
         }
         Some(Commands::Skills(cmd)) => {
             skills::run(cmd)?;
