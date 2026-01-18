@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::cli::DoctorOpts;
+use crate::vcs;
 
 /// Ensure the lin watcher daemon is available, prompting to install a bundled
 /// copy if it is missing from PATH. Returns the resolved binary path.
@@ -34,6 +35,8 @@ pub fn run(_opts: DoctorOpts) -> Result<()> {
     println!("Running flow doctor checks...\n");
 
     ensure_flox_available()?;
+    vcs::ensure_jj_installed()?;
+    println!("✅ jj found on PATH");
     let _ = ensure_lin_available_interactive();
     ensure_direnv_on_path()?;
 

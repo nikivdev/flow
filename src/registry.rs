@@ -213,17 +213,26 @@ pub fn publish(config_path: &Path, cfg: &Config, opts: RegistryReleaseOpts) -> R
 }
 
 pub fn install(opts: InstallOpts) -> Result<()> {
+    let name = opts
+        .name
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        bail!("package name is required for registry install");
+    }
     let global_registry = load_global_registry_config();
     let registry_url = resolve_registry_url(opts.registry.as_deref(), global_registry.as_ref())?;
     let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
     let version = opts.version.clone();
-    let manifest = fetch_manifest(&client, &registry_url, &opts.name, version.as_deref())?;
+    let manifest = fetch_manifest(&client, &registry_url, &name, version.as_deref())?;
     let target = detect_target_triple()?;
     let target_entry = manifest
         .targets
         .get(&target)
         .with_context(|| format!("No binaries for target {}", target))?;
-    let bin = resolve_install_bin(&opts.name, &opts.bin, &manifest, target_entry)?;
+    let bin = resolve_install_bin(&name, &opts.bin, &manifest, target_entry)?;
     let path = target_entry
         .binaries
         .get(&bin)

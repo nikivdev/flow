@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use crate::cli::{PublishAction, PublishCommand, PublishOpts};
 use crate::config;
+use crate::vcs;
 
 /// Run the publish command.
 pub fn run(cmd: PublishCommand) -> Result<()> {
@@ -609,6 +610,7 @@ fn git_root() -> Result<PathBuf> {
 }
 
 fn ensure_git_repo(repo_root: &Path) -> Result<()> {
+    let _ = vcs::ensure_jj_repo_in(repo_root)?;
     let git_dir = repo_root.join(".git");
     if !git_dir.exists() {
         Command::new("git")

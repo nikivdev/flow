@@ -36,6 +36,10 @@ struct EnvJson {
 
 /// Ensure a flox manifest exists for the given packages and return the paths to use.
 pub fn ensure_env(project_root: &Path, packages: &[(String, FloxInstallSpec)]) -> Result<FloxEnv> {
+    ensure_env_at(project_root, packages)
+}
+
+pub fn ensure_env_at(root: &Path, packages: &[(String, FloxInstallSpec)]) -> Result<FloxEnv> {
     if packages.is_empty() {
         bail!("flox environment requested without any packages");
     }
@@ -43,7 +47,7 @@ pub fn ensure_env(project_root: &Path, packages: &[(String, FloxInstallSpec)]) -
     let flox_bin = which::which("flox")
         .context("flox is required to use [deps]; install flox and ensure it is on PATH")?;
 
-    let env_dir = project_root.join(".flox").join("env");
+    let env_dir = root.join(".flox").join("env");
     let manifest_path = env_dir.join("manifest.toml");
     let lockfile_path = env_dir.join("manifest.lock");
     fs::create_dir_all(&env_dir)
@@ -71,10 +75,10 @@ pub fn ensure_env(project_root: &Path, packages: &[(String, FloxInstallSpec)]) -
         }
     }
 
-    write_env_json(project_root, &manifest_path, &lockfile_path)?;
+    write_env_json(root, &manifest_path, &lockfile_path)?;
 
     Ok(FloxEnv {
-        project_root: project_root.to_path_buf(),
+        project_root: root.to_path_buf(),
         manifest_path,
         lockfile_path,
     })

@@ -90,7 +90,6 @@ fn open_bike() -> Result<()> {
         bail!("Bike.app failed to open {}", path.display());
     }
 
-    println!("Opened {}", path.display());
     Ok(())
 }
 

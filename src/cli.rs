@@ -94,6 +94,11 @@ pub enum Commands {
     )]
     ShellInit(ShellInitOpts),
     #[command(
+        about = "Manage shell integration.",
+        long_about = "Helper commands for shell integration like refreshing the current session."
+    )]
+    Shell(ShellCommand),
+    #[command(
         about = "Create a new project from a template.",
         long_about = "Create a new project from ~/new/<template>. Path resolution:\n  f new <template>        → ./<template>\n  f new <template> zerg   → ~/code/zerg\n  f new <template> ./foo  → ./foo\n  f new <template> ~/path → ~/path"
     )]
@@ -108,6 +113,11 @@ pub enum Commands {
         long_about = "Checks for flox (for managed deps), lin (hub helper), and direnv + shell hook presence."
     )]
     Doctor(DoctorOpts),
+    #[command(
+        about = "Ensure your system matches Flow's expectations.",
+        long_about = "Enforces fish shell, installs flow shell integration, and runs doctor checks."
+    )]
+    Health(HealthOpts),
     #[command(
         about = "List tasks from the current project flow.toml (name + description).",
         long_about = "Prints the tasks defined in the active flow.toml along with any descriptions, suitable for piping into a launcher."
@@ -236,6 +246,11 @@ pub enum Commands {
     )]
     Env(EnvCommand),
     #[command(
+        about = "Authenticate Flow AI via myflow.",
+        long_about = "Starts a device auth flow for myflow, storing a token for AI-powered CLI features."
+    )]
+    Auth(AuthOpts),
+    #[command(
         about = "Onboard third-party services (Stripe, etc.) with guided env setup.",
         long_about = "Guided setup flows for external services. Prompts for required env vars, stores them in the cloud backend, and can apply them to Cloudflare."
     )]
@@ -358,9 +373,10 @@ pub enum Commands {
     Release(ReleaseCommand),
     #[command(
         about = "Install a binary from the Flow registry.",
-        long_about = "Download a binary from a Flow registry and install it into your PATH."
+        long_about = "Download a binary from a Flow registry and install it into your PATH.",
+        alias = "i"
     )]
-    Install(InstallOpts),
+    Install(InstallCommand),
     #[command(
         about = "Manage the Flow registry (tokens, setup).",
         long_about = "Create registry tokens and wire them into worker secrets and local envs."
@@ -641,6 +657,9 @@ pub struct TaskLogsOpts {
 pub struct DoctorOpts {}
 
 #[derive(Args, Debug, Clone)]
+pub struct HealthOpts {}
+
+#[derive(Args, Debug, Clone)]
 pub struct RerunOpts {
     /// Path to the project flow config (flow.toml).
     #[arg(long, default_value = "flow.toml")]
@@ -720,6 +739,21 @@ pub struct InitOpts {
 pub struct ShellInitOpts {
     /// Shell to generate init script for (fish, zsh, bash).
     pub shell: String,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ShellCommand {
+    #[command(subcommand)]
+    pub action: Option<ShellAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ShellAction {
+    /// Refresh the current shell session.
+    Reset,
+    /// Disable fish terminal query to avoid PDA warning.
+    #[command(alias = "fix-terminal")]
+    FixTerminal,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1167,6 +1201,13 @@ pub enum ProviderAiAction {
 pub struct EnvCommand {
     #[command(subcommand)]
     pub action: Option<EnvAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AuthOpts {
+    /// Override API base URL for myflow (defaults to https://myflow.sh).
+    #[arg(long)]
+    pub api_url: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2019,11 +2060,14 @@ pub struct RegistryReleaseOpts {
 
 #[derive(Args, Debug, Clone)]
 pub struct InstallOpts {
-    /// Package name to install.
-    pub name: String,
+    /// Package name to install (leave blank to search).
+    pub name: Option<String>,
     /// Registry base URL (defaults to FLOW_REGISTRY_URL).
     #[arg(long)]
     pub registry: Option<String>,
+    /// Install backend (auto tries registry, falls back to flox).
+    #[arg(long, value_enum, default_value = "auto")]
+    pub backend: InstallBackend,
     /// Version to install (defaults to latest).
     #[arg(long, short)]
     pub version: Option<String>,
@@ -2039,6 +2083,52 @@ pub struct InstallOpts {
     /// Overwrite existing binary if present.
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct InstallCommand {
+    #[command(subcommand)]
+    pub action: Option<InstallAction>,
+
+    #[command(flatten)]
+    pub opts: InstallOpts,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum InstallAction {
+    /// Index flox packages into Typesense.
+    Index(InstallIndexOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct InstallIndexOpts {
+    /// Search term to index (defaults to prompt).
+    pub query: Option<String>,
+    /// File with newline-separated search terms.
+    #[arg(long)]
+    pub queries: Option<PathBuf>,
+    /// Typesense base URL (overrides FLOW_TYPESENSE_URL).
+    #[arg(long)]
+    pub url: Option<String>,
+    /// Typesense API key (overrides FLOW_TYPESENSE_API_KEY).
+    #[arg(long)]
+    pub api_key: Option<String>,
+    /// Typesense collection name (overrides FLOW_TYPESENSE_COLLECTION).
+    #[arg(long, default_value = "flox-packages")]
+    pub collection: String,
+    /// Max results per search term.
+    #[arg(long, default_value_t = 200)]
+    pub per_page: usize,
+    /// Dry run (do not write to Typesense).
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum InstallBackend {
+    Auto,
+    Registry,
+    Flox,
 }
 
 #[derive(Args, Debug, Clone)]

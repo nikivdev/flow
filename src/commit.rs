@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
+use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -23,6 +24,7 @@ use crate::config;
 use crate::hub;
 use crate::notify;
 use crate::setup;
+use crate::vcs;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
@@ -395,6 +397,11 @@ struct RemoteReviewResponse {
     stderr: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RemoteCommitMessageResponse {
+    message: String,
+}
+
 #[derive(Debug)]
 struct ReviewResult {
     issues_found: bool,
@@ -532,9 +539,8 @@ pub fn run_sync(push: bool) -> Result<()> {
     let repo_root = git_root_or_cwd();
     ensure_commit_setup(&repo_root)?;
 
-    // Get API key
-    let api_key = get_openai_key()?;
-    debug!("got OpenAI API key");
+    let commit_provider = resolve_commit_message_provider()?;
+    debug!("resolved commit message provider");
 
     // Stage all changes
     print!("Staging changes... ");
@@ -576,7 +582,12 @@ pub fn run_sync(push: bool) -> Result<()> {
     print!("Generating commit message... ");
     io::stdout().flush()?;
     info!(model = MODEL, "calling OpenAI API");
-    let message = generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?;
+    let message = commit_message_from_provider(
+        &commit_provider,
+        &diff_for_prompt,
+        &status,
+        truncated,
+    )?;
     println!("done\n");
     debug!(message_len = message.len(), "got commit message");
 
@@ -855,6 +866,15 @@ fn commit_with_check_review_url() -> Option<String> {
         }
     }
 
+    if let Ok(Some(_token)) = crate::env::load_ai_auth_token() {
+        if let Ok(api_url) = crate::env::load_ai_api_url() {
+            let trimmed = api_url.trim().trim_end_matches('/').to_string();
+            if !trimmed.is_empty() {
+                return Some(format!("{}/api/ai", trimmed));
+            }
+        }
+    }
+
     None
 }
 
@@ -890,6 +910,13 @@ fn commit_with_check_review_token() -> Option<String> {
                     return Some(trimmed);
                 }
             }
+        }
+    }
+
+    if let Ok(Some(token)) = crate::env::load_ai_auth_token() {
+        let trimmed = token.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
         }
     }
 
@@ -1117,7 +1144,7 @@ pub fn run_with_check_sync(
     }
 
     // Continue with normal commit flow
-    let api_key = get_openai_key()?;
+    let commit_provider = resolve_commit_message_provider()?;
 
     // Get status
     let status = git_capture_in(&repo_root, &["status", "--short"]).unwrap_or_default();
@@ -1130,12 +1157,43 @@ pub fn run_with_check_sync(
     io::stdout().flush()?;
     let message = match &review_selection {
         ReviewSelection::Opencode { model } => {
-            generate_commit_message_opencode(&diff_for_prompt, &status, truncated, model)?
+            match generate_commit_message_opencode(&diff_for_prompt, &status, truncated, model) {
+                Ok(message) => message,
+                Err(err) => match &commit_provider {
+                    CommitMessageProvider::Remote { .. } => {
+                        println!(
+                            "⚠ Opencode commit message failed: {}. Falling back to myflow.",
+                            err
+                        );
+                        commit_message_from_provider(
+                            &commit_provider,
+                            &diff_for_prompt,
+                            &status,
+                            truncated,
+                        )?
+                    }
+                    _ => return Err(err),
+                },
+            }
         }
-        ReviewSelection::Claude(_) => {
-            generate_commit_message_claude(&diff_for_prompt, &status, truncated)?
-        }
-        _ => generate_commit_message(&api_key, &diff_for_prompt, &status, truncated)?,
+        ReviewSelection::Claude(_) => match generate_commit_message_claude(
+            &diff_for_prompt,
+            &status,
+            truncated,
+        ) {
+            Ok(message) => message,
+            Err(err) => match &commit_provider {
+                CommitMessageProvider::Remote { .. } => {
+                    println!(
+                        "⚠ Claude commit message failed: {}. Falling back to myflow.",
+                        err
+                    );
+                    commit_message_from_provider(&commit_provider, &diff_for_prompt, &status, truncated)?
+                }
+                _ => return Err(err),
+            },
+        },
+        _ => commit_message_from_provider(&commit_provider, &diff_for_prompt, &status, truncated)?,
     };
     println!("done\n");
 
@@ -1578,6 +1636,12 @@ fn run_remote_claude_review(
         .context("failed to send remote review request")?;
 
     if !response.status().is_success() {
+        if response.status() == StatusCode::UNAUTHORIZED {
+            bail!("remote review unauthorized. Run `f auth` to login.");
+        }
+        if response.status() == StatusCode::PAYMENT_REQUIRED {
+            bail!("remote review requires an active subscription. Visit myflow to subscribe.");
+        }
         bail!("remote review failed: HTTP {}", response.status());
     }
 
@@ -1944,6 +2008,7 @@ fn run_opencode_review(
 }
 
 fn ensure_git_repo() -> Result<()> {
+    let _ = vcs::ensure_jj_repo()?;
     let output = Command::new("git")
         .args(["rev-parse", "--git-dir"])
         .stdout(Stdio::null())
@@ -2051,6 +2116,49 @@ fn log_commit_event_for_repo(
 
 fn get_openai_key() -> Result<String> {
     std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY environment variable not set")
+}
+
+enum CommitMessageProvider {
+    OpenAi { api_key: String },
+    Remote { api_url: String, token: String },
+}
+
+fn resolve_commit_message_provider() -> Result<CommitMessageProvider> {
+    if let Ok(api_key) = get_openai_key() {
+        let trimmed = api_key.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(CommitMessageProvider::OpenAi { api_key: trimmed });
+        }
+    }
+
+    if let Ok(Some(token)) = crate::env::load_ai_auth_token() {
+        let api_url = crate::env::load_ai_api_url()?;
+        let trimmed_url = api_url.trim().trim_end_matches('/').to_string();
+        if !trimmed_url.is_empty() {
+            return Ok(CommitMessageProvider::Remote {
+                api_url: trimmed_url,
+                token,
+            });
+        }
+    }
+
+    bail!("OPENAI_API_KEY not set. Run `f auth` or set OPENAI_API_KEY.")
+}
+
+fn commit_message_from_provider(
+    provider: &CommitMessageProvider,
+    diff: &str,
+    status: &str,
+    truncated: bool,
+) -> Result<String> {
+    match provider {
+        CommitMessageProvider::OpenAi { api_key } => {
+            generate_commit_message(api_key, diff, status, truncated)
+        }
+        CommitMessageProvider::Remote { api_url, token } => {
+            generate_commit_message_remote(api_url, token, diff, status, truncated)
+        }
+    }
 }
 
 fn git_run(args: &[&str]) -> Result<()> {
@@ -2517,6 +2625,58 @@ fn generate_commit_message(
         "{}",
         last_error.unwrap_or_else(|| "OpenAI API failed after retries".to_string())
     )
+}
+
+fn generate_commit_message_remote(
+    api_url: &str,
+    token: &str,
+    diff: &str,
+    status: &str,
+    truncated: bool,
+) -> Result<String> {
+    let trimmed = api_url.trim().trim_end_matches('/');
+    let url = format!("{}/api/ai/commit-message", trimmed);
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(commit_with_check_timeout_secs()))
+        .build()
+        .context("failed to create HTTP client for remote commit message")?;
+
+    let payload = json!({
+        "diff": diff,
+        "status": status,
+        "truncated": truncated,
+    });
+
+    let response = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&payload)
+        .send()
+        .context("failed to request remote commit message")?;
+
+    if !response.status().is_success() {
+        if response.status() == StatusCode::UNAUTHORIZED {
+            bail!("remote commit message unauthorized. Run `f auth` to login.");
+        }
+        if response.status() == StatusCode::PAYMENT_REQUIRED {
+            bail!("remote commit message requires an active subscription. Visit myflow to subscribe.");
+        }
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        bail!("remote commit message failed: HTTP {} {}", status, body);
+    }
+
+    let payload: RemoteCommitMessageResponse = response
+        .json()
+        .context("failed to parse remote commit message response")?;
+
+    let message = payload.message.trim().to_string();
+    if message.is_empty() {
+        bail!("remote commit message was empty");
+    }
+
+    Ok(trim_quotes(&message))
 }
 
 fn trim_quotes(s: &str) -> String {

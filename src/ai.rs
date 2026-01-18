@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -2139,6 +2139,10 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
     // Auto-import any new sessions silently
     auto_import_sessions()?;
 
+    if session.is_none() && provider != Provider::All {
+        return copy_last_session(provider);
+    }
+
     // Handle provider shortcuts: "claude" or "codex" -> copy last session for that provider
     if let Some(ref query) = session {
         let q = query.to_lowercase();
@@ -2161,6 +2165,10 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
         };
         println!("No {} sessions found for this project.", provider_name);
         return Ok(());
+    }
+
+    if session.is_none() && !io::stdin().is_terminal() {
+        bail!("no session specified (interactive selection requires a TTY)");
     }
 
     // Find the session ID and provider

@@ -35,6 +35,9 @@ struct AuthConfig {
     token: Option<String>,
     api_url: Option<String>,
     token_source: Option<String>,
+    ai_token: Option<String>,
+    ai_api_url: Option<String>,
+    ai_token_source: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -110,6 +113,22 @@ fn load_auth_config() -> Result<AuthConfig> {
     Ok(auth)
 }
 
+fn load_ai_auth_config() -> Result<AuthConfig> {
+    let mut auth = load_auth_config_raw()?;
+    if auth.ai_token.is_none()
+        && auth
+            .ai_token_source
+            .as_deref()
+            .map(|source| source == "keychain")
+            .unwrap_or(false)
+    {
+        if let Some(token) = get_keychain_ai_token(&get_ai_api_url(&auth))? {
+            auth.ai_token = Some(token);
+        }
+    }
+    Ok(auth)
+}
+
 /// Save auth config.
 fn save_auth_config(config: &AuthConfig) -> Result<()> {
     let path = get_auth_config_path();
@@ -123,6 +142,10 @@ fn save_auth_config(config: &AuthConfig) -> Result<()> {
 
 fn keychain_service(api_url: &str) -> String {
     format!("flow-cloud-token:{}", api_url)
+}
+
+fn keychain_service_ai(api_url: &str) -> String {
+    format!("flow-ai-token:{}", api_url)
 }
 
 fn set_keychain_token(api_url: &str, token: &str) -> Result<()> {
@@ -142,6 +165,27 @@ fn set_keychain_token(api_url: &str, token: &str) -> Result<()> {
         .context("failed to store token in Keychain")?;
     if !status.success() {
         bail!("failed to store token in Keychain");
+    }
+    Ok(())
+}
+
+fn set_keychain_ai_token(api_url: &str, token: &str) -> Result<()> {
+    let service = keychain_service_ai(api_url);
+    let status = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-a",
+            "flow",
+            "-s",
+            &service,
+            "-w",
+            token,
+            "-U",
+        ])
+        .status()
+        .context("failed to store AI token in Keychain")?;
+    if !status.success() {
+        bail!("failed to store AI token in Keychain");
     }
     Ok(())
 }
@@ -173,6 +217,33 @@ fn get_keychain_token(api_url: &str) -> Result<Option<String>> {
     bail!("failed to read token from Keychain: {}", stderr.trim());
 }
 
+fn get_keychain_ai_token(api_url: &str) -> Result<Option<String>> {
+    if !cfg!(target_os = "macos") {
+        return Ok(None);
+    }
+
+    let service = keychain_service_ai(api_url);
+    let output = Command::new("security")
+        .args(["find-generic-password", "-a", "flow", "-s", &service, "-w"])
+        .output()
+        .context("failed to read AI token from Keychain")?;
+
+    if output.status.success() {
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if token.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(token));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("could not be found") || stderr.contains("SecKeychainSearchCopyNext") {
+        return Ok(None);
+    }
+
+    bail!("failed to read AI token from Keychain: {}", stderr.trim());
+}
+
 fn store_auth_token(auth: &mut AuthConfig, token: String) -> Result<()> {
     let api_url = get_api_url(auth);
     if cfg!(target_os = "macos") {
@@ -188,6 +259,25 @@ fn store_auth_token(auth: &mut AuthConfig, token: String) -> Result<()> {
     } else {
         auth.token = Some(token);
         auth.token_source = None;
+    }
+    Ok(())
+}
+
+fn store_ai_auth_token(auth: &mut AuthConfig, token: String) -> Result<()> {
+    let api_url = get_ai_api_url(auth);
+    if cfg!(target_os = "macos") {
+        if let Err(err) = set_keychain_ai_token(&api_url, &token) {
+            eprintln!("⚠ Failed to store AI token in Keychain: {}", err);
+            eprintln!("  Falling back to auth.toml storage.");
+            auth.ai_token = Some(token);
+            auth.ai_token_source = None;
+            return Ok(());
+        }
+        auth.ai_token = None;
+        auth.ai_token_source = Some("keychain".to_string());
+    } else {
+        auth.ai_token = Some(token);
+        auth.ai_token_source = None;
     }
     Ok(())
 }
@@ -578,6 +668,32 @@ fn get_api_url(auth: &AuthConfig) -> String {
     auth.api_url
         .clone()
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
+}
+
+fn get_ai_api_url(auth: &AuthConfig) -> String {
+    auth.ai_api_url
+        .clone()
+        .unwrap_or_else(|| DEFAULT_API_URL.to_string())
+}
+
+pub fn load_ai_auth_token() -> Result<Option<String>> {
+    let auth = load_ai_auth_config()?;
+    Ok(auth.ai_token)
+}
+
+pub fn load_ai_api_url() -> Result<String> {
+    let auth = load_auth_config_raw()?;
+    Ok(get_ai_api_url(&auth))
+}
+
+pub fn save_ai_auth_token(token: String, api_url: Option<String>) -> Result<()> {
+    let mut auth = load_auth_config_raw()?;
+    if let Some(api_url) = api_url {
+        auth.ai_api_url = Some(api_url);
+    }
+    store_ai_auth_token(&mut auth, token)?;
+    save_auth_config(&auth)?;
+    Ok(())
 }
 
 fn find_flow_toml(start: &PathBuf) -> Option<PathBuf> {
