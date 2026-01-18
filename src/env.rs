@@ -1866,6 +1866,40 @@ fn show_keys() -> Result<()> {
 
 /// List env vars for this project.
 fn list(environment: &str) -> Result<()> {
+    let target = resolve_env_target()?;
+    let label = env_target_label(&target);
+
+    if local_env_enabled() {
+        let vars = read_local_env_vars(&target, environment)?;
+
+        println!("Space: {}", label);
+        println!("Environment: {}", environment);
+        println!("Backend: local");
+        println!("─────────────────────────────");
+
+        if vars.is_empty() {
+            println!("No env vars set.");
+            return Ok(());
+        }
+
+        let mut keys: Vec<_> = vars.keys().collect();
+        keys.sort();
+
+        for key in keys {
+            let value = &vars[key];
+            let masked = if value.len() > 8 {
+                format!("{}...", &value[..4])
+            } else {
+                "****".to_string()
+            };
+            println!("  {} = {}", key, masked);
+        }
+
+        println!();
+        println!("{} env var(s)", vars.len());
+        return Ok(());
+    }
+
     let auth = load_auth_config()?;
     let token = auth
         .token
@@ -1874,9 +1908,6 @@ fn list(environment: &str) -> Result<()> {
     require_env_read_unlock()?;
 
     let api_url = get_api_url(&auth);
-    let target = resolve_env_target()?;
-    let label = env_target_label(&target);
-
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
@@ -2196,6 +2227,26 @@ fn set_project_env_var_internal(
 
 /// Show current auth status.
 fn status() -> Result<()> {
+    if local_env_enabled() {
+        println!("Local Environment Manager");
+        println!("─────────────────────────────");
+        if let Ok(root) = local_env_root() {
+            println!("Root: {}", root.display());
+        }
+        if let Ok(target) = resolve_env_target() {
+            println!("Space: {}", env_target_label(&target));
+        }
+        println!();
+        println!("Commands:");
+        println!("  f env list    - List env vars");
+        println!("  f env set K=V - Set env var");
+        println!("  f env get ... - Read env vars");
+        println!("  f env run -- <cmd> - Run with env vars injected");
+        println!("  f env keys    - Show configured env keys");
+        println!("  f env guide   - Guided env setup from flow.toml");
+        return Ok(());
+    }
+
     let auth = load_auth_config_raw()?;
 
     println!("Cloud Environment Manager");

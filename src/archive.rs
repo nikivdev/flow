@@ -10,6 +10,7 @@ use crate::cli::ArchiveOpts;
 pub fn run(opts: ArchiveOpts) -> Result<()> {
     let root = ai_context::find_project_root()
         .ok_or_else(|| anyhow::anyhow!("project root not found"))?;
+    let root = fs::canonicalize(&root).unwrap_or(root);
     let project_name = root
         .file_name()
         .and_then(|name| name.to_str())
@@ -25,19 +26,46 @@ pub fn run(opts: ArchiveOpts) -> Result<()> {
         bail!("archive message must include at least one letter or number");
     }
 
-    let archive_root = dirs::home_dir()
+    let home = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
-        .join("archive")
-        .join("code");
+        .to_path_buf();
+    let archive_root = home.join("archive").join("code");
     fs::create_dir_all(&archive_root).with_context(|| {
         format!("failed to create archive directory {}", archive_root.display())
     })?;
 
-    let base_name = format!("{}-{}", project_name, slug);
-    let mut dest = archive_root.join(&base_name);
+    let code_root = fs::canonicalize(home.join("code"))
+        .unwrap_or_else(|_| home.join("code"));
+    let rel_path = root.strip_prefix(&code_root).ok();
+    let (dest_parent, base_project) = if let Some(rel) = rel_path {
+        let parent = rel
+            .parent()
+            .map(|p| archive_root.join(p))
+            .unwrap_or_else(|| archive_root.clone());
+        let name = rel
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(project_name)
+            .to_string();
+        (parent, name)
+    } else {
+        (archive_root.clone(), project_name.to_string())
+    };
+
+    fs::create_dir_all(&dest_parent).with_context(|| {
+        format!("failed to create archive directory {}", dest_parent.display())
+    })?;
+
+    let date_suffix = Local::now()
+        .format("%b-%d-%y")
+        .to_string()
+        .to_ascii_lowercase();
+    let base_name = format!("{}-{}-{}", base_project, slug, date_suffix);
+    let mut dest = dest_parent.join(&base_name);
     if dest.exists() {
         let suffix = Local::now().format("%Y%m%d-%H%M%S");
-        dest = archive_root.join(format!("{}-{}", base_name, suffix));
+        dest = dest_parent.join(format!("{}-{}", base_name, suffix));
     }
 
     copy_dir_all(&root, &dest, &ArchiveFilter::default())?;
@@ -53,7 +81,16 @@ struct ArchiveFilter {
 impl ArchiveFilter {
     fn default() -> Self {
         Self {
-            skip_names: vec![".git", ".jj"],
+            skip_names: vec![
+                ".jj",
+                "node_modules",
+                "target",
+                "dist",
+                "build",
+                ".next",
+                ".turbo",
+                ".cache",
+            ],
         }
     }
 
