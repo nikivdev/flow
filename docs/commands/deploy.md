@@ -117,6 +117,8 @@ port = 3000                   # Port the service listens on
 service = "myapp"             # Systemd service name (optional, defaults to folder name)
 setup = "./scripts/setup.sh"  # Setup script to run after first sync (optional)
 env_file = ".env.production"  # Path to .env file for secrets (optional)
+env_source = "flow"           # Pull envs from Flow env store (optional)
+env_keys = ["API_KEY"]        # Keys to fetch when env_source=flow/cloud (optional)
 domain = "myapp.example.com"  # Public domain for nginx (optional)
 ssl = true                    # Enable SSL via Let's Encrypt (optional)
 ```
@@ -157,6 +159,7 @@ f deploy host --remote-build
 
 1. **Sync files** - rsync uploads project (excludes `target/`, `.git/`, `node_modules/`, `.env`, `*.log`)
 2. **Copy env file** - If `env_file` is specified, copies it to `{dest}/.env`
+   (or, if `env_source = "flow"`, fetches from Flow env store and writes `{dest}/.env`)
 3. **Run setup** - Executes setup script on first deploy or with `--setup`
 4. **Create systemd service** - Generates and enables `/etc/systemd/system/{service}.service`
 5. **Configure nginx** - If `domain` is set, creates reverse proxy config
