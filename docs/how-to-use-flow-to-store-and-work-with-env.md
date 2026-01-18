@@ -192,6 +192,30 @@ f env get --personal KEY
 f env run --personal -- npm start
 ```
 
+## Host deploy integration (Linux)
+
+When deploying to a Linux host with `[host]` in `flow.toml`, you can have Flow
+pull env vars from the Flow env store and upload them as a `.env` file at deploy time:
+
+```toml
+[host]
+env_source = "flow" # or "local" to force local backend
+env_keys = ["API_KEY", "SECRET"]
+environment = "production"
+```
+
+Store values locally:
+
+```bash
+FLOW_ENV_BACKEND=local f env set API_KEY=...
+```
+
+Then deploy:
+
+```bash
+f deploy
+```
+
 To store project envs under a personal space, set in `flow.toml`:
 
 ```toml

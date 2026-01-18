@@ -720,6 +720,7 @@ fn deploy_host(
 
     // 2. Handle env vars
     let use_cloud = is_cloud_source(host_cfg.env_source.as_deref());
+    let use_flow = is_flow_source(host_cfg.env_source.as_deref());
     let has_service_token = host_cfg.service_token.is_some();
 
     if use_cloud && has_service_token {
@@ -737,7 +738,7 @@ fn deploy_host(
             env_name,
             &host_cfg.env_keys,
         )?;
-    } else if use_cloud {
+    } else if use_cloud || use_flow {
         // Deploy-time fetch mode: fetch now and copy to host
         let env_name = host_cfg.environment.as_deref().unwrap_or("production");
         let keys = &host_cfg.env_keys;
@@ -745,23 +746,37 @@ fn deploy_host(
 
         if !keys.is_empty() {
             let source = if use_project {
-                &format!("project/{}", env_name)
+                format!("project/{}", env_name)
             } else {
-                "personal"
+                "personal".to_string()
             };
-            println!("==> Fetching env vars from cloud ({})...", source);
+            let source_label = if use_cloud { "cloud" } else { "flow" };
+            println!("==> Fetching env vars from {} ({})...", source_label, source);
 
-            let result = if use_project {
-                crate::env::fetch_project_env_vars(env_name, keys)
+            let fetch = || {
+                if use_project {
+                    crate::env::fetch_project_env_vars(env_name, keys)
+                } else {
+                    crate::env::fetch_personal_env_vars(keys)
+                }
+            };
+
+            let result = if use_flow && host_cfg.env_source.as_deref() == Some("local") {
+                with_local_env_backend(fetch)
             } else {
-                crate::env::fetch_personal_env_vars(keys)
+                fetch()
             };
 
             match result {
-                Ok(vars) if !vars.is_empty() => {
+                Ok(mut vars) if !vars.is_empty() => {
+                    if !keys.is_empty() {
+                        let key_set: HashSet<_> = keys.iter().collect();
+                        vars.retain(|k, _| key_set.contains(k));
+                    }
+
                     // Generate .env content
                     let mut content = String::new();
-                    content.push_str(&format!("# Source: cloud {} (fetched at deploy)\n", source));
+                    content.push_str(&format!("# Source: {} {} (fetched at deploy)\n", source_label, source));
                     let mut sorted_keys: Vec<_> = vars.keys().collect();
                     sorted_keys.sort();
                     for key in sorted_keys {
@@ -780,10 +795,10 @@ fn deploy_host(
                     let _ = fs::remove_file(&temp_env);
                 }
                 Ok(_) => {
-                    eprintln!("⚠ No env vars found in cloud for {}", source);
+                    eprintln!("⚠ No env vars found in {} for {}", source_label, source);
                 }
                 Err(err) => {
-                    eprintln!("⚠ Failed to fetch env vars from cloud: {}", err);
+                    eprintln!("⚠ Failed to fetch env vars from {}: {}", source_label, err);
                 }
             }
         }
@@ -1078,6 +1093,13 @@ fn is_cloud_source(source: Option<&str>) -> bool {
     matches!(
         source.map(|s| s.to_ascii_lowercase()).as_deref(),
         Some("cloud") | Some("remote") | Some("myflow")
+    )
+}
+
+fn is_flow_source(source: Option<&str>) -> bool {
+    matches!(
+        source.map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("flow") | Some("local")
     )
 }
 
