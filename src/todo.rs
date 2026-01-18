@@ -66,12 +66,7 @@ fn open_bike() -> Result<()> {
         Err(_) => true,
     };
     if needs_init {
-        let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let ul_id = format!("_{}", Uuid::new_v4().simple());
-        let content = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html>\n  <head>\n    <meta charset=\"utf-8\"/>\n  </head>\n  <body>\n    <ul id=\"{}\" data-created=\"{}\" data-modified=\"{}\"/>\n  </body>\n</html>\n",
-            ul_id, now, now
-        );
+        let content = render_bike_template(&project_name);
         fs::write(&path, content)?;
     }
 
@@ -100,6 +95,22 @@ fn looks_like_bike(content: &str) -> bool {
     }
     let lower = trimmed.to_ascii_lowercase();
     lower.contains("<html") && lower.contains("<body") && lower.contains("<ul")
+}
+
+fn render_bike_template(project_name: &str) -> String {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let ul_id = format!("_{}", Uuid::new_v4().simple());
+    let li_id = Uuid::new_v4().simple().to_string();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html>\n  <head>\n    <meta charset=\"utf-8\"/>\n  </head>\n  <body>\n    <ul id=\"{}\" data-created=\"{}\" data-modified=\"{}\">\n      <li id=\"{}\" data-created=\"{}\" data-modified=\"{}\">\n        <p>{}</p>\n      </li>\n    </ul>\n  </body>\n</html>\n",
+        ul_id,
+        now,
+        now,
+        li_id,
+        now,
+        now,
+        project_name
+    )
 }
 
 fn add(
