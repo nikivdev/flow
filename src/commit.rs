@@ -22,6 +22,7 @@ use crate::ai;
 use crate::config;
 use crate::hub;
 use crate::notify;
+use crate::setup;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
@@ -528,6 +529,8 @@ pub fn run_sync(push: bool) -> Result<()> {
     // Ensure we're in a git repo
     ensure_git_repo()?;
     debug!("verified git repository");
+    let repo_root = git_root_or_cwd();
+    ensure_commit_setup(&repo_root)?;
 
     // Get API key
     let api_key = get_openai_key()?;
@@ -539,6 +542,7 @@ pub fn run_sync(push: bool) -> Result<()> {
     git_run(&["add", "."])?;
     println!("done");
     debug!("staged all changes");
+    ensure_no_internal_staged(&repo_root)?;
 
     // Check for sensitive files before proceeding
     let cwd = std::env::current_dir()?;
@@ -596,6 +600,8 @@ pub fn run_sync(push: bool) -> Result<()> {
     git_run(&args)?;
     println!("✓ Committed");
     info!("created commit");
+
+    log_commit_event_for_repo(&repo_root, &message, "commit", None, None);
 
     // Push if requested
     if push {
@@ -925,6 +931,7 @@ pub fn run_with_check_sync(
     ensure_git_repo()?;
 
     let repo_root = resolve_commit_with_check_root()?;
+    ensure_commit_setup(&repo_root)?;
 
     // Capture current staged changes so we can restore if we cancel.
     let staged_snapshot = capture_staged_snapshot_in(&repo_root)?;
@@ -941,6 +948,7 @@ pub fn run_with_check_sync(
     io::stdout().flush()?;
     git_run_in(&repo_root, &["add", "."])?;
     println!("done");
+    ensure_no_internal_staged(&repo_root)?;
 
     // Check for sensitive files before proceeding
     let sensitive_files = check_sensitive_files(&repo_root);
@@ -1220,6 +1228,31 @@ pub fn run_with_check_sync(
     } else {
         debug!("failed to capture commit SHA for review log");
     }
+
+    let review_summary = ai::CommitReviewSummary {
+        model: review_selection.model_label(),
+        reviewer: if review_selection.is_claude() {
+            "claude".to_string()
+        } else {
+            "codex".to_string()
+        },
+        issues_found: review.issues_found,
+        issues: review.issues.clone(),
+        summary: review.summary.clone(),
+        timed_out: review.timed_out,
+    };
+    let context_len = if context_chars > 0 {
+        Some(context_chars)
+    } else {
+        None
+    };
+    log_commit_event_for_repo(
+        &repo_root,
+        &full_message,
+        "commitWithCheck",
+        Some(review_summary),
+        context_len,
+    );
 
     // Push if requested
     if push {
@@ -1922,6 +1955,98 @@ fn ensure_git_repo() -> Result<()> {
         bail!("Not a git repository");
     }
     Ok(())
+}
+
+fn git_root_or_cwd() -> std::path::PathBuf {
+    match git_capture(&["rev-parse", "--show-toplevel"]) {
+        Ok(root) => std::path::PathBuf::from(root.trim()),
+        Err(_) => std::env::current_dir().unwrap_or_default(),
+    }
+}
+
+fn ensure_commit_setup(repo_root: &Path) -> Result<()> {
+    let ai_internal = repo_root.join(".ai").join("internal");
+    fs::create_dir_all(&ai_internal)
+        .with_context(|| format!("failed to create {}", ai_internal.display()))?;
+    setup::add_gitignore_entry(repo_root, ".ai/internal/")?;
+    setup::add_gitignore_entry(repo_root, ".ai/todos/*.bike")?;
+    Ok(())
+}
+
+fn ensure_no_internal_staged(repo_root: &Path) -> Result<()> {
+    if env::var("FLOW_ALLOW_INTERNAL_COMMIT").as_deref() == Ok("1") {
+        return Ok(());
+    }
+    let staged = internal_staged_paths(repo_root);
+    if staged.is_empty() {
+        return Ok(());
+    }
+
+    println!("Refusing to commit internal .ai files:");
+    for path in staged {
+        println!("  - {}", path);
+    }
+    println!("Remove these from staging or set FLOW_ALLOW_INTERNAL_COMMIT=1 to override.");
+    bail!("Refusing to commit internal .ai files");
+}
+
+fn internal_staged_paths(repo_root: &Path) -> Vec<String> {
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(repo_root)
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let files = String::from_utf8_lossy(&output.stdout);
+    files
+        .lines()
+        .filter(|path| {
+            path.starts_with(".ai/internal/")
+                || path == &".ai/internal"
+                || (path.starts_with(".ai/todos/") && path.ends_with(".bike"))
+        })
+        .map(|path| path.to_string())
+        .collect()
+}
+
+fn log_commit_event_for_repo(
+    repo_root: &Path,
+    message: &str,
+    command: &str,
+    review: Option<ai::CommitReviewSummary>,
+    context_chars: Option<usize>,
+) {
+    let commit_sha = match git_capture_in(repo_root, &["rev-parse", "HEAD"]) {
+        Ok(sha) => sha,
+        Err(err) => {
+            debug!("failed to capture commit SHA for commit log: {}", err);
+            return;
+        }
+    };
+    let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".to_string());
+    let author_name = git_capture_in(repo_root, &["log", "-1", "--format=%an"])
+        .unwrap_or_else(|_| "unknown".to_string());
+    let author_email = git_capture_in(repo_root, &["log", "-1", "--format=%ae"])
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    ai::log_commit_event(
+        &repo_root.to_path_buf(),
+        commit_sha.trim(),
+        branch.trim(),
+        message,
+        author_name.trim(),
+        author_email.trim(),
+        command,
+        review,
+        context_chars,
+    );
 }
 
 fn get_openai_key() -> Result<String> {
