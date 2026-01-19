@@ -162,6 +162,15 @@ pub struct CloudflareConfig {
     pub url: Option<String>,
 }
 
+/// Production deploy overrides from flow.toml [prod] section.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProdConfig {
+    /// Custom domain to serve (e.g., app.example.com).
+    pub domain: Option<String>,
+    /// Explicit route pattern (e.g., app.example.com/*).
+    pub route: Option<String>,
+}
+
 /// Web deployment config from flow.toml [web] section.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WebConfig {
@@ -358,6 +367,126 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
             setup,
         }) => deploy_host(&project_root, flow_config.as_ref(), remote_build, setup),
         Some(DeployAction::Cloudflare { secrets, dev }) => {
+            deploy_cloudflare(&project_root, flow_config.as_ref(), secrets, dev)
+        }
+        Some(DeployAction::Web) => deploy_web(&project_root, flow_config.as_ref()),
+        Some(DeployAction::Setup) => setup_cloudflare(&project_root, flow_config.as_ref()),
+        Some(DeployAction::Railway) => deploy_railway(&project_root, flow_config.as_ref()),
+        Some(DeployAction::Config) => configure_deploy(),
+        Some(DeployAction::Release(opts)) => release::run_task(opts),
+        Some(DeployAction::Status) => show_status(&project_root, flow_config.as_ref()),
+        Some(DeployAction::Logs {
+            follow,
+            since_deploy,
+            all,
+            lines,
+        }) => show_logs(
+            &project_root,
+            flow_config.as_ref(),
+            follow,
+            since_deploy,
+            all,
+            lines,
+        ),
+        Some(DeployAction::Restart) => restart_service(&project_root, flow_config.as_ref()),
+        Some(DeployAction::Stop) => stop_service(&project_root, flow_config.as_ref()),
+        Some(DeployAction::Shell) => open_shell(),
+        Some(DeployAction::SetHost { connection }) => set_host(&connection),
+        Some(DeployAction::ShowHost) => show_host(),
+        Some(DeployAction::Health { url, status }) => {
+            check_health(&project_root, flow_config.as_ref(), url, status)
+        }
+    }
+}
+
+/// Run a production deploy (skips flow.deploy_task and prefers deploy-prod/prod tasks).
+pub fn run_prod(cmd: DeployCommand) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let config_path = project_root.join("flow.toml");
+    let flow_config = if config_path.exists() {
+        Some(crate::config::load(&config_path)?)
+    } else {
+        None
+    };
+
+    match cmd.action {
+        None => {
+            let cfg = flow_config
+                .as_ref()
+                .context("No flow.toml found. Run `f init` first.")?;
+
+            if tasks::find_task(cfg, "deploy-prod").is_some() {
+                return tasks::run(TaskRunOpts {
+                    config: config_path.clone(),
+                    delegate_to_hub: false,
+                    hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+                    hub_port: 9050,
+                    name: "deploy-prod".to_string(),
+                    args: Vec::new(),
+                });
+            }
+
+            if tasks::find_task(cfg, "prod").is_some() {
+                return tasks::run(TaskRunOpts {
+                    config: config_path.clone(),
+                    delegate_to_hub: false,
+                    hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+                    hub_port: 9050,
+                    name: "prod".to_string(),
+                    args: Vec::new(),
+                });
+            }
+
+            if cfg.host.is_some() || cfg.cloudflare.is_some() || cfg.railway.is_some() || cfg.web.is_some() {
+                if cfg.host.is_some() {
+                    println!("Detected [host] config, deploying to Linux host...");
+                    return deploy_host(&project_root, Some(cfg), false, false);
+                }
+
+                if cfg.cloudflare.is_some() {
+                    println!("Detected [cloudflare] config, deploying to Cloudflare...");
+                    if let Err(err) = ensure_prod_cloudflare_routes(&project_root, cfg) {
+                        eprintln!("WARN prod route setup skipped: {err}");
+                    }
+                    return deploy_cloudflare(&project_root, Some(cfg), false, false);
+                }
+
+                if cfg.railway.is_some() {
+                    println!("Detected [railway] config, deploying to Railway...");
+                    return deploy_railway(&project_root, Some(cfg));
+                }
+
+                if cfg.web.is_some() {
+                    println!("Detected [web] config, deploying web...");
+                    return deploy_web(&project_root, Some(cfg));
+                }
+            }
+
+            bail!(
+                "No production deploy config found in flow.toml.\n\n\
+                Add one of:\n\
+                [host]\n\
+                dest = \"/opt/myapp\"\n\
+                run = \"./server\"\n\n\
+                [cloudflare]\n\
+                path = \"worker\"\n\n\
+                [railway]\n\
+                project = \"my-project\"\n\n\
+                [web]\n\
+                path = \"packages/web\"\n\n\
+                Or define a deploy-prod/prod task."
+            );
+        }
+        Some(DeployAction::Host {
+            remote_build,
+            setup,
+        }) => deploy_host(&project_root, flow_config.as_ref(), remote_build, setup),
+        Some(DeployAction::Cloudflare { secrets, dev }) => {
+            if let Some(cfg) = flow_config.as_ref() {
+                if let Err(err) = ensure_prod_cloudflare_routes(&project_root, cfg) {
+                    eprintln!("WARN prod route setup skipped: {err}");
+                }
+            }
             deploy_cloudflare(&project_root, flow_config.as_ref(), secrets, dev)
         }
         Some(DeployAction::Web) => deploy_web(&project_root, flow_config.as_ref()),
@@ -878,13 +1007,17 @@ fn deploy_cloudflare(
         env_apply_mode_from_str(cf_cfg.env_apply.as_deref())
     };
     let should_apply = matches!(env_apply_mode, EnvApplyMode::Always | EnvApplyMode::Auto);
-    let use_cloud = is_cloud_source(cf_cfg.env_source.as_deref());
+    let source = cf_cfg.env_source.as_deref();
+    let use_cloud = is_cloud_source(source);
+    let use_flow = is_flow_source(source);
+    let use_env_store = use_cloud || use_flow;
+    let source_label = if use_cloud { "cloud" } else { "flow" };
 
     let cloud_env = env_name.unwrap_or("production");
     let mut cloud_vars: HashMap<String, String> = HashMap::new();
     let mut cloud_loaded = false;
 
-    if use_cloud {
+    if use_env_store {
         let keys = collect_cloudflare_env_keys(cf_cfg);
         if !cf_cfg.env_defaults.is_empty() {
             for key in &keys {
@@ -897,7 +1030,13 @@ fn deploy_cloudflare(
         }
 
         if !keys.is_empty() {
-            match crate::env::fetch_project_env_vars(cloud_env, &keys) {
+            let fetch = || crate::env::fetch_project_env_vars(cloud_env, &keys);
+            let result = if use_flow && source == Some("local") {
+                with_local_env_backend(fetch)
+            } else {
+                fetch()
+            };
+            match result {
                 Ok(vars) => {
                     if !vars.is_empty() {
                         cloud_loaded = true;
@@ -924,12 +1063,13 @@ fn deploy_cloudflare(
     }
 
     if should_apply {
-        if use_cloud {
+        if use_env_store {
             if cloud_loaded {
                 apply_cloudflare_env_map(project_root, cf_cfg, &cloud_vars)?;
             } else if env_apply_mode == EnvApplyMode::Always {
                 eprintln!(
-                    "⚠ No env vars found in cloud for environment '{}' (using defaults only).",
+                    "⚠ No env vars found in {} for environment '{}' (using defaults only).",
+                    source_label,
                     cloud_env
                 );
             }
@@ -960,7 +1100,7 @@ fn deploy_cloudflare(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    if use_cloud && !cloud_vars.is_empty() {
+    if use_env_store && !cloud_vars.is_empty() {
         deploy_cmd.envs(&cloud_vars);
     }
 
@@ -1010,15 +1150,21 @@ pub fn set_cloudflare_secrets(
 }
 
 fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConfig) -> Result<()> {
-    if !is_cloud_source(cf_cfg.env_source.as_deref()) {
-        bail!("cloudflare.env_source must be set to \"cloud\" to apply envs");
+    let source = cf_cfg.env_source.as_deref();
+    if !is_cloud_source(source) && !is_flow_source(source) {
+        bail!("cloudflare.env_source must be set to \"cloud\", \"flow\", or \"local\" to apply envs");
     }
 
     let cloud_env = cf_cfg.environment.as_deref().unwrap_or("production");
     let keys = collect_cloudflare_env_keys(cf_cfg);
-    let vars = crate::env::fetch_project_env_vars(cloud_env, &keys)?;
+    let fetch = || crate::env::fetch_project_env_vars(cloud_env, &keys);
+    let vars = if is_flow_source(source) && source == Some("local") {
+        with_local_env_backend(fetch)?
+    } else {
+        fetch()?
+    };
     if vars.is_empty() {
-        bail!("No env vars found in cloud for environment '{}'", cloud_env);
+        bail!("No env vars found in env store for environment '{}'", cloud_env);
     }
 
     apply_cloudflare_env_map(project_root, cf_cfg, &vars)?;
@@ -1050,7 +1196,7 @@ fn apply_cloudflare_env_map(
 
     let wrangler_env = cf_cfg.environment.as_deref();
     let var_keys: HashSet<String> = cf_cfg.env_vars.iter().cloned().collect();
-    println!("==> Applying {} env var(s) from cloud...", vars.len());
+    println!("==> Applying {} env var(s) from env store...", vars.len());
     set_wrangler_env_map(&worker_path, wrangler_env, vars, &var_keys)?;
     Ok(())
 }
@@ -2345,6 +2491,60 @@ fn resolve_web_domain(web_cfg: &WebConfig) -> Option<String> {
         return None;
     }
     Some(host.to_string())
+}
+
+fn resolve_prod_route(prod_cfg: &ProdConfig) -> Option<String> {
+    if let Some(route) = prod_cfg.route.as_ref() {
+        let route = route.trim();
+        if !route.is_empty() {
+            return Some(route.to_string());
+        }
+    }
+    let domain = prod_cfg.domain.as_ref()?.trim();
+    if domain.is_empty() {
+        return None;
+    }
+    let domain = domain
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    if domain.is_empty() || domain == "*" {
+        return None;
+    }
+    Some(format!("{}/*", domain))
+}
+
+fn ensure_prod_cloudflare_routes(project_root: &Path, config: &Config) -> Result<()> {
+    let Some(prod_cfg) = config.prod.as_ref() else {
+        return Ok(());
+    };
+    let Some(cf_cfg) = config.cloudflare.as_ref() else {
+        return Ok(());
+    };
+    let Some(route) = resolve_prod_route(prod_cfg) else {
+        return Ok(());
+    };
+
+    let worker_root = cf_cfg
+        .path
+        .as_ref()
+        .map(|p| project_root.join(p))
+        .unwrap_or_else(|| project_root.to_path_buf());
+
+    let Some(config_path) = find_wrangler_route_file(&worker_root) else {
+        eprintln!(
+            "WARN No wrangler.json/jsonc found in {}; add route '{}' manually.",
+            worker_root.display(),
+            route
+        );
+        return Ok(());
+    };
+
+    if ensure_wrangler_routes_jsonc(&config_path, &route)? {
+        println!("Added prod route '{}' to {}", route, config_path.display());
+    }
+
+    Ok(())
 }
 
 fn find_wrangler_route_file(web_root: &Path) -> Option<PathBuf> {

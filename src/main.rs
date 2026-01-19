@@ -266,6 +266,9 @@ fn main() -> Result<()> {
         Some(Commands::Deploy(cmd)) => {
             deploy::run(cmd)?;
         }
+        Some(Commands::Prod(cmd)) => {
+            deploy::run_prod(cmd)?;
+        }
         Some(Commands::Publish(cmd)) => {
             publish::run(cmd)?;
         }

@@ -12,12 +12,16 @@ The `deploy` command handles deployment to multiple platforms:
 Auto-detects the platform from your `flow.toml` configuration.
 If `[flow].deploy_task` is set, `f deploy` runs that task first.
 If no deployment config exists but a `deploy` task is defined, `f deploy` runs that task.
+Use `f prod` to deploy directly from `[host]`, `[cloudflare]`, `[railway]`, or `[web]` (it skips `[flow].deploy_task`).
 
 ## Quick Start
 
 ```bash
 # Auto-deploy based on flow.toml config
 f deploy
+
+# Production deploy (skips flow.deploy_task, uses deploy config or deploy-prod task)
+f prod
 
 # Run the project's release task (flow.release_task or fallback)
 f deploy release
@@ -26,6 +30,10 @@ f deploy release
 f deploy host
 f deploy cloudflare
 f deploy railway
+
+# Production deploy to specific platform
+f prod host
+f prod cloudflare
 
 # Configure deployment defaults
 f deploy config
@@ -208,8 +216,8 @@ Add to `flow.toml`:
 path = "worker"                    # Path to worker directory (optional, defaults to project root)
 environment = "production"         # Wrangler environment name (optional)
 env_file = ".env.cloudflare"       # Path to .env file for secrets (optional)
-env_source = "cloud"              # Use cloud for secrets (optional)
-env_keys = ["API_KEY", "SECRET"]   # Specific keys to fetch from cloud (optional)
+env_source = "cloud"              # Use cloud or local env store for secrets (optional)
+env_keys = ["API_KEY", "SECRET"]   # Specific keys to fetch from env store (optional)
 env_vars = ["PUBLIC_URL"]          # Keys to set as non-secret vars (optional)
 deploy = "wrangler deploy"         # Custom deploy command (optional)
 dev = "wrangler dev"               # Custom dev command (optional)
@@ -233,6 +241,17 @@ f deploy cloudflare --secrets
 
 # Run in dev mode
 f deploy cloudflare --dev
+```
+
+### Production domain (for `f prod`)
+
+Use `[prod]` to set a production domain or route for Workers. `f prod` will add
+the route to your `wrangler.json/jsonc` before deploying.
+
+```toml
+[prod]
+domain = "anysynth.nikiv.com"   # Will be mapped to route "anysynth.nikiv.com/*"
+# route = "anysynth.nikiv.com/*"  # Use this for explicit patterns
 ```
 
 ### Interactive Setup
@@ -269,6 +288,15 @@ Then deploy:
 
 ```bash
 f deploy cloudflare --secrets
+```
+
+If you want to use local Flow envs instead:
+
+```toml
+[cloudflare]
+env_source = "local"
+env_keys = ["ANTHROPIC_API_KEY", "DATABASE_URL"]
+env_vars = ["PUBLIC_API_URL"]
 ```
 
 If you need to fill missing values first:

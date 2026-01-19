@@ -335,6 +335,12 @@ pub enum Commands {
     )]
     Deploy(DeployCommand),
     #[command(
+        about = "Deploy to production using flow.toml deploy config.",
+        long_about = "Deploys using flow.toml [host], [cloudflare], [railway], or [web] configuration and skips [flow].deploy_task. If a deploy-prod or prod task exists, it will run that task instead.",
+        alias = "production"
+    )]
+    Prod(DeployCommand),
+    #[command(
         about = "Publish project to gitedit.dev or GitHub.",
         long_about = "Publish the current project. Without a subcommand, shows a fuzzy picker to choose the target."
     )]
