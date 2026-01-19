@@ -77,6 +77,9 @@ pub struct Config {
     /// Web deployment config.
     #[serde(default)]
     pub web: Option<crate::deploy::WebConfig>,
+    /// Production deploy overrides (used by `f prod`).
+    #[serde(default, alias = "production")]
+    pub prod: Option<crate::deploy::ProdConfig>,
     /// Release configuration (hosts, npm, etc.).
     #[serde(default)]
     pub release: Option<ReleaseConfig>,
@@ -212,6 +215,7 @@ impl Default for Config {
             cloudflare: None,
             railway: None,
             web: None,
+            prod: None,
             release: None,
             commit: None,
             setup: None,

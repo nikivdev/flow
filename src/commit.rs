@@ -1195,6 +1195,7 @@ pub fn run_with_check_sync(
         },
         _ => commit_message_from_provider(&commit_provider, &diff_for_prompt, &status, truncated)?,
     };
+    let message = sanitize_commit_message(&message);
     println!("done\n");
 
     let mut gitedit_sessions: Vec<ai::GitEditSessionData> = Vec::new();
@@ -2151,14 +2152,28 @@ fn commit_message_from_provider(
     status: &str,
     truncated: bool,
 ) -> Result<String> {
-    match provider {
+    let message = match provider {
         CommitMessageProvider::OpenAi { api_key } => {
             generate_commit_message(api_key, diff, status, truncated)
         }
         CommitMessageProvider::Remote { api_url, token } => {
             generate_commit_message_remote(api_url, token, diff, status, truncated)
         }
+    }?;
+    Ok(sanitize_commit_message(&message))
+}
+
+fn sanitize_commit_message(message: &str) -> String {
+    let filtered: Vec<&str> = message
+        .lines()
+        .filter(|line| !line.trim().contains("[Image #"))
+        .collect();
+
+    let cleaned = filtered.join("\n").trim().to_string();
+    if cleaned.is_empty() {
+        return message.trim().to_string();
     }
+    cleaned
 }
 
 fn git_run(args: &[&str]) -> Result<()> {
