@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use url::Url;
 
 use crate::cli::{ReposAction, ReposCloneOpts, ReposCommand};
 use crate::{config, publish, ssh, ssh_keys, upstream};
@@ -187,6 +188,19 @@ struct RepoParent {
     clone_url: Option<String>,
 }
 
+#[derive(Debug)]
+enum RepoTarget {
+    GitHub(RepoRef),
+    Generic(GenericRepoRef),
+}
+
+#[derive(Debug)]
+struct GenericRepoRef {
+    host: String,
+    path: Vec<String>,
+    clone_url: String,
+}
+
 pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     ssh::ensure_ssh_env();
     let mode = ssh::ssh_mode();
@@ -202,32 +216,61 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
         }
     }
     let prefer_ssh = ssh::prefer_ssh();
-    let repo_ref = parse_github_repo(&opts.url)?;
+    let repo_target = parse_repo_target(&opts.url)?;
     let root = normalize_root(&opts.root)?;
-    let owner_dir = root.join(&repo_ref.owner);
-    let target_dir = owner_dir.join(&repo_ref.repo);
+    let mut github_ref: Option<RepoRef> = None;
+    let (target_dir, clone_url, is_github) = match repo_target {
+        RepoTarget::GitHub(repo_ref) => {
+            github_ref = Some(RepoRef {
+                owner: repo_ref.owner.clone(),
+                repo: repo_ref.repo.clone(),
+            });
+            let owner_dir = root.join(&repo_ref.owner);
+            let target_dir = owner_dir.join(&repo_ref.repo);
+            let clone_url = if prefer_ssh {
+                format!("git@github.com:{}/{}.git", repo_ref.owner, repo_ref.repo)
+            } else {
+                format!(
+                    "https://github.com/{}/{}.git",
+                    repo_ref.owner, repo_ref.repo
+                )
+            };
+            (target_dir, clone_url, true)
+        }
+        RepoTarget::Generic(repo_ref) => {
+            let mut target_dir = root.join(&repo_ref.host);
+            for part in &repo_ref.path {
+                target_dir = target_dir.join(part);
+            }
+            (target_dir, repo_ref.clone_url, false)
+        }
+    };
 
     if target_dir.exists() {
         println!("Already cloned: {}", target_dir.display());
         return Ok(target_dir);
     }
 
-    fs::create_dir_all(&owner_dir)
-        .with_context(|| format!("failed to create {}", owner_dir.display()))?;
+    if let Some(parent) = target_dir.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
 
-    let clone_url = if prefer_ssh {
-        format!("git@github.com:{}/{}.git", repo_ref.owner, repo_ref.repo)
-    } else {
-        format!(
-            "https://github.com/{}/{}.git",
-            repo_ref.owner, repo_ref.repo
-        )
-    };
     let shallow = !opts.full;
     let fetch_depth = if shallow { Some(1) } else { None };
     run_git_clone(&clone_url, &target_dir, shallow)?;
 
     println!("✓ cloned to {}", target_dir.display());
+
+    if !is_github {
+        if shallow {
+            spawn_background_history_fetch(&target_dir, false)?;
+        }
+        if !opts.no_upstream {
+            println!("Skipping upstream setup (non-GitHub repo).");
+        }
+        return Ok(target_dir);
+    }
 
     if opts.no_upstream {
         if shallow {
@@ -239,7 +282,10 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     let upstream_url = if let Some(url) = opts.upstream_url {
         Some(url)
     } else {
-        resolve_upstream_url(&repo_ref, prefer_ssh)?
+        let repo_ref = github_ref
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing GitHub repo reference"))?;
+        resolve_upstream_url(repo_ref, prefer_ssh)?
     };
 
     let (upstream_url, upstream_is_origin) = match upstream_url {
@@ -259,6 +305,75 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     }
 
     Ok(target_dir)
+}
+
+fn parse_repo_target(input: &str) -> Result<RepoTarget> {
+    if is_github_input(input) {
+        return parse_github_repo(input).map(RepoTarget::GitHub);
+    }
+
+    let generic = parse_generic_repo(input)?;
+    Ok(RepoTarget::Generic(generic))
+}
+
+fn is_github_input(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.starts_with("git@github.com:") || trimmed.contains("github.com/") {
+        return true;
+    }
+    !trimmed.contains("://") && !trimmed.contains('@')
+}
+
+fn parse_generic_repo(input: &str) -> Result<GenericRepoRef> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        bail!("missing repository URL");
+    }
+
+    if let Ok(url) = Url::parse(trimmed) {
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("unable to parse host from: {}", input))?
+            .to_string();
+        let path = url
+            .path()
+            .trim_matches('/')
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .map(|p| p.trim_end_matches(".git").to_string())
+            .collect::<Vec<_>>();
+        if path.is_empty() {
+            bail!("unable to parse repository path from: {}", input);
+        }
+        return Ok(GenericRepoRef {
+            host,
+            path,
+            clone_url: trimmed.to_string(),
+        });
+    }
+
+    if let Some(at) = trimmed.find('@') {
+        if let Some(colon) = trimmed[at + 1..].find(':') {
+            let host = &trimmed[at + 1..at + 1 + colon];
+            let rest = &trimmed[at + 1 + colon + 1..];
+            let path = rest
+                .trim_matches('/')
+                .split('/')
+                .filter(|p| !p.is_empty())
+                .map(|p| p.trim_end_matches(".git").to_string())
+                .collect::<Vec<_>>();
+            if host.is_empty() || path.is_empty() {
+                bail!("unable to parse repository from: {}", input);
+            }
+            return Ok(GenericRepoRef {
+                host: host.to_string(),
+                path,
+                clone_url: trimmed.to_string(),
+            });
+        }
+    }
+
+    bail!("unable to parse repository URL: {}", input)
 }
 
 pub(crate) fn parse_github_repo(input: &str) -> Result<RepoRef> {
