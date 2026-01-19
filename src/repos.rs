@@ -196,7 +196,6 @@ enum RepoTarget {
 
 #[derive(Debug)]
 struct GenericRepoRef {
-    host: String,
     path: Vec<String>,
     clone_url: String,
 }
@@ -238,8 +237,14 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
             (target_dir, clone_url, true)
         }
         RepoTarget::Generic(repo_ref) => {
-            let mut target_dir = root.join(&repo_ref.host);
-            for part in &repo_ref.path {
+            let mut target_dir = root.to_path_buf();
+            let path_len = repo_ref.path.len();
+            let parts = if path_len >= 2 {
+                &repo_ref.path[path_len - 2..]
+            } else {
+                repo_ref.path.as_slice()
+            };
+            for part in parts {
                 target_dir = target_dir.join(part);
             }
             (target_dir, repo_ref.clone_url, false)
@@ -262,19 +267,22 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
 
     println!("✓ cloned to {}", target_dir.display());
 
-    if !is_github {
+    if opts.no_upstream {
         if shallow {
             spawn_background_history_fetch(&target_dir, false)?;
-        }
-        if !opts.no_upstream {
-            println!("Skipping upstream setup (non-GitHub repo).");
         }
         return Ok(target_dir);
     }
 
-    if opts.no_upstream {
+    if !is_github {
+        let upstream_url = opts.upstream_url.clone().unwrap_or_else(|| clone_url.clone());
+        let upstream_is_origin = upstream_url.trim() == clone_url.as_str();
+        if upstream_is_origin {
+            println!("No upstream provided; using origin as upstream.");
+        }
+        configure_upstream(&target_dir, &upstream_url, fetch_depth)?;
         if shallow {
-            spawn_background_history_fetch(&target_dir, false)?;
+            spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
         }
         return Ok(target_dir);
     }
@@ -331,10 +339,6 @@ fn parse_generic_repo(input: &str) -> Result<GenericRepoRef> {
     }
 
     if let Ok(url) = Url::parse(trimmed) {
-        let host = url
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("unable to parse host from: {}", input))?
-            .to_string();
         let path = url
             .path()
             .trim_matches('/')
@@ -346,7 +350,6 @@ fn parse_generic_repo(input: &str) -> Result<GenericRepoRef> {
             bail!("unable to parse repository path from: {}", input);
         }
         return Ok(GenericRepoRef {
-            host,
             path,
             clone_url: trimmed.to_string(),
         });
@@ -354,7 +357,6 @@ fn parse_generic_repo(input: &str) -> Result<GenericRepoRef> {
 
     if let Some(at) = trimmed.find('@') {
         if let Some(colon) = trimmed[at + 1..].find(':') {
-            let host = &trimmed[at + 1..at + 1 + colon];
             let rest = &trimmed[at + 1 + colon + 1..];
             let path = rest
                 .trim_matches('/')
@@ -362,11 +364,10 @@ fn parse_generic_repo(input: &str) -> Result<GenericRepoRef> {
                 .filter(|p| !p.is_empty())
                 .map(|p| p.trim_end_matches(".git").to_string())
                 .collect::<Vec<_>>();
-            if host.is_empty() || path.is_empty() {
+            if path.is_empty() {
                 bail!("unable to parse repository from: {}", input);
             }
             return Ok(GenericRepoRef {
-                host: host.to_string(),
                 path,
                 clone_url: trimmed.to_string(),
             });
