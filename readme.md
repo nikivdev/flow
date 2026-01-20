@@ -22,6 +22,4 @@ All projects of [Nikita](https://github.com/nikivdev) run on flow. Like [rust](h
 
 [Use AI](https://nikiv.dev/how-i-code) & flow. All meaningful issues and PRs will be merged in. Thank you.
 
-### 🖤
-
 [![Discord](https://go.nikiv.dev/badge-discord)](https://go.nikiv.dev/discord) [![X](https://go.nikiv.dev/badge-x)](https://x.com/nikivdev) [![nikiv.dev](https://go.nikiv.dev/badge-nikiv)](https://nikiv.dev)
