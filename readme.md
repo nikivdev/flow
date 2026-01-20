@@ -8,11 +8,15 @@ Install this CLI (currently by cloning repo and buliding rust binary).
 
 ## Dev 
 
-Run `f setup`, then `f` will fuzzy search through list of tasks.
+With flow, run `f setup`, then `f` will search through list of tasks.
 
 Running `f deploy` will compile and put new version of flow into your path (so its easy to make flow work for you). 
 
 For available features, see [docs](docs) or feed `f --help` to AI.
+
+## Examples
+
+All projects of [Nikita](https://github.com/nikivdev) run on flow. Like [rust](https://github.com/nikivdev/rust).
 
 ## Contributing
 
