@@ -1939,6 +1939,8 @@ pub enum UpstreamAction {
         #[arg(short, long)]
         branch: Option<String>,
     },
+    /// Checkout local 'upstream' branch synced to upstream.
+    Check,
     /// Full sync: pull upstream, merge to dev/main, push to origin.
     Sync {
         /// Skip pushing to origin.

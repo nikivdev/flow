@@ -771,8 +771,13 @@ fn push_with_autofix(branch: &str, auto_fix: bool, max_attempts: u32) -> Result<
             attempts, max_attempts
         );
 
-        // Run Claude to fix the errors
-        if !try_claude_fix(&combined)? {
+        // Run Claude to fix the errors (fallback to opencode glm if Claude fails)
+        let mut fixed = try_claude_fix(&combined)?;
+        if !fixed {
+            println!("  Claude fix failed; trying opencode glm...");
+            fixed = try_opencode_fix(&combined)?;
+        }
+        if !fixed {
             println!("{}", combined);
             bail!("Auto-fix failed. Run manually:\n  claude 'fix these errors: ...'");
         }
@@ -802,16 +807,7 @@ fn try_claude_fix(error_output: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    // Build a focused prompt
-    let prompt = format!(
-        "Fix these errors so the code compiles/passes checks. Make minimal changes. Do not explain, just fix:\n\n{}",
-        // Truncate if too long
-        if error_output.len() > 4000 {
-            &error_output[error_output.len() - 4000..]
-        } else {
-            error_output
-        }
-    );
+    let prompt = build_fix_prompt(error_output);
 
     // Run claude with the fix prompt
     let status = Command::new("claude")
@@ -823,6 +819,45 @@ fn try_claude_fix(error_output: &str) -> Result<bool> {
         .context("failed to run claude")?;
 
     Ok(status.success())
+}
+
+fn try_opencode_fix(error_output: &str) -> Result<bool> {
+    let opencode_check = Command::new("which").arg("opencode").output();
+    if opencode_check.is_err() || !opencode_check.unwrap().status.success() {
+        println!("  opencode CLI not found. Install with: npm i -g opencode");
+        return Ok(false);
+    }
+
+    let prompt = build_fix_prompt(error_output);
+    let mut child = Command::new("opencode")
+        .args(["run", "-m", "opencode/glm-4.7-free", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to run opencode")?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin
+            .write_all(prompt.as_bytes())
+            .context("failed to write opencode prompt")?;
+    }
+
+    let status = child.wait().context("failed to wait on opencode")?;
+    Ok(status.success())
+}
+
+fn build_fix_prompt(error_output: &str) -> String {
+    let excerpt = if error_output.len() > 4000 {
+        &error_output[error_output.len() - 4000..]
+    } else {
+        error_output
+    };
+    format!(
+        "Fix these errors so the code compiles/passes checks. Make minimal changes. Do not explain, just fix:\n\n{}",
+        excerpt
+    )
 }
 
 /// Try to create the origin repo on GitHub if it doesn't exist.

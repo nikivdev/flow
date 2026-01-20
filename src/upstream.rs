@@ -22,6 +22,7 @@ pub fn run(cmd: UpstreamCommand) -> Result<()> {
             upstream_branch,
         } => setup_upstream(upstream_url.as_deref(), upstream_branch.as_deref()),
         UpstreamAction::Pull { branch } => pull_upstream(branch.as_deref()),
+        UpstreamAction::Check => check_upstream(),
         UpstreamAction::Sync {
             no_push,
             create_repo,
@@ -268,21 +269,7 @@ fn pull_upstream(target_branch: Option<&str>) -> Result<()> {
     git_run(&["fetch", "upstream", "--prune"])?;
 
     // Determine the upstream branch to track (check config, then HEAD, then try main/master)
-    let upstream_branch =
-        if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
-            merge_ref.trim().replace("refs/heads/", "")
-        } else if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
-            // Parse "refs/remotes/upstream/master" -> "master"
-            head_ref.trim().replace("refs/remotes/upstream/", "")
-        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
-            "main".to_string()
-        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
-            "master".to_string()
-        } else if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/dev"]).is_ok() {
-            "dev".to_string()
-        } else {
-            bail!("Cannot determine upstream branch. Run: f upstream setup --branch <branch>");
-        };
+    let upstream_branch = resolve_upstream_branch()?;
 
     let upstream_ref = format!("upstream/{}", upstream_branch);
 
@@ -366,6 +353,78 @@ fn pull_upstream(target_branch: Option<&str>) -> Result<()> {
         println!("Run 'f upstream sync' to merge and push.");
     } else {
         println!("\n✓ Up to date with upstream!");
+    }
+
+    Ok(())
+}
+
+fn resolve_upstream_branch() -> Result<String> {
+    if let Ok(merge_ref) = git_capture(&["config", "--get", "branch.upstream.merge"]) {
+        return Ok(merge_ref.trim().replace("refs/heads/", ""));
+    }
+    if let Ok(head_ref) = git_capture(&["symbolic-ref", "refs/remotes/upstream/HEAD"]) {
+        // Parse "refs/remotes/upstream/master" -> "master"
+        return Ok(head_ref.trim().replace("refs/remotes/upstream/", ""));
+    }
+    if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/main"]).is_ok() {
+        return Ok("main".to_string());
+    }
+    if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/master"]).is_ok() {
+        return Ok("master".to_string());
+    }
+    if git_capture(&["rev-parse", "--verify", "refs/remotes/upstream/dev"]).is_ok() {
+        return Ok("dev".to_string());
+    }
+    bail!("Cannot determine upstream branch. Run: f upstream setup --branch <branch>");
+}
+
+fn check_upstream() -> Result<()> {
+    if git_capture(&["remote", "get-url", "upstream"]).is_err() {
+        bail!("No upstream remote. Run: f upstream setup --url <url>");
+    }
+
+    println!("Fetching upstream...");
+    git_run(&["fetch", "upstream", "--prune"])?;
+
+    let upstream_branch = resolve_upstream_branch()?;
+    let upstream_ref = format!("upstream/{}", upstream_branch);
+
+    let current = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let current = current.trim();
+
+    let mut stashed = false;
+    let stash_count_before = git_capture(&["stash", "list"])
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
+
+    let status = git_capture(&["status", "--porcelain"])?;
+    if !status.trim().is_empty() {
+        println!("Stashing local changes to check upstream...");
+        let _ = git_run(&["stash", "push", "-m", "upstream-check auto-stash"]);
+        let stash_count_after = git_capture(&["stash", "list"])
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        stashed = stash_count_after > stash_count_before;
+    }
+
+    let local_upstream_exists =
+        git_capture(&["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
+    if local_upstream_exists {
+        if current == "upstream" {
+            git_run(&["reset", "--hard", &upstream_ref])?;
+        } else {
+            git_run(&["branch", "-f", "upstream", &upstream_ref])?;
+        }
+        println!("✓ Updated local 'upstream' branch to {}", upstream_ref);
+    } else {
+        git_run(&["branch", "upstream", &upstream_ref])?;
+        println!("✓ Created local 'upstream' branch from {}", upstream_ref);
+    }
+
+    git_run(&["checkout", "upstream"])?;
+    println!("Now on 'upstream' (tracking {}).", upstream_ref);
+    if stashed {
+        println!("Your changes are stashed. Run 'git stash pop' when you're ready.");
     }
 
     Ok(())
