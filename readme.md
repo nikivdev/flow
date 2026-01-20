@@ -16,7 +16,7 @@ For available features, see [docs](docs) or feed `f --help` to AI.
 
 ## Examples
 
-All projects of [Nikita](https://github.com/nikivdev) run on flow. Like [rust](https://github.com/nikivdev/rust).
+All projects of [Nikita](https://github.com/nikivdev) run on flow. Like [rust](https://github.com/nikivdev/rust) & flow itself.
 
 ## Contributing
 
