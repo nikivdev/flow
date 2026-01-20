@@ -2543,6 +2543,12 @@ fn ensure_prod_cloudflare_routes(project_root: &Path, config: &Config) -> Result
     if ensure_wrangler_routes_jsonc(&config_path, &route)? {
         println!("Added prod route '{}' to {}", route, config_path.display());
     }
+    if ensure_wrangler_bool_jsonc(&config_path, "workers_dev", true)? {
+        println!("Enabled workers_dev in {}", config_path.display());
+    }
+    if ensure_wrangler_bool_jsonc(&config_path, "preview_urls", true)? {
+        println!("Enabled preview_urls in {}", config_path.display());
+    }
 
     Ok(())
 }
@@ -2921,6 +2927,51 @@ fn ensure_wrangler_routes_jsonc(path: &Path, route: &str) -> Result<bool> {
     }
 
     let insert_block = format!("\"routes\": [\n  \"{}\"\n]", route);
+
+    let mut lines: Vec<String> = contents.lines().map(|line| line.to_string()).collect();
+    let had_trailing_newline = contents.ends_with('\n');
+    if let Some(pos) = lines.iter().rposition(|line| line.trim() == "}") {
+        let needs_comma = lines
+            .iter()
+            .take(pos)
+            .rfind(|line| !line.trim().is_empty())
+            .map(|line| !line.trim_end().ends_with(',') && !line.trim_end().ends_with('{'))
+            .unwrap_or(false);
+        if needs_comma {
+            if let Some(last) = lines
+                .iter_mut()
+                .take(pos)
+                .rfind(|line| !line.trim().is_empty())
+            {
+                if !last.trim_end().ends_with(',') {
+                    last.push(',');
+                }
+            }
+        }
+        let mut block_lines: Vec<String> = insert_block
+            .lines()
+            .map(|line| format!("  {line}"))
+            .collect();
+        lines.splice(pos..pos, block_lines.drain(..));
+        let mut updated = lines.join("\n");
+        if had_trailing_newline {
+            updated.push('\n');
+        }
+        fs::write(path, updated)?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn ensure_wrangler_bool_jsonc(path: &Path, key: &str, value: bool) -> Result<bool> {
+    let contents = fs::read_to_string(path)?;
+    let needle = format!("\"{key}\"");
+    if contents.contains(&needle) {
+        return Ok(false);
+    }
+
+    let insert_block = format!("\"{key}\": {}", if value { "true" } else { "false" });
 
     let mut lines: Vec<String> = contents.lines().map(|line| line.to_string()).collect();
     let had_trailing_newline = contents.ends_with('\n');
