@@ -25,7 +25,7 @@ use which::which;
 use crate::{
     cli::{
         GlobalAction, GlobalCommand, HubAction, HubCommand, HubOpts, TaskActivateOpts, TaskRunOpts,
-        TasksOpts,
+        TasksAction, TasksCommand, TasksListOpts, TasksOpts,
     },
     config::{self, Config, FloxInstallSpec, TaskConfig},
     discover,
@@ -254,6 +254,152 @@ fn needs_interactive_mode(command: &str) -> bool {
     let base_cmd = first_word.rsplit('/').next().unwrap_or(first_word);
 
     interactive_commands.contains(&base_cmd)
+}
+
+/// Handle `f tasks` command: fuzzy search history or list tasks.
+pub fn run_tasks_command(cmd: TasksCommand) -> Result<()> {
+    match cmd.action {
+        Some(TasksAction::List(opts)) => list_tasks(opts),
+        None => fuzzy_search_task_history(),
+    }
+}
+
+/// Fuzzy search through task history (most recent first).
+fn fuzzy_search_task_history() -> Result<()> {
+    let records = history::load_all_records()?;
+
+    if records.is_empty() {
+        println!("No task history found.");
+        return Ok(());
+    }
+
+    // Dedupe by task_name + project_root, keeping most recent
+    let mut seen = std::collections::HashSet::new();
+    let mut unique_records = Vec::new();
+    for rec in records {
+        let key = format!("{}:{}", rec.project_root, rec.task_name);
+        if seen.insert(key) {
+            unique_records.push(rec);
+        }
+    }
+
+    if unique_records.is_empty() {
+        println!("No task history found.");
+        return Ok(());
+    }
+
+    // Format for fzf: "task_name  project_path"
+    let lines: Vec<String> = unique_records
+        .iter()
+        .map(|r| {
+            let project = r
+                .project_root
+                .strip_prefix(&dirs::home_dir().unwrap_or_default().to_string_lossy().to_string())
+                .map(|p| format!("~{}", p))
+                .unwrap_or_else(|| r.project_root.clone());
+            format!("{}\t{}", r.task_name, project)
+        })
+        .collect();
+
+    let input = lines.join("\n");
+
+    // Run fzf
+    let mut fzf = Command::new("fzf")
+        .args([
+            "--height=50%",
+            "--reverse",
+            "--prompt=Task: ",
+            "--delimiter=\t",
+            "--with-nth=1,2",
+            "--tabstop=4",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to spawn fzf")?;
+
+    fzf.stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())?;
+
+    let output = fzf.wait_with_output()?;
+    if !output.status.success() {
+        return Ok(()); // User cancelled
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected.is_empty() {
+        return Ok(());
+    }
+
+    // Parse selection: "task_name\tproject_path"
+    let parts: Vec<&str> = selected.split('\t').collect();
+    if parts.is_empty() {
+        return Ok(());
+    }
+
+    let task_name = parts[0].trim();
+    let project_path = if parts.len() > 1 {
+        let p = parts[1].trim();
+        if p.starts_with("~/") {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(&p[2..])
+                .to_string_lossy()
+                .to_string()
+        } else {
+            p.to_string()
+        }
+    } else {
+        std::env::current_dir()?.to_string_lossy().to_string()
+    };
+
+    // Run the task in that project
+    println!("Running '{}' in {}", task_name, project_path);
+    let project_root = PathBuf::from(&project_path);
+    let config_path = project_root.join("flow.toml");
+
+    run(TaskRunOpts {
+        config: config_path,
+        delegate_to_hub: false,
+        hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+        hub_port: 9050,
+        name: task_name.to_string(),
+        args: vec![],
+    })
+}
+
+/// List tasks from flow.toml (moved from `f tasks` to `f tasks list`).
+fn list_tasks(opts: TasksListOpts) -> Result<()> {
+    // Determine root directory for discovery
+    let mut root = if opts.config.is_absolute() {
+        opts.config
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
+    if is_default_flow_config(&opts.config) && !root.join("flow.toml").exists() {
+        if let Some(found) = find_flow_toml_upwards(&root) {
+            root = found.parent().unwrap_or(&root).to_path_buf();
+        }
+    }
+
+    let discovery = discover::discover_tasks(&root)?;
+
+    if discovery.tasks.is_empty() {
+        println!("No tasks defined in {} or subdirectories", root.display());
+        return Ok(());
+    }
+
+    println!("Tasks (root: {}):", root.display());
+    for line in format_discovered_task_lines(&discovery.tasks) {
+        println!("{line}");
+    }
+
+    Ok(())
 }
 
 pub fn list(opts: TasksOpts) -> Result<()> {

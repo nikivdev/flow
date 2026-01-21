@@ -124,10 +124,10 @@ pub enum Commands {
     )]
     Health(HealthOpts),
     #[command(
-        about = "List tasks from the current project flow.toml (name + description).",
-        long_about = "Prints the tasks defined in the active flow.toml along with any descriptions, suitable for piping into a launcher."
+        about = "Fuzzy search task history or list available tasks.",
+        long_about = "Search through previously run tasks (most recent first) or list tasks from flow.toml."
     )]
-    Tasks(TasksOpts),
+    Tasks(TasksCommand),
     /// Execute a specific project task (hidden; used by the palette and task shortcuts).
     #[command(hide = true)]
     Run(TaskRunOpts),
@@ -324,6 +324,12 @@ pub enum Commands {
     )]
     Sync(SyncCommand),
     #[command(
+        about = "Show project information.",
+        long_about = "Display project details including git remotes, upstream configuration, and flow.toml settings.",
+        alias = "i"
+    )]
+    Info,
+    #[command(
         about = "Manage upstream fork workflow.",
         long_about = "Set up and manage upstream forks. Creates a local 'upstream' branch to cleanly track the original repo, making merges easier.",
         alias = "up"
@@ -356,8 +362,8 @@ pub enum Commands {
     )]
     Code(CodeCommand),
     #[command(
-        about = "Move a folder to a new location, preserving symlinks and AI sessions.",
-        long_about = "Migrate a project folder to a new location. Usage:\n  f migrate <target>           - move current dir to target\n  f migrate <source> <target>  - move source to target\n  f migrate code <relative>    - move current dir to ~/code/<relative>\nUpdates ~/bin symlinks and AI session paths."
+        about = "Move or copy a folder to a new location, preserving symlinks and AI sessions.",
+        long_about = "Migrate a project folder to a new location. Usage:\n  f migrate <target>           - move current dir to target\n  f migrate <source> <target>  - move source to target\n  f migrate -c <src> <target>  - copy instead of move\n  f migrate code <relative>    - move current dir to ~/code/<relative>\nUpdates ~/bin symlinks and AI session paths (move only)."
     )]
     Migrate(MigrateCommand),
     #[command(
@@ -523,6 +529,25 @@ pub struct ServersOpts {
     /// TCP port of the daemon's HTTP interface.
     #[arg(long, default_value_t = 9050)]
     pub port: u16,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TasksCommand {
+    #[command(subcommand)]
+    pub action: Option<TasksAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum TasksAction {
+    /// List tasks from the current project flow.toml.
+    List(TasksListOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TasksListOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1831,6 +1856,9 @@ pub struct MigrateCommand {
     pub source: Option<String>,
     /// Target path (if source is given, this is the destination).
     pub target: Option<String>,
+    /// Copy instead of move (keeps original).
+    #[arg(long, short)]
+    pub copy: bool,
     /// Show what would change without writing.
     #[arg(long)]
     pub dry_run: bool,

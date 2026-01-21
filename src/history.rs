@@ -193,8 +193,33 @@ pub fn load_last_record_for_project(project_root: &Path) -> Result<Option<Invoca
     Ok(None)
 }
 
-fn history_path() -> PathBuf {
+pub fn history_path() -> PathBuf {
     config::global_state_dir().join("history.jsonl")
+}
+
+/// Load all invocation records from history, most recent first.
+pub fn load_all_records() -> Result<Vec<InvocationRecord>> {
+    let path = history_path();
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read history at {}", path.display()))?;
+
+    let mut records = Vec::new();
+    for line in contents.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(rec) = serde_json::from_str::<InvocationRecord>(line) {
+            records.push(rec);
+        }
+    }
+
+    // Most recent first
+    records.reverse();
+    Ok(records)
 }
 
 fn now_ms() -> u128 {
