@@ -21,9 +21,10 @@ This script will:
 
 - Install `fnm` + Node (if missing)
 - Install Rust (if missing)
-- Clone/update Flow + Jazz under `~/code/org/1f`
+- Clone/update Flow + Jazz under `~/code/org/1f` (if Jazz is accessible)
 - Patch Cargo to use local Groove crates
 - Build Flow and symlink `f`/`flow` (and `lin` if present) into `~/.local/bin`
+- Fallback to a release install if Jazz is not accessible
 
 Overrides:
 
@@ -32,6 +33,7 @@ Overrides:
 - `FLOW_BIN_DIR` to change where binaries are linked
 - `FLOW_GITHUB_TOKEN` (or `GITHUB_TOKEN`) if a repo is private
 - `FLOW_GIT_SSH=1` to use SSH URLs (requires SSH key access)
+- `FLOW_JAZZ_OPTIONAL=0` to require Jazz access (otherwise it falls back to release)
 
 If a private repo clone fails, the installer will run:
 
