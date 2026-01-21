@@ -291,13 +291,27 @@ fn warn_large_diffs(files: &[(String, usize)]) -> Result<()> {
     Ok(())
 }
 
-/// Check TypeScript config for commit settings first.
+/// Check TypeScript config for review settings first, then fall back to commit settings.
 pub fn resolve_review_selection_from_config() -> Option<ReviewSelection> {
     let ts_config = config::load_ts_config()?;
-    let commit_config = ts_config.flow?.commit?;
+    let flow_config = ts_config.flow?;
 
-    let tool = commit_config.tool.as_deref()?;
-    let model = commit_config.model.clone();
+    // Check review config first (takes precedence)
+    let (tool, model) = if let Some(ref review_config) = flow_config.review {
+        if let Some(ref tool) = review_config.tool {
+            (tool.as_str(), review_config.model.clone())
+        } else if let Some(ref commit_config) = flow_config.commit {
+            // Fall back to commit config
+            (commit_config.tool.as_deref()?, commit_config.model.clone())
+        } else {
+            return None;
+        }
+    } else if let Some(ref commit_config) = flow_config.commit {
+        // No review config, use commit config
+        (commit_config.tool.as_deref()?, commit_config.model.clone())
+    } else {
+        return None;
+    };
 
     match tool {
         "opencode" => {

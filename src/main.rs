@@ -63,8 +63,8 @@ fn main() -> Result<()> {
         Some(Commands::New(opts)) => {
             code::new_from_template(opts)?;
         }
-        Some(Commands::Home(opts)) => {
-            home::run(opts)?;
+        Some(Commands::Home(cmd)) => {
+            home::run(cmd)?;
         }
         Some(Commands::Archive(opts)) => {
             archive::run(opts)?;
@@ -165,12 +165,8 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::CommitSimple(opts)) => {
-            // Simple commit without review
-            if opts.sync {
-                commit::run_sync(!opts.no_push)?;
-            } else {
-                commit::run(!opts.no_push)?;
-            }
+            // Simple commit without review - always sync (fast, no hub)
+            commit::run_sync(!opts.no_push)?;
         }
         Some(Commands::CommitWithCheck(opts)) => {
             // Review but no gitedit sync

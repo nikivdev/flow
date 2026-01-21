@@ -29,6 +29,8 @@ GITHUB_TOKEN="${FLOW_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JAZZ_OPTIONAL="${FLOW_JAZZ_OPTIONAL:-1}"
 JAZZ_AVAILABLE=1
+DIST_DIR="${FLOW_DIST_DIR:-${SCRIPT_DIR}/../dist}"
+FORCE_HTTPS=0
 
 ensure_brew() {
   if command -v brew >/dev/null 2>&1; then
@@ -63,6 +65,14 @@ ensure_fnm_and_node() {
   fi
 }
 
+ensure_fzf() {
+  if command -v fzf >/dev/null 2>&1; then
+    return 0
+  fi
+  info "installing fzf..."
+  brew install fzf
+}
+
 ensure_rust() {
   if command -v cargo >/dev/null 2>&1; then
     return 0
@@ -71,6 +81,31 @@ ensure_rust() {
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   # shellcheck disable=SC1090
   source "$HOME/.cargo/env"
+}
+
+check_github_ssh() {
+  if [[ "${FLOW_FORCE_HTTPS:-}" = "1" ]]; then
+    FORCE_HTTPS=1
+    return 0
+  fi
+  if [[ "${FLOW_SSH_MODE:-}" = "https" ]]; then
+    FORCE_HTTPS=1
+    return 0
+  fi
+  if ! command -v ssh >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local out
+  out="$(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 || true)"
+  if echo "${out}" | grep -qi "successfully authenticated"; then
+    info "GitHub SSH auth OK."
+    return 0
+  fi
+  if echo "${out}" | grep -qi "Permission denied"; then
+    FORCE_HTTPS=1
+    info "GitHub SSH auth failed; configuring Flow to prefer HTTPS."
+  fi
 }
 
 clone_or_update() {
@@ -178,6 +213,10 @@ build_and_link() {
 install_release_fallback() {
   local root_installer="${SCRIPT_DIR}/../install.sh"
 
+  if install_local_dist; then
+    return 0
+  fi
+
   info "installing Flow from release (no Jazz access)..."
 
   if [[ -x "${root_installer}" ]]; then
@@ -202,6 +241,64 @@ install_release_fallback() {
   fail "no installer found for release fallback"
 }
 
+install_local_dist() {
+  local arch
+  local pattern
+  local tarball
+  local tmpdir
+  local binary
+
+  if [[ ! -d "${DIST_DIR}" ]]; then
+    return 1
+  fi
+
+  arch="$(uname -m)"
+  case "${arch}" in
+    arm64) pattern="*_darwin_arm64.tar.gz" ;;
+    x86_64) pattern="*_darwin_x64.tar.gz" ;;
+    *) return 1 ;;
+  esac
+
+  tarball="$(ls -t "${DIST_DIR}"/${pattern} 2>/dev/null | head -n1 || true)"
+  if [[ -z "${tarball}" ]]; then
+    # fallback for amd64 naming
+    if [[ "${arch}" = "x86_64" ]]; then
+      tarball="$(ls -t "${DIST_DIR}"/*_darwin_amd64.tar.gz 2>/dev/null | head -n1 || true)"
+    fi
+  fi
+
+  if [[ -z "${tarball}" ]]; then
+    return 1
+  fi
+
+  info "installing Flow from local dist: ${tarball}"
+  tmpdir="$(mktemp -d)"
+  tar -xzf "${tarball}" -C "${tmpdir}"
+
+  if [[ -f "${tmpdir}/f" ]]; then
+    binary="${tmpdir}/f"
+  else
+    binary="$(find "${tmpdir}" -type f \( -name "f" -o -name "flow" \) 2>/dev/null | head -n1 || true)"
+  fi
+
+  if [[ -z "${binary}" ]]; then
+    rm -rf "${tmpdir}"
+    return 1
+  fi
+
+  mkdir -p "${BIN_DIR}"
+  cp "${binary}" "${BIN_DIR}/f"
+  chmod +x "${BIN_DIR}/f"
+  ln -sf "${BIN_DIR}/f" "${BIN_DIR}/flow"
+  if [[ -f "${tmpdir}/lin" ]]; then
+    cp "${tmpdir}/lin" "${BIN_DIR}/lin"
+    chmod +x "${BIN_DIR}/lin"
+  fi
+
+  rm -rf "${tmpdir}"
+  return 0
+}
+
 ensure_shell_setup() {
   local zshrc="$HOME/.zshrc"
   local bashrc="$HOME/.bashrc"
@@ -209,27 +306,42 @@ ensure_shell_setup() {
 
   local path_line="export PATH=\"${BIN_DIR}:\$PATH\""
   local fnm_line='eval "$(fnm env --use-on-cd)"'
+  local https_line='export FLOW_FORCE_HTTPS=1'
 
   if [[ -f "${zshrc}" ]]; then
     grep -qF "${path_line}" "${zshrc}" || echo "${path_line}" >> "${zshrc}"
     grep -qF "${fnm_line}" "${zshrc}" || echo "${fnm_line}" >> "${zshrc}"
+    if [[ "${FORCE_HTTPS}" = "1" ]]; then
+      grep -qF "${https_line}" "${zshrc}" || echo "${https_line}" >> "${zshrc}"
+    fi
   elif [[ -f "${bashrc}" ]]; then
     grep -qF "${path_line}" "${bashrc}" || echo "${path_line}" >> "${bashrc}"
     grep -qF "${fnm_line}" "${bashrc}" || echo "${fnm_line}" >> "${bashrc}"
+    if [[ "${FORCE_HTTPS}" = "1" ]]; then
+      grep -qF "${https_line}" "${bashrc}" || echo "${https_line}" >> "${bashrc}"
+    fi
   elif [[ -f "${bash_profile}" ]]; then
     grep -qF "${path_line}" "${bash_profile}" || echo "${path_line}" >> "${bash_profile}"
     grep -qF "${fnm_line}" "${bash_profile}" || echo "${fnm_line}" >> "${bash_profile}"
+    if [[ "${FORCE_HTTPS}" = "1" ]]; then
+      grep -qF "${https_line}" "${bash_profile}" || echo "${https_line}" >> "${bash_profile}"
+    fi
   else
     info "add to your shell config:"
     info "  ${path_line}"
     info "  ${fnm_line}"
+    if [[ "${FORCE_HTTPS}" = "1" ]]; then
+      info "  ${https_line}"
+    fi
   fi
 }
 
 main() {
   info "starting macOS dev install"
   ensure_brew
+  ensure_fzf
   ensure_fnm_and_node
+  check_github_ssh
   clone_or_update
   if [[ "${JAZZ_AVAILABLE}" = "0" ]]; then
     install_release_fallback
