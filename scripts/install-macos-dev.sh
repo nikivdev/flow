@@ -91,6 +91,10 @@ clone_or_update() {
             if [[ "${JAZZ_OPTIONAL}" != "0" ]]; then
                 info "Jazz clone failed; continuing without local Jazz (release fallback)."
                 info "To build with local Jazz, set FLOW_GIT_SSH=1 or FLOW_GITHUB_TOKEN=... and rerun."
+                if [[ -x "${SCRIPT_DIR}/setup-github-ssh.sh" ]]; then
+                    info "running SSH setup helper so you can add the key to GitHub if needed..."
+                    "${SCRIPT_DIR}/setup-github-ssh.sh" || true
+                fi
                 JAZZ_AVAILABLE=0
             else
                 fail_clone "${JAZZ_REPO_URL}"
@@ -172,12 +176,30 @@ build_and_link() {
 }
 
 install_release_fallback() {
-  if [[ -x "${SCRIPT_DIR}/install.sh" ]]; then
-    info "installing Flow from release (no Jazz access)..."
-    FLOW_SKIP_DEPS=1 FLOW_BIN_DIR="${BIN_DIR}" "${SCRIPT_DIR}/install.sh"
-  else
-    fail "install.sh not found for release fallback"
+  local root_installer="${SCRIPT_DIR}/../install.sh"
+
+  info "installing Flow from release (no Jazz access)..."
+
+  if [[ -x "${root_installer}" ]]; then
+    if ! FLOW_INSTALL_PATH="${BIN_DIR}/f" "${root_installer}"; then
+      info "release install failed."
+      info "If you don't have access to the private Jazz repo, you need a public Flow release."
+      fail "release install unavailable"
+    fi
+    ln -sf "${BIN_DIR}/f" "${BIN_DIR}/flow"
+    return 0
   fi
+
+  if [[ -x "${SCRIPT_DIR}/install.sh" ]]; then
+    if ! FLOW_SKIP_DEPS=1 FLOW_BIN_DIR="${BIN_DIR}" FLOW_RELEASE_ONLY=1 "${SCRIPT_DIR}/install.sh"; then
+      info "release install failed."
+      info "If you don't have access to the private Jazz repo, you need a public Flow release."
+      fail "release install unavailable"
+    fi
+    return 0
+  fi
+
+  fail "no installer found for release fallback"
 }
 
 ensure_shell_setup() {

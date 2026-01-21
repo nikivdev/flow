@@ -26,6 +26,7 @@ REGISTRY_URL="${FLOW_REGISTRY_URL:-}"
 REGISTRY_PACKAGE="${FLOW_REGISTRY_PACKAGE:-flow}"
 DEV_INSTALL="${FLOW_DEV:-}"
 SKIP_DEPS="${FLOW_SKIP_DEPS:-}"
+RELEASE_ONLY="${FLOW_RELEASE_ONLY:-}"
 RESOLVED_VERSION=""
 OS_NAME=""
 ARCH_NAME=""
@@ -547,6 +548,9 @@ main() {
         if [[ -n "${RESOLVED_VERSION}" ]] && install_from_release "${RESOLVED_VERSION}"; then
             :
         else
+            if [[ -n "${RELEASE_ONLY}" ]]; then
+                fail "release not found or unavailable (FLOW_RELEASE_ONLY=1)"
+            fi
             info "Falling back to source build (release not found or unavailable)."
             install_all_deps
             install_from_source
