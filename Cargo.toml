@@ -50,8 +50,8 @@ ctrlc = "3.4"
 rpassword = "7"
 atty = "0.2"
 cojson-core = { git = "https://github.com/garden-co/jazz", rev = "c5b673823e81b55eff6304b673eeea32e1e0ebb4", package = "cojson-core" }
-groove = { path = "/Users/nikiv/code/org/1f/jazz/crates/groove" }
-groove-rocksdb = { path = "/Users/nikiv/code/org/1f/jazz/crates/groove-rocksdb" }
+groove = { git = "https://github.com/1focus-ai/jazz", branch = "main" }
+groove-rocksdb = { git = "https://github.com/1focus-ai/jazz", branch = "main" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
