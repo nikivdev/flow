@@ -159,9 +159,15 @@ fn apply_diff(diff: Option<String>, file: Option<PathBuf>) -> Result<()> {
     if content.trim().is_empty() {
         bail!("Diff input is empty.");
     }
+    apply_diff_content(&repo_root, &content)?;
 
+    println!("Applied diff successfully.");
+    Ok(())
+}
+
+fn apply_diff_content(repo_root: &Path, content: &str) -> Result<()> {
     let mut child = Command::new("git")
-        .current_dir(&repo_root)
+        .current_dir(repo_root)
         .args(["apply", "--whitespace=fix", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
@@ -180,7 +186,6 @@ fn apply_diff(diff: Option<String>, file: Option<PathBuf>) -> Result<()> {
         bail!("git apply failed");
     }
 
-    println!("Applied diff successfully.");
     Ok(())
 }
 
@@ -283,11 +288,22 @@ fn unroll_bundle(id: &str) -> Result<()> {
     fs::write(&meta_path, serde_json::to_string_pretty(&meta)?)
         .with_context(|| format!("failed to write {}", meta_path.display()))?;
 
+    let stash_ref = stash_if_dirty(&repo_root)?;
+    if let Err(err) = apply_diff_content(&repo_root, &bundle.diff) {
+        if let Some(stash_ref) = stash_ref {
+            eprintln!("Diff apply failed. Your previous state is stashed: {}", stash_ref);
+        }
+        return Err(err);
+    }
+
     println!("Unrolled diff {} -> {}", bundle.hash, output_dir.display());
     if let Some(path) = source_path {
         println!("Source bundle: {}", path.display());
     }
-    println!("Apply: f changes accept --file {}", diff_path.display());
+    if let Some(stash_ref) = stash_ref {
+        println!("Stashed previous state: {}", stash_ref);
+        println!("Restore: git stash pop {}", stash_ref);
+    }
 
     Ok(())
 }
@@ -352,4 +368,30 @@ fn read_bundle(id: &str) -> Result<(DiffBundle, Option<PathBuf>)> {
     }
 
     Ok((bundle, Some(path)))
+}
+
+fn stash_if_dirty(repo_root: &Path) -> Result<Option<String>> {
+    let (status, _ok) = git_output_in(repo_root, &["status", "--porcelain"])?;
+    if status.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let message = format!("flow-diff-{}", Utc::now().format("%Y%m%d-%H%M%S"));
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["stash", "push", "-u", "-m", &message])
+        .output()
+        .context("failed to stash working tree")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("failed to stash working tree: {}", stderr.trim());
+    }
+
+    let (stash_ref, _ok) = git_output_in(repo_root, &["stash", "list", "-1", "--pretty=%gd"])?;
+    let stash_ref = stash_ref.trim().to_string();
+    if stash_ref.is_empty() {
+        return Ok(Some(message));
+    }
+
+    Ok(Some(stash_ref))
 }
