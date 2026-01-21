@@ -12,6 +12,23 @@ use sha2::{Digest, Sha256};
 use crate::{ai, config, env};
 use crate::cli::{ChangesAction, ChangesCommand, DiffCommand};
 
+fn trace_enabled() -> bool {
+    matches!(
+        std::env::var("FLOW_DIFF_TRACE")
+            .or_else(|_| std::env::var("FLOW_TRACE_DIFF"))
+            .or_else(|_| std::env::var("FLOW_DEBUG"))
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+fn trace(msg: &str) {
+    if trace_enabled() {
+        eprintln!("[diff] {}", msg);
+    }
+}
+
 pub fn run(cmd: ChangesCommand) -> Result<()> {
     match cmd.action {
         Some(ChangesAction::CurrentDiff) => {
@@ -33,10 +50,12 @@ pub fn run_diff(cmd: DiffCommand) -> Result<()> {
             if !cmd.env.is_empty() {
                 bail!("Env keys are only supported when creating a bundle.");
             }
+            trace(&format!("unroll bundle: {}", hash));
             unroll_bundle(&hash)
         }
         None => {
             let env_keys = normalize_env_keys(&cmd.env)?;
+            trace(&format!("create bundle (env keys: {})", env_keys.len()));
             create_bundle(&env_keys)
         }
     }
@@ -54,6 +73,7 @@ fn repo_root() -> Result<PathBuf> {
     if root.is_empty() {
         bail!("Unable to resolve git root.");
     }
+    trace(&format!("repo root: {}", root));
     Ok(PathBuf::from(root))
 }
 
@@ -86,9 +106,11 @@ fn resolve_base_ref(repo_root: &Path) -> Result<String> {
     let candidates = ["main", "origin/main", "master", "origin/master"];
     for candidate in candidates {
         if git_ref_exists(repo_root, candidate)? {
+            trace(&format!("base ref: {}", candidate));
             return Ok(candidate.to_string());
         }
     }
+    trace("base ref fallback: HEAD");
     Ok("HEAD".to_string())
 }
 
@@ -115,6 +137,7 @@ fn print_current_diff() -> Result<()> {
 }
 
 fn diff_from_base(repo_root: &Path, base_ref: &str) -> Result<String> {
+    trace(&format!("diffing from {}", base_ref));
     let (tracked_diff, _ok) = git_output_in(&repo_root, &["diff", "--binary", base_ref])?;
     let mut diff = tracked_diff;
 
@@ -168,6 +191,7 @@ fn apply_diff(diff: Option<String>, file: Option<PathBuf>) -> Result<()> {
     if content.trim().is_empty() {
         bail!("Diff input is empty.");
     }
+    trace(&format!("applying diff (bytes: {})", content.len()));
     apply_diff_content(&repo_root, &content)?;
 
     println!("Applied diff successfully.");
@@ -264,6 +288,7 @@ fn create_bundle(env_keys: &[String]) -> Result<()> {
     let project_name = load_project_name(&repo_root)?;
     let base_ref = resolve_base_ref(&repo_root)?;
     let diff = diff_from_base(&repo_root, &base_ref)?;
+    trace(&format!("project: {}", project_name));
     let ai_sessions = match ai::get_sessions_for_gitedit(&repo_root) {
         Ok(sessions) => sessions
             .into_iter()
@@ -305,6 +330,7 @@ fn create_bundle(env_keys: &[String]) -> Result<()> {
     };
 
     let bundle_path = write_bundle(&bundle)?;
+    trace(&format!("bundle written: {}", bundle_path.display()));
 
     println!("Diff hash: {}", hash);
     println!("Project: {}", project_name);
@@ -362,6 +388,7 @@ fn load_project_name(repo_root: &Path) -> Result<String> {
     if !flow_path.exists() {
         bail!("flow.toml not found in repo root.");
     }
+    trace(&format!("reading project name from {}", flow_path.display()));
     let cfg = config::load(&flow_path)
         .with_context(|| format!("failed to read {}", flow_path.display()))?;
     let name = cfg
@@ -384,6 +411,7 @@ fn ensure_project_match(repo_root: &Path, bundle: &DiffBundle) -> Result<()> {
             current_name
         );
     }
+    trace(&format!("project match: {}", current_name));
     Ok(())
 }
 
@@ -406,12 +434,14 @@ fn gather_env_vars(keys: &[String]) -> Result<(Option<String>, BTreeMap<String, 
     if !missing.is_empty() {
         eprintln!("Warning: missing env vars: {}", missing.join(", "));
     }
+    trace(&format!("env keys bundled: {}", vars.len()));
 
     Ok((Some("personal".to_string()), vars))
 }
 
 fn read_personal_local_env(keys: &[String]) -> Result<BTreeMap<String, String>> {
     let path = local_env_path("personal")?;
+    trace(&format!("reading local env: {}", path.display()));
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
@@ -465,6 +495,7 @@ fn unroll_bundle(id: &str) -> Result<()> {
     let meta_path = output_dir.join("meta.json");
     fs::write(&meta_path, serde_json::to_string_pretty(&meta)?)
         .with_context(|| format!("failed to write {}", meta_path.display()))?;
+    trace(&format!("unroll output: {}", output_dir.display()));
 
     let stash_ref = stash_if_dirty(&repo_root, &bundle.hash)?;
     if let Err(err) = apply_diff_content(&repo_root, &bundle.diff) {
@@ -518,6 +549,7 @@ fn bundle_dir() -> Result<PathBuf> {
     let config_dir = config::ensure_global_config_dir()?;
     let diffs_dir = config_dir.join("diffs");
     fs::create_dir_all(&diffs_dir)?;
+    trace(&format!("bundle dir: {}", diffs_dir.display()));
     Ok(diffs_dir)
 }
 
@@ -538,12 +570,14 @@ fn read_bundle(id: &str) -> Result<(DiffBundle, Option<PathBuf>)> {
     };
 
     if !path.exists() {
+        trace(&format!("bundle lookup failed: {}", path.display()));
         bail!(
             "Diff bundle not found. Expected {} or pass a path to a bundle file.",
             path.display()
         );
     }
 
+    trace(&format!("bundle read: {}", path.display()));
     let data = fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let bundle: DiffBundle = serde_json::from_str(&data)
@@ -659,6 +693,7 @@ fn record_stash(
 
     let payload = serde_json::to_string_pretty(&records)?;
     fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))?;
+    trace(&format!("recorded stash: {}", stash_ref));
     Ok(())
 }
 
@@ -708,6 +743,7 @@ fn write_local_env(
 fn stash_if_dirty(repo_root: &Path, bundle_hash: &str) -> Result<Option<String>> {
     let (status, _ok) = git_output_in(repo_root, &["status", "--porcelain"])?;
     if status.trim().is_empty() {
+        trace("working tree clean; no stash needed");
         return Ok(None);
     }
 
