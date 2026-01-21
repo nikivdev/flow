@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as CEvent, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use ignore::WalkBuilder;
 use serde::Deserialize;
 
 use crate::{
@@ -46,6 +47,8 @@ pub fn run(opts: SetupOpts) -> Result<()> {
 
     ensure_bike_gitignore(&project_root)?;
     ensure_project_dependencies(&cfg)?;
+    ensure_pnpm_only_built_deps(&project_root)?;
+    ensure_jazz_local_links(&project_root)?;
 
     if tasks::find_task(&cfg, "setup").is_some() {
         if created_flow_toml {
@@ -174,8 +177,242 @@ fn brew_package_for_command(command: &str) -> Option<String> {
         "python" | "python3" => Some("python".to_string()),
         "go" => Some("go".to_string()),
         "rustc" | "cargo" => Some("rust".to_string()),
+        "wasm-pack" => Some("wasm-pack".to_string()),
         _ => None,
     }
+}
+
+fn ensure_pnpm_only_built_deps(project_root: &Path) -> Result<()> {
+    let workspace_path = project_root.join("pnpm-workspace.yaml");
+    if !workspace_path.exists() {
+        return Ok(());
+    }
+
+    let mut content = fs::read_to_string(&workspace_path)
+        .with_context(|| format!("failed to read {}", workspace_path.display()))?;
+    let mut needed = std::collections::BTreeSet::new();
+    if repo_contains_package(project_root, "electron") {
+        needed.insert("electron".to_string());
+    }
+    if repo_contains_package(project_root, "@swc/core") {
+        needed.insert("@swc/core".to_string());
+    }
+
+    if needed.is_empty() {
+        return Ok(());
+    }
+
+    let has_only_built = content.contains("onlyBuiltDependencies:");
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let mut start_idx = None;
+    for (idx, line) in lines.iter().enumerate() {
+        if line.trim() == "onlyBuiltDependencies:" {
+            start_idx = Some(idx);
+            break;
+        }
+    }
+
+    if start_idx.is_none() {
+        lines.push("".to_string());
+        lines.push("onlyBuiltDependencies:".to_string());
+        start_idx = Some(lines.len() - 1);
+    }
+
+    let start_idx = start_idx.unwrap();
+
+    let mut existing = std::collections::BTreeSet::new();
+    let mut insert_at = start_idx + 1;
+    for idx in start_idx + 1..lines.len() {
+        let line = lines[idx].trim();
+        if !line.starts_with("- ") {
+            insert_at = idx;
+            break;
+        }
+        existing.insert(line.trim_start_matches("- ").trim().to_string());
+        insert_at = idx + 1;
+    }
+
+    let missing: Vec<String> = needed
+        .into_iter()
+        .filter(|dep| !existing.contains(dep))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    for (offset, dep) in missing.iter().enumerate() {
+        lines.insert(insert_at + offset, format!("  - {}", dep));
+    }
+
+    content = lines.join("\n");
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    fs::write(&workspace_path, content)
+        .with_context(|| format!("failed to update {}", workspace_path.display()))?;
+    if has_only_built {
+        println!(
+            "Updated pnpm-workspace.yaml onlyBuiltDependencies with: {}",
+            missing.join(", ")
+        );
+    } else {
+        println!(
+            "Added pnpm-workspace.yaml onlyBuiltDependencies with: {}",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn repo_contains_package(project_root: &Path, needle: &str) -> bool {
+    let walker = WalkBuilder::new(project_root)
+        .hidden(false)
+        .ignore(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .build();
+
+    for entry in walker.flatten() {
+        if entry
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            != Some("package.json")
+        {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(entry.path()) {
+            if text.contains(&format!("\"{}\"", needle)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
+    let old_root = "/Users/nikiv/code/org/1f/jazz";
+    let link_old = format!("link:{}", old_root);
+    let files = [
+        project_root.join("packages/web/package.json"),
+        project_root.join("packages/web/tsconfig.json"),
+        project_root.join("packages/web/vite.config.ts"),
+        project_root.join("pnpm-lock.yaml"),
+    ];
+
+    let mut needs_rewrite = false;
+    for file in files.iter() {
+        if !file.exists() {
+            continue;
+        }
+        let text = fs::read_to_string(file).unwrap_or_default();
+        if text.contains(old_root) || text.contains(&link_old) {
+            needs_rewrite = true;
+            break;
+        }
+    }
+
+    if !needs_rewrite {
+        return Ok(());
+    }
+
+    let env_root = std::env::var("JAZZ_ROOT")
+        .ok()
+        .or_else(|| std::env::var("FLOW_JAZZ_ROOT").ok());
+
+    let mut target_root = env_root
+        .map(PathBuf::from)
+        .or_else(|| {
+            let candidate = dirs::home_dir()?.join("code/org/1f/jazz");
+            candidate.exists().then_some(candidate)
+        })
+        .or_else(|| {
+            let candidate = dirs::home_dir()?.join("code/org/1f/jazz2");
+            candidate.exists().then_some(candidate)
+        });
+
+    if target_root.is_none() {
+        let candidate = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("~"))
+            .join("code/org/1f/jazz");
+        if let Some(parent) = candidate.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        println!("Jazz repo not found; attempting to clone to {}...", candidate.display());
+        let status = Command::new("git")
+            .args(["clone", "https://github.com/garden-co/jazz", candidate.to_str().unwrap_or("")])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
+        if let Ok(status) = status {
+            if status.success() {
+                target_root = Some(candidate);
+            } else {
+                println!("Failed to clone jazz; update paths manually.");
+            }
+        }
+    }
+
+    let Some(target_root) = target_root else {
+        return Ok(());
+    };
+
+    let target_root = target_root
+        .canonicalize()
+        .unwrap_or_else(|_| target_root.clone());
+    let target_root_str = target_root.to_string_lossy().to_string();
+    let link_new = format!("link:{}", target_root_str);
+
+    for file in files.iter() {
+        if !file.exists() {
+            continue;
+        }
+        let mut text = fs::read_to_string(file)
+            .with_context(|| format!("failed to read {}", file.display()))?;
+        if !text.contains(old_root) && !text.contains(&link_old) {
+            continue;
+        }
+        text = text.replace(old_root, &target_root_str);
+        text = text.replace(&link_old, &link_new);
+        fs::write(file, text).with_context(|| format!("failed to write {}", file.display()))?;
+        println!("Rewrote Jazz paths in {}", file.display());
+    }
+
+    let groove_wasm = target_root.join("crates/groove-wasm/pkg/groove_wasm.js");
+    if groove_wasm.exists() {
+        return Ok(());
+    }
+
+    println!("Building groove-wasm...");
+    if which::which("wasm-pack").is_err() {
+        if brew_available() {
+            println!("Installing wasm-pack...");
+            let _ = Command::new("brew")
+                .args(["install", "wasm-pack"])
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status();
+        } else {
+            println!("wasm-pack not found; install it to build groove-wasm.");
+            return Ok(());
+        }
+    }
+
+    let status = Command::new("wasm-pack")
+        .args(["build", "--target", "web"])
+        .current_dir(target_root.join("crates/groove-wasm"))
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run wasm-pack")?;
+    if !status.success() {
+        println!("groove-wasm build failed; run it manually if needed.");
+    }
+
+    Ok(())
 }
 
 fn resolve_project_root(config_path: &PathBuf) -> Result<(PathBuf, PathBuf)> {
