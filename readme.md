@@ -30,6 +30,14 @@ Overrides:
 - `FLOW_DEV_ROOT` to change the base directory (default `~/code/org/1f`)
 - `FLOW_REPO_URL` / `FLOW_JAZZ_URL` to use forks
 - `FLOW_BIN_DIR` to change where binaries are linked
+- `FLOW_GITHUB_TOKEN` (or `GITHUB_TOKEN`) if a repo is private
+- `FLOW_GIT_SSH=1` to use SSH URLs (requires SSH key access)
+
+If a private repo clone fails, the installer will run:
+
+```sh
+./scripts/setup-github-ssh.sh
+```
 
 ## Dev 
 

@@ -24,6 +24,9 @@ JAZZ_REPO_URL="${FLOW_JAZZ_URL:-https://github.com/1focus-ai/jazz}"
 FLOW_DIR="${FLOW_DEV_FLOW_DIR:-$BASE_DIR/flow}"
 JAZZ_DIR="${FLOW_DEV_JAZZ_DIR:-$BASE_DIR/jazz}"
 BIN_DIR="${FLOW_BIN_DIR:-$HOME/.local/bin}"
+USE_SSH="${FLOW_GIT_SSH:-}"
+GITHUB_TOKEN="${FLOW_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ensure_brew() {
   if command -v brew >/dev/null 2>&1; then
@@ -69,23 +72,63 @@ ensure_rust() {
 }
 
 clone_or_update() {
-  mkdir -p "${BASE_DIR}"
+    mkdir -p "${BASE_DIR}"
 
-  if [[ -d "${JAZZ_DIR}/.git" ]]; then
-    info "updating Jazz..."
-    (cd "${JAZZ_DIR}" && git pull --rebase) || true
-  else
-    info "cloning Jazz to ${JAZZ_DIR}..."
-    git clone "${JAZZ_REPO_URL}" "${JAZZ_DIR}"
+    local resolved_jazz_url
+    local resolved_flow_url
+
+    resolved_jazz_url="$(resolve_repo_url "${JAZZ_REPO_URL}")"
+    resolved_flow_url="$(resolve_repo_url "${FLOW_REPO_URL}")"
+
+    if [[ -d "${JAZZ_DIR}/.git" ]]; then
+        info "updating Jazz..."
+        (cd "${JAZZ_DIR}" && GIT_TERMINAL_PROMPT=0 git pull --rebase) || true
+    else
+        info "cloning Jazz to ${JAZZ_DIR}..."
+        GIT_TERMINAL_PROMPT=0 git clone "${resolved_jazz_url}" "${JAZZ_DIR}" || fail_clone "${JAZZ_REPO_URL}"
+    fi
+
+    if [[ -d "${FLOW_DIR}/.git" ]]; then
+        info "updating Flow..."
+        (cd "${FLOW_DIR}" && GIT_TERMINAL_PROMPT=0 git pull --rebase) || true
+    else
+        info "cloning Flow to ${FLOW_DIR}..."
+        GIT_TERMINAL_PROMPT=0 git clone "${resolved_flow_url}" "${FLOW_DIR}" || fail_clone "${FLOW_REPO_URL}"
+    fi
+}
+
+resolve_repo_url() {
+  local url="$1"
+
+  if [[ -n "${USE_SSH}" ]]; then
+    if [[ "${url}" =~ ^https://github.com/([^/]+)/([^/]+)(\.git)?$ ]]; then
+      echo "git@github.com:${BASH_REMATCH[1]}/${BASH_REMATCH[2]}.git"
+      return
+    fi
   fi
 
-  if [[ -d "${FLOW_DIR}/.git" ]]; then
-    info "updating Flow..."
-    (cd "${FLOW_DIR}" && git pull --rebase) || true
-  else
-    info "cloning Flow to ${FLOW_DIR}..."
-    git clone "${FLOW_REPO_URL}" "${FLOW_DIR}"
+  if [[ -n "${GITHUB_TOKEN}" ]]; then
+    if [[ "${url}" =~ ^https://github.com/(.+)$ ]]; then
+      echo "https://x-access-token:${GITHUB_TOKEN}@github.com/${BASH_REMATCH[1]}"
+      return
+    fi
   fi
+
+  echo "${url}"
+}
+
+fail_clone() {
+  local url="$1"
+  info ""
+  info "clone failed for ${url}"
+  if [[ -x "${SCRIPT_DIR}/setup-github-ssh.sh" ]]; then
+    info "attempting to provision GitHub SSH key..."
+    "${SCRIPT_DIR}/setup-github-ssh.sh" || true
+  fi
+  info "If this repo is private, set one of:"
+  info "  FLOW_GITHUB_TOKEN=... (or GITHUB_TOKEN=...)"
+  info "  FLOW_GIT_SSH=1 (uses git@github.com:... and your SSH key)"
+  fail "unable to clone ${url}"
 }
 
 write_cargo_patch() {
