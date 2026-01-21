@@ -28,6 +28,7 @@ pub mod history;
 pub mod health;
 pub mod home;
 pub mod hub;
+pub mod info;
 pub mod init;
 pub mod install;
 pub mod jazz_state;

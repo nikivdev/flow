@@ -7,7 +7,7 @@ use flowd::{
     agents, ai, archive, auth,
     cli::{Cli, Commands, InstallAction, RerunOpts, ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction},
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fixup, health, help_search,
-    history, home, hub, init, init_tracing, install, log_server, notify, palette, parallel,
+    history, home, hub, info, init, init_tracing, install, log_server, notify, palette, parallel,
     processes, projects,
     publish, registry, release, repos, services, setup, skills, ssh_keys, storage, supervisor,
     sync, task_match, tasks, todo, tools, traces, upgrade, upstream, web,
@@ -75,8 +75,8 @@ fn main() -> Result<()> {
         Some(Commands::Health(opts)) => {
             health::run(opts)?;
         }
-        Some(Commands::Tasks(opts)) => {
-            tasks::list(opts)?;
+        Some(Commands::Tasks(cmd)) => {
+            tasks::run_tasks_command(cmd)?;
         }
         Some(Commands::Global(cmd)) => {
             tasks::run_global(cmd)?;
@@ -259,6 +259,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Sync(cmd)) => {
             sync::run(cmd)?;
+        }
+        Some(Commands::Info) => {
+            info::run()?;
         }
         Some(Commands::Upstream(cmd)) => {
             upstream::run(cmd)?;

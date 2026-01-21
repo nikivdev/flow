@@ -234,18 +234,21 @@ pub fn run_migrate(cmd: MigrateCommand) -> Result<()> {
         }
     };
 
-    migrate_to_path(&from, &target, cmd.dry_run, cmd.skip_claude, cmd.skip_codex)
+    migrate_to_path(&from, &target, cmd.copy, cmd.dry_run, cmd.skip_claude, cmd.skip_codex)
 }
 
 /// Migrate a folder to an arbitrary target path (not necessarily ~/code).
 fn migrate_to_path(
     from: &Path,
     target: &Path,
+    copy: bool,
     dry_run: bool,
     skip_claude: bool,
     skip_codex: bool,
 ) -> Result<()> {
     let target_display = target.display().to_string();
+    let action = if copy { "copy" } else { "move" };
+    let action_past = if copy { "Copied" } else { "Moved" };
 
     if from == target {
         bail!("Source and destination are the same path.");
@@ -276,15 +279,26 @@ fn migrate_to_path(
     }
 
     if dry_run {
-        println!("Would move {} -> {}", from.display(), target_display);
+        println!("Would {} {} -> {}", action, from.display(), target_display);
+    } else if copy {
+        copy_dir_all(from, target)?;
+        println!("{} {} -> {}", action_past, from.display(), target_display);
     } else {
         move_dir(from, target)?;
-        println!("Moved {} -> {}", from.display(), target_display);
+        println!("{} {} -> {}", action_past, from.display(), target_display);
     }
 
-    let relinked = relink_bin_symlinks(from, target, dry_run)?;
-    if relinked > 0 {
-        println!("Updated {} symlink(s) in ~/bin", relinked);
+    // Only relink symlinks if moving (not copying)
+    if !copy {
+        let relinked = relink_bin_symlinks(from, target, dry_run)?;
+        if relinked > 0 {
+            println!("Updated {} symlink(s) in ~/bin", relinked);
+        }
+    }
+
+    // Skip session migration for copy (sessions stay with original)
+    if copy {
+        return Ok(());
     }
 
     let session_opts = CodeMoveSessionsOpts {
