@@ -220,6 +220,16 @@ pub enum Commands {
     )]
     Fixup(FixupOpts),
     #[command(
+        about = "Share or apply git diffs without remotes.",
+        long_about = "Print the current git diff for sharing or apply a diff string/file to this repo. Useful when git pull/push isn't available."
+    )]
+    Changes(ChangesCommand),
+    #[command(
+        about = "Create or unpack a shareable diff bundle.",
+        long_about = "Generates a diff against the main branch (including untracked files) plus AI sessions, stores it by hash, or unrolls a stored bundle by hash."
+    )]
+    Diff(DiffCommand),
+    #[command(
         about = "Manage background daemons (start, stop, status).",
         long_about = "Start, stop, and monitor background daemons defined in flow.toml. Daemons are long-running processes like sync servers, API servers, or file watchers.",
         alias = "d"
@@ -1083,6 +1093,38 @@ pub struct FixupOpts {
     /// Only show what would be fixed without making changes.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ChangesCommand {
+    #[command(subcommand)]
+    pub action: Option<ChangesAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DiffCommand {
+    /// Hash to unroll. When omitted, creates a new diff bundle.
+    pub hash: Option<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ChangesAction {
+    #[command(
+        about = "Print the current git diff for sharing.",
+        long_about = "Outputs git diff (including untracked files) so it can be applied elsewhere."
+    )]
+    CurrentDiff,
+    #[command(
+        about = "Apply a diff to the current repo.",
+        long_about = "Accepts a diff string, a file path, or '-' to read from stdin."
+    )]
+    Accept {
+        /// Diff content, '-' for stdin, or a path to a diff file.
+        diff: Option<String>,
+        /// Read diff from a file path.
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]

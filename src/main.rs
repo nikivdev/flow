@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
     agents, ai, archive, auth,
+    changes,
     cli::{Cli, Commands, InstallAction, RerunOpts, ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction},
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fixup, health, help_search,
     history, home, hub, info, init, init_tracing, install, log_server, notify, palette, parallel,
@@ -195,6 +196,12 @@ fn main() -> Result<()> {
         }
         Some(Commands::Fixup(opts)) => {
             fixup::run(opts)?;
+        }
+        Some(Commands::Changes(cmd)) => {
+            changes::run(cmd)?;
+        }
+        Some(Commands::Diff(cmd)) => {
+            changes::run_diff(cmd)?;
         }
         Some(Commands::Daemon(cmd)) => {
             daemon::run(cmd)?;

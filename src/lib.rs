@@ -4,6 +4,7 @@ pub mod ai;
 pub mod ai_context;
 pub mod archive;
 pub mod auth;
+pub mod changes;
 pub mod cli;
 pub mod code;
 pub mod commit;
