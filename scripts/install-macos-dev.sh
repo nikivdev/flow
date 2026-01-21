@@ -195,6 +195,7 @@ EOF
 }
 
 build_and_link() {
+  cleanup_stale_links
   if [[ "${JAZZ_AVAILABLE}" = "0" ]]; then
     install_release_fallback
     return 0
@@ -286,6 +287,7 @@ install_local_dist() {
     return 1
   fi
 
+  cleanup_stale_links
   mkdir -p "${BIN_DIR}"
   cp "${binary}" "${BIN_DIR}/f"
   chmod +x "${BIN_DIR}/f"
@@ -297,6 +299,14 @@ install_local_dist() {
 
   rm -rf "${tmpdir}"
   return 0
+}
+
+cleanup_stale_links() {
+  local home_bin="$HOME/bin"
+  rm -f "${BIN_DIR}/f" "${BIN_DIR}/flow"
+  if [[ -d "${home_bin}" ]]; then
+    rm -f "${home_bin}/f" "${home_bin}/flow"
+  fi
 }
 
 ensure_shell_setup() {
