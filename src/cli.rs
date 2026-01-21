@@ -1105,6 +1105,9 @@ pub struct ChangesCommand {
 pub struct DiffCommand {
     /// Hash to unroll. When omitted, creates a new diff bundle.
     pub hash: Option<String>,
+    /// Include specific env vars from local personal env store.
+    #[arg(long, value_name = "KEY", action = clap::ArgAction::Append)]
+    pub env: Vec<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
