@@ -20,6 +20,7 @@ cd flow
 This script will:
 
 - Install `fnm` + Node (if missing)
+- Install `fzf` (used by `f` for fuzzy selection)
 - Install Rust (if missing)
 - Clone/update Flow + Jazz under `~/code/org/1f` (if Jazz is accessible)
 - Patch Cargo to use local Groove crates
@@ -34,7 +35,9 @@ Overrides:
 - `FLOW_GITHUB_TOKEN` (or `GITHUB_TOKEN`) if a repo is private
 - `FLOW_GIT_SSH=1` to use SSH URLs (requires SSH key access)
 - `FLOW_JAZZ_OPTIONAL=0` to require Jazz access (otherwise it falls back to release)
-- If Jazz is not accessible and no public release exists, the installer will fail and you need access to the private repo or a published release.
+- If Jazz is not accessible, the installer tries to use a local dist tarball from `./dist`.
+- If there is no local dist tarball and no public release, the installer will fail and you need access to the private repo or a published release.
+- If GitHub SSH auth fails, the installer sets `FLOW_FORCE_HTTPS=1` so `f repos clone` uses HTTPS by default.
 
 If a private repo clone fails, the installer will run:
 

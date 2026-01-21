@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::cli::HomeOpts;
+use crate::cli::{HomeAction, HomeCommand};
 use crate::{config, ssh, ssh_keys};
 
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
@@ -53,7 +53,13 @@ struct HomeConfigSection {
     kar_repo_url: Option<String>,
 }
 
-pub fn run(opts: HomeOpts) -> Result<()> {
+pub fn run(opts: HomeCommand) -> Result<()> {
+    if let Some(action) = opts.action {
+        match action {
+            HomeAction::Setup => return setup(),
+        }
+    }
+
     ssh::ensure_ssh_env();
     let mode = ssh::ssh_mode();
     if matches!(mode, ssh::SshMode::Force) && !ssh::has_identities() {
@@ -68,7 +74,11 @@ pub fn run(opts: HomeOpts) -> Result<()> {
     let prefer_ssh = ssh::prefer_ssh();
     let home = dirs::home_dir().context("Could not find home directory")?;
     let config_dir = home.join("config");
-    let repo = coerce_repo_scheme(parse_repo_input(&opts.repo)?, prefer_ssh);
+    let repo_str = opts
+        .repo
+        .as_ref()
+        .context("Missing repo. Use `f home <repo>` or `f home setup`.")?;
+    let repo = coerce_repo_scheme(parse_repo_input(repo_str)?, prefer_ssh);
     let flow_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("f"));
 
     ensure_repo(&config_dir, Some(&repo.clone_url), "config", false)?;
@@ -124,6 +134,100 @@ pub fn run(opts: HomeOpts) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn setup() -> Result<()> {
+    println!("Home setup");
+    println!("-----------");
+
+    if !check_git() {
+        println!("git not found on PATH. Install Xcode Command Line Tools:");
+        println!("  xcode-select --install");
+        return Ok(());
+    }
+
+    ssh::ensure_ssh_env();
+
+    let ssh_check = check_git_access("git@github.com:github/linguist.git");
+    if ssh_check.ok {
+        println!("✓ GitHub SSH auth works (git@github.com)");
+    } else {
+        println!("✗ GitHub SSH auth failed (git@github.com)");
+    }
+
+    let https_check = check_git_access("https://github.com/github/linguist.git");
+    if https_check.ok {
+        println!("✓ GitHub HTTPS works (https://github.com)");
+    } else {
+        println!("✗ GitHub HTTPS failed (https://github.com)");
+    }
+
+    if !ssh_check.ok && https_check.ok {
+        match ssh::ensure_git_https_insteadof() {
+            Ok(true) => println!("Configured git to use HTTPS when SSH isn't available."),
+            Ok(false) => {}
+            Err(err) => println!("warning: failed to configure git https rewrites: {}", err),
+        }
+        println!("If you want SSH instead, add your key to GitHub and run:");
+        println!("  f ssh setup");
+        println!("  ssh -T git@github.com");
+    }
+
+    if !ssh_check.ok && !https_check.ok {
+        println!("GitHub connectivity failed. Check your network or proxy settings.");
+    }
+
+    if !ssh_check.ok {
+        if ssh_check
+            .stderr
+            .to_lowercase()
+            .contains("permission denied (publickey)")
+        {
+            println!("SSH key is not authorized for GitHub. Add ~/.ssh/id_ed25519.pub to GitHub.");
+        } else if ssh_check
+            .stderr
+            .to_lowercase()
+            .contains("host key verification failed")
+        {
+            println!("Accept GitHub host key first: ssh -T git@github.com");
+        }
+    }
+
+    println!("Done.");
+    Ok(())
+}
+
+fn check_git() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+struct GitCheck {
+    ok: bool,
+    stderr: String,
+}
+
+fn check_git_access(url: &str) -> GitCheck {
+    let output = Command::new("git")
+        .args(["ls-remote", "--heads", url])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output();
+
+    match output {
+        Ok(out) => GitCheck {
+            ok: out.status.success(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        },
+        Err(err) => GitCheck {
+            ok: false,
+            stderr: err.to_string(),
+        },
+    }
 }
 
 fn archive_existing_configs(config_dir: &Path) -> Result<Vec<PathBuf>> {

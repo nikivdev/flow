@@ -104,10 +104,10 @@ pub enum Commands {
     )]
     New(NewOpts),
     #[command(
-        about = "Clone and apply a home config repo.",
-        long_about = "Clones a GitHub config repo into ~/config, optionally pulls an internal repo into ~/config/i, then applies symlinked configs."
+        about = "Home setup and config repo management.",
+        long_about = "Set up your home environment or clone a GitHub config repo into ~/config, optionally pulling an internal repo into ~/config/i, then applying symlinked configs."
     )]
-    Home(HomeOpts),
+    Home(HomeCommand),
     #[command(
         about = "Archive the current project to ~/archive/code.",
         long_about = "Copies the current project into ~/archive/code/<project>-<message> so you can keep a snapshot outside git history."
@@ -804,12 +804,20 @@ pub struct NewOpts {
 }
 
 #[derive(Args, Debug, Clone)]
-pub struct HomeOpts {
+pub struct HomeCommand {
+    #[command(subcommand)]
+    pub action: Option<HomeAction>,
     /// GitHub URL or owner/repo for the config repo.
-    pub repo: String,
+    pub repo: Option<String>,
     /// Optional internal config repo URL (cloned into ~/config/i).
     #[arg(long)]
     pub internal: Option<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum HomeAction {
+    /// Guide home setup and validate GitHub access.
+    Setup,
 }
 
 #[derive(Args, Debug, Clone)]

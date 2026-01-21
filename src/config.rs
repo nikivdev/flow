@@ -143,6 +143,8 @@ pub struct TsFlowConfig {
     #[serde(default)]
     pub commit: Option<TsCommitConfig>,
     #[serde(default)]
+    pub review: Option<TsReviewConfig>,
+    #[serde(default)]
     pub agents: Option<TsAgentsConfig>,
     #[serde(default)]
     pub env: Option<TsEnvConfig>,
@@ -188,6 +190,17 @@ pub struct TsCommitConfig {
     /// Whether to run async (delegate to hub). Default true.
     #[serde(default, rename = "async")]
     pub async_enabled: Option<bool>,
+}
+
+/// Review settings from TypeScript config (overrides commit settings for review).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TsReviewConfig {
+    /// Tool to use for review: "claude", "codex", "opencode"
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// Model identifier for review (e.g., "opencode/glm-4.7-free")
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl Default for Config {
