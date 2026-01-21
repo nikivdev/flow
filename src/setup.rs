@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as CEvent, KeyCode};
@@ -44,6 +45,7 @@ pub fn run(opts: SetupOpts) -> Result<()> {
     let (config_path, cfg) = load_project_config(config_path)?;
 
     ensure_bike_gitignore(&project_root)?;
+    ensure_project_dependencies(&cfg)?;
 
     if tasks::find_task(&cfg, "setup").is_some() {
         if created_flow_toml {
@@ -86,6 +88,94 @@ pub fn run(opts: SetupOpts) -> Result<()> {
 fn ensure_bike_gitignore(project_root: &Path) -> Result<()> {
     add_gitignore_entry(project_root, ".ai/todos/*.bike")?;
     add_gitignore_entry(project_root, ".ai/review-log.jsonl")
+}
+
+fn ensure_project_dependencies(cfg: &config::Config) -> Result<()> {
+    if cfg.dependencies.is_empty() {
+        return Ok(());
+    }
+
+    let mut commands = Vec::new();
+    for spec in cfg.dependencies.values() {
+        spec.extend_commands(&mut commands);
+    }
+
+    let mut missing = std::collections::BTreeSet::new();
+    for command in commands {
+        if which::which(&command).is_err() {
+            missing.insert(command);
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    println!(
+        "Missing dependencies: {}",
+        missing.iter().cloned().collect::<Vec<_>>().join(", ")
+    );
+
+    if !brew_available() {
+        println!("Homebrew not found. Install missing deps manually.");
+        return Ok(());
+    }
+
+    let mut packages = std::collections::BTreeSet::new();
+    for command in &missing {
+        if let Some(pkg) = brew_package_for_command(command) {
+            packages.insert(pkg);
+        } else {
+            println!("  - No brew mapping for '{}'; install it manually.", command);
+        }
+    }
+
+    if packages.is_empty() {
+        return Ok(());
+    }
+
+    println!(
+        "Installing missing deps with Homebrew: {}",
+        packages.iter().cloned().collect::<Vec<_>>().join(", ")
+    );
+
+    for pkg in packages {
+        let status = Command::new("brew")
+            .args(["install", &pkg])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .with_context(|| format!("failed to run brew install {}", pkg))?;
+        if !status.success() {
+            println!("  - brew install {} failed; install it manually.", pkg);
+        }
+    }
+
+    Ok(())
+}
+
+fn brew_available() -> bool {
+    Command::new("brew")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn brew_package_for_command(command: &str) -> Option<String> {
+    match command {
+        "pnpm" => Some("pnpm".to_string()),
+        "yarn" => Some("yarn".to_string()),
+        "bun" => Some("bun".to_string()),
+        "node" | "npm" => Some("node".to_string()),
+        "python" | "python3" => Some("python".to_string()),
+        "go" => Some("go".to_string()),
+        "rustc" | "cargo" => Some("rust".to_string()),
+        _ => None,
+    }
 }
 
 fn resolve_project_root(config_path: &PathBuf) -> Result<(PathBuf, PathBuf)> {
