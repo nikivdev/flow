@@ -393,6 +393,11 @@ pub enum Commands {
     )]
     Upgrade(UpgradeOpts),
     #[command(
+        about = "Pull ~/code/flow and rebuild the local flow binary.",
+        long_about = "Updates ~/code/flow, runs f deploy in that repo, and reloads the fish shell."
+    )]
+    Latest,
+    #[command(
         about = "Release a project (registry, GitHub, or task).",
         long_about = "Release a project based on flow.toml defaults. Supports Flow registry releases, GitHub releases, or running a release task.",
         alias = "rel"
@@ -1106,6 +1111,9 @@ pub struct DiffCommand {
     /// Hash to unroll. When omitted, creates a new diff bundle.
     pub hash: Option<String>,
     /// Include specific env vars from local personal env store.
+    /// Examples: --env CEREBRAS_API_KEY --env CEREBRAS_MODEL
+    ///           --env CEREBRAS_API_KEY,CEREBRAS_MODEL
+    ///           --env='[\"CEREBRAS_API_KEY\",\"CEREBRAS_MODEL\"]'
     #[arg(long, value_name = "KEY", action = clap::ArgAction::Append)]
     pub env: Vec<String>,
 }

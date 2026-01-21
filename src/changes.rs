@@ -35,7 +35,10 @@ pub fn run_diff(cmd: DiffCommand) -> Result<()> {
             }
             unroll_bundle(&hash)
         }
-        None => create_bundle(&cmd.env),
+        None => {
+            let env_keys = normalize_env_keys(&cmd.env)?;
+            create_bundle(&env_keys)
+        }
     }
 }
 
@@ -201,6 +204,8 @@ struct DiffBundle {
     version: u32,
     created_at: String,
     repo_root: String,
+    #[serde(default)]
+    project_name: Option<String>,
     base_ref: String,
     diff: String,
     ai_sessions: Vec<serde_json::Value>,
@@ -215,6 +220,7 @@ struct DiffBundlePayload {
     version: u32,
     created_at: String,
     repo_root: String,
+    project_name: Option<String>,
     base_ref: String,
     diff: String,
     ai_sessions: Vec<serde_json::Value>,
@@ -232,6 +238,18 @@ struct DiffBundlePayloadV1 {
     ai_sessions: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Serialize)]
+struct DiffBundlePayloadV2 {
+    version: u32,
+    created_at: String,
+    repo_root: String,
+    base_ref: String,
+    diff: String,
+    ai_sessions: Vec<serde_json::Value>,
+    env_target: Option<String>,
+    env_vars: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct DiffStashRecord {
     stash_ref: String,
@@ -243,6 +261,7 @@ struct DiffStashRecord {
 
 fn create_bundle(env_keys: &[String]) -> Result<()> {
     let repo_root = repo_root()?;
+    let project_name = load_project_name(&repo_root)?;
     let base_ref = resolve_base_ref(&repo_root)?;
     let diff = diff_from_base(&repo_root, &base_ref)?;
     let ai_sessions = match ai::get_sessions_for_gitedit(&repo_root) {
@@ -260,9 +279,10 @@ fn create_bundle(env_keys: &[String]) -> Result<()> {
     let (env_target, env_vars) = gather_env_vars(env_keys)?;
 
     let payload = DiffBundlePayload {
-        version: 2,
+        version: 3,
         created_at: created_at.clone(),
         repo_root: repo_root_str.clone(),
+        project_name: Some(project_name.clone()),
         base_ref: base_ref.clone(),
         diff: diff.clone(),
         ai_sessions: ai_sessions.clone(),
@@ -276,6 +296,7 @@ fn create_bundle(env_keys: &[String]) -> Result<()> {
         version: payload.version,
         created_at: payload.created_at,
         repo_root: payload.repo_root,
+        project_name: payload.project_name,
         base_ref: payload.base_ref,
         diff: payload.diff,
         ai_sessions: payload.ai_sessions,
@@ -286,6 +307,7 @@ fn create_bundle(env_keys: &[String]) -> Result<()> {
     let bundle_path = write_bundle(&bundle)?;
 
     println!("Diff hash: {}", hash);
+    println!("Project: {}", project_name);
     println!("Base ref: {}", base_ref);
     println!("AI sessions: {}", ai_sessions.len());
     if !env_vars.is_empty() {
@@ -294,6 +316,74 @@ fn create_bundle(env_keys: &[String]) -> Result<()> {
     println!("Bundle: {}", bundle_path.display());
     println!("Unroll: f diff {}", hash);
 
+    Ok(())
+}
+
+fn normalize_env_keys(raw: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for item in raw {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let parsed: Vec<String> = serde_json::from_str(trimmed)
+                .context("failed to parse --env JSON array")?;
+            for key in parsed {
+                let key = key.trim().to_string();
+                if !key.is_empty() {
+                    out.push(key);
+                }
+            }
+            continue;
+        }
+
+        if trimmed.contains(',') {
+            for key in trimmed.split(',') {
+                let key = key.trim().to_string();
+                if !key.is_empty() {
+                    out.push(key);
+                }
+            }
+            continue;
+        }
+
+        out.push(trimmed.to_string());
+    }
+
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+fn load_project_name(repo_root: &Path) -> Result<String> {
+    let flow_path = repo_root.join("flow.toml");
+    if !flow_path.exists() {
+        bail!("flow.toml not found in repo root.");
+    }
+    let cfg = config::load(&flow_path)
+        .with_context(|| format!("failed to read {}", flow_path.display()))?;
+    let name = cfg
+        .project_name
+        .ok_or_else(|| anyhow::anyhow!("flow.toml missing 'name'"))?;
+    Ok(name)
+}
+
+fn ensure_project_match(repo_root: &Path, bundle: &DiffBundle) -> Result<()> {
+    let bundle_name = bundle.project_name.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Diff bundle missing project name. Recreate with the latest flow."
+        )
+    })?;
+    let current_name = load_project_name(repo_root)?;
+    if bundle_name != current_name {
+        bail!(
+            "Project mismatch. Bundle is for '{}' but this repo is '{}'.",
+            bundle_name,
+            current_name
+        );
+    }
     Ok(())
 }
 
@@ -347,6 +437,7 @@ fn read_personal_local_env(keys: &[String]) -> Result<BTreeMap<String, String>> 
 fn unroll_bundle(id: &str) -> Result<()> {
     let (bundle, source_path) = read_bundle(id)?;
     let repo_root = repo_root()?;
+    ensure_project_match(&repo_root, &bundle)?;
     let output_dir = repo_root.join(".ai").join("diffs").join(&bundle.hash);
     fs::create_dir_all(&output_dir)?;
 
@@ -415,6 +506,14 @@ fn bundle_hash_v1(payload: &DiffBundlePayloadV1) -> Result<String> {
     Ok(hex::encode(digest))
 }
 
+fn bundle_hash_v2(payload: &DiffBundlePayloadV2) -> Result<String> {
+    let bytes = serde_json::to_vec(payload).context("failed to serialize diff bundle")?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    Ok(hex::encode(digest))
+}
+
 fn bundle_dir() -> Result<PathBuf> {
     let config_dir = config::ensure_global_config_dir()?;
     let diffs_dir = config_dir.join("diffs");
@@ -460,11 +559,24 @@ fn read_bundle(id: &str) -> Result<(DiffBundle, Option<PathBuf>)> {
             ai_sessions: bundle.ai_sessions.clone(),
         };
         bundle_hash_v1(&payload)?
+    } else if bundle.version == 2 {
+        let payload = DiffBundlePayloadV2 {
+            version: bundle.version,
+            created_at: bundle.created_at.clone(),
+            repo_root: bundle.repo_root.clone(),
+            base_ref: bundle.base_ref.clone(),
+            diff: bundle.diff.clone(),
+            ai_sessions: bundle.ai_sessions.clone(),
+            env_target: bundle.env_target.clone(),
+            env_vars: bundle.env_vars.clone(),
+        };
+        bundle_hash_v2(&payload)?
     } else {
         let payload = DiffBundlePayload {
             version: bundle.version,
             created_at: bundle.created_at.clone(),
             repo_root: bundle.repo_root.clone(),
+            project_name: bundle.project_name.clone(),
             base_ref: bundle.base_ref.clone(),
             diff: bundle.diff.clone(),
             ai_sessions: bundle.ai_sessions.clone(),

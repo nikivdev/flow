@@ -8,8 +8,8 @@ use flowd::{
     changes,
     cli::{Cli, Commands, InstallAction, RerunOpts, ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction},
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fixup, health, help_search,
-    history, home, hub, info, init, init_tracing, install, log_server, notify, palette, parallel,
-    processes, projects,
+    history, home, hub, info, init, init_tracing, install, latest, log_server, notify, palette,
+    parallel, processes, projects,
     publish, registry, release, repos, services, setup, skills, ssh_keys, storage, supervisor,
     sync, task_match, tasks, todo, tools, traces, upgrade, upstream, web,
 };
@@ -295,6 +295,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Upgrade(opts)) => {
             upgrade::run(opts)?;
+        }
+        Some(Commands::Latest) => {
+            latest::run()?;
         }
         Some(Commands::Release(cmd)) => {
             release::run(cmd)?;
