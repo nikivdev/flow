@@ -33,6 +33,7 @@ pub mod info;
 pub mod init;
 pub mod install;
 pub mod jazz_state;
+pub mod latest;
 pub mod lmstudio;
 pub mod log_server;
 pub mod log_store;
