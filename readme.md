@@ -34,12 +34,17 @@ Overrides:
 - `FLOW_GITHUB_TOKEN` (or `GITHUB_TOKEN`) if a repo is private
 - `FLOW_GIT_SSH=1` to use SSH URLs (requires SSH key access)
 - `FLOW_JAZZ_OPTIONAL=0` to require Jazz access (otherwise it falls back to release)
+- If Jazz is not accessible and no public release exists, the installer will fail and you need access to the private repo or a published release.
 
 If a private repo clone fails, the installer will run:
 
 ```sh
 ./scripts/setup-github-ssh.sh
 ```
+
+That script prints (and copies) a single-line public key that starts with
+`ssh-ed25519`. Paste that exact line into GitHub → Settings → SSH and GPG keys
+→ New SSH key (Key type: Authentication).
 
 ## Dev 
 
