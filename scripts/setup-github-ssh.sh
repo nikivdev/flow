@@ -20,6 +20,7 @@ fi
 KEY_PATH="${FLOW_SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 EMAIL="${FLOW_SSH_EMAIL:-${USER}@$(hostname -s)}"
 PASSPHRASE="${FLOW_SSH_PASSPHRASE:-}"
+OPEN_GITHUB="${FLOW_OPEN_GITHUB:-1}"
 
 ensure_key() {
   if [[ -f "${KEY_PATH}" && -f "${KEY_PATH}.pub" ]]; then
@@ -63,15 +64,23 @@ EOF
 
 print_next_steps() {
   info ""
-  info "add this public key to GitHub (Settings -> SSH and GPG keys -> New SSH key):"
+  info "add this public key to GitHub:"
+  info "1) Open https://github.com/settings/keys"
+  info "2) Click \"New SSH key\""
+  info "3) Title: something like \"$(hostname -s)\""
+  info "4) Key type: Authentication"
+  info "5) Key: paste the EXACT line below (starts with ssh-ed25519)"
   if command -v pbcopy >/dev/null 2>&1; then
     pbcopy < "${KEY_PATH}.pub"
     info "public key copied to clipboard"
-  else
-    cat "${KEY_PATH}.pub"
   fi
+  cat "${KEY_PATH}.pub"
   info ""
+  if [[ "${OPEN_GITHUB}" != "0" ]] && command -v open >/dev/null 2>&1; then
+    open "https://github.com/settings/keys" || true
+  fi
   info "then run: ssh -T git@github.com"
+  info "if it still says Permission denied, you may not have access to the private repo yet."
 }
 
 ensure_key
