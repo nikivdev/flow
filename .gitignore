@@ -1,4 +1,5 @@
 # flow
+.cargo/
 .ai/internal/
 .ai/web/
 .ai/todos/*.bike

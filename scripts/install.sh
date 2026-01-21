@@ -15,17 +15,27 @@ set -euo pipefail
 #   FLOW_REGISTRY_PACKAGE=<name>         # registry package name (default: flow)
 #   FLOW_INSTALL_LIN=0                   # skip installing the lin helper binary
 #   FLOW_NO_RELEASE=1                    # force source build even if a release exists
+#   FLOW_DEV=1                           # dev install: clone to ~/code/org/1f/flow with jazz
+#   FLOW_SKIP_DEPS=1                     # skip installing dependencies (brew, fnm, node, bun, rust)
 
 REPO_URL="${FLOW_REPO_URL:-https://github.com/nikivdev/flow}"
+JAZZ_REPO_URL="${FLOW_JAZZ_URL:-https://github.com/1focus-ai/jazz}"
 REF="${FLOW_REF:-main}"
 INSTALL_LIN="${FLOW_INSTALL_LIN:-1}"
 REGISTRY_URL="${FLOW_REGISTRY_URL:-}"
 REGISTRY_PACKAGE="${FLOW_REGISTRY_PACKAGE:-flow}"
+DEV_INSTALL="${FLOW_DEV:-}"
+SKIP_DEPS="${FLOW_SKIP_DEPS:-}"
 RESOLVED_VERSION=""
 OS_NAME=""
 ARCH_NAME=""
 OWNER=""
 REPO_NAME=""
+
+# Dev install paths
+DEV_BASE="$HOME/code/org/1f"
+DEV_FLOW_DIR="$DEV_BASE/flow"
+DEV_JAZZ_DIR="$DEV_BASE/jazz"
 
 fail() {
     echo "flow installer: $*" >&2
@@ -34,6 +44,135 @@ fail() {
 
 info() {
     echo "flow installer: $*"
+}
+
+# =============================================================================
+# Dependency Installation
+# =============================================================================
+
+install_homebrew() {
+    if command -v brew &>/dev/null; then
+        info "Homebrew already installed"
+        return 0
+    fi
+
+    info "Installing Homebrew..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+    # Add brew to PATH for this session
+    if [[ -f "/opt/homebrew/bin/brew" ]]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [[ -f "/usr/local/bin/brew" ]]; then
+        eval "$(/usr/local/bin/brew shellenv)"
+    fi
+}
+
+install_fnm() {
+    if command -v fnm &>/dev/null; then
+        info "fnm already installed"
+        return 0
+    fi
+
+    info "Installing fnm (Fast Node Manager)..."
+    brew install fnm
+
+    # Initialize fnm for this session
+    eval "$(fnm env)"
+}
+
+install_node() {
+    # Check if node is available via fnm
+    if command -v fnm &>/dev/null; then
+        if fnm list 2>/dev/null | grep -q "v"; then
+            info "Node.js already installed via fnm"
+            eval "$(fnm env)"
+            return 0
+        fi
+
+        info "Installing Node.js LTS via fnm..."
+        fnm install --lts
+        fnm default lts-latest
+        eval "$(fnm env)"
+        return 0
+    fi
+
+    # Fallback: check if node exists
+    if command -v node &>/dev/null; then
+        info "Node.js already installed"
+        return 0
+    fi
+
+    fail "fnm not available and node not found"
+}
+
+install_bun() {
+    if command -v bun &>/dev/null; then
+        info "Bun already installed"
+        return 0
+    fi
+
+    info "Installing Bun..."
+    curl -fsSL https://bun.sh/install | bash
+
+    # Add bun to PATH for this session
+    export BUN_INSTALL="$HOME/.bun"
+    export PATH="$BUN_INSTALL/bin:$PATH"
+}
+
+install_rust() {
+    if command -v cargo &>/dev/null; then
+        info "Rust already installed"
+        return 0
+    fi
+
+    info "Installing Rust..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+    # Add cargo to PATH for this session
+    source "$HOME/.cargo/env"
+}
+
+install_gh() {
+    if command -v gh &>/dev/null; then
+        info "GitHub CLI already installed"
+        return 0
+    fi
+
+    info "Installing GitHub CLI..."
+    brew install gh
+}
+
+install_fzf() {
+    if command -v fzf &>/dev/null; then
+        info "fzf already installed"
+        return 0
+    fi
+
+    info "Installing fzf..."
+    brew install fzf
+}
+
+install_all_deps() {
+    if [[ -n "${SKIP_DEPS}" ]]; then
+        info "Skipping dependency installation (FLOW_SKIP_DEPS=1)"
+        return 0
+    fi
+
+    info ""
+    info "=== Installing Dependencies ==="
+    info ""
+
+    install_homebrew
+    install_fnm
+    install_node
+    install_bun
+    install_rust
+    install_gh
+    install_fzf
+
+    info ""
+    info "=== Dependencies installed ==="
+    info ""
 }
 
 resolve_paths() {
@@ -313,9 +452,82 @@ ensure_path_hint() {
     esac
 }
 
+# Dev install: clone repos to ~/code/org/1f/ and build from source
+install_dev() {
+    # Install all dependencies first
+    install_all_deps
+
+    info ""
+    info "=== Dev Install: Setting up in ${DEV_BASE} ==="
+    info ""
+    mkdir -p "${DEV_BASE}"
+
+    # Clone or update jazz
+    if [[ -d "${DEV_JAZZ_DIR}" ]]; then
+        info "Jazz directory exists, updating..."
+        (cd "${DEV_JAZZ_DIR}" && git pull --rebase) || true
+    else
+        info "Cloning jazz to ${DEV_JAZZ_DIR}..."
+        git clone "${JAZZ_REPO_URL}" "${DEV_JAZZ_DIR}"
+    fi
+
+    # Clone or update flow
+    if [[ -d "${DEV_FLOW_DIR}" ]]; then
+        info "Flow directory exists, updating..."
+        (cd "${DEV_FLOW_DIR}" && git pull --rebase) || true
+    else
+        info "Cloning flow to ${DEV_FLOW_DIR}..."
+        git clone "${REPO_URL}" "${DEV_FLOW_DIR}"
+    fi
+
+    # Create .cargo/config.toml for local path overrides
+    mkdir -p "${DEV_FLOW_DIR}/.cargo"
+    cat > "${DEV_FLOW_DIR}/.cargo/config.toml" << EOF
+# Local path overrides for faster builds (auto-generated by install.sh)
+[patch."https://github.com/1focus-ai/jazz"]
+groove = { path = "${DEV_JAZZ_DIR}/crates/groove" }
+groove-rocksdb = { path = "${DEV_JAZZ_DIR}/crates/groove-rocksdb" }
+EOF
+    info "Created .cargo/config.toml with local jazz paths"
+
+    # Build
+    info "Building flow from source..."
+    (cd "${DEV_FLOW_DIR}" && cargo build --release)
+
+    # Setup symlinks
+    mkdir -p "${BIN_DIR}"
+    ln -sf "${DEV_FLOW_DIR}/target/release/f" "${BIN_DIR}/f"
+    ln -sf "${DEV_FLOW_DIR}/target/release/f" "${BIN_DIR}/flow"
+    if [[ "${INSTALL_LIN}" != "0" && -f "${DEV_FLOW_DIR}/target/release/lin" ]]; then
+        ln -sf "${DEV_FLOW_DIR}/target/release/lin" "${BIN_DIR}/lin"
+    fi
+
+    info "Symlinked binaries to ${BIN_DIR}"
+    info ""
+    info "Dev install complete!"
+    info "  Flow: ${DEV_FLOW_DIR}"
+    info "  Jazz: ${DEV_JAZZ_DIR}"
+    info "  Binaries: ${BIN_DIR}/f, ${BIN_DIR}/flow"
+}
+
 main() {
     resolve_paths
     detect_platform
+
+    info ""
+    info "=== Flow Installer ==="
+    info ""
+
+    # Dev install mode
+    if [[ -n "${DEV_INSTALL}" ]]; then
+        install_dev
+        ensure_path_hint
+        print_shell_setup
+        info ""
+        info "Done. Launch with \"flow --help\" or \"f --help\"."
+        return
+    fi
+
     parse_repo_url
     info "Installing to ${BIN_DIR}"
 
@@ -336,9 +548,11 @@ main() {
             :
         else
             info "Falling back to source build (release not found or unavailable)."
+            install_all_deps
             install_from_source
         fi
     else
+        install_all_deps
         install_from_source
     fi
 
@@ -346,6 +560,53 @@ main() {
     ensure_path_hint
 
     info "Done. Launch with \"flow --help\" or \"f --help\"."
+}
+
+print_shell_setup() {
+    info ""
+    info "=== Shell Setup ==="
+    info ""
+    info "Add these to your shell config:"
+    info ""
+    if [[ -f "$HOME/.config/fish/config.fish" ]]; then
+        info "# Fish (~/.config/fish/config.fish):"
+        info 'set -gx PATH $HOME/.local/bin $PATH'
+        info ''
+        info '# fnm (Node.js)'
+        info 'fnm env | source'
+        info ''
+        info '# Bun'
+        info 'set -gx BUN_INSTALL $HOME/.bun'
+        info 'set -gx PATH $BUN_INSTALL/bin $PATH'
+        info ''
+        info '# Flow function'
+        info 'function f'
+        info '    if test -z "$argv[1]"'
+        info '        ~/bin/f'
+        info '    else'
+        info '        ~/bin/f match $argv'
+        info '    end'
+        info 'end'
+    else
+        info "# Bash/Zsh (~/.bashrc or ~/.zshrc):"
+        info 'export PATH="$HOME/.local/bin:$PATH"'
+        info ''
+        info '# fnm (Node.js)'
+        info 'eval "$(fnm env)"'
+        info ''
+        info '# Bun'
+        info 'export BUN_INSTALL="$HOME/.bun"'
+        info 'export PATH="$BUN_INSTALL/bin:$PATH"'
+        info ''
+        info '# Flow function'
+        info 'f() {'
+        info '    if [ -z "$1" ]; then'
+        info '        ~/bin/f'
+        info '    else'
+        info '        ~/bin/f match "$@"'
+        info '    fi'
+        info '}'
+    fi
 }
 
 main "$@"
