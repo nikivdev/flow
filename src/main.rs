@@ -140,6 +140,13 @@ fn main() -> Result<()> {
                 execute: !opts.dry_run,
             })?;
         }
+        Some(Commands::Ask(opts)) => {
+            flowd::ask::run(flowd::ask::AskOpts {
+                args: opts.query,
+                model: opts.model,
+                url: opts.url,
+            })?;
+        }
         Some(Commands::Commit(opts)) => {
             // Default: Claude review, no context, gitedit sync
             let review_selection =

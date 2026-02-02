@@ -194,6 +194,12 @@ pub enum Commands {
     )]
     Match(MatchOpts),
     #[command(
+        about = "Ask the AI server to suggest a task or Flow command.",
+        long_about = "Uses the local AI server (zerg/ai) to match your query to a flow.toml task or a Flow CLI command you can run.",
+        alias = "a"
+    )]
+    Ask(AskOpts),
+    #[command(
         about = "AI-powered commit with code review and optional GitEdit sync.",
         long_about = "Stages all changes, runs code review for bugs/security, generates commit message, commits, pushes, and syncs AI sessions to gitedit.dev when enabled in global config.",
         alias = "c"
@@ -1060,6 +1066,21 @@ pub struct MatchOpts {
     /// Only show the match without running the task.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AskOpts {
+    /// Natural language query describing the task or command you want to run.
+    #[arg(value_name = "QUERY", trailing_var_arg = true, num_args = 1..)]
+    pub query: Vec<String>,
+
+    /// AI server model to use (defaults to AI_SERVER_MODEL).
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// AI server URL (defaults to AI_SERVER_URL or http://127.0.0.1:7331).
+    #[arg(long)]
+    pub url: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
