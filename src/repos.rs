@@ -12,7 +12,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::cli::{ReposAction, ReposCloneOpts, ReposCommand};
-use crate::{config, publish, ssh, ssh_keys, upstream};
+use crate::{config, publish, ssh, ssh_keys, upstream, vcs};
 
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
 const REPOS_ROOT_OVERRIDE_ENV: &str = "FLOW_REPOS_ALLOW_ROOT_OVERRIDE";
@@ -32,7 +32,7 @@ pub fn run(cmd: ReposCommand) -> Result<()> {
 
 fn open_in_zed(path: &std::path::Path) -> Result<()> {
     std::process::Command::new("open")
-        .args(["-a", "/Applications/Zed.app"])
+        .args(["-a", "/Applications/Zed Preview.app"])
         .arg(path)
         .status()
         .context("failed to open Zed")?;
@@ -271,11 +271,15 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
         if shallow {
             spawn_background_history_fetch(&target_dir, false)?;
         }
+        init_jj_repo(&target_dir)?;
         return Ok(target_dir);
     }
 
     if !is_github {
-        let upstream_url = opts.upstream_url.clone().unwrap_or_else(|| clone_url.clone());
+        let upstream_url = opts
+            .upstream_url
+            .clone()
+            .unwrap_or_else(|| clone_url.clone());
         let upstream_is_origin = upstream_url.trim() == clone_url.as_str();
         if upstream_is_origin {
             println!("No upstream provided; using origin as upstream.");
@@ -284,6 +288,7 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
         if shallow {
             spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
         }
+        init_jj_repo(&target_dir)?;
         return Ok(target_dir);
     }
 
@@ -312,7 +317,115 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
         spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
     }
 
+    init_jj_repo(&target_dir)?;
     Ok(target_dir)
+}
+
+fn init_jj_repo(repo_dir: &Path) -> Result<()> {
+    if repo_dir.join(".jj").exists() {
+        return Ok(());
+    }
+    if vcs::ensure_jj_installed().is_err() {
+        println!("⚠ jj not found; skipping jj init");
+        return Ok(());
+    }
+
+    let has_git = repo_dir.join(".git").exists();
+    let mut cmd = Command::new("jj");
+    cmd.current_dir(repo_dir).arg("git").arg("init");
+    if has_git {
+        cmd.arg("--colocate");
+    }
+    let status = cmd.status().context("failed to run jj git init")?;
+    if !status.success() {
+        println!("⚠ jj git init failed; continuing");
+        return Ok(());
+    }
+
+    let _ = Command::new("jj")
+        .current_dir(repo_dir)
+        .args(["git", "fetch"])
+        .status();
+
+    if jj_auto_track(repo_dir) {
+        let branch = jj_default_branch(repo_dir);
+        let remote = jj_default_remote(repo_dir);
+        let track_ref = format!("{}@{}", branch, remote);
+        let _ = Command::new("jj")
+            .current_dir(repo_dir)
+            .args(["bookmark", "track", &track_ref])
+            .status();
+    }
+
+    println!("✓ jj initialized for {}", repo_dir.display());
+    Ok(())
+}
+
+fn jj_default_remote(repo_dir: &Path) -> String {
+    if let Some(cfg) = load_jj_config(repo_dir) {
+        if let Some(remote) = cfg.remote {
+            return remote;
+        }
+    }
+    "origin".to_string()
+}
+
+fn jj_auto_track(repo_dir: &Path) -> bool {
+    load_jj_config(repo_dir)
+        .and_then(|cfg| cfg.auto_track)
+        .unwrap_or(true)
+}
+
+fn jj_default_branch(repo_dir: &Path) -> String {
+    if let Some(cfg) = load_jj_config(repo_dir) {
+        if let Some(branch) = cfg.default_branch {
+            return branch;
+        }
+    }
+    if git_ref_exists(repo_dir, "refs/remotes/origin/main")
+        || git_ref_exists(repo_dir, "refs/heads/main")
+    {
+        return "main".to_string();
+    }
+    if git_ref_exists(repo_dir, "refs/remotes/origin/master")
+        || git_ref_exists(repo_dir, "refs/heads/master")
+    {
+        return "master".to_string();
+    }
+    "main".to_string()
+}
+
+fn git_ref_exists(repo_dir: &Path, reference: &str) -> bool {
+    Command::new("git")
+        .current_dir(repo_dir)
+        .args(["rev-parse", "--verify", reference])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn load_jj_config(repo_dir: &Path) -> Option<config::JjConfig> {
+    let local = repo_dir.join("flow.toml");
+    if local.exists() {
+        if let Ok(cfg) = config::load(&local) {
+            if cfg.jj.is_some() {
+                return cfg.jj;
+            }
+        }
+    }
+
+    let global = config::default_config_path();
+    if global.exists() {
+        if let Ok(cfg) = config::load(&global) {
+            if cfg.jj.is_some() {
+                return cfg.jj;
+            }
+        }
+    }
+
+    None
 }
 
 fn parse_repo_target(input: &str) -> Result<RepoTarget> {

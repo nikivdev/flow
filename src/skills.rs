@@ -3,13 +3,15 @@
 //! Skills are stored in .ai/skills/<name>/skill.md
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use crate::cli::{SkillsAction, SkillsCommand};
 use crate::config;
+
+const DEFAULT_ENV_SKILL: &str = include_str!("../.ai/skills/env/skill.md");
 
 /// Run the skills subcommand.
 pub fn run(cmd: SkillsCommand) -> Result<()> {
@@ -32,25 +34,33 @@ pub fn run(cmd: SkillsCommand) -> Result<()> {
 /// Get the skills directory for the current project.
 fn get_skills_dir() -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    Ok(cwd.join(".ai").join("skills"))
+    Ok(get_skills_dir_at(&cwd))
+}
+
+fn get_skills_dir_at(project_root: &Path) -> PathBuf {
+    project_root.join(".ai").join("skills")
 }
 
 /// Ensure symlinks exist from .claude/skills and .codex/skills to .ai/skills
 fn ensure_symlinks() -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let ai_skills = cwd.join(".ai").join("skills");
+    ensure_symlinks_at(&cwd)
+}
+
+fn ensure_symlinks_at(project_root: &Path) -> Result<()> {
+    let ai_skills = project_root.join(".ai").join("skills");
 
     if !ai_skills.exists() {
         return Ok(());
     }
 
     // Create .claude/skills -> .ai/skills
-    let claude_dir = cwd.join(".claude");
+    let claude_dir = project_root.join(".claude");
     let claude_skills = claude_dir.join("skills");
     create_symlink_if_needed(&ai_skills, &claude_dir, &claude_skills)?;
 
     // Create .codex/skills -> .ai/skills
-    let codex_dir = cwd.join(".codex");
+    let codex_dir = project_root.join(".codex");
     let codex_skills = codex_dir.join("skills");
     create_symlink_if_needed(&ai_skills, &codex_dir, &codex_skills)?;
 
@@ -460,4 +470,55 @@ f {}
     println!("\nSymlinked to .claude/skills/ and .codex/skills/");
 
     Ok(())
+}
+
+pub fn ensure_default_skills_at(project_root: &Path) -> Result<()> {
+    let skills_dir = get_skills_dir_at(project_root);
+    fs::create_dir_all(&skills_dir)?;
+
+    let env_dir = skills_dir.join("env");
+    let env_file = env_dir.join("skill.md");
+    let should_write = if env_file.exists() {
+        let content = fs::read_to_string(&env_file).unwrap_or_default();
+        content.contains("source: flow-default")
+    } else {
+        true
+    };
+
+    if should_write {
+        fs::create_dir_all(&env_dir)?;
+        fs::write(&env_file, DEFAULT_ENV_SKILL)?;
+    }
+
+    ensure_symlinks_at(project_root)?;
+
+    Ok(())
+}
+
+pub fn auto_sync_skills() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+
+    let mut current = cwd.clone();
+    let flow_toml = loop {
+        let candidate = current.join("flow.toml");
+        if candidate.exists() {
+            break Some(candidate);
+        }
+        if !current.pop() {
+            break None;
+        }
+    };
+
+    let Some(flow_toml) = flow_toml else {
+        return;
+    };
+    let Some(project_root) = flow_toml.parent() else {
+        return;
+    };
+
+    if let Err(err) = ensure_default_skills_at(project_root) {
+        tracing::debug!(?err, "failed to auto-sync default skills");
+    }
 }

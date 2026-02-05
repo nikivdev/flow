@@ -56,7 +56,9 @@ fn run_builtin(name: &str, execute: bool) -> Result<()> {
         "commit" => {
             println!("Running: commit");
             if execute {
-                crate::commit::run(true)?;
+                let queue = crate::commit::resolve_commit_queue_mode(false, false);
+                let push = true && !queue.enabled;
+                crate::commit::run(push, queue, false)?;
             }
         }
         _ => bail!("Unknown built-in: {}", name),
@@ -466,6 +468,7 @@ mod tests {
                 interactive: false,
                 confirm_on_match: false,
                 on_cancel: None,
+                output_file: None,
             },
             config_path: PathBuf::from("flow.toml"),
             relative_dir: String::new(),

@@ -9,9 +9,9 @@ set -euo pipefail
 #   dist/flow-<version>-<os>-<arch>.tar.gz
 #   dist/flow-<version>-<os>-<arch>.tar.gz.sha256
 # Contents:
-#   f (binary), flow (symlink to f), lin (binary)
+#   f (binary), flow (binary), lin (binary)
 # Notes:
-#   - macOS: if CODESIGN_IDENTITY is set, f and lin are codesigned (--timestamp --options runtime).
+    #   - macOS: if CODESIGN_IDENTITY is set, f, flow, and lin are codesigned (--timestamp --options runtime).
 #   - Build is local-only; run on each target platform (macOS arm64/x86_64, Linux x86_64/aarch64).
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,7 +93,7 @@ main() {
     resolve_version
 
     info "Building flow (version ${VERSION}, ${OS_NAME}/${ARCH_NAME})"
-    cargo build --locked --release --bin f --bin lin
+    cargo build --locked --release --bin f --bin flow --bin lin
 
     local stage="${DIST_DIR}/flow_${VERSION}_${OS_NAME}_${ARCH_NAME}"
     local target_dir="${ROOT_DIR}/target/${PROFILE}"
@@ -101,10 +101,11 @@ main() {
     mkdir -p "${stage}"
 
     cp "${target_dir}/f" "${stage}/f"
+    cp "${target_dir}/flow" "${stage}/flow"
     cp "${target_dir}/lin" "${stage}/lin"
-    (cd "${stage}" && ln -sf f flow)
 
     codesign_if_requested "${stage}/f"
+    codesign_if_requested "${stage}/flow"
     codesign_if_requested "${stage}/lin"
 
     mkdir -p "${DIST_DIR}"

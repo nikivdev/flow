@@ -3,12 +3,13 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as CEvent, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ignore::WalkBuilder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     agents,
@@ -54,14 +55,21 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         if created_flow_toml {
             println!("Running setup task...");
         }
-        return tasks::run(TaskRunOpts {
-            config: config_path,
+        let config_path_for_task = config_path.clone();
+        let result = tasks::run(TaskRunOpts {
+            config: config_path_for_task,
             delegate_to_hub: false,
             hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
             hub_port: 9050,
             name: "setup".to_string(),
             args: Vec::new(),
         });
+        if result.is_ok() {
+            if let Err(err) = write_setup_checkpoint(&project_root, &config_path) {
+                eprintln!("⚠ failed to write setup checkpoint: {err}");
+            }
+        }
+        return result;
     }
 
     if cfg.aliases.is_empty() {
@@ -72,6 +80,9 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         println!("# Add a setup task or an alias table like:");
         println!("#   [[alias]]");
         println!("#   fr = \"f run\"");
+        if let Err(err) = write_setup_checkpoint(&project_root, &config_path) {
+            eprintln!("⚠ failed to write setup checkpoint: {err}");
+        }
         return Ok(());
     }
 
@@ -85,6 +96,59 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         println!("{line}");
     }
 
+    if let Err(err) = write_setup_checkpoint(&project_root, &config_path) {
+        eprintln!("⚠ failed to write setup checkpoint: {err}");
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct SetupCheckpoint {
+    version: u32,
+    commit: String,
+    timestamp_ms: u64,
+    config_path: String,
+    source: String,
+}
+
+fn current_git_commit(project_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if commit.is_empty() {
+        None
+    } else {
+        Some(commit)
+    }
+}
+
+fn write_setup_checkpoint(project_root: &Path, config_path: &Path) -> Result<()> {
+    let rise_dir = project_root.join(".rise");
+    fs::create_dir_all(&rise_dir)?;
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let checkpoint = SetupCheckpoint {
+        version: 1,
+        commit: current_git_commit(project_root).unwrap_or_default(),
+        timestamp_ms,
+        config_path: config_path.display().to_string(),
+        source: "flow".to_string(),
+    };
+    let payload = serde_json::to_string_pretty(&checkpoint)?;
+    fs::write(rise_dir.join("setup.json"), payload)?;
     Ok(())
 }
 
@@ -129,7 +193,10 @@ fn ensure_project_dependencies(cfg: &config::Config) -> Result<()> {
         if let Some(pkg) = brew_package_for_command(command) {
             packages.insert(pkg);
         } else {
-            println!("  - No brew mapping for '{}'; install it manually.", command);
+            println!(
+                "  - No brew mapping for '{}'; install it manually.",
+                command
+            );
         }
     }
 
@@ -273,12 +340,7 @@ fn repo_contains_package(project_root: &Path, needle: &str) -> bool {
         .build();
 
     for entry in walker.flatten() {
-        if entry
-            .path()
-            .file_name()
-            .and_then(|n| n.to_str())
-            != Some("package.json")
-        {
+        if entry.path().file_name().and_then(|n| n.to_str()) != Some("package.json") {
             continue;
         }
         if let Ok(text) = fs::read_to_string(entry.path()) {
@@ -338,9 +400,16 @@ fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
         if let Some(parent) = candidate.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        println!("Jazz repo not found; attempting to clone to {}...", candidate.display());
+        println!(
+            "Jazz repo not found; attempting to clone to {}...",
+            candidate.display()
+        );
         let status = Command::new("git")
-            .args(["clone", "https://github.com/garden-co/jazz", candidate.to_str().unwrap_or("")])
+            .args([
+                "clone",
+                "https://github.com/garden-co/jazz",
+                candidate.to_str().unwrap_or(""),
+            ])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())

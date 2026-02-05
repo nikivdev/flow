@@ -1,5 +1,6 @@
 use std::{
     collections::hash_map::DefaultHasher,
+    env,
     fs::{self, File, OpenOptions},
     hash::{Hash, Hasher},
     io::{IsTerminal, Read, Write},
@@ -11,7 +12,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -34,10 +35,12 @@ use crate::{
     hub, init, jazz_state, projects,
     running::{self, RunningProcess},
     task_match,
+    task_failure_agents,
 };
 
 /// Global state for cancel cleanup handler.
 static CANCEL_HANDLER_SET: AtomicBool = AtomicBool::new(false);
+static FISHX_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Cleanup state shared with the signal handler.
 struct CleanupState {
@@ -247,6 +250,11 @@ fn needs_interactive_mode(command: &str) -> bool {
         "ghci",
         "lazygit",
         "lazydocker",
+        // Package managers can have interactive prompts (corepack, license confirmations, etc.)
+        "pnpm",
+        "npm",
+        "yarn",
+        "bun",
     ];
 
     let first_line = command.lines().next().unwrap_or("").trim();
@@ -294,7 +302,12 @@ fn fuzzy_search_task_history() -> Result<()> {
         .map(|r| {
             let project = r
                 .project_root
-                .strip_prefix(&dirs::home_dir().unwrap_or_default().to_string_lossy().to_string())
+                .strip_prefix(
+                    &dirs::home_dir()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                )
                 .map(|p| format!("~{}", p))
                 .unwrap_or_else(|| r.project_root.clone());
             format!("{}\t{}", r.task_name, project)
@@ -318,10 +331,7 @@ fn fuzzy_search_task_history() -> Result<()> {
         .spawn()
         .context("failed to spawn fzf")?;
 
-    fzf.stdin
-        .as_mut()
-        .unwrap()
-        .write_all(input.as_bytes())?;
+    fzf.stdin.as_mut().unwrap().write_all(input.as_bytes())?;
 
     let output = fzf.wait_with_output()?;
     if !output.status.success() {
@@ -566,6 +576,8 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
     let project_name = cfg.project_name.clone();
     let workdir = config_path.parent().unwrap_or(Path::new("."));
 
+    maybe_warn_non_fishx();
+
     // Set active project when running a task
     if let Some(ref name) = project_name {
         let _ = projects::set_active_project(name);
@@ -796,11 +808,9 @@ pub(crate) fn load_project_config(path: PathBuf) -> Result<(PathBuf, Config)> {
     if !config_path.exists() {
         let is_default = is_default_flow_config(&config_path);
         if is_default {
-            if let Some(found) = find_flow_toml_upwards(
-                config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new(".")),
-            ) {
+            if let Some(found) =
+                find_flow_toml_upwards(config_path.parent().unwrap_or_else(|| Path::new(".")))
+            {
                 config_path = found;
             } else {
                 init::write_template(&config_path)?;
@@ -912,6 +922,15 @@ fn task_log_path(ctx: &TaskContext) -> Option<PathBuf> {
     };
 
     Some(base.join(slug).join(format!("{task}.log")))
+}
+
+fn task_output_path(raw: &str, workdir: &Path) -> PathBuf {
+    let expanded = config::expand_path(raw);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        workdir.join(expanded)
+    }
 }
 
 fn execute_task(
@@ -1069,6 +1088,17 @@ fn execute_task(
     record.status = status.code();
     record.success = status.success();
     record.output = combined_output;
+    let output = record.output.clone();
+
+    if let Some(output_file) = task.output_file.as_deref() {
+        let path = task_output_path(output_file, workdir);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(err) = fs::write(&path, record.output.as_bytes()) {
+            tracing::warn!(?err, path = %path.display(), "failed to write task output file");
+        }
+    }
 
     // Record to jazz2 first (borrows), then history (takes ownership)
     if let Err(err) = jazz_state::record_task_run(&record) {
@@ -1084,6 +1114,29 @@ fn execute_task(
     if status.success() {
         Ok(())
     } else {
+        write_failure_bundle(
+            &task.name,
+            command,
+            workdir,
+            config_path,
+            project_name,
+            &output,
+            status.code(),
+        );
+        task_failure_agents::maybe_run_task_failure_agents(
+            &task.name,
+            command,
+            workdir,
+            &output,
+            status.code(),
+        );
+        maybe_run_task_failure_hook(
+            &task.name,
+            command,
+            workdir,
+            &output,
+            status.code(),
+        );
         bail!(
             "task '{}' exited with status {}",
             task.name,
@@ -1246,6 +1299,191 @@ fn has_tty_access() -> bool {
     }
 }
 
+fn fishx_enabled() -> bool {
+    match env::var("FISHX") {
+        Ok(value) => {
+            let value = value.trim().to_lowercase();
+            value == "1" || value == "true" || value == "yes" || value == "on"
+        }
+        Err(_) => false,
+    }
+}
+
+fn maybe_warn_non_fishx() {
+    if !std::io::stdin().is_terminal() {
+        return;
+    }
+    if fishx_enabled() {
+        return;
+    }
+    if env::var_os("FLOW_ALLOW_NON_FISHX").is_some() {
+        return;
+    }
+    if FISHX_WARNED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "⚠️  fishx not detected. Flow runs best under fishx for error capture and AI hints.\n\
+   Tip: run `f deploy-login` in the fishx repo or set FLOW_ALLOW_NON_FISHX=1 to hide this warning."
+    );
+}
+
+fn failure_bundle_path() -> Option<PathBuf> {
+    if let Ok(path) = env::var("FISHX_FAILURE_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    if let Ok(path) = env::var("FLOW_FAILURE_BUNDLE_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    dirs::cache_dir().map(|dir| dir.join("flow").join("last-task-failure.json"))
+}
+
+fn resolve_task_failure_hook() -> Option<String> {
+    if let Ok(value) = env::var("FLOW_TASK_FAILURE_HOOK") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let config = config::load_ts_config()?;
+    let flow = config.flow?;
+    let hook = flow.task_failure_hook?;
+    let trimmed = hook.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn truncate_output_for_hook(output: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut lines: Vec<&str> = output.lines().collect();
+    if lines.len() > max_lines {
+        lines = lines[lines.len().saturating_sub(max_lines)..].to_vec();
+    }
+    let mut joined = lines.join("\n");
+    if joined.len() > max_chars {
+        let start = joined.len().saturating_sub(max_chars);
+        joined = format!("...{}", &joined[start..]);
+    }
+    joined
+}
+
+fn maybe_run_task_failure_hook(
+    task_name: &str,
+    command: &str,
+    workdir: &Path,
+    output: &str,
+    status: Option<i32>,
+) {
+    if env::var_os("FLOW_DISABLE_TASK_FAILURE_HOOK").is_some() {
+        return;
+    }
+    let Some(hook) = resolve_task_failure_hook() else {
+        return;
+    };
+    if !std::io::stdin().is_terminal() {
+        return;
+    }
+    let mut hook = hook;
+    if env::var_os("FLOW_TASK_FAILURE_HOOK_ALLOW_OPEN").is_none() {
+        let hook_lower = hook.to_ascii_lowercase();
+        if hook_lower.contains("rise work") && !hook_lower.contains("--no-open") {
+            hook.push_str(" --no-open");
+        }
+    }
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(&hook)
+        .current_dir(workdir)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    cmd.env("FLOW_TASK_NAME", task_name);
+    cmd.env("FLOW_TASK_COMMAND", command);
+    cmd.env("FLOW_TASK_WORKDIR", workdir.display().to_string());
+    cmd.env("FLOW_TASK_STATUS", status.unwrap_or(-1).to_string());
+    if let Some(path) = failure_bundle_path() {
+        cmd.env("FLOW_FAILURE_BUNDLE_PATH", path.display().to_string());
+    }
+    let tail = truncate_output_for_hook(output, 120, 12000);
+    if !tail.is_empty() {
+        cmd.env("FLOW_TASK_OUTPUT_TAIL", tail);
+    }
+    match cmd.status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!(
+                "⚠ task failure hook exited with status {:?}",
+                status.code()
+            );
+        }
+        Err(err) => {
+            eprintln!("⚠ failed to run task failure hook: {}", err);
+        }
+    }
+}
+
+fn truncate_for_bundle(output: &str, max_chars: usize) -> String {
+    if output.len() <= max_chars {
+        return output.to_string();
+    }
+    let start = output.len().saturating_sub(max_chars);
+    format!("...{}", &output[start..])
+}
+
+fn write_failure_bundle(
+    task_name: &str,
+    command: &str,
+    workdir: &Path,
+    config_path: &Path,
+    project_name: Option<&str>,
+    output: &str,
+    status: Option<i32>,
+) {
+    let Some(path) = failure_bundle_path() else {
+        return;
+    };
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let payload = json!({
+        "task": task_name,
+        "command": command,
+        "workdir": workdir.display().to_string(),
+        "config": config_path.display().to_string(),
+        "project": project_name,
+        "status": status.unwrap_or(-1),
+        "output": truncate_for_bundle(output, 20_000),
+        "fishx": fishx_enabled(),
+        "ts": ts,
+    });
+
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Err(err) = fs::write(&path, payload.to_string().as_bytes()) {
+        tracing::warn!(?err, path = %path.display(), "failed to write task failure bundle");
+        return;
+    }
+
+    if std::io::stdin().is_terminal() {
+        eprintln!("🧩 failure bundle: {}", path.display());
+        if which("fx-failure").is_ok() {
+            eprintln!("   Tip: run `fx-failure` or `last-error` for a quick fix prompt.");
+        }
+    }
+}
+
 fn run_host_command(
     workdir: &Path,
     command: &str,
@@ -1279,6 +1517,7 @@ fn run_host_command(
         }
     }
     cmd.current_dir(workdir);
+    inject_global_env(&mut cmd);
     run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn command without managed env")
 }
 
@@ -1388,6 +1627,7 @@ fn run_flox_command(
         }
     }
     cmd.current_dir(workdir);
+    inject_global_env(&mut cmd);
     run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn flox activate for task")
 }
 
@@ -1472,7 +1712,8 @@ fn run_flox_interactive_command(
     Ok((status, String::new()))
 }
 
-fn run_command_with_tee(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitStatus, String)> {
+fn run_command_with_tee(mut cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitStatus, String)> {
+    inject_global_env(&mut cmd);
     // Only use `script` for tasks explicitly marked as interactive
     // This avoids issues with non-interactive tasks hanging
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
@@ -1482,6 +1723,35 @@ fn run_command_with_tee(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
         run_command_with_script(cmd, ctx)
     } else {
         run_command_with_pipes(cmd, ctx)
+    }
+}
+
+fn inject_global_env(cmd: &mut Command) {
+    let keys = config::global_env_keys();
+    if keys.is_empty() {
+        return;
+    }
+
+    let missing: Vec<String> = keys
+        .into_iter()
+        .filter(|key| std::env::var_os(key).is_none())
+        .collect();
+
+    if missing.is_empty() {
+        return;
+    }
+
+    match crate::env::fetch_personal_env_vars(&missing) {
+        Ok(vars) => {
+            for (key, value) in vars {
+                if !value.is_empty() {
+                    cmd.env(key, value);
+                }
+            }
+        }
+        Err(err) => {
+            tracing::debug!(?err, "failed to fetch global env vars");
+        }
     }
 }
 
@@ -1673,6 +1943,7 @@ fn run_interactive_command(
         }
     }
     cmd.current_dir(workdir);
+    inject_global_env(&mut cmd);
 
     // Prefer /dev/tty so interactive tasks keep working even if stdio is redirected.
     // Fall back to inherited stdio if /dev/tty is unavailable.
@@ -1981,6 +2252,7 @@ fn run_command_with_pipes(
     }
 
     let mut child = cmd
+        .stdin(Stdio::inherit()) // Allow user input for prompts
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2364,6 +2636,7 @@ mod tests {
                 interactive: false,
                 confirm_on_match: false,
                 on_cancel: None,
+                output_file: None,
             },
             TaskConfig {
                 name: "test".to_string(),
@@ -2376,6 +2649,7 @@ mod tests {
                 interactive: false,
                 confirm_on_match: false,
                 on_cancel: None,
+                output_file: None,
             },
         ];
 
@@ -2403,6 +2677,7 @@ mod tests {
             interactive: false,
             confirm_on_match: false,
             on_cancel: None,
+            output_file: None,
         };
         let empty_args: Vec<String> = Vec::new();
         let err = execute_task(
@@ -2445,6 +2720,7 @@ mod tests {
             interactive: false,
             confirm_on_match: false,
             on_cancel: None,
+            output_file: None,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -2480,6 +2756,7 @@ mod tests {
             interactive: false,
             confirm_on_match: false,
             on_cancel: None,
+            output_file: None,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -2516,6 +2793,7 @@ mod tests {
             interactive: false,
             confirm_on_match: false,
             on_cancel: None,
+            output_file: None,
         };
 
         let resolved = resolve_task_dependencies(&task, &cfg).expect("dependencies should resolve");
@@ -2539,6 +2817,7 @@ mod tests {
             interactive: false,
             confirm_on_match: false,
             on_cancel: None,
+            output_file: None,
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
@@ -2564,6 +2843,7 @@ mod tests {
             interactive: false,
             confirm_on_match: false,
             on_cancel: None,
+            output_file: None,
         };
 
         let err = resolve_task_dependencies(&task, &cfg).unwrap_err();
@@ -2588,6 +2868,7 @@ mod tests {
                 interactive: false,
                 confirm_on_match: false,
                 on_cancel: None,
+                output_file: None,
             },
             TaskConfig {
                 name: "dev-hub".into(),
@@ -2600,6 +2881,7 @@ mod tests {
                 interactive: false,
                 confirm_on_match: false,
                 on_cancel: None,
+                output_file: None,
             },
         ];
 
@@ -2631,6 +2913,7 @@ mod tests {
                 interactive: false,
                 confirm_on_match: false,
                 on_cancel: None,
+                output_file: None,
             },
             TaskConfig {
                 name: "deploy-core-runner".into(),
@@ -2643,6 +2926,7 @@ mod tests {
                 interactive: false,
                 confirm_on_match: false,
                 on_cancel: None,
+                output_file: None,
             },
         ];
 

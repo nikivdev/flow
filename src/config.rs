@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -46,6 +47,12 @@ pub struct Config {
     pub remote_servers: Vec<RemoteServerConfig>,
     #[serde(default)]
     pub tasks: Vec<TaskConfig>,
+    /// Hive agents defined for this project (array format: [[agent]]).
+    #[serde(default, rename = "agent")]
+    pub agents: Vec<crate::hive::AgentConfig>,
+    /// Agent registry references (map format: [agents]).
+    #[serde(default)]
+    pub agents_registry: HashMap<String, String>,
     #[serde(default, alias = "deps")]
     pub dependencies: HashMap<String, DependencySpec>,
     #[serde(default, alias = "alias", deserialize_with = "deserialize_aliases")]
@@ -86,12 +93,37 @@ pub struct Config {
     /// Commit workflow config (fixers, review instructions).
     #[serde(default)]
     pub commit: Option<CommitConfig>,
+    /// Jujutsu (jj) workflow config.
+    #[serde(default)]
+    pub jj: Option<JjConfig>,
     /// Setup defaults (global or project-level).
     #[serde(default)]
     pub setup: Option<SetupConfig>,
     /// SSH defaults (global or project-level).
     #[serde(default)]
     pub ssh: Option<SshConfig>,
+    /// macOS launchd service management config.
+    #[serde(default)]
+    pub macos: Option<MacosConfig>,
+    /// Proxy server configuration.
+    #[serde(default)]
+    pub proxy: Option<crate::proxy::ProxyConfig>,
+    /// Proxy targets (array format: [[proxies]]).
+    #[serde(default, alias = "proxy-target")]
+    pub proxies: Vec<crate::proxy::ProxyTargetConfig>,
+}
+
+/// macOS launchd service management config.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MacosConfig {
+    /// Service patterns that are allowed (won't be flagged).
+    /// Supports wildcards like "com.nikiv.*".
+    #[serde(default)]
+    pub allowed: Vec<String>,
+    /// Service patterns that should be blocked/disabled.
+    /// Supports wildcards like "com.google.*".
+    #[serde(default)]
+    pub blocked: Vec<String>,
 }
 
 /// SSH config (mode, key name, etc.).
@@ -122,12 +154,58 @@ pub struct CommitConfig {
     /// File path to load review instructions from.
     #[serde(default)]
     pub review_instructions_file: Option<String>,
-    /// Tool to use for commit review: "claude", "codex", "opencode"
+    /// Tool to use for commit review: "claude", "codex", "opencode", "kimi"
     #[serde(default)]
     pub tool: Option<String>,
     /// Model to use for commit review (tool-specific)
     #[serde(default)]
     pub model: Option<String>,
+    /// Tool to use for commit message generation: "kimi"
+    #[serde(
+        default,
+        rename = "message-tool",
+        alias = "message_tool",
+        alias = "messageTool"
+    )]
+    pub message_tool: Option<String>,
+    /// Model to use for commit message generation (tool-specific)
+    #[serde(
+        default,
+        rename = "message-model",
+        alias = "message_model",
+        alias = "messageModel"
+    )]
+    pub message_model: Option<String>,
+    /// Queue commits for review before push.
+    #[serde(default)]
+    pub queue: Option<bool>,
+}
+
+/// Jujutsu (jj) workflow config.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct JjConfig {
+    /// Default branch to rebase onto (e.g., "main").
+    #[serde(
+        default,
+        rename = "default_branch",
+        alias = "default-branch",
+        alias = "defaultBranch"
+    )]
+    pub default_branch: Option<String>,
+    /// Default git remote (e.g., "origin").
+    #[serde(default)]
+    pub remote: Option<String>,
+    /// Auto-track bookmarks on create.
+    #[serde(default, rename = "auto_track", alias = "auto-track", alias = "autoTrack")]
+    pub auto_track: Option<bool>,
+    /// Prefix for review bookmarks created by flow (e.g., "review").
+    #[serde(
+        default,
+        rename = "review_prefix",
+        alias = "review-prefix",
+        alias = "reviewPrefix"
+    )]
+    pub review_prefix: Option<String>,
 }
 
 /// TypeScript config loaded from ~/.config/flow/config.ts
@@ -148,6 +226,16 @@ pub struct TsFlowConfig {
     pub agents: Option<TsAgentsConfig>,
     #[serde(default)]
     pub env: Option<TsEnvConfig>,
+    #[serde(default, rename = "taskFailureAgents")]
+    pub task_failure_agents: Option<TsTaskFailureAgentsConfig>,
+    /// Optional command to run on task failure.
+    #[serde(
+        default,
+        rename = "taskFailureHook",
+        alias = "task_failure_hook",
+        alias = "task-failure-hook"
+    )]
+    pub task_failure_hook: Option<String>,
     /// Enable gitedit.dev hash in commit messages. Default false.
     #[serde(default)]
     pub gitedit: Option<bool>,
@@ -162,6 +250,14 @@ pub struct TsEnvConfig {
     /// Preferred env backend: "cloud" or "local".
     #[serde(default)]
     pub backend: Option<String>,
+    /// Env vars to inject into every task from the personal env store.
+    #[serde(
+        default,
+        rename = "global_keys",
+        alias = "globalKeys",
+        alias = "global-keys"
+    )]
+    pub global_keys: Vec<String>,
 }
 
 /// Agents settings from TypeScript config.
@@ -175,6 +271,26 @@ pub struct TsAgentsConfig {
     pub model: Option<String>,
 }
 
+/// Task-failure agent routing settings from TypeScript config.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TsTaskFailureAgentsConfig {
+    /// Enable auto-routing on task failure.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Tool to use (currently "hive").
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// Max lines of task output to include in prompt.
+    #[serde(default, rename = "maxLines")]
+    pub max_lines: Option<usize>,
+    /// Max chars of task output to include in prompt.
+    #[serde(default, rename = "maxChars")]
+    pub max_chars: Option<usize>,
+    /// Max agents to run per failure.
+    #[serde(default, rename = "maxAgents")]
+    pub max_agents: Option<usize>,
+}
+
 /// Commit settings from TypeScript config.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TsCommitConfig {
@@ -184,9 +300,28 @@ pub struct TsCommitConfig {
     /// Model identifier (e.g., "opencode/minimax-m2.1-free")
     #[serde(default)]
     pub model: Option<String>,
+    /// Tool to use for commit message generation: "kimi"
+    #[serde(
+        default,
+        rename = "messageTool",
+        alias = "message_tool",
+        alias = "message-tool"
+    )]
+    pub message_tool: Option<String>,
+    /// Model identifier for commit message generation
+    #[serde(
+        default,
+        rename = "messageModel",
+        alias = "message_model",
+        alias = "message-model"
+    )]
+    pub message_model: Option<String>,
     /// Custom review instructions
     #[serde(default)]
     pub review_instructions: Option<String>,
+    /// Queue commits for review before push.
+    #[serde(default)]
+    pub queue: Option<bool>,
     /// Whether to run async (delegate to hub). Default true.
     #[serde(default, rename = "async")]
     pub async_enabled: Option<bool>,
@@ -195,7 +330,7 @@ pub struct TsCommitConfig {
 /// Review settings from TypeScript config (overrides commit settings for review).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TsReviewConfig {
-    /// Tool to use for review: "claude", "codex", "opencode"
+    /// Tool to use for review: "claude", "codex", "opencode", "kimi"
     #[serde(default)]
     pub tool: Option<String>,
     /// Model identifier for review (e.g., "opencode/glm-4.7-free")
@@ -215,6 +350,8 @@ impl Default for Config {
             servers: Vec::new(),
             remote_servers: Vec::new(),
             tasks: Vec::new(),
+            agents: Vec::new(),
+            agents_registry: HashMap::new(),
             dependencies: HashMap::new(),
             aliases: HashMap::new(),
             command_files: Vec::new(),
@@ -231,8 +368,12 @@ impl Default for Config {
             prod: None,
             release: None,
             commit: None,
+            jj: None,
             setup: None,
             ssh: None,
+            macos: None,
+            proxy: None,
+            proxies: Vec::new(),
         }
     }
 }
@@ -546,6 +687,9 @@ pub struct TaskConfig {
     /// Command to run when the task is cancelled (Ctrl+C).
     #[serde(default, alias = "on-cancel")]
     pub on_cancel: Option<String>,
+    /// Optional file path to save combined task output (relative to project root unless absolute).
+    #[serde(default, alias = "output-file")]
+    pub output_file: Option<String>,
 }
 
 /// Definition of a dependency that can be referenced by automation tasks.
@@ -776,7 +920,7 @@ pub struct StreamConfig {
 }
 
 /// Restart behavior for managed daemons.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DaemonRestartPolicy {
     Never,
@@ -1101,6 +1245,32 @@ pub fn preferred_env_backend() -> Option<String> {
     Some(trimmed.to_ascii_lowercase())
 }
 
+/// Env vars to inject into every task from the personal env store.
+/// Defaults to AI server connection vars unless overridden in config.ts.
+pub fn global_env_keys() -> Vec<String> {
+    static GLOBAL_KEYS: OnceLock<Vec<String>> = OnceLock::new();
+    GLOBAL_KEYS
+        .get_or_init(|| {
+            let mut keys = vec![
+                "AI_SERVER_URL".to_string(),
+                "AI_SERVER_TOKEN".to_string(),
+                "AI_SERVER_MODEL".to_string(),
+                "ZAI_API_KEY".to_string(),
+            ];
+
+            if let Some(config) = load_ts_config() {
+                if let Some(env) = config.flow.and_then(|flow| flow.env) {
+                    if !env.global_keys.is_empty() {
+                        keys = env.global_keys;
+                    }
+                }
+            }
+
+            keys
+        })
+        .clone()
+}
+
 pub fn expand_path(raw: &str) -> PathBuf {
     let tilde_expanded = tilde(raw).into_owned();
     let env_expanded = match shellexpand::env(&tilde_expanded) {
@@ -1298,6 +1468,9 @@ fn merge_config(base: &mut Config, other: Config) {
                 base_server.host = other_server.host;
             }
         }
+    }
+    if base.jj.is_none() {
+        base.jj = other.jj;
     }
     base.options.merge(other.options);
     base.servers.extend(other.servers);

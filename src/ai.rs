@@ -217,8 +217,14 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Init => init_ai_folder()?,
         AiAction::Import => import_sessions()?,
         AiAction::Copy { session } => copy_session(session, Provider::All)?,
-        AiAction::CopyClaude => copy_last_session(Provider::Claude)?,
-        AiAction::CopyCodex => copy_last_session(Provider::Codex)?,
+        AiAction::CopyClaude { search } => {
+            let query = if search.is_empty() { None } else { Some(search.join(" ")) };
+            copy_last_session(Provider::Claude, query)?
+        }
+        AiAction::CopyCodex { search } => {
+            let query = if search.is_empty() { None } else { Some(search.join(" ")) };
+            copy_last_session(Provider::Codex, query)?
+        }
         AiAction::Context {
             session,
             count,
@@ -2140,17 +2146,17 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
     auto_import_sessions()?;
 
     if session.is_none() && provider != Provider::All {
-        return copy_last_session(provider);
+        return copy_last_session(provider, None);
     }
 
     // Handle provider shortcuts: "claude" or "codex" -> copy last session for that provider
     if let Some(ref query) = session {
         let q = query.to_lowercase();
         if q == "claude" || q == "c" {
-            return copy_last_session(Provider::Claude);
+            return copy_last_session(Provider::Claude, None);
         }
         if q == "codex" || q == "x" {
-            return copy_last_session(Provider::Codex);
+            return copy_last_session(Provider::Codex, None);
         }
     }
 
@@ -2296,9 +2302,15 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
 }
 
 /// Copy the most recent session for a provider directly (no fzf selection).
-fn copy_last_session(provider: Provider) -> Result<()> {
+/// If search query is provided, searches ALL sessions globally for matching content.
+fn copy_last_session(provider: Provider, search: Option<String>) -> Result<()> {
     // Auto-import any new sessions silently
     auto_import_sessions()?;
+
+    // If search query provided, search all sessions globally
+    if let Some(query) = search {
+        return copy_session_by_search(provider, &query);
+    }
 
     let sessions = read_sessions_for_project(provider)?;
 
@@ -2328,6 +2340,101 @@ fn copy_last_session(provider: Provider) -> Result<()> {
         id_short, line_count
     );
 
+    Ok(())
+}
+
+/// Search all sessions globally for content matching the query.
+fn copy_session_by_search(provider: Provider, query: &str) -> Result<()> {
+    let query_lower = query.to_lowercase();
+
+    // Search Codex sessions
+    if provider == Provider::Codex || provider == Provider::All {
+        let sessions_dir = get_codex_sessions_dir();
+        if sessions_dir.exists() {
+            for file_path in collect_codex_session_files(&sessions_dir) {
+                // Read raw content and check for query
+                if let Ok(content) = fs::read_to_string(&file_path) {
+                    if content.to_lowercase().contains(&query_lower) {
+                        // Found a match - get session ID and read formatted history
+                        let filename = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                        let session_id = filename.split('_').next().unwrap_or(filename);
+
+                        let history = read_session_history(session_id, Provider::Codex)?;
+                        copy_to_clipboard(&history)?;
+
+                        let line_count = history.lines().count();
+                        let id_short = &session_id[..8.min(session_id.len())];
+
+                        // Try to get project path from session
+                        if let Some((_, cwd)) = parse_codex_session_file(&file_path, filename) {
+                            if let Some(project_path) = cwd {
+                                println!(
+                                    "Copied session {} from {} ({} lines) to clipboard",
+                                    id_short, project_path.display(), line_count
+                                );
+                                return Ok(());
+                            }
+                        }
+
+                        println!(
+                            "Copied session {} ({} lines) to clipboard",
+                            id_short, line_count
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    // Search Claude sessions
+    if provider == Provider::Claude || provider == Provider::All {
+        let projects_dir = get_claude_projects_dir();
+        if projects_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&projects_dir) {
+                for entry in entries.flatten() {
+                    let project_dir = entry.path();
+                    if !project_dir.is_dir() {
+                        continue;
+                    }
+                    if let Ok(files) = fs::read_dir(&project_dir) {
+                        for file in files.flatten() {
+                            let file_path = file.path();
+                            if file_path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                                if let Ok(content) = fs::read_to_string(&file_path) {
+                                    if content.to_lowercase().contains(&query_lower) {
+                                        let session_id = file_path
+                                            .file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("");
+
+                                        let history =
+                                            read_session_history(session_id, Provider::Claude)?;
+                                        copy_to_clipboard(&history)?;
+
+                                        let line_count = history.lines().count();
+                                        let id_short = &session_id[..8.min(session_id.len())];
+                                        let project_name = project_dir
+                                            .file_name()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("unknown");
+
+                                        println!(
+                                            "Copied session {} from {} ({} lines) to clipboard",
+                                            id_short, project_name, line_count
+                                        );
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("No session found containing: {}", query);
     Ok(())
 }
 
@@ -2455,8 +2562,10 @@ fn is_session_boilerplate(text: &str) -> bool {
     let trimmed = text.trim();
 
     // === Codex boilerplate ===
-    // Skip AGENTS.md instructions
-    if trimmed.starts_with("# AGENTS.md instructions") {
+    // Skip agents.md instructions
+    if trimmed.starts_with("# AGENTS.md instructions")
+        || trimmed.starts_with("# agents.md instructions")
+    {
         return true;
     }
     // Skip environment context
@@ -2465,6 +2574,14 @@ fn is_session_boilerplate(text: &str) -> bool {
     }
     // Skip instructions blocks
     if trimmed.starts_with("<INSTRUCTIONS>") {
+        return true;
+    }
+    // Skip permissions instructions (Codex system context)
+    if trimmed.contains("<permissions instructions>") {
+        return true;
+    }
+    // Skip developer role messages with system instructions
+    if trimmed.starts_with("developer:") {
         return true;
     }
     // Skip short status messages (likely action summaries)
@@ -2790,6 +2907,9 @@ fn read_last_context(
 
 /// Copy text to system clipboard.
 fn copy_to_clipboard(text: &str) -> Result<()> {
+    if std::env::var("FLOW_NO_CLIPBOARD").is_ok() || !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
     #[cfg(target_os = "macos")]
     {
         let mut child = Command::new("pbcopy")

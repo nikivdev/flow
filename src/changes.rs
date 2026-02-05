@@ -9,8 +9,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{ai, config, env};
 use crate::cli::{ChangesAction, ChangesCommand, DiffCommand};
+use crate::{ai, config, env};
 
 fn trace_enabled() -> bool {
     matches!(
@@ -38,7 +38,9 @@ pub fn run(cmd: ChangesCommand) -> Result<()> {
             apply_diff(diff, file)?;
         }
         None => {
-            bail!("Missing changes subcommand. Use: f changes current-diff | f changes accept <diff>");
+            bail!(
+                "Missing changes subcommand. Use: f changes current-diff | f changes accept <diff>"
+            );
         }
     }
     Ok(())
@@ -354,8 +356,8 @@ fn normalize_env_keys(raw: &[String]) -> Result<Vec<String>> {
         }
 
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            let parsed: Vec<String> = serde_json::from_str(trimmed)
-                .context("failed to parse --env JSON array")?;
+            let parsed: Vec<String> =
+                serde_json::from_str(trimmed).context("failed to parse --env JSON array")?;
             for key in parsed {
                 let key = key.trim().to_string();
                 if !key.is_empty() {
@@ -388,7 +390,10 @@ fn load_project_name(repo_root: &Path) -> Result<String> {
     if !flow_path.exists() {
         bail!("flow.toml not found in repo root.");
     }
-    trace(&format!("reading project name from {}", flow_path.display()));
+    trace(&format!(
+        "reading project name from {}",
+        flow_path.display()
+    ));
     let cfg = config::load(&flow_path)
         .with_context(|| format!("failed to read {}", flow_path.display()))?;
     let name = cfg
@@ -399,9 +404,7 @@ fn load_project_name(repo_root: &Path) -> Result<String> {
 
 fn ensure_project_match(repo_root: &Path, bundle: &DiffBundle) -> Result<()> {
     let bundle_name = bundle.project_name.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Diff bundle missing project name. Recreate with the latest flow."
-        )
+        anyhow::anyhow!("Diff bundle missing project name. Recreate with the latest flow.")
     })?;
     let current_name = load_project_name(repo_root)?;
     if bundle_name != current_name {
@@ -446,8 +449,8 @@ fn read_personal_local_env(keys: &[String]) -> Result<BTreeMap<String, String>> 
         return Ok(BTreeMap::new());
     }
 
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let vars = env::parse_env_file(&content);
 
     if keys.is_empty() {
@@ -500,7 +503,10 @@ fn unroll_bundle(id: &str) -> Result<()> {
     let stash_ref = stash_if_dirty(&repo_root, &bundle.hash)?;
     if let Err(err) = apply_diff_content(&repo_root, &bundle.diff) {
         if let Some(stash_ref) = stash_ref {
-            eprintln!("Diff apply failed. Your previous state is stashed: {}", stash_ref);
+            eprintln!(
+                "Diff apply failed. Your previous state is stashed: {}",
+                stash_ref
+            );
         }
         return Err(err);
     }
@@ -578,8 +584,8 @@ fn read_bundle(id: &str) -> Result<(DiffBundle, Option<PathBuf>)> {
     }
 
     trace(&format!("bundle read: {}", path.display()));
-    let data = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let data =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let bundle: DiffBundle = serde_json::from_str(&data)
         .with_context(|| format!("failed to parse {}", path.display()))?;
 
@@ -630,10 +636,7 @@ fn read_bundle(id: &str) -> Result<(DiffBundle, Option<PathBuf>)> {
 }
 
 fn apply_env_vars(bundle: &DiffBundle) -> Result<()> {
-    let target = bundle
-        .env_target
-        .as_deref()
-        .unwrap_or("personal");
+    let target = bundle.env_target.as_deref().unwrap_or("personal");
     let path = local_env_path(target)?;
 
     let mut vars: BTreeMap<String, String> = if path.exists() {
@@ -649,13 +652,19 @@ fn apply_env_vars(bundle: &DiffBundle) -> Result<()> {
     }
 
     write_local_env(&path, target, "production", &vars)?;
-    println!("Applied {} env var(s) to {}", bundle.env_vars.len(), path.display());
+    println!(
+        "Applied {} env var(s) to {}",
+        bundle.env_vars.len(),
+        path.display()
+    );
     Ok(())
 }
 
 fn local_env_path(target: &str) -> Result<PathBuf> {
     let config_dir = config::ensure_global_config_dir()?;
-    let dir = config_dir.join("env-local").join(sanitize_env_segment(target));
+    let dir = config_dir
+        .join("env-local")
+        .join(sanitize_env_segment(target));
     fs::create_dir_all(&dir)?;
     Ok(dir.join("production.env"))
 }
@@ -667,12 +676,7 @@ fn stash_log_path() -> Result<PathBuf> {
     Ok(dir.join("stashes.json"))
 }
 
-fn record_stash(
-    repo_root: &Path,
-    stash_ref: &str,
-    bundle_hash: &str,
-    message: &str,
-) -> Result<()> {
+fn record_stash(repo_root: &Path, stash_ref: &str, bundle_hash: &str, message: &str) -> Result<()> {
     let path = stash_log_path()?;
     let mut records: Vec<DiffStashRecord> = if path.exists() {
         match fs::read_to_string(&path) {

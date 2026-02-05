@@ -17,6 +17,15 @@ commit_with_check_gitedit_mirror = true
 gitedit_url = "https://gitedit.dev"
 commit_with_check_review_url = "http://100.114.156.47:3000/review"
 
+[commit]
+queue = true
+
+[jj]
+default_branch = "main"
+remote = "origin"
+auto_track = true
+review_prefix = "review"
+
 [release]
 # Default release provider for `f release`.
 default = "registry"
@@ -132,6 +141,12 @@ name = "clone-test-repo"
 command = "git clone https://github.com/nikivdev/flow-testing testing/flow-testing"
 description = "Clone the flow-testing repo into testing/"
 
+[[tasks]]
+name = "agents"
+command = "bash ./scripts/agents-switch.sh $@"
+description = "Switch agents.md profile in a repo"
+interactive = true
+
 [storage]
 provider = "myflow.sh"
 env_var = "FLOW_SECRETS_TOKEN" # optional; defaults to this value
@@ -144,3 +159,62 @@ variables = [
   { key = "OPENAI_API_KEY", default = "" },
   { key = "ANTHROPIC_API_KEY", default = "" },
 ]
+
+# ============================================================================
+# Swarm Demo Tasks - Run with: uv run flow <command> "<task>"
+# ============================================================================
+
+[[tasks]]
+name = "swarm-single"
+command = "uv run flow.py single \"$@\""
+description = "Single agent demo"
+
+[[tasks]]
+name = "swarm-seq"
+command = "uv run flow.py sequential \"$@\""
+description = "Sequential workflow (Researcher -> Analyst -> Writer)"
+
+[[tasks]]
+name = "swarm-parallel"
+command = "uv run flow.py concurrent \"$@\""
+description = "Concurrent agents (Optimist, Critic, Pragmatist)"
+
+[[tasks]]
+name = "swarm-hier"
+command = "uv run flow.py hierarchical \"$@\""
+description = "Hierarchical swarm (Director with workers)"
+
+[[tasks]]
+name = "swarm-rearrange"
+command = "uv run flow.py rearrange \"$@\""
+description = "Agent rearrange with custom flow"
+
+[[tasks]]
+name = "swarm-chat"
+command = "uv run flow.py chat \"$@\""
+description = "Group chat discussion"
+
+[[tasks]]
+name = "swarm-auto"
+command = "uv run flow.py auto \"$@\""
+description = "Auto-generate a swarm for a task"
+
+[[tasks]]
+name = "pond-build"
+command = "bash -c 'cd /Users/nikiv/repos/ghostty-org/ghostty && zig build && zig build -Doptimize=ReleaseFast'"
+description = "Build Pond (Ghostty fork) in debug and production modes"
+
+[[tasks]]
+name = "pond-debug"
+command = "bash -c 'cd /Users/nikiv/repos/ghostty-org/ghostty && zig build -Doptimize=Debug'"
+description = "Build Pond (Ghostty fork) in debug mode"
+
+[[tasks]]
+name = "linsa-assistant-serve"
+command = "bash -c 'cd /Users/nikiv/code/org/linsa/linsa/api/cpp && sh ./run.sh serve'"
+description = "Build + run the Linsa C++ assistant proxy server"
+
+[[tasks]]
+name = "linsa-assistant-stream"
+command = "bash -c 'curl -N -X POST http://127.0.0.1:8788/api/assistant/chat/stream -H \"Content-Type: application/json\" -d \"{\\\"message\\\":\\\"hello\\\"}\"'"
+description = "Stream assistant response via SSE from the local proxy"

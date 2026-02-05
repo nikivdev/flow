@@ -1,11 +1,13 @@
 use std::{
     env,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Context, Result, bail};
+use crossterm::{event, terminal};
 
 use crate::cli::DoctorOpts;
 use crate::vcs;
@@ -34,11 +36,12 @@ pub fn ensure_lin_available_interactive() -> Result<PathBuf> {
 pub fn run(_opts: DoctorOpts) -> Result<()> {
     println!("Running flow doctor checks...\n");
 
-    ensure_flox_available()?;
-    vcs::ensure_jj_installed()?;
-    println!("✅ jj found on PATH");
+    let zerobrew_available = ensure_zerobrew_available_interactive()?;
+
+    ensure_flox_available(zerobrew_available)?;
+    ensure_jj_available(zerobrew_available)?;
     let _ = ensure_lin_available_interactive();
-    ensure_direnv_on_path()?;
+    ensure_direnv_on_path(zerobrew_available)?;
 
     match detect_shell()? {
         Some(shell) => ensure_shell_hook(shell)?,
@@ -51,10 +54,17 @@ pub fn run(_opts: DoctorOpts) -> Result<()> {
     Ok(())
 }
 
-fn ensure_flox_available() -> Result<()> {
+fn ensure_flox_available(zerobrew_available: bool) -> Result<()> {
     if which::which("flox").is_ok() {
         println!("✅ flox found on PATH");
         return Ok(());
+    }
+
+    if maybe_install_with_zerobrew(zerobrew_available, "flox", "flox")? {
+        if which::which("flox").is_ok() {
+            println!("✅ flox installed via zerobrew");
+            return Ok(());
+        }
     }
 
     // Heuristic: flox-managed env leaves a .flox directory or ~/.flox directory.
@@ -72,15 +82,41 @@ fn ensure_flox_available() -> Result<()> {
     );
 }
 
-fn ensure_direnv_on_path() -> Result<()> {
+fn ensure_jj_available(zerobrew_available: bool) -> Result<()> {
+    if which::which("jj").is_ok() {
+        println!("✅ jj found on PATH");
+        return Ok(());
+    }
+
+    if maybe_install_with_zerobrew(zerobrew_available, "jj", "jj")? {
+        if which::which("jj").is_ok() {
+            println!("✅ jj installed via zerobrew");
+            return Ok(());
+        }
+    }
+
+    vcs::ensure_jj_installed()?;
+    println!("✅ jj found on PATH");
+    Ok(())
+}
+
+fn ensure_direnv_on_path(zerobrew_available: bool) -> Result<()> {
     match which::which("direnv") {
         Ok(path) => {
             println!("✅ direnv found at {}", path.display());
             Ok(())
         }
-        Err(_) => bail!(
-            "direnv is not on PATH. Install it from https://direnv.net/#installation and rerun `flow doctor`."
-        ),
+        Err(_) => {
+            if maybe_install_with_zerobrew(zerobrew_available, "direnv", "direnv")? {
+                if let Ok(path) = which::which("direnv") {
+                    println!("✅ direnv installed via zerobrew at {}", path.display());
+                    return Ok(());
+                }
+            }
+            bail!(
+                "direnv is not on PATH. Install it from https://direnv.net/#installation and rerun `flow doctor`."
+            )
+        }
     }
 }
 
@@ -110,6 +146,104 @@ fn prompt_install_lin(bundled: &Path) -> Result<bool> {
     std::io::stdin().read_line(&mut input).ok();
     let normalized = input.trim().to_ascii_lowercase();
     Ok(normalized.is_empty() || normalized == "y" || normalized == "yes")
+}
+
+fn ensure_zerobrew_available_interactive() -> Result<bool> {
+    if which::which("zb").is_ok() {
+        println!("✅ zerobrew (zb) found on PATH");
+        return Ok(true);
+    }
+
+    if !std::io::stdin().is_terminal() {
+        println!("⚠️  zerobrew (zb) not found; skipping interactive install.");
+        return Ok(false);
+    }
+
+    let install = prompt_yes(
+        "zerobrew (zb) not found. Install it now? [y/N]: ",
+        false,
+    );
+
+    if !install {
+        return Ok(false);
+    }
+
+    let status = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("curl -sSL https://raw.githubusercontent.com/lucasgelfond/zerobrew/main/install.sh | bash")
+        .status()
+        .context("failed to run zerobrew install script")?;
+
+    if status.success() {
+        if which::which("zb").is_ok() {
+            println!("✅ zerobrew installed");
+            return Ok(true);
+        }
+        println!("⚠️  zerobrew installed but not on PATH yet; restart your shell.");
+        return Ok(false);
+    }
+
+    println!("⚠️  zerobrew install failed");
+    Ok(false)
+}
+
+fn maybe_install_with_zerobrew(
+    zerobrew_available: bool,
+    tool: &str,
+    package: &str,
+) -> Result<bool> {
+    if !zerobrew_available {
+        return Ok(false);
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+
+    let prompt = format!("Install {} via zerobrew? [y/N]: ", tool);
+    if !prompt_yes(&prompt, false) {
+        return Ok(false);
+    }
+
+    let status = Command::new("zb")
+        .arg("install")
+        .arg(package)
+        .status()
+        .context("failed to run zb install")?;
+
+    Ok(status.success())
+}
+
+fn prompt_yes(prompt: &str, default_yes: bool) -> bool {
+    print!("{}", prompt);
+    let _ = std::io::stdout().flush();
+    if std::io::stdin().is_terminal() {
+        if terminal::enable_raw_mode().is_ok() {
+            let read = event::read();
+            let _ = terminal::disable_raw_mode();
+            if let Ok(event::Event::Key(key)) = read {
+                let decision = match key.code {
+                    event::KeyCode::Char('y') | event::KeyCode::Char('Y') => Some(true),
+                    event::KeyCode::Char('n') | event::KeyCode::Char('N') => Some(false),
+                    event::KeyCode::Enter => Some(default_yes),
+                    event::KeyCode::Esc => Some(false),
+                    _ => None,
+                };
+                if let Some(choice) = decision {
+                    println!();
+                    return choice;
+                }
+            }
+        }
+    }
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).ok();
+    let normalized = input.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return default_yes;
+    }
+    normalized == "y" || normalized == "yes"
 }
 
 fn install_lin(bundled: &Path) -> Result<PathBuf> {

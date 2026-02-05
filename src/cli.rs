@@ -138,6 +138,12 @@ pub enum Commands {
     LastCmd,
     #[command(about = "Show the last task run (command, status, and output) recorded by flow.")]
     LastCmdFull,
+    #[command(about = "Show the last fish shell command and output (from fish io-trace).")]
+    FishLast,
+    #[command(about = "Show full details of the last fish shell command.")]
+    FishLastFull,
+    #[command(about = "Install traced fish shell (fish fork with always-on I/O tracing).")]
+    FishInstall(FishInstallOpts),
     #[command(about = "Re-run the last task executed in this project.")]
     Rerun(RerunOpts),
     #[command(
@@ -201,10 +207,22 @@ pub enum Commands {
     Ask(AskOpts),
     #[command(
         about = "AI-powered commit with code review and optional GitEdit sync.",
-        long_about = "Stages all changes, runs code review for bugs/security, generates commit message, commits, pushes, and syncs AI sessions to gitedit.dev when enabled in global config.",
+        long_about = "Stages all changes, runs code review for bugs/security, generates commit message, commits, pushes (unless commit queue is enabled), and syncs AI sessions to gitedit.dev when enabled in global config.",
         alias = "c"
     )]
     Commit(CommitOpts),
+    #[command(
+        about = "Manage the commit review queue.",
+        long_about = "List, inspect, approve, or drop queued commits before they push to remote.",
+        alias = "cq"
+    )]
+    CommitQueue(CommitQueueCommand),
+    #[command(
+        about = "Open queued commits for review in Rise.",
+        long_about = "Open the latest queued commit (or a specific one in the future) in Rise's review UI.",
+        alias = "rv"
+    )]
+    Review(ReviewCommand),
     #[command(
         about = "Simple AI commit without code review.",
         long_about = "Stages all changes, uses OpenAI to generate a commit message from the diff, commits, and pushes. No code review.",
@@ -221,6 +239,17 @@ pub enum Commands {
     )]
     CommitWithCheck(CommitOpts),
     #[command(
+        about = "Undo the last undoable action (commit, push).",
+        long_about = "Reverts the last recorded action. For commits, resets with --soft to keep changes staged. For pushes, force pushes the previous state.",
+        alias = "u"
+    )]
+    Undo(UndoCommand),
+    #[command(
+        about = "Fix issues in the repo with help from Hive.",
+        long_about = "Optionally unroll the last commit, then run a Hive agent to fix the issue (e.g., leaked secrets)."
+    )]
+    Fix(FixOpts),
+    #[command(
         about = "Fix common TOML syntax errors in flow.toml.",
         long_about = "Automatically fixes common issues in flow.toml that can break parsing, such as invalid escape sequences (\\$, \\n in basic strings), unclosed quotes, and other TOML syntax errors."
     )]
@@ -235,6 +264,11 @@ pub enum Commands {
         long_about = "Generates a diff against the main branch (including untracked files) plus AI sessions, stores it by hash, or unrolls a stored bundle by hash."
     )]
     Diff(DiffCommand),
+    #[command(
+        about = "Hash files or sessions with unhash and copy a share link.",
+        long_about = "Runs the unhash CLI, then copies unstash./<hash> to clipboard and prints the hash/link."
+    )]
+    Hash(HashOpts),
     #[command(
         about = "Manage background daemons (start, stop, status).",
         long_about = "Start, stop, and monitor background daemons defined in flow.toml. Daemons are long-running processes like sync servers, API servers, or file watchers.",
@@ -267,6 +301,11 @@ pub enum Commands {
     )]
     Env(EnvCommand),
     #[command(
+        about = "Fetch one-time passwords from 1Password Connect.",
+        long_about = "Uses OP_CONNECT_HOST + OP_CONNECT_TOKEN (from env or Flow personal env store) to fetch an item TOTP."
+    )]
+    Otp(OtpCommand),
+    #[command(
         about = "Authenticate Flow AI via myflow.",
         long_about = "Starts a device auth flow for myflow, storing a token for AI-powered CLI features."
     )]
@@ -276,6 +315,11 @@ pub enum Commands {
         long_about = "Guided setup flows for external services. Prompts for required env vars, stores them in the cloud backend, and can apply them to Cloudflare."
     )]
     Services(ServicesCommand),
+    #[command(
+        about = "Manage macOS launch agents and daemons.",
+        long_about = "List, audit, enable, and disable macOS launchd services. Helps keep your startup clean by identifying bloatware and unwanted background processes."
+    )]
+    Macos(MacosCommand),
     #[command(
         about = "Manage SSH keys via the cloud backend.",
         long_about = "Generate, store, and unlock SSH keys stored in cloud personal env vars, then wire git to use the Flow SSH agent."
@@ -335,10 +379,26 @@ pub enum Commands {
     )]
     Agents(AgentsCommand),
     #[command(
+        about = "Manage and run hive agents.",
+        long_about = "Hive agents are MoonBit-powered AI agents with tool use. Agents can be project-local (.flow/agents/) or global (~/.hive/agents/).",
+        alias = "h"
+    )]
+    Hive(HiveCommand),
+    #[command(
         about = "Sync git repo: pull, upstream merge, push.",
         long_about = "Comprehensive git sync: pulls from origin, merges upstream changes if configured, and pushes. One command to keep your fork in sync."
     )]
     Sync(SyncCommand),
+    #[command(
+        about = "Jujutsu (jj) workflow helpers.",
+        long_about = "Initialize jj, manage workspaces/bookmarks, and sync with git remotes in a safe, structured flow."
+    )]
+    Jj(JjCommand),
+    #[command(
+        about = "Repair git state (abort rebase/merge, leave detached HEAD).",
+        long_about = "Aborts in-progress git operations (rebase, merge, cherry-pick, revert), resets bisect, and checks out the target branch if HEAD is detached."
+    )]
+    GitRepair(GitRepairOpts),
     #[command(
         about = "Show project information.",
         long_about = "Display project details including git remotes, upstream configuration, and flow.toml settings.",
@@ -379,7 +439,7 @@ pub enum Commands {
     Code(CodeCommand),
     #[command(
         about = "Move or copy a folder to a new location, preserving symlinks and AI sessions.",
-        long_about = "Migrate a project folder to a new location. Usage:\n  f migrate <target>           - move current dir to target\n  f migrate <source> <target>  - move source to target\n  f migrate -c <src> <target>  - copy instead of move\n  f migrate code <relative>    - move current dir to ~/code/<relative>\nUpdates ~/bin symlinks and AI session paths (move only)."
+        long_about = "Migrate a project folder to a new location. Usage:\n  f migrate <target>            - move current dir to target\n  f migrate <source> <target>   - move source to target\n  f migrate -c <src> <target>   - copy instead of move\n  f migrate code <relative>     - move current dir to ~/code/<relative>\n  f migrate --copy code <rel>   - copy current dir to ~/code/<relative>\nUpdates ~/bin symlinks (move only). AI sessions are moved or copied based on the mode."
     )]
     Migrate(MigrateCommand),
     #[command(
@@ -420,6 +480,12 @@ pub enum Commands {
         long_about = "Create registry tokens and wire them into worker secrets and local envs."
     )]
     Registry(RegistryCommand),
+    #[command(
+        about = "Zero-cost traced reverse proxy for development.",
+        long_about = "Start a reverse proxy that traces all HTTP requests with zero overhead. Writes trace-summary.json for AI agents to read.",
+        alias = "px"
+    )]
+    Proxy(ProxyCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -467,6 +533,98 @@ pub enum TraceSource {
     All,
     Tasks,
     Ai,
+}
+
+// === Proxy Commands ===
+
+#[derive(Args, Debug, Clone)]
+pub struct ProxyCommand {
+    #[command(subcommand)]
+    pub action: ProxyAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProxyAction {
+    /// Start the proxy server (reads [[proxies]] from flow.toml).
+    Start(ProxyStartOpts),
+    /// View recent request traces.
+    #[command(alias = "t")]
+    Trace(ProxyTraceOpts),
+    /// Show the last request details.
+    Last(ProxyLastOpts),
+    /// Add a new proxy target.
+    Add(ProxyAddOpts),
+    /// List configured proxy targets.
+    List,
+    /// Stop the proxy server.
+    Stop,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProxyStartOpts {
+    /// Listen address (e.g., ":8080" or "127.0.0.1:8080").
+    #[arg(short, long)]
+    pub listen: Option<String>,
+
+    /// Run in foreground (don't daemonize).
+    #[arg(short, long)]
+    pub foreground: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProxyTraceOpts {
+    /// Number of records to show.
+    #[arg(short = 'n', long, default_value = "20")]
+    pub count: usize,
+
+    /// Follow trace in real-time.
+    #[arg(short, long)]
+    pub follow: bool,
+
+    /// Filter by target name.
+    #[arg(long)]
+    pub target: Option<String>,
+
+    /// Show only errors (status >= 400).
+    #[arg(long)]
+    pub errors: bool,
+
+    /// Filter by trace ID.
+    #[arg(long)]
+    pub id: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProxyLastOpts {
+    /// Show only errors.
+    #[arg(long)]
+    pub errors: bool,
+
+    /// Filter by target name.
+    #[arg(long)]
+    pub target: Option<String>,
+
+    /// Include request/response body.
+    #[arg(long)]
+    pub body: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProxyAddOpts {
+    /// Target address (e.g., "localhost:3000").
+    pub target: String,
+
+    /// Proxy name (auto-suggested if not provided).
+    #[arg(short, long)]
+    pub name: Option<String>,
+
+    /// Host-based routing.
+    #[arg(long)]
+    pub host: Option<String>,
+
+    /// Path prefix routing.
+    #[arg(long)]
+    pub path: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -893,6 +1051,26 @@ pub struct SecretsCommand {
     pub action: SecretsAction,
 }
 
+#[derive(Parser, Debug)]
+pub struct OtpCommand {
+    #[command(subcommand)]
+    pub action: OtpAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum OtpAction {
+    #[command(about = "Get a TOTP code from 1Password Connect")]
+    Get {
+        /// Vault name or id.
+        vault: String,
+        /// Item title or id.
+        item: String,
+        /// Optional field label to select when multiple TOTP fields exist.
+        #[arg(long)]
+        field: Option<String>,
+    },
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum SecretsAction {
     #[command(about = "List configured secret environments")]
@@ -1088,12 +1266,30 @@ pub struct CommitOpts {
     /// Skip pushing after commit.
     #[arg(long, short = 'n')]
     pub no_push: bool,
+    /// Queue the commit for review before pushing.
+    #[arg(long)]
+    pub queue: bool,
+    /// Bypass commit queue and allow pushing immediately.
+    #[arg(long, conflicts_with = "queue")]
+    pub no_queue: bool,
+    /// Force commit without queue (bypass stacked review).
+    #[arg(long, conflicts_with = "queue")]
+    pub force: bool,
+    /// Commit and push immediately (bypass commit queue).
+    #[arg(long, conflicts_with = "queue")]
+    pub approved: bool,
+    /// Open the queued commit in Rise for review after commit.
+    #[arg(long)]
+    pub review: bool,
     /// Run synchronously (don't delegate to hub).
     #[arg(long, visible_alias = "no-hub")]
     pub sync: bool,
     /// Include AI session context in code review (default: off).
     #[arg(long)]
     pub context: bool,
+    /// Include an unhash.sh bundle/link in the commit message (opt-in).
+    #[arg(long)]
+    pub hashed: bool,
     /// Dry run: show context that would be passed to review without committing.
     #[arg(long)]
     pub dry: bool,
@@ -1106,9 +1302,180 @@ pub struct CommitOpts {
     /// Custom message to include in commit (appended after author line).
     #[arg(long, short = 'm')]
     pub message: Option<String>,
+    /// Fast commit with optional message (defaults to ".").
+    #[arg(long, value_name = "MESSAGE", num_args = 0..=1, default_missing_value = ".")]
+    pub fast: Option<String>,
+    /// Message to append after the AI-generated subject/body.
+    #[arg(value_name = "MESSAGE", allow_hyphen_values = true)]
+    pub message_arg: Option<String>,
     /// Max tokens for AI session context (default: 1000).
     #[arg(long, short = 't', default_value = "1000")]
     pub tokens: usize,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CommitQueueCommand {
+    #[command(subcommand)]
+    pub action: Option<CommitQueueAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReviewCommand {
+    #[command(subcommand)]
+    pub action: Option<ReviewAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GitRepairOpts {
+    /// Branch to checkout if HEAD is detached (default: main).
+    #[arg(long)]
+    pub branch: Option<String>,
+    /// Dry run - show what would be repaired.
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CommitQueueAction {
+    /// List queued commits.
+    List,
+    /// Show details for a queued commit.
+    Show {
+        /// Commit hash (short or full).
+        hash: String,
+    },
+    /// Approve a queued commit and push it.
+    Approve {
+        /// Commit hash (short or full).
+        hash: String,
+        /// Push even if the commit is not at HEAD.
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
+    /// Approve all queued commits on the current branch (push once).
+    ApproveAll {
+        /// Push even if the branch is behind its remote.
+        #[arg(long, short = 'f')]
+        force: bool,
+    },
+    /// Remove a commit from the queue without pushing.
+    Drop {
+        /// Commit hash (short or full).
+        hash: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ReviewAction {
+    /// Open the latest queued commit in Rise.
+    Latest,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct JjCommand {
+    #[command(subcommand)]
+    pub action: Option<JjAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum JjAction {
+    /// Initialize jj in the repo (colocated with git when possible).
+    Init {
+        /// Optional path to initialize (defaults to current directory).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Show jj status.
+    Status,
+    /// Fetch from git remotes.
+    Fetch,
+    /// Rebase current change onto a destination.
+    Rebase(JjRebaseOpts),
+    /// Push bookmarks to git.
+    Push(JjPushOpts),
+    /// Fetch, rebase, then push a bookmark.
+    Sync(JjSyncOpts),
+    /// Manage workspaces.
+    #[command(subcommand)]
+    Workspace(JjWorkspaceAction),
+    /// Manage bookmarks.
+    #[command(subcommand)]
+    Bookmark(JjBookmarkAction),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct JjRebaseOpts {
+    /// Destination to rebase onto (default: jj.default_branch or main/master).
+    #[arg(long)]
+    pub dest: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct JjPushOpts {
+    /// Bookmark to push.
+    #[arg(long)]
+    pub bookmark: Option<String>,
+    /// Push all bookmarks.
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct JjSyncOpts {
+    /// Bookmark to push after rebase (optional).
+    #[arg(long)]
+    pub bookmark: Option<String>,
+    /// Destination to rebase onto (default: jj.default_branch or main/master).
+    #[arg(long)]
+    pub dest: Option<String>,
+    /// Remote to sync with (default: jj.remote or origin).
+    #[arg(long)]
+    pub remote: Option<String>,
+    /// Skip pushing after rebase.
+    #[arg(long)]
+    pub no_push: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum JjWorkspaceAction {
+    /// List workspaces.
+    List,
+    /// Add a workspace.
+    Add {
+        /// Workspace name.
+        name: String,
+        /// Optional path for workspace directory.
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum JjBookmarkAction {
+    /// List bookmarks.
+    List,
+    /// Track a bookmark from a remote.
+    Track {
+        /// Bookmark name.
+        name: String,
+        /// Remote name (default: jj.remote or origin).
+        #[arg(long)]
+        remote: Option<String>,
+    },
+    /// Create a bookmark at a revision.
+    Create {
+        /// Bookmark name.
+        name: String,
+        /// Revision to attach to (default: @).
+        #[arg(long)]
+        rev: Option<String>,
+        /// Whether to track the remote bookmark (default: jj.auto_track).
+        #[arg(long)]
+        track: Option<bool>,
+        /// Remote to track (default: jj.remote or origin).
+        #[arg(long)]
+        remote: Option<String>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1119,6 +1486,49 @@ pub struct FixupOpts {
     /// Only show what would be fixed without making changes.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct FixOpts {
+    /// Description of what to fix.
+    #[arg(value_name = "MESSAGE", trailing_var_arg = true)]
+    pub message: Vec<String>,
+    /// Skip unrolling the last commit.
+    #[arg(long)]
+    pub no_unroll: bool,
+    /// Stash local changes before unrolling, then restore after.
+    #[arg(long)]
+    pub stash: bool,
+    /// Hive agent name to run (default: shell).
+    #[arg(long, default_value = "shell")]
+    pub agent: String,
+    /// Skip running Hive agent (only unroll).
+    #[arg(long)]
+    pub no_agent: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UndoCommand {
+    #[command(subcommand)]
+    pub action: Option<UndoAction>,
+    /// Dry run - show what would be undone without doing it.
+    #[arg(long, short = 'n')]
+    pub dry_run: bool,
+    /// Force undo even if it requires force push.
+    #[arg(long, short = 'f')]
+    pub force: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum UndoAction {
+    /// Show the last undoable action.
+    Show,
+    /// List recent undoable actions.
+    List {
+        /// Maximum number of actions to show.
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1137,6 +1547,13 @@ pub struct DiffCommand {
     ///           --env='[\"CEREBRAS_API_KEY\",\"CEREBRAS_MODEL\"]'
     #[arg(long, value_name = "KEY", action = clap::ArgAction::Append)]
     pub env: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HashOpts {
+    /// Arguments passed to unhash (paths or session flags).
+    #[arg(trailing_var_arg = true, required = true)]
+    pub args: Vec<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -1183,7 +1600,10 @@ pub enum DaemonAction {
         name: String,
     },
     /// Show status of all configured daemons.
-    Status,
+    Status {
+        /// Optional daemon name to filter status output.
+        name: Option<String>,
+    },
     /// List available daemons.
     #[command(alias = "ls")]
     List,
@@ -1212,6 +1632,14 @@ pub enum SupervisorAction {
         #[arg(long)]
         boot: bool,
     },
+    /// Install a macOS LaunchAgent to keep the supervisor running.
+    Install {
+        /// Start boot daemons in addition to autostart daemons.
+        #[arg(long)]
+        boot: bool,
+    },
+    /// Remove the macOS LaunchAgent for the supervisor.
+    Uninstall,
     /// Stop the supervisor if running.
     Stop,
     /// Show supervisor status.
@@ -1271,12 +1699,20 @@ pub enum AiAction {
         /// Session name or ID to copy (if not provided, shows fuzzy search).
         session: Option<String>,
     },
-    /// Copy last Claude session to clipboard.
+    /// Copy last Claude session to clipboard. Optionally search for a session containing text.
     #[command(name = "copy-claude", alias = "cc")]
-    CopyClaude,
-    /// Copy last Codex session to clipboard.
+    CopyClaude {
+        /// Search for a session containing this text.
+        #[arg(value_name = "SEARCH", trailing_var_arg = true)]
+        search: Vec<String>,
+    },
+    /// Copy last Codex session to clipboard. Optionally search for a session containing text.
     #[command(name = "copy-codex", alias = "cx")]
-    CopyCodex,
+    CopyCodex {
+        /// Search for a session containing this text.
+        #[arg(value_name = "SEARCH", trailing_var_arg = true)]
+        search: Vec<String>,
+    },
     /// Copy last prompt and response from a session to clipboard (for context passing).
     /// Usage: f ai context [session] [path] [count]
     Context {
@@ -1459,6 +1895,82 @@ pub enum ServicesAction {
     /// List available service setup flows.
     #[command(alias = "ls")]
     List,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MacosCommand {
+    #[command(subcommand)]
+    pub action: Option<MacosAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum MacosAction {
+    /// List all launchd services.
+    #[command(alias = "ls")]
+    List(MacosListOpts),
+    /// Show running non-Apple services.
+    Status,
+    /// Audit services with recommendations.
+    Audit(MacosAuditOpts),
+    /// Show detailed info about a service.
+    Info(MacosInfoOpts),
+    /// Disable a service.
+    Disable(MacosDisableOpts),
+    /// Enable a service.
+    Enable(MacosEnableOpts),
+    /// Disable known bloatware services.
+    Clean(MacosCleanOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MacosListOpts {
+    /// Only show user agents.
+    #[arg(long)]
+    pub user: bool,
+    /// Only show system agents/daemons.
+    #[arg(long)]
+    pub system: bool,
+    /// Output as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MacosAuditOpts {
+    /// Output as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MacosInfoOpts {
+    /// Service identifier (e.g., com.google.keystone.agent).
+    pub service: String,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MacosDisableOpts {
+    /// Service identifier to disable.
+    pub service: String,
+    /// Skip confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MacosEnableOpts {
+    /// Service identifier to enable.
+    pub service: String,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MacosCleanOpts {
+    /// Only show what would be done.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1815,16 +2327,72 @@ pub enum AgentsAction {
         /// Optional agent name (fuzzy select if not provided).
         agent: Option<String>,
     },
+    /// Switch agents.md profile (fuzzy select if not provided).
+    Rules {
+        /// Optional profile name (e.g., light).
+        profile: Option<String>,
+        /// Optional repo path (defaults to cwd).
+        repo: Option<String>,
+    },
+}
+
+/// Hive agent management.
+#[derive(Args, Debug, Clone)]
+pub struct HiveCommand {
+    #[command(subcommand)]
+    pub action: Option<HiveAction>,
+    /// Run an agent directly (e.g., `f hive fish "wrap ls"`).
+    #[arg(trailing_var_arg = true)]
+    pub agent: Vec<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum HiveAction {
+    /// List available hive agents.
+    #[command(alias = "ls")]
+    List,
+    /// Run a hive agent with a prompt.
+    Run {
+        /// Agent name.
+        agent: String,
+        /// Prompt for the agent.
+        #[arg(trailing_var_arg = true)]
+        prompt: Vec<String>,
+    },
+    /// Create a new agent spec.
+    New {
+        /// Agent name.
+        name: String,
+        /// Create as global agent (default: project-local).
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Edit an agent spec file.
+    Edit {
+        /// Agent name (fuzzy select if not provided).
+        agent: Option<String>,
+    },
+    /// Show an agent's spec.
+    Show {
+        /// Agent name.
+        agent: String,
+    },
 }
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct PublishOpts {
+    /// GitHub repository URL (e.g., https://github.com/org/repo or git@github.com:org/repo.git).
+    #[arg(value_name = "URL")]
+    pub url: Option<String>,
     /// Repository name (defaults to current folder name).
     #[arg(short, long)]
     pub name: Option<String>,
-    /// Repository owner (gitedit.dev only; defaults to config or user).
+    /// Repository owner/org (GitHub) or owner (gitedit.dev).
     #[arg(long)]
     pub owner: Option<String>,
+    /// Update existing origin remote to match the target repo (GitHub).
+    #[arg(long)]
+    pub set_origin: bool,
     /// Make the repository public.
     #[arg(long)]
     pub public: bool,
@@ -1900,6 +2468,9 @@ pub struct CodeMigrateOpts {
     pub from: String,
     /// Relative path under the code root (e.g., "flow/myflow").
     pub relative: String,
+    /// Copy instead of move (keeps original).
+    #[arg(long, short)]
+    pub copy: bool,
     /// Show what would change without writing.
     #[arg(long)]
     pub dry_run: bool,
@@ -1954,7 +2525,7 @@ pub struct MigrateCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum MigrateAction {
-    /// Move current folder to ~/code/<relative-path>.
+    /// Move or copy current folder to ~/code/<relative-path>.
     Code(MigrateCodeOpts),
 }
 
@@ -1962,6 +2533,9 @@ pub enum MigrateAction {
 pub struct MigrateCodeOpts {
     /// Relative path under ~/code (e.g., "flow/myflow").
     pub relative: String,
+    /// Copy instead of move (keeps original).
+    #[arg(long, short)]
+    pub copy: bool,
     /// Show what would change without writing.
     #[arg(long)]
     pub dry_run: bool,
@@ -2010,6 +2584,12 @@ pub struct SyncCommand {
     /// Auto-stash uncommitted changes (default: true).
     #[arg(long, short, default_value = "true")]
     pub stash: bool,
+    /// Stash local JJ commits to a bookmark before syncing (JJ-only).
+    #[arg(long, default_value = "false")]
+    pub stash_commits: bool,
+    /// Allow sync/rebase even when commit queue is non-empty.
+    #[arg(long)]
+    pub allow_queue: bool,
     /// Create origin repo on GitHub if it doesn't exist.
     #[arg(long)]
     pub create_repo: bool,
@@ -2264,6 +2844,22 @@ pub enum InstallBackend {
     Auto,
     Registry,
     Flox,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct FishInstallOpts {
+    /// Path to fish-shell source repo (auto-detected if not set).
+    #[arg(long)]
+    pub source: Option<PathBuf>,
+    /// Install directory for the fish binary (defaults to ~/.local/bin).
+    #[arg(long)]
+    pub bin_dir: Option<PathBuf>,
+    /// Force reinstall even if already installed.
+    #[arg(long)]
+    pub force: bool,
+    /// Skip confirmation prompt.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug, Clone)]
