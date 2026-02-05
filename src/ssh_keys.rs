@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -530,6 +530,9 @@ fn next_local_midnight_utc() -> Result<DateTime<Utc>> {
 fn prompt_touch_id() -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("Touch ID is not available on this OS");
+    }
+    if std::env::var("FLOW_NO_TOUCH_ID").is_ok() || !std::io::stdin().is_terminal() {
+        bail!("Touch ID prompt requires an interactive terminal");
     }
 
     let reason = "Flow needs Touch ID to unlock SSH keys.";

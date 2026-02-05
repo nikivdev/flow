@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::web;
+use crate::{skills, web};
 
 /// Checkpoint names for tracking completed actions.
 pub mod checkpoints {
@@ -56,6 +56,8 @@ pub fn run_at(project_root: &Path) -> Result<()> {
         set_checkpoint(&project_root, checkpoints::DB_SCHEMA_CREATED)?;
         println!("✓ Created .ai/internal/db/ with schema");
     }
+
+    skills::ensure_default_skills_at(&project_root)?;
 
     // Materialize .claude/ and .codex/ from .ai/
     materialize_tool_folders(&project_root)?;

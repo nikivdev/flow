@@ -213,12 +213,7 @@ pub fn publish(config_path: &Path, cfg: &Config, opts: RegistryReleaseOpts) -> R
 }
 
 pub fn install(opts: InstallOpts) -> Result<()> {
-    let name = opts
-        .name
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let name = opts.name.as_deref().unwrap_or("").trim().to_string();
     if name.is_empty() {
         bail!("package name is required for registry install");
     }

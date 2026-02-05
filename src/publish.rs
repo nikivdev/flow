@@ -16,6 +16,42 @@ use crate::cli::{PublishAction, PublishCommand, PublishOpts};
 use crate::config;
 use crate::vcs;
 
+fn parse_github_repo(url: &str) -> Result<(String, String, String)> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        bail!("GitHub URL is empty");
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        let rest = rest.trim_end_matches(".git");
+        let Some((owner, repo)) = rest.split_once('/') else {
+            bail!("Invalid GitHub SSH URL: {}", url);
+        };
+        return Ok((
+            owner.to_string(),
+            repo.to_string(),
+            format!("git@github.com:{}/{}.git", owner, repo),
+        ));
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        let rest = rest.trim_end_matches(".git");
+        let Some((owner, repo)) = rest.split_once('/') else {
+            bail!("Invalid GitHub HTTPS URL: {}", url);
+        };
+        return Ok((
+            owner.to_string(),
+            repo.to_string(),
+            format!("git@github.com:{}/{}.git", owner, repo),
+        ));
+    }
+
+    bail!(
+        "Unsupported GitHub URL (expected https://github.com/... or git@github.com:...): {}",
+        url
+    );
+}
+
 /// Run the publish command.
 pub fn run(cmd: PublishCommand) -> Result<()> {
     match cmd.action {
@@ -101,7 +137,7 @@ pub fn run_github(opts: PublishOpts) -> Result<()> {
     // Check if already a git repo
     let is_git_repo = cwd.join(".git").exists();
 
-    // Get GitHub username
+    // Get GitHub username (fallback owner)
     let gh_user = Command::new("gh")
         .args(["api", "user", "-q", ".login"])
         .output()
@@ -111,9 +147,20 @@ pub fn run_github(opts: PublishOpts) -> Result<()> {
     if username.is_empty() {
         bail!("Could not determine GitHub username");
     }
+    let mut owner = opts.owner.clone().unwrap_or_else(|| username.clone());
+    let mut repo_name_from_url: Option<String> = None;
+    let mut remote_from_url: Option<String> = None;
+    if let Some(url) = opts.url.as_ref() {
+        let (parsed_owner, parsed_name, parsed_remote) = parse_github_repo(url)?;
+        owner = parsed_owner;
+        repo_name_from_url = Some(parsed_name);
+        remote_from_url = Some(parsed_remote);
+    }
 
     // Determine repo name
     let repo_name = if let Some(name) = opts.name {
+        name
+    } else if let Some(name) = repo_name_from_url.clone() {
         name
     } else if opts.yes {
         folder_name.clone()
@@ -142,7 +189,10 @@ pub fn run_github(opts: PublishOpts) -> Result<()> {
     };
 
     let visibility = if is_public { "public" } else { "private" };
-    let full_name = format!("{}/{}", username, repo_name);
+    let full_name = format!("{}/{}", owner, repo_name);
+    let desired_remote =
+        remote_from_url.unwrap_or_else(|| format!("git@github.com:{}.git", full_name));
+    let set_origin = opts.set_origin || opts.url.is_some();
 
     // Check if repo already exists
     let repo_check = Command::new("gh")
@@ -195,14 +245,36 @@ pub fn run_github(opts: PublishOpts) -> Result<()> {
                 .args(["remote", "get-url", "origin"])
                 .output();
 
-            if origin_check.map(|o| o.status.success()).unwrap_or(false) {
-                println!("\n✓ https://github.com/{}", full_name);
-                return Ok(());
+            if let Ok(output) = origin_check {
+                if output.status.success() {
+                    let current_origin = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if set_origin && current_origin != desired_remote {
+                        println!("Updating origin remote...");
+                        Command::new("git")
+                            .args(["remote", "set-url", "origin", &desired_remote])
+                            .status()
+                            .context("failed to update origin remote")?;
+                    }
+
+                    let should_push = if opts.yes {
+                        true
+                    } else {
+                        prompt_push_choice()?
+                    };
+
+                    if should_push {
+                        println!("Pushing to {}...", full_name);
+                        push_to_origin()?;
+                    }
+
+                    println!("\n✓ https://github.com/{}", full_name);
+                    return Ok(());
+                }
             }
 
             // Add origin and push
             println!("Adding origin remote...");
-            let remote_url = format!("git@github.com:{}.git", full_name);
+            let remote_url = desired_remote.clone();
             Command::new("git")
                 .args(["remote", "add", "origin", &remote_url])
                 .status()
@@ -841,6 +913,24 @@ fn prompt_public_choice() -> Result<bool> {
         answer.as_str(),
         "y" | "yes" | "public" | "pub" | "p"
     ))
+}
+
+fn prompt_push_choice() -> Result<bool> {
+    let default_push = true;
+    print!("Push current branch to origin? [Y/n]: ");
+    io::stdout().flush()?;
+
+    if io::stdin().is_terminal() {
+        return read_yes_no_key(default_push);
+    }
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    if answer.is_empty() {
+        return Ok(default_push);
+    }
+    Ok(matches!(answer.as_str(), "y" | "yes"))
 }
 
 fn read_yes_no_key(default_yes: bool) -> Result<bool> {

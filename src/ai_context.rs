@@ -53,14 +53,18 @@ pub fn find_project_root() -> Option<PathBuf> {
 /// Load context for a specific flow command (e.g., "sync", "deploy").
 pub fn load_command_context(command: &str) -> Option<String> {
     let root = find_project_root()?;
-    let context_path = root.join(".ai/context/commands").join(format!("{}.md", command));
+    let context_path = root
+        .join(".ai/context/commands")
+        .join(format!("{}.md", command));
     load_context_file(&context_path)
 }
 
 /// Load context for a specific task name.
 pub fn load_task_context(task_name: &str) -> Option<String> {
     let root = find_project_root()?;
-    let context_path = root.join(".ai/context/tasks").join(format!("{}.md", task_name));
+    let context_path = root
+        .join(".ai/context/tasks")
+        .join(format!("{}.md", task_name));
     load_context_file(&context_path)
 }
 

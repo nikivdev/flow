@@ -17,12 +17,15 @@ use reqwest::blocking::Client;
 use crate::{
     cli::{DaemonAction, DaemonCommand},
     config::{self, DaemonConfig, DaemonRestartPolicy},
+    env,
     supervisor,
 };
 
 /// Run the daemon command.
 pub fn run(cmd: DaemonCommand) -> Result<()> {
-    let action = cmd.action.unwrap_or(DaemonAction::Status);
+    let action = cmd
+        .action
+        .unwrap_or(DaemonAction::Status { name: None });
     let config_path = resolve_flow_toml_path();
 
     if supervisor::try_handle_daemon_action(&action, config_path.as_deref())? {
@@ -37,7 +40,13 @@ pub fn run(cmd: DaemonCommand) -> Result<()> {
             std::thread::sleep(Duration::from_millis(500));
             start_daemon(&name)?;
         }
-        DaemonAction::Status => show_status()?,
+        DaemonAction::Status { name } => {
+            if let Some(name) = name {
+                show_status_for(&name)?;
+            } else {
+                show_status()?;
+            }
+        }
         DaemonAction::List => list_daemons()?,
     }
 
@@ -147,6 +156,11 @@ pub fn show_status() -> Result<()> {
     show_status_with_path(resolve_flow_toml_path().as_deref())
 }
 
+/// Show status of a specific daemon.
+pub fn show_status_for(name: &str) -> Result<()> {
+    show_status_for_with_path(name, resolve_flow_toml_path().as_deref())
+}
+
 pub fn show_status_with_path(config_path: Option<&Path>) -> Result<()> {
     let config = load_merged_config_with_path(config_path)?;
 
@@ -193,6 +207,38 @@ pub fn show_status_with_path(config_path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+pub fn show_status_for_with_path(name: &str, config_path: Option<&Path>) -> Result<()> {
+    let daemon = find_daemon_config_with_path(name, config_path)?;
+    let status = get_daemon_status(&daemon);
+    let icon = if status.running { "✓" } else { "✗" };
+    let state = if status.running { "running" } else { "stopped" };
+
+    println!("Daemon Status:");
+    println!();
+    print!("  {} {}: {}", icon, daemon.name, state);
+
+    if let Some(url) = daemon.effective_health_url() {
+        if status.running {
+            if status.healthy == Some(false) {
+                print!(" (unhealthy: {})", url.replace("/health", ""));
+            } else {
+                print!(" ({})", url.replace("/health", ""));
+            }
+        }
+    }
+
+    if let Some(pid) = status.pid {
+        print!(" [PID {}]", pid);
+    }
+
+    println!();
+    if let Some(desc) = &daemon.description {
+        println!("      {}", desc);
+    }
+
+    Ok(())
+}
+
 /// List available daemons.
 pub fn list_daemons() -> Result<()> {
     list_daemons_with_path(resolve_flow_toml_path().as_deref())
@@ -225,21 +271,33 @@ pub fn list_daemons_with_path(config_path: Option<&Path>) -> Result<()> {
 pub struct DaemonStatus {
     pub running: bool,
     pub pid: Option<u32>,
+    pub healthy: Option<bool>,
 }
 
 /// Get the status of a specific daemon.
 pub fn get_daemon_status(daemon: &DaemonConfig) -> DaemonStatus {
     let pid = load_daemon_pid(&daemon.name).ok().flatten();
+    let pid_alive = pid
+        .map(|pid| process_alive(pid).unwrap_or(false))
+        .unwrap_or(false);
 
-    let running = if let Some(url) = daemon.effective_health_url() {
-        check_health(&url)
-    } else if let Some(pid) = pid {
-        process_alive(pid).unwrap_or(false)
+    let healthy = daemon.effective_health_url().map(|url| check_health(&url));
+    let running = if healthy.is_some() {
+        // Prefer PID when available; a transient health blip shouldn't mark the process as stopped.
+        if pid.is_some() {
+            pid_alive
+        } else {
+            healthy.unwrap_or(false)
+        }
     } else {
-        false
+        pid_alive
     };
 
-    DaemonStatus { running, pid }
+    DaemonStatus {
+        running,
+        pid,
+        healthy,
+    }
 }
 
 pub fn restart_policy_for(daemon: &DaemonConfig) -> DaemonRestartPolicy {
@@ -303,6 +361,12 @@ fn spawn_daemon_process(daemon: &DaemonConfig, binary: &Path) -> Result<SpawnedD
         let expanded = config::expand_path(wd);
         if expanded.exists() {
             cmd.current_dir(&expanded);
+        }
+    }
+
+    if let Ok(vars) = env::fetch_local_personal_env_vars(&config::global_env_keys()) {
+        for (key, value) in vars {
+            cmd.env(key, value);
         }
     }
 

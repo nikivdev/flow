@@ -8,8 +8,8 @@ use crate::ai_context;
 use crate::cli::ArchiveOpts;
 
 pub fn run(opts: ArchiveOpts) -> Result<()> {
-    let root = ai_context::find_project_root()
-        .ok_or_else(|| anyhow::anyhow!("project root not found"))?;
+    let root =
+        ai_context::find_project_root().ok_or_else(|| anyhow::anyhow!("project root not found"))?;
     let root = fs::canonicalize(&root).unwrap_or(root);
     let project_name = root
         .file_name()
@@ -31,11 +31,13 @@ pub fn run(opts: ArchiveOpts) -> Result<()> {
         .to_path_buf();
     let archive_root = home.join("archive").join("code");
     fs::create_dir_all(&archive_root).with_context(|| {
-        format!("failed to create archive directory {}", archive_root.display())
+        format!(
+            "failed to create archive directory {}",
+            archive_root.display()
+        )
     })?;
 
-    let code_root = fs::canonicalize(home.join("code"))
-        .unwrap_or_else(|_| home.join("code"));
+    let code_root = fs::canonicalize(home.join("code")).unwrap_or_else(|_| home.join("code"));
     let rel_path = root.strip_prefix(&code_root).ok();
     let (dest_parent, base_project) = if let Some(rel) = rel_path {
         let parent = rel
@@ -54,7 +56,10 @@ pub fn run(opts: ArchiveOpts) -> Result<()> {
     };
 
     fs::create_dir_all(&dest_parent).with_context(|| {
-        format!("failed to create archive directory {}", dest_parent.display())
+        format!(
+            "failed to create archive directory {}",
+            dest_parent.display()
+        )
     })?;
 
     let date_suffix = Local::now()

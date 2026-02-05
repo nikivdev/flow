@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -186,6 +188,7 @@ pub fn run_migrate(cmd: MigrateCommand) -> Result<()> {
     // Handle `f migrate code <relative>` subcommand
     if let Some(MigrateAction::Code(opts)) = cmd.action {
         // Merge flags from parent command and subcommand (subcommand takes precedence if set)
+        let copy = opts.copy || cmd.copy;
         let dry_run = opts.dry_run || cmd.dry_run;
         let skip_claude = opts.skip_claude || cmd.skip_claude;
         let skip_codex = opts.skip_codex || cmd.skip_codex;
@@ -193,6 +196,7 @@ pub fn run_migrate(cmd: MigrateCommand) -> Result<()> {
         let migrate_opts = CodeMigrateOpts {
             from: from.to_string_lossy().to_string(),
             relative: opts.relative,
+            copy,
             dry_run,
             skip_claude,
             skip_codex,
@@ -230,11 +234,20 @@ pub fn run_migrate(cmd: MigrateCommand) -> Result<()> {
         }
         // No paths provided
         (None, _) => {
-            bail!("Usage: f migrate <target> OR f migrate <source> <target> OR f migrate code <relative>");
+            bail!(
+                "Usage: f migrate <target> OR f migrate <source> <target> OR f migrate code <relative>"
+            );
         }
     };
 
-    migrate_to_path(&from, &target, cmd.copy, cmd.dry_run, cmd.skip_claude, cmd.skip_codex)
+    migrate_to_path(
+        &from,
+        &target,
+        cmd.copy,
+        cmd.dry_run,
+        cmd.skip_claude,
+        cmd.skip_codex,
+    )
 }
 
 /// Migrate a folder to an arbitrary target path (not necessarily ~/code).
@@ -296,11 +309,6 @@ fn migrate_to_path(
         }
     }
 
-    // Skip session migration for copy (sessions stay with original)
-    if copy {
-        return Ok(());
-    }
-
     let session_opts = CodeMoveSessionsOpts {
         from: from.to_string_lossy().to_string(),
         to: target.to_string_lossy().to_string(),
@@ -308,8 +316,14 @@ fn migrate_to_path(
         skip_claude,
         skip_codex,
     };
-    move_sessions(session_opts)
-        .with_context(|| format!("moved to {}, but session migration failed", target_display))?;
+    if copy {
+        copy_sessions(session_opts)
+            .with_context(|| format!("copied to {}, but session copy failed", target_display))?;
+    } else {
+        move_sessions(session_opts).with_context(|| {
+            format!("moved to {}, but session migration failed", target_display)
+        })?;
+    }
 
     Ok(())
 }
@@ -588,15 +602,21 @@ fn migrate_project(opts: CodeMigrateOpts, root: &str) -> Result<()> {
     }
 
     if opts.dry_run {
-        println!("Would move {} -> {}", from.display(), target_display);
+        let action = if opts.copy { "copy" } else { "move" };
+        println!("Would {} {} -> {}", action, from.display(), target_display);
+    } else if opts.copy {
+        copy_dir_all(&from, &target)?;
+        println!("Copied {} -> {}", from.display(), target_display);
     } else {
         move_dir(&from, &target)?;
         println!("Moved {} -> {}", from.display(), target_display);
     }
 
-    let relinked = relink_bin_symlinks(&from, &target, opts.dry_run)?;
-    if relinked > 0 {
-        println!("Updated {} symlink(s) in ~/bin", relinked);
+    if !opts.copy {
+        let relinked = relink_bin_symlinks(&from, &target, opts.dry_run)?;
+        if relinked > 0 {
+            println!("Updated {} symlink(s) in ~/bin", relinked);
+        }
     }
 
     let session_opts = CodeMoveSessionsOpts {
@@ -606,8 +626,48 @@ fn migrate_project(opts: CodeMigrateOpts, root: &str) -> Result<()> {
         skip_claude: opts.skip_claude,
         skip_codex: opts.skip_codex,
     };
-    move_sessions(session_opts)
-        .with_context(|| format!("moved to {}, but session migration failed", target_display))?;
+    if opts.copy {
+        copy_sessions(session_opts)
+            .with_context(|| format!("copied to {}, but session copy failed", target_display))?;
+    } else {
+        move_sessions(session_opts).with_context(|| {
+            format!("moved to {}, but session migration failed", target_display)
+        })?;
+    }
+
+    Ok(())
+}
+
+fn copy_sessions(opts: CodeMoveSessionsOpts) -> Result<()> {
+    let from = normalize_path(&opts.from)?;
+    let to = normalize_path(&opts.to)?;
+
+    if from == to {
+        bail!("Source and destination are the same path.");
+    }
+
+    let mut copied_claude = 0;
+    let mut copied_codex = 0;
+    let mut copied_codex_files = 0;
+
+    if !opts.skip_claude {
+        let base = claude_projects_dir();
+        copied_claude = copy_project_dir(&base, &from, &to, opts.dry_run)?;
+    }
+    if !opts.skip_codex {
+        let base = codex_projects_dir();
+        copied_codex = copy_project_dir(&base, &from, &to, opts.dry_run)?;
+        let codex_copy = copy_codex_sessions(&from, &to, opts.dry_run)?;
+        copied_codex_files = codex_copy.copied_files;
+    }
+
+    println!("Session copy summary:");
+    println!("  Claude project dirs copied: {}", copied_claude);
+    println!("  Codex legacy dirs copied: {}", copied_codex);
+    println!("  Codex jsonl files copied: {}", copied_codex_files);
+    if opts.dry_run {
+        println!("Dry run only; no files were changed.");
+    }
 
     Ok(())
 }
@@ -923,13 +983,208 @@ fn move_project_dir(base: &Path, from: &Path, to: &Path, dry_run: bool) -> Resul
     Ok(1)
 }
 
+fn copy_project_dir(base: &Path, from: &Path, to: &Path, dry_run: bool) -> Result<usize> {
+    if !base.exists() {
+        return Ok(0);
+    }
+
+    let from_name = path_to_project_name(from);
+    let to_name = path_to_project_name(to);
+    let from_dir = base.join(&from_name);
+    let to_dir = base.join(&to_name);
+
+    if !from_dir.exists() {
+        return Ok(0);
+    }
+    if to_dir.exists() {
+        println!("Skip: {} already exists", to_dir.display());
+        return Ok(0);
+    }
+
+    if dry_run {
+        println!("Would copy {} -> {}", from_dir.display(), to_dir.display());
+    } else {
+        if let Some(parent) = to_dir.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        copy_dir_all(&from_dir, &to_dir)?;
+    }
+
+    Ok(1)
+}
+
 fn path_to_project_name(path: &Path) -> String {
     path.to_string_lossy().replace('/', "-")
+}
+
+struct CodexCopySummary {
+    copied_files: usize,
+}
+
+fn copy_codex_sessions(from: &Path, to: &Path, dry_run: bool) -> Result<CodexCopySummary> {
+    let root = codex_sessions_dir();
+    if !root.exists() {
+        return Ok(CodexCopySummary { copied_files: 0 });
+    }
+
+    let from_str = from.to_string_lossy().to_string();
+    let to_str = to.to_string_lossy().to_string();
+    let mut copied_files = 0;
+
+    for file_path in collect_codex_session_files(&root) {
+        if let Some(copy_path) = copy_codex_session_file(&file_path, &from_str, &to_str, dry_run)? {
+            copied_files += 1;
+            if dry_run {
+                println!(
+                    "Would copy session {} -> {}",
+                    file_path.display(),
+                    copy_path.display()
+                );
+            }
+        }
+    }
+
+    Ok(CodexCopySummary { copied_files })
 }
 
 struct CodexUpdateSummary {
     updated_files: usize,
     remaining_files: Vec<PathBuf>,
+}
+
+fn copy_codex_session_file(
+    path: &Path,
+    from: &str,
+    to: &str,
+    dry_run: bool,
+) -> Result<Option<PathBuf>> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let ends_with_newline = content.ends_with('\n');
+    let mut matched = false;
+    let mut old_id: Option<String> = None;
+    let mut parsed_lines: Vec<(String, Option<Value>)> = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            parsed_lines.push((String::new(), None));
+            continue;
+        }
+
+        match serde_json::from_str::<Value>(line) {
+            Ok(value) => {
+                if value.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
+                    if let Some(payload) = value.get("payload").and_then(|v| v.as_object()) {
+                        if old_id.is_none() {
+                            old_id = payload
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                        }
+                        if payload.get("cwd").and_then(|v| v.as_str()) == Some(from) {
+                            matched = true;
+                        }
+                    }
+                }
+                parsed_lines.push((line.to_string(), Some(value)));
+            }
+            Err(_) => parsed_lines.push((line.to_string(), None)),
+        }
+    }
+
+    if !matched {
+        return Ok(None);
+    }
+
+    let fallback_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session")
+        .to_string();
+    let old_id = old_id.unwrap_or(fallback_id);
+    let new_id = derive_copy_id(&old_id, to);
+    let copy_path = derive_copy_path(path, &old_id, &new_id);
+
+    let mut lines = Vec::new();
+    for (raw, value) in parsed_lines {
+        if let Some(mut value) = value {
+            if value.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
+                if let Some(payload) = value.get_mut("payload") {
+                    if let Some(obj) = payload.as_object_mut() {
+                        if obj.get("cwd").and_then(|v| v.as_str()) == Some(from) {
+                            obj.insert("cwd".to_string(), Value::String(to.to_string()));
+                            obj.insert("id".to_string(), Value::String(new_id.clone()));
+                            lines.push(serde_json::to_string(&value)?);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        lines.push(raw);
+    }
+
+    if dry_run {
+        return Ok(Some(copy_path));
+    }
+
+    let mut output = lines.join("\n");
+    if ends_with_newline {
+        output.push('\n');
+    }
+    fs::write(&copy_path, output.as_bytes())
+        .with_context(|| format!("failed to write {}", copy_path.display()))?;
+
+    Ok(Some(copy_path))
+}
+
+fn derive_copy_id(old_id: &str, to: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    old_id.hash(&mut hasher);
+    to.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!("{old_id}-copy-{hash:x}")
+}
+
+fn derive_copy_path(path: &Path, old_id: &str, new_id: &str) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session.jsonl");
+    let base_name = if filename.contains(old_id) {
+        filename.replace(old_id, new_id)
+    } else {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("session");
+        format!("{stem}-{new_id}.jsonl")
+    };
+    unique_copy_path(parent, &base_name)
+}
+
+fn unique_copy_path(parent: &Path, base_name: &str) -> PathBuf {
+    let mut candidate = parent.join(base_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    for i in 1..=1000 {
+        let alt = insert_suffix(base_name, &format!("-{}", i));
+        candidate = parent.join(&alt);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    candidate
+}
+
+fn insert_suffix(filename: &str, suffix: &str) -> String {
+    if let Some(idx) = filename.rfind('.') {
+        format!("{}{}{}", &filename[..idx], suffix, &filename[idx..])
+    } else {
+        format!("{}{}", filename, suffix)
+    }
 }
 
 fn update_codex_sessions(from: &Path, to: &Path, dry_run: bool) -> Result<CodexUpdateSummary> {

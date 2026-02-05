@@ -42,3 +42,13 @@ private
 /test-data
 testing/
 desktop/.tauri-dev.json
+
+.ai/review-log.jsonl
+.rise/
+.ai/state.json
+
+.beads/
+
+*.pyc
+
+__pycache__/

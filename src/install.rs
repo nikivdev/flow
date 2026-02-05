@@ -5,15 +5,20 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 use reqwest::blocking::Client;
+use serde::Deserialize;
 
 use crate::cli::{InstallBackend, InstallIndexOpts, InstallOpts};
 use crate::config::FloxInstallSpec;
 use crate::registry;
 
 pub fn run(mut opts: InstallOpts) -> Result<()> {
-    if opts.name.as_deref().map(|name| name.trim().is_empty()).unwrap_or(true) {
+    if opts
+        .name
+        .as_deref()
+        .map(|name| name.trim().is_empty())
+        .unwrap_or(true)
+    {
         opts.backend = InstallBackend::Flox;
         opts.name = Some(prompt_flox_package()?);
     }
@@ -80,11 +85,7 @@ fn registry_configured(opts: &InstallOpts) -> bool {
 }
 
 fn install_with_flox(opts: &InstallOpts) -> Result<()> {
-    let name = opts
-        .name
-        .as_deref()
-        .unwrap_or("")
-        .trim();
+    let name = opts.name.as_deref().unwrap_or("").trim();
     if name.is_empty() {
         bail!("package name is required");
     }
@@ -132,7 +133,11 @@ fn install_with_flox(opts: &InstallOpts) -> Result<()> {
             shim_path.display()
         );
     } else {
-        println!("Installed {} via flox (shim at {})", name, shim_path.display());
+        println!(
+            "Installed {} via flox (shim at {})",
+            name,
+            shim_path.display()
+        );
     }
     if !path_in_env(&bin_dir) {
         println!("Add {} to PATH to use it everywhere.", bin_dir.display());
@@ -369,8 +374,13 @@ struct TypesenseDoc {
 fn typesense_config() -> Option<TypesenseConfig> {
     let url = env::var("FLOW_TYPESENSE_URL").ok()?;
     let api_key = env::var("FLOW_TYPESENSE_API_KEY").unwrap_or_default();
-    let collection = env::var("FLOW_TYPESENSE_COLLECTION").unwrap_or_else(|_| "flox-packages".to_string());
-    Some(TypesenseConfig { url, api_key, collection })
+    let collection =
+        env::var("FLOW_TYPESENSE_COLLECTION").unwrap_or_else(|_| "flox-packages".to_string());
+    Some(TypesenseConfig {
+        url,
+        api_key,
+        collection,
+    })
 }
 
 fn typesense_config_with_overrides(opts: &InstallIndexOpts) -> Option<TypesenseConfig> {
@@ -383,14 +393,18 @@ fn typesense_config_with_overrides(opts: &InstallIndexOpts) -> Option<TypesenseC
         .clone()
         .or_else(|| env::var("FLOW_TYPESENSE_API_KEY").ok())
         .unwrap_or_default();
-    let collection = opts
-        .collection
-        .clone();
-    Some(TypesenseConfig { url, api_key, collection })
+    let collection = opts.collection.clone();
+    Some(TypesenseConfig {
+        url,
+        api_key,
+        collection,
+    })
 }
 
 fn typesense_search(config: &TypesenseConfig, query: &str) -> Result<Vec<FloxDisplayEntry>> {
-    let client = Client::builder().timeout(std::time::Duration::from_secs(5)).build()?;
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
     let url = format!(
         "{}/collections/{}/documents/search",
         config.url.trim_end_matches('/'),
@@ -409,7 +423,9 @@ fn typesense_search(config: &TypesenseConfig, query: &str) -> Result<Vec<FloxDis
     if !response.status().is_success() {
         bail!("typesense returned {}", response.status());
     }
-    let body: TypesenseSearchResponse = response.json().context("failed to parse typesense response")?;
+    let body: TypesenseSearchResponse = response
+        .json()
+        .context("failed to parse typesense response")?;
     let mut entries = Vec::new();
     for hit in body.hits {
         entries.push(FloxDisplayEntry {
@@ -423,14 +439,18 @@ fn typesense_search(config: &TypesenseConfig, query: &str) -> Result<Vec<FloxDis
 }
 
 fn typesense_ensure_collection(config: &TypesenseConfig) -> Result<()> {
-    let client = Client::builder().timeout(std::time::Duration::from_secs(5)).build()?;
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
     let base = config.url.trim_end_matches('/');
     let get_url = format!("{}/collections/{}", base, config.collection);
     let mut request = client.get(&get_url);
     if !config.api_key.is_empty() {
         request = request.header("X-TYPESENSE-API-KEY", &config.api_key);
     }
-    let resp = request.send().context("failed to check typesense collection")?;
+    let resp = request
+        .send()
+        .context("failed to check typesense collection")?;
     if resp.status().is_success() {
         return Ok(());
     }
@@ -453,7 +473,9 @@ fn typesense_ensure_collection(config: &TypesenseConfig) -> Result<()> {
     if !config.api_key.is_empty() {
         create_req = create_req.header("X-TYPESENSE-API-KEY", &config.api_key);
     }
-    let resp = create_req.send().context("failed to create typesense collection")?;
+    let resp = create_req
+        .send()
+        .context("failed to create typesense collection")?;
     if !resp.status().is_success() {
         bail!("typesense collection create failed ({})", resp.status());
     }
@@ -461,7 +483,9 @@ fn typesense_ensure_collection(config: &TypesenseConfig) -> Result<()> {
 }
 
 fn typesense_import(config: &TypesenseConfig, entries: Vec<FloxDisplayEntry>) -> Result<()> {
-    let client = Client::builder().timeout(std::time::Duration::from_secs(20)).build()?;
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
     let base = config.url.trim_end_matches('/');
     let url = format!(
         "{}/collections/{}/documents/import?action=upsert",
@@ -602,7 +626,8 @@ fn flox_search(flox_bin: &Path, query: &str) -> Result<Vec<FloxSearchEntry>> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("flox search failed: {}", stderr.trim());
     }
-    let stdout = String::from_utf8(output.stdout).context("flox search output was not valid UTF-8")?;
+    let stdout =
+        String::from_utf8(output.stdout).context("flox search output was not valid UTF-8")?;
     let entries: Vec<FloxSearchEntry> = serde_json::from_str(&stdout)
         .with_context(|| format!("failed to parse flox search output for {}", query))?;
     Ok(entries)
@@ -647,8 +672,8 @@ fn write_flox_shim(dest: &Path, env_root: &Path, bin: &str) -> Result<()> {
 }
 
 fn shim_matches(dest: &Path, env_root: &Path, bin: &str) -> Result<bool> {
-    let content = fs::read_to_string(dest)
-        .with_context(|| format!("failed to read {}", dest.display()))?;
+    let content =
+        fs::read_to_string(dest).with_context(|| format!("failed to read {}", dest.display()))?;
     let expected = format!(
         "#!/bin/sh\nexec flox activate -d \"{}\" -- \"{}\" \"$@\"\n",
         env_root.display(),

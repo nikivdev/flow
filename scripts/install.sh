@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs flow/f to the current user. Usage:
+# Installs flow + f to the current user. Usage:
 #   curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | bash
 # Customize with:
 #   FLOW_INSTALL_ROOT=/usr/local         # overrides install prefix (default: ~/.local)
@@ -27,6 +27,7 @@ REGISTRY_PACKAGE="${FLOW_REGISTRY_PACKAGE:-flow}"
 DEV_INSTALL="${FLOW_DEV:-}"
 SKIP_DEPS="${FLOW_SKIP_DEPS:-}"
 RELEASE_ONLY="${FLOW_RELEASE_ONLY:-}"
+FLOW_INSTALLED=0
 RESOLVED_VERSION=""
 OS_NAME=""
 ARCH_NAME=""
@@ -322,7 +323,7 @@ install_from_registry() {
     mkdir -p "${BIN_DIR}"
     local bins=("${REGISTRY_PACKAGE}")
     if [[ "${REGISTRY_PACKAGE}" == "flow" ]]; then
-        bins=("f")
+        bins=("f" "flow")
         if [[ "${INSTALL_LIN}" != "0" ]]; then
             bins+=("lin")
         fi
@@ -335,6 +336,9 @@ install_from_registry() {
         if curl -fsSL "${url}" -o "${BIN_DIR}/${bin}"; then
             chmod +x "${BIN_DIR}/${bin}"
             installed=1
+            if [[ "${bin}" == "flow" ]]; then
+                FLOW_INSTALLED=1
+            fi
         else
             info "Failed to download ${bin} from registry"
         fi
@@ -386,11 +390,14 @@ install_from_release() {
 
     mkdir -p "${BIN_DIR}"
     local copied=0
-    for bin in f lin; do
+    for bin in f flow lin; do
         if [[ -f "${extracted}/${bin}" ]]; then
             cp "${extracted}/${bin}" "${BIN_DIR}/${bin}"
             chmod +x "${BIN_DIR}/${bin}"
             copied=1
+            if [[ "${bin}" == "flow" ]]; then
+                FLOW_INSTALLED=1
+            fi
         fi
     done
 
@@ -428,17 +435,24 @@ install_from_source() {
     download_source_tarball "${tmp}"
 
     info "Building flow from source with cargo (this may take a moment)..."
-    local args=(install --locked --force --path "${tmp}" --root "${INSTALL_ROOT}" --bin f)
+    local args=(install --locked --force --path "${tmp}" --root "${INSTALL_ROOT}" --bin f --bin flow)
     if [[ "${INSTALL_LIN}" != "0" ]]; then
         args+=(--bin lin)
     fi
 
     cargo "${args[@]}"
+    if [[ -x "${BIN_DIR}/flow" ]]; then
+        FLOW_INSTALLED=1
+    fi
 }
 
 ensure_aliases() {
     local target="${BIN_DIR}/f"
     [[ -x "${target}" ]] || fail "expected ${target} after install"
+
+    if [[ "${FLOW_INSTALLED}" -eq 1 ]]; then
+        return 0
+    fi
 
     ln -sf "${target}" "${BIN_DIR}/flow"
 }
@@ -498,7 +512,11 @@ EOF
     # Setup symlinks
     mkdir -p "${BIN_DIR}"
     ln -sf "${DEV_FLOW_DIR}/target/release/f" "${BIN_DIR}/f"
-    ln -sf "${DEV_FLOW_DIR}/target/release/f" "${BIN_DIR}/flow"
+    if [[ -f "${DEV_FLOW_DIR}/target/release/flow" ]]; then
+        ln -sf "${DEV_FLOW_DIR}/target/release/flow" "${BIN_DIR}/flow"
+    else
+        ln -sf "${DEV_FLOW_DIR}/target/release/f" "${BIN_DIR}/flow"
+    fi
     if [[ "${INSTALL_LIN}" != "0" && -f "${DEV_FLOW_DIR}/target/release/lin" ]]; then
         ln -sf "${DEV_FLOW_DIR}/target/release/lin" "${BIN_DIR}/lin"
     fi

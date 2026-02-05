@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,8 @@ struct DaemonStatusView {
     name: String,
     running: bool,
     pid: Option<u32>,
+    #[serde(default)]
+    healthy: Option<bool>,
     health_url: Option<String>,
     description: Option<String>,
 }
@@ -65,6 +67,9 @@ struct ManagedDaemon {
     retry_remaining: Option<u32>,
     autostop: bool,
     disabled: bool,
+    health_failures: u32,
+    restart_attempts: u32,
+    next_restart_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -84,6 +89,8 @@ pub fn run(cmd: SupervisorCommand) -> Result<()> {
             Ok(())
         }
         SupervisorAction::Run { boot } => run_server(&socket_path, boot),
+        SupervisorAction::Install { boot } => install_launch_agent(&socket_path, boot),
+        SupervisorAction::Uninstall => uninstall_launch_agent(&socket_path),
         SupervisorAction::Stop => stop_supervisor(&socket_path),
         SupervisorAction::Status => show_status(&socket_path),
     }
@@ -123,7 +130,7 @@ pub fn try_handle_daemon_action(action: &DaemonAction, config_path: Option<&Path
                 name: name.clone(),
                 config_path: config_path.map(|p| p.display().to_string()),
             },
-            DaemonAction::Status => SupervisorIpcAction::Status {
+            DaemonAction::Status { .. } => SupervisorIpcAction::Status {
                 config_path: config_path.map(|p| p.display().to_string()),
             },
             DaemonAction::List => SupervisorIpcAction::List {
@@ -146,7 +153,7 @@ pub fn try_handle_daemon_action(action: &DaemonAction, config_path: Option<&Path
 
     if let Some(daemons) = response.daemons {
         match action {
-            DaemonAction::Status => print_status_views(&daemons),
+            DaemonAction::Status { name } => print_status_views(&daemons, name.as_deref()),
             DaemonAction::List => print_list_views(&daemons),
             _ => {}
         }
@@ -197,6 +204,10 @@ fn ensure_supervisor_running(socket_path: &Path, announce: bool, boot: bool) -> 
             println!("Supervisor already running.");
         }
         return Ok(true);
+    }
+
+    if let Some(started) = ensure_supervisor_via_launchd(socket_path, announce, boot)? {
+        return Ok(started);
     }
 
     let exe = std::env::current_exe().context("failed to resolve flow binary")?;
@@ -302,6 +313,10 @@ fn run_server(socket_path: &Path, boot: bool) -> Result<()> {
     }
 
     if socket_path.exists() {
+        if supervisor_running(socket_path) {
+            println!("Supervisor already running; exiting.");
+            return Ok(());
+        }
         fs::remove_file(socket_path).ok();
     }
 
@@ -344,6 +359,255 @@ fn run_server(socket_path: &Path, boot: bool) -> Result<()> {
     Ok(())
 }
 
+fn ensure_supervisor_via_launchd(
+    socket_path: &Path,
+    announce: bool,
+    boot: bool,
+) -> Result<Option<bool>> {
+    #[cfg(target_os = "macos")]
+    {
+        if !launch_agent_installed() {
+            return Ok(None);
+        }
+
+        if boot {
+            install_launch_agent(socket_path, true)?;
+        }
+
+        if announce {
+            println!("Starting supervisor via launchd...");
+        }
+
+        launch_agent_kickstart()?;
+
+        let mut ready = false;
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(150));
+            if supervisor_running(socket_path) {
+                ready = true;
+                break;
+            }
+        }
+
+        if ready {
+            if announce {
+                println!("Supervisor started (launchd).");
+            }
+            return Ok(Some(true));
+        }
+
+        if announce {
+            eprintln!("WARN launchd supervisor did not respond.");
+        }
+        return Ok(Some(false));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = socket_path;
+        let _ = announce;
+        let _ = boot;
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_label() -> &'static str {
+    "io.linsa.flow-supervisor"
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_plist_path() -> Result<PathBuf> {
+    let dir = config::expand_path("~/Library/LaunchAgents");
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+    Ok(dir.join(format!("{}.plist", launch_agent_label())))
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_installed() -> bool {
+    launch_agent_plist_path().map(|p| p.exists()).unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_domain() -> String {
+    let uid = unsafe { libc::getuid() };
+    format!("gui/{}", uid)
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_target() -> String {
+    format!("{}/{}", launch_agent_domain(), launch_agent_label())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_program_args(socket_path: &Path, boot: bool) -> Result<Vec<String>> {
+    let exe = std::env::current_exe().context("failed to resolve flow binary")?;
+    let mut args = vec![
+        exe.to_string_lossy().into_owned(),
+        "supervisor".to_string(),
+        "run".to_string(),
+        "--socket".to_string(),
+        socket_path.to_string_lossy().into_owned(),
+    ];
+    if boot {
+        args.push("--boot".to_string());
+    }
+    Ok(args)
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_plist(
+    socket_path: &Path,
+    boot: bool,
+    log_path: Option<&Path>,
+) -> Result<String> {
+    let args = launch_agent_program_args(socket_path, boot)?;
+    let mut buf = String::new();
+    buf.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    buf.push_str(
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+    );
+    buf.push_str("<plist version=\"1.0\">\n<dict>\n");
+    buf.push_str("  <key>Label</key>\n");
+    buf.push_str(&format!(
+        "  <string>{}</string>\n",
+        launch_agent_label()
+    ));
+    buf.push_str("  <key>ProgramArguments</key>\n  <array>\n");
+    for arg in args {
+        buf.push_str(&format!("    <string>{}</string>\n", xml_escape(&arg)));
+    }
+    buf.push_str("  </array>\n");
+    buf.push_str("  <key>RunAtLoad</key>\n  <true/>\n");
+    buf.push_str("  <key>KeepAlive</key>\n  <dict>\n");
+    buf.push_str("    <key>SuccessfulExit</key>\n    <false/>\n");
+    buf.push_str("  </dict>\n");
+    if let Some(path) = log_path {
+        let log = path.to_string_lossy();
+        buf.push_str("  <key>StandardOutPath</key>\n");
+        buf.push_str(&format!(
+            "  <string>{}</string>\n",
+            xml_escape(log.as_ref())
+        ));
+        buf.push_str("  <key>StandardErrorPath</key>\n");
+        buf.push_str(&format!(
+            "  <string>{}</string>\n",
+            xml_escape(log.as_ref())
+        ));
+    }
+    buf.push_str("</dict>\n</plist>\n");
+    Ok(buf)
+}
+
+#[cfg(target_os = "macos")]
+fn install_launch_agent(socket_path: &Path, boot: bool) -> Result<()> {
+    let plist_path = launch_agent_plist_path()?;
+    let log_path = supervisor_log_path().ok();
+    let plist = launch_agent_plist(socket_path, boot, log_path.as_deref())?;
+    fs::write(&plist_path, plist)
+        .with_context(|| format!("failed to write {}", plist_path.display()))?;
+
+    let domain = launch_agent_domain();
+    let target = launch_agent_target();
+
+    let _ = Command::new("launchctl")
+        .args(["bootout", &domain, plist_path.to_string_lossy().as_ref()])
+        .output();
+
+    let output = Command::new("launchctl")
+        .args(["bootstrap", &domain, plist_path.to_string_lossy().as_ref()])
+        .output()
+        .context("failed to bootstrap launch agent")?;
+    if !output.status.success() {
+        bail!(
+            "launchctl bootstrap failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let _ = Command::new("launchctl")
+        .args(["enable", &target])
+        .output();
+
+    let output = Command::new("launchctl")
+        .args(["kickstart", "-k", &target])
+        .output()
+        .context("failed to kickstart launch agent")?;
+    if !output.status.success() {
+        bail!(
+            "launchctl kickstart failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    println!(
+        "Installed launch agent {} at {}",
+        launch_agent_label(),
+        plist_path.display()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_kickstart() -> Result<()> {
+    let target = launch_agent_target();
+    let output = Command::new("launchctl")
+        .args(["kickstart", "-k", &target])
+        .output()
+        .context("failed to kickstart launch agent")?;
+    if !output.status.success() {
+        bail!(
+            "launchctl kickstart failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_launch_agent(_socket_path: &Path) -> Result<()> {
+    let plist_path = launch_agent_plist_path()?;
+    let domain = launch_agent_domain();
+
+    let _ = Command::new("launchctl")
+        .args(["bootout", &domain, plist_path.to_string_lossy().as_ref()])
+        .output();
+
+    if plist_path.exists() {
+        fs::remove_file(&plist_path)
+            .with_context(|| format!("failed to remove {}", plist_path.display()))?;
+    }
+
+    println!("Removed launch agent {}", launch_agent_label());
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_launch_agent(_socket_path: &Path, _boot: bool) -> Result<()> {
+    bail!("launch agent install is only supported on macOS");
+}
+
+#[cfg(not(target_os = "macos"))]
+fn uninstall_launch_agent(_socket_path: &Path) -> Result<()> {
+    bail!("launch agent uninstall is only supported on macOS");
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
 #[cfg(unix)]
 fn handle_client(stream: std::os::unix::net::UnixStream, state: &SharedState) -> Result<()> {
     let mut reader = BufReader::new(&stream);
@@ -437,6 +701,7 @@ fn build_status_views(config_path: Option<&Path>) -> Result<Vec<DaemonStatusView
             name,
             running: status.running,
             pid: status.pid,
+            healthy: status.healthy,
             health_url,
             description,
         });
@@ -533,6 +798,7 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
 
     loop {
         std::thread::sleep(Duration::from_secs(2));
+        let now = Instant::now();
 
         let active_path = resolve_active_project_config_path()
             .as_deref()
@@ -549,7 +815,14 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
 
         let mut to_restart: Vec<(String, Option<PathBuf>)> = Vec::new();
         let mut to_stop: Vec<(String, Option<PathBuf>)> = Vec::new();
-        let mut updates: Vec<(String, Option<u32>, bool)> = Vec::new();
+        let mut updates: Vec<(
+            String,
+            Option<u32>,
+            bool,
+            u32,
+            u32,
+            Option<Instant>,
+        )> = Vec::new();
 
         for entry in entries {
             if entry.disabled {
@@ -564,6 +837,9 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
                             daemon_key(&entry.name, entry.config_path.as_deref()),
                             entry.retry_remaining,
                             true,
+                            entry.health_failures,
+                            entry.restart_attempts,
+                            entry.next_restart_at,
                         ));
                         continue;
                     }
@@ -584,6 +860,53 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
 
             let status = daemon::get_daemon_status(&daemon_cfg);
             if status.running {
+                if status.healthy == Some(false) {
+                    let key = daemon_key(&entry.name, config_path.as_deref());
+                    let failures = entry.health_failures.saturating_add(1);
+                    let should_restart_for_health = failures >= 3;
+                    if should_restart_for_health && should_restart(&entry) {
+                        if entry
+                            .next_restart_at
+                            .map(|deadline| now < deadline)
+                            .unwrap_or(false)
+                        {
+                            updates.push((
+                                key,
+                                entry.retry_remaining,
+                                false,
+                                failures,
+                                entry.restart_attempts,
+                                entry.next_restart_at,
+                            ));
+                            continue;
+                        }
+
+                        let delay_secs =
+                            2u64.saturating_pow(entry.restart_attempts.saturating_add(1)).min(60);
+                        let next_restart_at = Some(now + Duration::from_secs(delay_secs));
+                        updates.push((
+                            key,
+                            entry.retry_remaining,
+                            false,
+                            failures,
+                            entry.restart_attempts.saturating_add(1),
+                            next_restart_at,
+                        ));
+                        to_restart.push((entry.name.clone(), config_path));
+                    } else {
+                        updates.push((
+                            key,
+                            entry.retry_remaining,
+                            false,
+                            failures,
+                            entry.restart_attempts,
+                            entry.next_restart_at,
+                        ));
+                    }
+                } else if entry.health_failures != 0 || entry.restart_attempts != 0 {
+                    let key = daemon_key(&entry.name, config_path.as_deref());
+                    updates.push((key, entry.retry_remaining, false, 0, 0, None));
+                }
                 continue;
             }
 
@@ -591,25 +914,55 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
             if !should_restart(&entry) {
                 continue;
             }
-
-            let mut retry_remaining = entry.retry_remaining;
-            if let Some(remaining) = retry_remaining {
-                if remaining == 0 {
-                    continue;
-                }
-                retry_remaining = Some(remaining.saturating_sub(1));
+            if entry
+                .next_restart_at
+                .map(|deadline| now < deadline)
+                .unwrap_or(false)
+            {
+                updates.push((
+                    key,
+                    entry.retry_remaining,
+                    false,
+                    entry.health_failures,
+                    entry.restart_attempts,
+                    entry.next_restart_at,
+                ));
+                continue;
             }
 
-            updates.push((key, retry_remaining, false));
+            let mut retry_remaining = entry.retry_remaining;
+            if entry.restart != config::DaemonRestartPolicy::Always {
+                if let Some(remaining) = retry_remaining {
+                    if remaining == 0 {
+                        continue;
+                    }
+                    retry_remaining = Some(remaining.saturating_sub(1));
+                }
+            }
+
+            let delay_secs = 2u64
+                .saturating_pow(entry.restart_attempts.saturating_add(1))
+                .min(60);
+            updates.push((
+                key,
+                retry_remaining,
+                false,
+                entry.health_failures.saturating_add(1),
+                entry.restart_attempts.saturating_add(1),
+                Some(now + Duration::from_secs(delay_secs)),
+            ));
             to_restart.push((entry.name.clone(), config_path));
         }
 
         if !updates.is_empty() {
             let mut state = state.lock().expect("supervisor state lock");
-            for (key, retry_remaining, disabled) in updates {
+            for (key, retry_remaining, disabled, health_failures, restart_attempts, next_restart_at) in updates {
                 if let Some(entry) = state.managed.get_mut(&key) {
                     entry.retry_remaining = retry_remaining;
                     entry.disabled = disabled;
+                    entry.health_failures = health_failures;
+                    entry.restart_attempts = restart_attempts;
+                    entry.next_restart_at = next_restart_at;
                 }
             }
         }
@@ -658,6 +1011,9 @@ fn register_managed_daemon(
         retry_remaining: daemon_cfg.retry,
         autostop: daemon_cfg.autostop,
         disabled,
+        health_failures: 0,
+        restart_attempts: 0,
+        next_restart_at: None,
     };
     state.managed.insert(key, entry);
     Ok(())
@@ -683,6 +1039,9 @@ fn disable_managed_daemon(
             retry_remaining: cfg.retry,
             autostop: cfg.autostop,
             disabled: true,
+            health_failures: 0,
+            restart_attempts: 0,
+            next_restart_at: None,
         };
         state.managed.insert(key, entry);
     }
@@ -696,21 +1055,40 @@ fn daemon_key(name: &str, config_path: Option<&Path>) -> String {
     }
 }
 
-fn print_status_views(daemons: &[DaemonStatusView]) {
+fn print_status_views(daemons: &[DaemonStatusView], filter: Option<&str>) {
     if daemons.is_empty() {
         println!("No daemons configured.");
         return;
     }
 
+    let mut matched = false;
     println!("Daemon Status:");
     println!();
     for daemon in daemons {
-        let icon = if daemon.running { "OK" } else { "NO" };
+        if let Some(name) = filter {
+            if daemon.name != name {
+                continue;
+            }
+        }
+        matched = true;
+        let icon = if daemon.running {
+            if daemon.healthy == Some(false) {
+                "WARN"
+            } else {
+                "OK"
+            }
+        } else {
+            "NO"
+        };
         let state = if daemon.running { "running" } else { "stopped" };
         print!("  {} {}: {}", icon, daemon.name, state);
         if let Some(url) = &daemon.health_url {
             if daemon.running {
-                print!(" ({})", url.replace("/health", ""));
+                if daemon.healthy == Some(false) {
+                    print!(" (unhealthy: {})", url.replace("/health", ""));
+                } else {
+                    print!(" ({})", url.replace("/health", ""));
+                }
             }
         }
         if let Some(pid) = daemon.pid {
@@ -719,6 +1097,12 @@ fn print_status_views(daemons: &[DaemonStatusView]) {
         println!();
         if let Some(desc) = &daemon.description {
             println!("      {}", desc);
+        }
+    }
+
+    if let Some(name) = filter {
+        if !matched {
+            println!("Daemon '{}' not found.", name);
         }
     }
 }

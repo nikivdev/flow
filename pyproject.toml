@@ -1,0 +1,19 @@
+[project]
+name = "flow"
+version = "0.1.0"
+description = "CLI to demonstrate swarms in action"
+requires-python = ">=3.10"
+dependencies = [
+    "swarms>=8.9.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+flow = "flow:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -42,7 +42,11 @@ pub fn run(cmd: ExtCommand) -> Result<()> {
         eprintln!("WARN failed to migrate sessions: {err}");
     }
 
-    println!("Copied {} -> {}", source_workspace.display(), dest.display());
+    println!(
+        "Copied {} -> {}",
+        source_workspace.display(),
+        dest.display()
+    );
     Ok(())
 }
 

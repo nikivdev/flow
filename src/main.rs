@@ -4,14 +4,17 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    agents, ai, archive, auth,
-    changes,
-    cli::{Cli, Commands, InstallAction, RerunOpts, ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction},
-    code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fixup, health, help_search,
-    history, home, hub, info, init, init_tracing, install, latest, log_server, notify, palette,
-    parallel, processes, projects,
-    publish, registry, release, repos, services, setup, skills, ssh_keys, storage, supervisor,
-    sync, task_match, tasks, todo, tools, traces, upgrade, upstream, web,
+    agents, ai, archive, auth, changes,
+    cli::{
+        Cli, Commands, InstallAction, ProxyAction, ProxyCommand, ReviewAction, RerunOpts,
+        ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
+    },
+    code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fish_install, fish_trace,
+    fix, fixup, git_guard, hash, health, help_search, history, hive, home, hub, info,
+    init, init_tracing, install, jj, latest, log_server, macos, notify, otp, palette, parallel,
+    processes, projects, proxy, publish, registry, release, repos, services, setup, skills,
+    ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade,
+    upstream, web,
 };
 
 fn main() -> Result<()> {
@@ -48,6 +51,10 @@ fn main() -> Result<()> {
             err.exit()
         }
     };
+
+    // Keep default skills in sync for Flow projects (minimal cost).
+    skills::auto_sync_skills();
+
     match cli.command {
         Some(Commands::Hub(cmd)) => {
             hub::run(cmd)?;
@@ -89,10 +96,29 @@ fn main() -> Result<()> {
             palette::run_global()?;
         }
         Some(Commands::LastCmd) => {
-            history::print_last_record()?;
+            // Prefer fish shell traces if available, fall back to flow history
+            if fish_trace::load_last_record()?.is_some() {
+                fish_trace::print_last_fish_cmd()?;
+            } else {
+                history::print_last_record()?;
+            }
         }
         Some(Commands::LastCmdFull) => {
-            history::print_last_record_full()?;
+            // Prefer fish shell traces if available, fall back to flow history
+            if fish_trace::load_last_record()?.is_some() {
+                fish_trace::print_last_fish_cmd_full()?;
+            } else {
+                history::print_last_record_full()?;
+            }
+        }
+        Some(Commands::FishLast) => {
+            fish_trace::print_last_fish_cmd()?;
+        }
+        Some(Commands::FishLastFull) => {
+            fish_trace::print_last_fish_cmd_full()?;
+        }
+        Some(Commands::FishInstall(opts)) => {
+            fish_install::run(opts)?;
         }
         Some(Commands::Rerun(opts)) => {
             rerun(opts)?;
@@ -149,57 +175,157 @@ fn main() -> Result<()> {
         }
         Some(Commands::Commit(opts)) => {
             // Default: Claude review, no context, gitedit sync
+            let mut force = opts.force || opts.approved;
+            let mut message_arg = opts.message_arg.as_deref();
+            let mut open_review = opts.review;
+            if !force {
+                if let Some(arg) = message_arg {
+                    if arg == "force"
+                        && opts.message.is_none()
+                        && opts.fast.is_none()
+                        && !opts.queue
+                        && !opts.no_queue
+                    {
+                        force = true;
+                        message_arg = None;
+                    } else if arg == "review"
+                        && opts.message.is_none()
+                        && opts.fast.is_none()
+                        && !opts.queue
+                        && !opts.no_queue
+                    {
+                        open_review = true;
+                        message_arg = None;
+                    }
+                }
+            }
+            let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
+                .with_open_review(open_review);
+            let push = !opts.no_push && !queue.enabled;
+            if let Some(message) = opts.fast.as_deref() {
+                commit::run_fast(message, push, queue, opts.hashed)?;
+                return Ok(());
+            }
             let review_selection =
                 commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
+            let author_message = opts.message.as_deref().or(message_arg);
             if opts.dry {
                 commit::dry_run_context()?;
             } else if opts.sync {
                 commit::run_with_check_sync(
-                    !opts.no_push,
+                    push,
                     opts.context,
                     review_selection,
-                    opts.message.as_deref(),
+                    author_message,
                     opts.tokens,
                     true,
+                    queue,
+                    opts.hashed,
                 )?;
             } else {
                 commit::run_with_check_with_gitedit(
-                    !opts.no_push,
+                    push,
                     opts.context,
                     review_selection,
-                    opts.message.as_deref(),
+                    author_message,
                     opts.tokens,
+                    queue,
+                    opts.hashed,
                 )?;
             }
         }
+        Some(Commands::CommitQueue(cmd)) => {
+            commit::run_commit_queue(cmd)?;
+        }
+        Some(Commands::Review(cmd)) => {
+            match cmd.action {
+                Some(ReviewAction::Latest) | None => {
+                    commit::open_latest_queue_review()?;
+                }
+            }
+        }
+        Some(Commands::GitRepair(opts)) => {
+            git_guard::run_git_repair(opts)?;
+        }
+        Some(Commands::Jj(cmd)) => {
+            jj::run(cmd)?;
+        }
         Some(Commands::CommitSimple(opts)) => {
             // Simple commit without review - always sync (fast, no hub)
-            commit::run_sync(!opts.no_push)?;
+            let mut force = opts.force || opts.approved;
+            let mut open_review = opts.review;
+            if !force {
+                if let Some(arg) = opts.message_arg.as_deref() {
+                    if arg == "force" && opts.message.is_none() && opts.fast.is_none() {
+                        force = true;
+                    } else if arg == "review"
+                        && opts.message.is_none()
+                        && opts.fast.is_none()
+                        && !opts.queue
+                        && !opts.no_queue
+                    {
+                        open_review = true;
+                    }
+                }
+            }
+            let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
+                .with_open_review(open_review);
+            let push = !opts.no_push && !queue.enabled;
+            commit::run_sync(push, queue, opts.hashed)?;
         }
         Some(Commands::CommitWithCheck(opts)) => {
             // Review but no gitedit sync
+            let mut force = opts.force || opts.approved;
+            let mut open_review = opts.review;
+            if !force {
+                if let Some(arg) = opts.message_arg.as_deref() {
+                    if arg == "force" && opts.message.is_none() && opts.fast.is_none() {
+                        force = true;
+                    } else if arg == "review"
+                        && opts.message.is_none()
+                        && opts.fast.is_none()
+                        && !opts.queue
+                        && !opts.no_queue
+                    {
+                        open_review = true;
+                    }
+                }
+            }
+            let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
+                .with_open_review(open_review);
+            let push = !opts.no_push && !queue.enabled;
             let review_selection =
                 commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
             if opts.dry {
                 commit::dry_run_context()?;
             } else if opts.sync {
                 commit::run_with_check_sync(
-                    !opts.no_push,
+                    push,
                     opts.context,
                     review_selection,
                     opts.message.as_deref(),
                     opts.tokens,
                     false,
+                    queue,
+                    opts.hashed,
                 )?;
             } else {
                 commit::run_with_check(
-                    !opts.no_push,
+                    push,
                     opts.context,
                     review_selection,
                     opts.message.as_deref(),
                     opts.tokens,
+                    queue,
+                    opts.hashed,
                 )?;
             }
+        }
+        Some(Commands::Fix(opts)) => {
+            fix::run(opts)?;
+        }
+        Some(Commands::Undo(cmd)) => {
+            undo::run(cmd)?;
         }
         Some(Commands::Fixup(opts)) => {
             fixup::run(opts)?;
@@ -209,6 +335,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Diff(cmd)) => {
             changes::run_diff(cmd)?;
+        }
+        Some(Commands::Hash(opts)) => {
+            hash::run(opts)?;
         }
         Some(Commands::Daemon(cmd)) => {
             daemon::run(cmd)?;
@@ -228,11 +357,17 @@ fn main() -> Result<()> {
         Some(Commands::Env(cmd)) => {
             env::run(cmd.action)?;
         }
+        Some(Commands::Otp(cmd)) => {
+            otp::run(cmd)?;
+        }
         Some(Commands::Auth(opts)) => {
             auth::run(opts)?;
         }
         Some(Commands::Services(cmd)) => {
             services::run(cmd)?;
+        }
+        Some(Commands::Macos(cmd)) => {
+            macos::run(cmd)?;
         }
         Some(Commands::Ssh(cmd)) => {
             ssh_keys::run(cmd.action)?;
@@ -266,6 +401,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Agents(cmd)) => {
             agents::run(cmd)?;
+        }
+        Some(Commands::Hive(cmd)) => {
+            hive::run_command(cmd)?;
         }
         Some(Commands::Sync(cmd)) => {
             sync::run(cmd)?;
@@ -318,6 +456,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Registry(cmd)) => {
             registry::run(cmd)?;
+        }
+        Some(Commands::Proxy(cmd)) => {
+            proxy_command(cmd)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {
@@ -389,7 +530,10 @@ fn shell_reset() {
     if std::env::var("FISH_VERSION").is_ok() {
         println!("Run: source {}", config_path.display());
     } else {
-        println!("Refresh your shell session (fish): source {}", config_path.display());
+        println!(
+            "Refresh your shell session (fish): source {}",
+            config_path.display()
+        );
     }
 }
 
@@ -421,7 +565,10 @@ fn shell_init(shell: &str) {
             let config_fish = config_dir.join("fish").join("config.fish");
 
             println!("No fish integration changes applied.");
-            println!("Manage your fish config manually: {}", config_fish.display());
+            println!(
+                "Manage your fish config manually: {}",
+                config_fish.display()
+            );
         }
         "zsh" => {
             let zshrc = config_dir.join("zsh").join(".zshrc");
@@ -487,4 +634,95 @@ f() {
             eprintln!("Supported: fish, zsh");
         }
     }
+}
+
+/// Handle proxy commands
+fn proxy_command(cmd: ProxyCommand) -> Result<()> {
+    // Helper to load config from current directory
+    let load_project_config = || -> Result<flowd::config::Config> {
+        let cwd = std::env::current_dir()?;
+        let flow_toml = cwd.join("flow.toml");
+        if flow_toml.exists() {
+            flowd::config::load(&flow_toml)
+        } else {
+            // Try global config
+            let global = dirs::config_dir()
+                .map(|d| d.join("flow").join("flow.toml"))
+                .filter(|p| p.exists());
+            if let Some(path) = global {
+                flowd::config::load(&path)
+            } else {
+                bail!("No flow.toml found in current directory or global config");
+            }
+        }
+    };
+
+    match cmd.action {
+        ProxyAction::Start(opts) => {
+            // Load config
+            let config = load_project_config()?;
+            let proxy_config = config.proxy.unwrap_or_default();
+            let targets = config.proxies;
+
+            if targets.is_empty() {
+                bail!("No proxy targets configured. Add [[proxies]] to flow.toml");
+            }
+
+            // Override listen if provided
+            let proxy_config = if let Some(listen) = opts.listen {
+                proxy::ProxyConfig {
+                    listen,
+                    ..proxy_config
+                }
+            } else {
+                proxy_config
+            };
+
+            // Start server
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(proxy::start(proxy_config, targets))?;
+        }
+        ProxyAction::Trace(opts) => {
+            proxy::trace_last(opts.count)?;
+        }
+        ProxyAction::Last(_opts) => {
+            proxy::trace_last(1)?;
+        }
+        ProxyAction::Add(opts) => {
+            println!("To add a proxy, edit flow.toml:");
+            println!();
+            println!("[[proxies]]");
+            println!("name = \"{}\"", opts.name.unwrap_or_else(|| "myservice".to_string()));
+            println!("target = \"{}\"", opts.target);
+            if let Some(host) = opts.host {
+                println!("host = \"{}\"", host);
+            }
+            if let Some(path) = opts.path {
+                println!("path = \"{}\"", path);
+            }
+        }
+        ProxyAction::List => {
+            let config = load_project_config()?;
+            if config.proxies.is_empty() {
+                println!("No proxy targets configured.");
+                println!("Add [[proxies]] sections to flow.toml");
+            } else {
+                println!("{:<15} {:<25} {:<15} {:<15}", "NAME", "TARGET", "HOST", "PATH");
+                println!("{}", "-".repeat(70));
+                for p in &config.proxies {
+                    println!(
+                        "{:<15} {:<25} {:<15} {:<15}",
+                        p.name,
+                        p.target,
+                        p.host.as_deref().unwrap_or("-"),
+                        p.path.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+        }
+        ProxyAction::Stop => {
+            println!("Proxy stop not implemented yet. Use Ctrl+C or kill the process.");
+        }
+    }
+    Ok(())
 }

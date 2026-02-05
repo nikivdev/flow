@@ -68,6 +68,14 @@ f logs <task-name>
 f logs -f  # Follow in real-time
 ```
 
+### Task Failure Hooks
+
+Flow can run a hook automatically when a task fails. This is useful for opening
+an AI prompt, collecting diagnostics, or running cleanup scripts.
+
+See `docs/task-failure-hooks.md` for configuration, environment variables, and
+default behavior.
+
 ---
 
 ## AI Session Management

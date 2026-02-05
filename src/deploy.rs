@@ -437,7 +437,11 @@ pub fn run_prod(cmd: DeployCommand) -> Result<()> {
                 });
             }
 
-            if cfg.host.is_some() || cfg.cloudflare.is_some() || cfg.railway.is_some() || cfg.web.is_some() {
+            if cfg.host.is_some()
+                || cfg.cloudflare.is_some()
+                || cfg.railway.is_some()
+                || cfg.web.is_some()
+            {
                 if cfg.host.is_some() {
                     println!("Detected [host] config, deploying to Linux host...");
                     return deploy_host(&project_root, Some(cfg), false, false);
@@ -880,7 +884,10 @@ fn deploy_host(
                 "personal".to_string()
             };
             let source_label = if use_cloud { "cloud" } else { "flow" };
-            println!("==> Fetching env vars from {} ({})...", source_label, source);
+            println!(
+                "==> Fetching env vars from {} ({})...",
+                source_label, source
+            );
 
             let fetch = || {
                 if use_project {
@@ -905,7 +912,10 @@ fn deploy_host(
 
                     // Generate .env content
                     let mut content = String::new();
-                    content.push_str(&format!("# Source: {} {} (fetched at deploy)\n", source_label, source));
+                    content.push_str(&format!(
+                        "# Source: {} {} (fetched at deploy)\n",
+                        source_label, source
+                    ));
                     let mut sorted_keys: Vec<_> = vars.keys().collect();
                     sorted_keys.sort();
                     for key in sorted_keys {
@@ -1069,8 +1079,7 @@ fn deploy_cloudflare(
             } else if env_apply_mode == EnvApplyMode::Always {
                 eprintln!(
                     "⚠ No env vars found in {} for environment '{}' (using defaults only).",
-                    source_label,
-                    cloud_env
+                    source_label, cloud_env
                 );
             }
         } else if let Some(env_file) = &cf_cfg.env_file {
@@ -1152,7 +1161,9 @@ pub fn set_cloudflare_secrets(
 fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConfig) -> Result<()> {
     let source = cf_cfg.env_source.as_deref();
     if !is_cloud_source(source) && !is_flow_source(source) {
-        bail!("cloudflare.env_source must be set to \"cloud\", \"flow\", or \"local\" to apply envs");
+        bail!(
+            "cloudflare.env_source must be set to \"cloud\", \"flow\", or \"local\" to apply envs"
+        );
     }
 
     let cloud_env = cf_cfg.environment.as_deref().unwrap_or("production");
@@ -1164,7 +1175,10 @@ fn apply_cloudflare_env_from_config(project_root: &Path, cf_cfg: &CloudflareConf
         fetch()?
     };
     if vars.is_empty() {
-        bail!("No env vars found in env store for environment '{}'", cloud_env);
+        bail!(
+            "No env vars found in env store for environment '{}'",
+            cloud_env
+        );
     }
 
     apply_cloudflare_env_map(project_root, cf_cfg, &vars)?;

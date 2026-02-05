@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -30,6 +30,9 @@ pub fn run(cmd: AgentsCommand) -> Result<()> {
         Some(AgentsAction::Run { agent, prompt }) => run_agent(&agent, prompt),
         Some(AgentsAction::Global { agent, prompt }) => run_agent_optional(&agent, prompt),
         Some(AgentsAction::Copy { agent }) => copy_agent_instructions(agent.as_deref()),
+        Some(AgentsAction::Rules { profile, repo }) => {
+            run_agents_rules(profile.as_deref(), repo.as_deref())
+        }
         None => {
             if cmd.agent.is_empty() {
                 run_fuzzy_agents()
@@ -112,9 +115,163 @@ fn list_agents() -> Result<()> {
     println!("  f agents                    # Fuzzy search agents");
     println!("  f agents run <agent> \"prompt\"");
     println!("  f agents <agent>            # Run agent (prompts for input)");
+    println!("  f agents rules              # Fuzzy pick agents.md profile");
+    println!("  f agents rules <profile>    # Activate profile");
     println!();
 
     Ok(())
+}
+
+fn run_agents_rules(profile: Option<&str>, repo: Option<&str>) -> Result<()> {
+    let mut repo_path = repo
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let mut chosen_profile = profile.map(|value| value.to_string());
+    if repo.is_none() {
+        if let Some(candidate) = profile {
+            let candidate_path = PathBuf::from(candidate);
+            if candidate_path.is_dir() {
+                repo_path = candidate_path;
+                chosen_profile = None;
+            }
+        }
+    }
+
+    let agents_dir = repo_path.join("agents");
+    if !agents_dir.is_dir() {
+        println!("No agents/ directory in {}", repo_path.display());
+        return Ok(());
+    }
+
+    let mut profiles = list_agents_profiles(&agents_dir)?;
+    if profiles.is_empty() {
+        println!("No profiles found in {}", agents_dir.display());
+        return Ok(());
+    }
+    profiles.sort();
+
+    if let Some(name) = &chosen_profile {
+        if !profiles.iter().any(|p| p == name) {
+            bail!("Missing profile: {}", name);
+        }
+    } else {
+        chosen_profile = select_agents_profile(&profiles)?;
+    }
+
+    let Some(profile_name) = chosen_profile else {
+        println!("No profile selected.");
+        return Ok(());
+    };
+
+    let source_lower = agents_dir.join(format!("agents.{profile_name}.md"));
+    let source_upper = agents_dir.join(format!("AGENTS.{profile_name}.md"));
+    let source = if source_lower.is_file() {
+        source_lower
+    } else {
+        source_upper
+    };
+    if !source.is_file() {
+        bail!("Missing profile file: {}", source.display());
+    }
+    let target = repo_path.join("agents.md");
+    fs::copy(&source, &target)
+        .with_context(|| format!("failed to copy {} to {}", source.display(), target.display()))?;
+
+    let default_path = agents_dir.join(".default");
+    fs::write(&default_path, &profile_name)
+        .with_context(|| format!("failed to write {}", default_path.display()))?;
+
+    println!("Activated agents.md -> {}", source.display());
+    println!("Default profile set to: {}", profile_name);
+    Ok(())
+}
+
+fn list_agents_profiles(agents_dir: &Path) -> Result<Vec<String>> {
+    let mut profiles = HashSet::new();
+    for entry in fs::read_dir(agents_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let trimmed = if file_name.starts_with("agents.") && file_name.ends_with(".md") {
+            file_name
+                .trim_start_matches("agents.")
+                .trim_end_matches(".md")
+        } else if file_name.starts_with("AGENTS.") && file_name.ends_with(".md") {
+            file_name
+                .trim_start_matches("AGENTS.")
+                .trim_end_matches(".md")
+        } else {
+            continue;
+        };
+        if !trimmed.is_empty() {
+            profiles.insert(trimmed.to_string());
+        }
+    }
+    Ok(profiles.into_iter().collect())
+}
+
+fn select_agents_profile(profiles: &[String]) -> Result<Option<String>> {
+    if which::which("fzf").is_err() {
+        println!("fzf not found on PATH – install it to use fuzzy selection.");
+        return prompt_agents_profile(profiles).map(Some);
+    }
+
+    let mut child = Command::new("fzf")
+        .arg("--prompt")
+        .arg("agents rules> ")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to spawn fzf")?;
+
+    {
+        let stdin = child.stdin.as_mut().context("failed to open fzf stdin")?;
+        for profile in profiles {
+            writeln!(stdin, "{}", profile)?;
+        }
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let selection = String::from_utf8(output.stdout)
+        .context("fzf output was not valid UTF-8")?
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if selection.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(selection))
+    }
+}
+
+fn prompt_agents_profile(profiles: &[String]) -> Result<String> {
+    println!("Select an agents profile:");
+    for (index, profile) in profiles.iter().enumerate() {
+        println!("  {}) {}", index + 1, profile);
+    }
+    print!("choice> ");
+    io::stdout().flush()?;
+
+    let stdin = io::stdin();
+    let line = stdin.lock().lines().next();
+    let input = match line {
+        Some(Ok(value)) => value.trim().to_string(),
+        _ => "".to_string(),
+    };
+    if input.is_empty() {
+        bail!("No profile selected.");
+    }
+    let idx: usize = input.parse().context("invalid selection")?;
+    if idx == 0 || idx > profiles.len() {
+        bail!("Selection out of range.");
+    }
+    Ok(profiles[idx - 1].clone())
 }
 
 struct AgentEntry {
@@ -189,6 +346,11 @@ fn copy_agent_instructions(agent_name: Option<&str>) -> Result<()> {
 
     // Get agent file content
     let content = get_agent_content(&selected.name, selected.path.as_deref())?;
+
+    if std::env::var("FLOW_NO_CLIPBOARD").is_ok() || !std::io::stdin().is_terminal() {
+        println!("Clipboard disabled; skipping copy.");
+        return Ok(());
+    }
 
     // Copy to clipboard using pbcopy (macOS) or xclip (Linux)
     let mut cmd = if cfg!(target_os = "macos") {
@@ -305,6 +467,7 @@ fn get_flow_agent_instructions() -> String {
 - Preserve existing configuration when adding new items
 - Use appropriate task names and descriptions
 - Follow TOML formatting conventions
+- Enforce Flow env store usage for secrets/tokens (use `f env get` / `f env run`)
 "#
     .to_string()
 }
@@ -1085,6 +1248,7 @@ dependencies = ["other-task", "cargo"]  # optional: run before, or ensure binary
 interactive = false          # optional: needs TTY (auto-detected for sudo, vim, etc.)
 delegate_to_hub = false      # optional: run via background hub daemon
 on_cancel = "cleanup cmd"    # optional: run when Ctrl+C pressed
+output_file = "last-build-output.md" # optional: write task output to file
 
 # Dependencies section - define reusable deps
 [deps]
@@ -1106,6 +1270,7 @@ nodejs.pkg-path = "nodejs"
 4. **Dependencies**: List task deps (run first) or binary deps (check PATH)
 5. **on_cancel**: Add cleanup for long-running tasks that spawn processes
 6. **interactive**: Auto-detected for sudo/vim/ssh, set manually for custom TUIs
+7. **output_file**: Capture full task output for debugging or sharing
 "#;
 
 /// Flow CLI commands context.

@@ -24,6 +24,7 @@ f setup --config ./flow.toml
 - If `flow.toml` is missing, it prompts to generate `setup` + `dev` tasks (AI via `gen` if available, otherwise manual prompts).
 - If `flow.toml` defines a `setup` task, `f setup` runs that task.
 - Otherwise, it prints shell aliases from `[alias]` in `flow.toml`.
+- After successful completion, Flow writes a setup checkpoint to `.rise/setup.json` in the repo root.
 - `f setup deploy` adds a `[host]` section, creates a remote setup script, copies env templates, and optionally stores the deploy host.
 - `f setup release` detects server projects and offers Linux host deployment defaults.
 

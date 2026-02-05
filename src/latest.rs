@@ -50,8 +50,7 @@ fn rebuild_flow(root: &PathBuf) -> Result<()> {
     std::env::set_current_dir(root)
         .with_context(|| format!("failed to switch to {}", root.display()))?;
     let result = deploy::run(DeployCommand { action: None });
-    std::env::set_current_dir(prev)
-        .context("failed to restore previous directory")?;
+    std::env::set_current_dir(prev).context("failed to restore previous directory")?;
     result
 }
 

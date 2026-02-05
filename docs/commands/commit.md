@@ -12,6 +12,9 @@ Stages all changes, runs AI code review for bugs and security issues, generates 
 # Standard commit with review
 f commit
 
+# Queue for review (no push) + create jj review bookmark
+f commit --queue
+
 # Commit without pushing
 f commit -n
 
@@ -27,6 +30,8 @@ f commit -m "Fixes #123"
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--no-push` | `-n` | Skip pushing after commit |
+| `--queue` | | Queue the commit for review (no push) |
+| `--no-queue` | | Bypass queue and allow push |
 | `--sync` | | Run synchronously (don't delegate to hub) |
 | `--context` | | Include AI session context in code review |
 | `--dry` | | Dry run: show context without committing |
@@ -74,8 +79,12 @@ f commit --review-model codex-high
 5. **Commit**
    - Creates commit with generated message
 
-6. **Push**
-   - Pushes to remote (unless `--no-push`)
+6. **Queue (optional)**
+   - Adds commit to the review queue (`f commit-queue list`)
+   - Creates a jj review bookmark (e.g., `review/main-<sha>`)
+
+7. **Push**
+   - Pushes to remote (unless `--no-push` or `--queue`)
 
 7. **GitEdit Sync**
    - Syncs AI session data to gitedit.dev
@@ -207,6 +216,28 @@ f commit
 # Sync (direct)
 f commit --sync
 ```
+
+### Commit Message Tool (Kimi CLI)
+
+Use Kimi Code CLI in headless mode for commit messages:
+
+```toml
+[commit]
+message_tool = "kimi"
+message_model = "kimi-k2-thinking-turbo" # optional; uses Kimi default if omitted
+```
+
+### Review Tool (Kimi CLI)
+
+Use Kimi Code CLI for code review:
+
+```toml
+[review]
+tool = "kimi"
+model = "kimi-k2-thinking-turbo" # optional; uses Kimi default if omitted
+```
+
+This uses `kimi --quiet` (print mode) with your existing Kimi CLI auth/config.
 
 ### AI Session Context
 

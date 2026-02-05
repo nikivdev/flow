@@ -333,6 +333,9 @@ fn prompt_touch_id() -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("Touch ID is not available on this OS");
     }
+    if std::env::var("FLOW_NO_TOUCH_ID").is_ok() || !std::io::stdin().is_terminal() {
+        bail!("Touch ID prompt requires an interactive terminal");
+    }
 
     let reason = "Flow needs Touch ID to read env vars.";
     let reason = reason.replace('\\', "\\\\").replace('"', "\\\"");
@@ -589,6 +592,22 @@ fn read_local_env_vars(target: &EnvTarget, environment: &str) -> Result<HashMap<
     Ok(parse_env_file(&content))
 }
 
+/// Read keys from the local personal env store without cloud access.
+pub fn fetch_local_personal_env_vars(keys: &[String]) -> Result<HashMap<String, String>> {
+    let target = resolve_personal_target()?;
+    let vars = read_local_env_vars(&target, "production")?;
+    if keys.is_empty() {
+        return Ok(vars);
+    }
+    let mut filtered = HashMap::new();
+    for key in keys {
+        if let Some(value) = vars.get(key) {
+            filtered.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(filtered)
+}
+
 fn write_local_env_vars(
     target: &EnvTarget,
     environment: &str,
@@ -721,6 +740,11 @@ fn format_default_hint(value: &str) -> String {
 }
 
 pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
+    if local_env_enabled() {
+        let vars = fetch_local_personal_env_vars(&[key.to_string()])?;
+        return Ok(vars.get(key).cloned());
+    }
+
     let auth = load_auth_config()?;
     let token = match auth.token.as_ref() {
         Some(t) => t,
@@ -826,19 +850,23 @@ fn fuzzy_select_env() -> Result<()> {
 
     // Get the full value
     if let Some(value) = vars.get(key) {
-        // Copy to clipboard
-        let mut pbcopy = Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .context("Failed to run pbcopy")?;
+        if std::env::var("FLOW_NO_CLIPBOARD").is_ok() || !std::io::stdin().is_terminal() {
+            println!("Clipboard disabled; skipping copy.");
+        } else {
+            // Copy to clipboard
+            let mut pbcopy = Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .context("Failed to run pbcopy")?;
 
-        if let Some(stdin) = pbcopy.stdin.as_mut() {
-            use std::io::Write;
-            stdin.write_all(value.as_bytes())?;
+            if let Some(stdin) = pbcopy.stdin.as_mut() {
+                use std::io::Write;
+                stdin.write_all(value.as_bytes())?;
+            }
+            pbcopy.wait()?;
+
+            println!("Copied {} to clipboard", key);
         }
-        pbcopy.wait()?;
-
-        println!("Copied {} to clipboard", key);
     }
 
     Ok(())
