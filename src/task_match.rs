@@ -57,7 +57,7 @@ fn run_builtin(name: &str, execute: bool) -> Result<()> {
             println!("Running: commit");
             if execute {
                 let queue = crate::commit::resolve_commit_queue_mode(false, false);
-                let push = true && !queue.enabled;
+                let push = true;
                 crate::commit::run(push, queue, false)?;
             }
         }

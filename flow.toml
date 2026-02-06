@@ -19,6 +19,7 @@ commit_with_check_review_url = "http://100.114.156.47:3000/review"
 
 [commit]
 queue = true
+queue_on_issues = true
 
 [jj]
 default_branch = "main"
@@ -208,6 +209,11 @@ description = "Build Pond (Ghostty fork) in debug and production modes"
 name = "pond-debug"
 command = "bash -c 'cd /Users/nikiv/repos/ghostty-org/ghostty && zig build -Doptimize=Debug'"
 description = "Build Pond (Ghostty fork) in debug mode"
+
+[[tasks]]
+name = "zed-build-debug-release"
+command = "bash -c 'cd /Users/nikiv/repos/zed-industries/zed && ./script/bundle-mac -d && ./script/bundle-mac'"
+description = "Build Zed macOS bundle in debug mode (fast) and then in release mode"
 
 [[tasks]]
 name = "linsa-assistant-serve"

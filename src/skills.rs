@@ -1,6 +1,6 @@
 //! Codex skills management.
 //!
-//! Skills are stored in .ai/skills/<name>/skill.md
+//! Skills are stored in .ai/skills/<name>/skill.md (gitignored by default).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,8 +10,24 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::{SkillsAction, SkillsCommand};
 use crate::config;
+use crate::start;
 
 const DEFAULT_ENV_SKILL: &str = include_str!("../.ai/skills/env/skill.md");
+
+#[derive(Debug, Default)]
+pub struct SkillsEnforceSummary {
+    pub task_skills_created: usize,
+    pub task_skills_updated: usize,
+    pub installed_skills: Vec<String>,
+}
+
+impl SkillsEnforceSummary {
+    pub fn is_noop(&self) -> bool {
+        self.task_skills_created == 0
+            && self.task_skills_updated == 0
+            && self.installed_skills.is_empty()
+    }
+}
 
 /// Run the skills subcommand.
 pub fn run(cmd: SkillsCommand) -> Result<()> {
@@ -286,16 +302,90 @@ fn remove_skill(name: &str) -> Result<()> {
 
 const SKILLS_API_URL: &str = "https://myflow.sh/api/skills";
 
+fn codex_skills_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CODEX_HOME").map(PathBuf::from) {
+        return Some(home.join("skills"));
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    Some(home.join(".codex").join("skills"))
+}
+
+fn read_local_skill_content(name: &str) -> Option<String> {
+    let skills_dir = codex_skills_dir()?;
+    // Codex skills typically store the body in SKILL.md.
+    let candidates = [
+        skills_dir.join(name).join("SKILL.md"),
+        skills_dir.join(name).join("skill.md"),
+    ];
+    for path in candidates {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if !content.trim().is_empty() {
+                return Some(content);
+            }
+        }
+    }
+    None
+}
+
 /// Install a skill from the global skills registry.
 fn install_skill(name: &str) -> Result<()> {
-    println!("Fetching skill '{}' from registry...", name);
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    install_skill_inner(&cwd, name, false, false)?;
+    Ok(())
+}
 
-    // Fetch skill from API
+fn install_skill_inner(
+    project_root: &Path,
+    name: &str,
+    allow_existing: bool,
+    quiet: bool,
+) -> Result<bool> {
+    let skills_dir = get_skills_dir_at(project_root);
+    let skill_dir = skills_dir.join(name);
+
+    if skill_dir.exists() {
+        if allow_existing {
+            return Ok(false);
+        }
+        bail!(
+            "Skill '{}' already exists locally. Remove it first with: f skills remove {}",
+            name,
+            name
+        );
+    }
+
+    // Prefer local Codex skills (e.g. ~/.codex/skills/<name>/SKILL.md) when present.
+    if let Some(content) = read_local_skill_content(name) {
+        if !quiet {
+            println!("Installing skill '{}' from local Codex skills...", name);
+        }
+
+        fs::create_dir_all(&skill_dir)?;
+        fs::write(skill_dir.join("skill.md"), content)?;
+
+        ensure_symlinks_at(project_root)?;
+
+        if !quiet {
+            println!("Installed skill: {}", name);
+            println!("  Source: local (~/.codex/skills/)");
+        }
+
+        return Ok(true);
+    }
+
+    if !quiet {
+        println!("Fetching skill '{}' from registry...", name);
+    }
+
+    // Fetch skill from API.
     let url = format!("{}?name={}", SKILLS_API_URL, name);
     let response = reqwest::blocking::get(&url).context("failed to fetch skill from registry")?;
 
     if response.status() == 404 {
-        bail!("Skill '{}' not found in registry", name);
+        bail!(
+            "Skill '{}' not found in local Codex skills or registry",
+            name
+        );
     }
 
     if !response.status().is_success() {
@@ -304,37 +394,25 @@ fn install_skill(name: &str) -> Result<()> {
 
     let skill: SkillResponse = response.json().context("failed to parse skill response")?;
 
-    // Create skill directory
-    let skills_dir = get_skills_dir()?;
-    let skill_dir = skills_dir.join(name);
-
-    if skill_dir.exists() {
-        bail!(
-            "Skill '{}' already exists locally. Remove it first with: f skills remove {}",
-            name,
-            name
-        );
-    }
-
+    // Create skill directory and write skill.md.
     fs::create_dir_all(&skill_dir)?;
-
-    // Write skill.md
-    let skill_file = skill_dir.join("skill.md");
-    fs::write(&skill_file, &skill.content)?;
+    fs::write(skill_dir.join("skill.md"), &skill.content)?;
 
     // Ensure symlinks
-    ensure_symlinks()?;
+    ensure_symlinks_at(project_root)?;
 
-    println!("Installed skill: {}", name);
-    println!(
-        "  Source: {}",
-        skill.source.unwrap_or_else(|| "unknown".to_string())
-    );
-    if let Some(author) = skill.author {
-        println!("  Author: {}", author);
+    if !quiet {
+        println!("Installed skill: {}", name);
+        println!(
+            "  Source: {}",
+            skill.source.unwrap_or_else(|| "unknown".to_string())
+        );
+        if let Some(author) = skill.author {
+            println!("  Author: {}", author);
+        }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -388,35 +466,11 @@ struct SkillListItem {
     source: Option<String>,
 }
 
-/// Sync flow.toml tasks as skills.
-fn sync_skills() -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let flow_toml = cwd.join("flow.toml");
-
-    if !flow_toml.exists() {
-        bail!("No flow.toml found in current directory");
-    }
-
-    // Load flow.toml
-    let cfg = config::load(&flow_toml)?;
-
-    let skills_dir = get_skills_dir()?;
-    fs::create_dir_all(&skills_dir)?;
-
-    let mut created = 0;
-    let mut updated = 0;
-
-    for task in &cfg.tasks {
-        let skill_dir = skills_dir.join(&task.name);
-        let skill_file = skill_dir.join("skill.md");
-
-        let existed = skill_file.exists();
-
-        fs::create_dir_all(&skill_dir)?;
-
-        let desc = task.description.as_deref().unwrap_or("Flow task");
-        let content = format!(
-            r#"---
+fn render_task_skill(task: &config::TaskConfig) -> String {
+    let desc = task.description.as_deref().unwrap_or("Flow task");
+    let command = task.command.lines().collect::<Vec<_>>().join("\n");
+    format!(
+        r#"---
 name: {}
 description: {}
 source: flow.toml
@@ -440,22 +494,58 @@ f {}
 {}
 ```
 "#,
-            task.name,
-            desc,
-            task.name,
-            desc,
-            task.name,
-            task.command.lines().collect::<Vec<_>>().join("\n")
-        );
+        task.name, desc, task.name, desc, task.name, command
+    )
+}
 
-        fs::write(&skill_file, content)?;
+fn sync_tasks_to_skills(
+    skills_dir: &Path,
+    tasks: &[config::TaskConfig],
+) -> Result<(usize, usize)> {
+    fs::create_dir_all(skills_dir)?;
 
-        if existed {
-            updated += 1;
-        } else {
-            created += 1;
+    let mut created = 0;
+    let mut updated = 0;
+
+    for task in tasks {
+        let skill_dir = skills_dir.join(&task.name);
+        let skill_file = skill_dir.join("skill.md");
+        let content = render_task_skill(task);
+        let existed = skill_file.exists();
+        let should_write = match fs::read_to_string(&skill_file) {
+            Ok(existing) => existing != content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+            Err(err) => return Err(err.into()),
+        };
+
+        if should_write {
+            fs::create_dir_all(&skill_dir)?;
+            fs::write(&skill_file, content)?;
+            if existed {
+                updated += 1;
+            } else {
+                created += 1;
+            }
         }
     }
+
+    Ok((created, updated))
+}
+
+/// Sync flow.toml tasks as skills.
+fn sync_skills() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let flow_toml = cwd.join("flow.toml");
+
+    if !flow_toml.exists() {
+        bail!("No flow.toml found in current directory");
+    }
+
+    // Load flow.toml
+    let cfg = config::load(&flow_toml)?;
+
+    let skills_dir = get_skills_dir()?;
+    let (created, updated) = sync_tasks_to_skills(&skills_dir, &cfg.tasks)?;
 
     // Ensure symlinks exist for Claude Code and Codex
     ensure_symlinks()?;
@@ -472,9 +562,39 @@ f {}
     Ok(())
 }
 
+pub(crate) fn enforce_skills_from_config(
+    project_root: &Path,
+    cfg: &config::Config,
+) -> Result<SkillsEnforceSummary> {
+    let Some(skills_cfg) = cfg.skills.as_ref() else {
+        return Ok(SkillsEnforceSummary::default());
+    };
+
+    let skills_dir = get_skills_dir_at(project_root);
+    let mut summary = SkillsEnforceSummary::default();
+
+    if skills_cfg.sync_tasks {
+        let (created, updated) = sync_tasks_to_skills(&skills_dir, &cfg.tasks)?;
+        summary.task_skills_created = created;
+        summary.task_skills_updated = updated;
+        ensure_symlinks_at(project_root)?;
+    }
+
+    for name in &skills_cfg.install {
+        let installed = install_skill_inner(project_root, name, true, true)?;
+        if installed {
+            summary.installed_skills.push(name.clone());
+        }
+    }
+
+    Ok(summary)
+}
+
 pub fn ensure_default_skills_at(project_root: &Path) -> Result<()> {
     let skills_dir = get_skills_dir_at(project_root);
     fs::create_dir_all(&skills_dir)?;
+
+    start::update_gitignore(project_root)?;
 
     let env_dir = skills_dir.join("env");
     let env_file = env_dir.join("skill.md");
@@ -518,7 +638,26 @@ pub fn auto_sync_skills() {
         return;
     };
 
+    let cfg = match config::load(&flow_toml) {
+        Ok(cfg) => Some(cfg),
+        Err(err) => {
+            tracing::debug!(?err, "failed to load flow.toml for skills sync");
+            None
+        }
+    };
+
     if let Err(err) = ensure_default_skills_at(project_root) {
         tracing::debug!(?err, "failed to auto-sync default skills");
     }
+
+    if let Some(cfg) = cfg {
+        if let Err(err) = enforce_skills_from_config(project_root, &cfg) {
+            tracing::debug!(?err, "failed to auto-sync configured skills");
+        }
+    }
+}
+
+pub fn ensure_project_skills_at(project_root: &Path, cfg: &config::Config) -> Result<SkillsEnforceSummary> {
+    ensure_default_skills_at(project_root)?;
+    enforce_skills_from_config(project_root, cfg)
 }

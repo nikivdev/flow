@@ -47,6 +47,9 @@ pub struct Config {
     pub remote_servers: Vec<RemoteServerConfig>,
     #[serde(default)]
     pub tasks: Vec<TaskConfig>,
+    /// Skills enforcement configuration (auto-sync/install).
+    #[serde(default)]
+    pub skills: Option<SkillsConfig>,
     /// Hive agents defined for this project (array format: [[agent]]).
     #[serde(default, rename = "agent")]
     pub agents: Vec<crate::hive::AgentConfig>,
@@ -179,6 +182,14 @@ pub struct CommitConfig {
     /// Queue commits for review before push.
     #[serde(default)]
     pub queue: Option<bool>,
+    /// Queue only when review finds issues (overrides queue if review passes).
+    #[serde(
+        default,
+        rename = "queue_on_issues",
+        alias = "queue-on-issues",
+        alias = "queueOnIssues"
+    )]
+    pub queue_on_issues: Option<bool>,
 }
 
 /// Jujutsu (jj) workflow config.
@@ -322,6 +333,14 @@ pub struct TsCommitConfig {
     /// Queue commits for review before push.
     #[serde(default)]
     pub queue: Option<bool>,
+    /// Queue only when review finds issues (overrides queue if review passes).
+    #[serde(
+        default,
+        rename = "queueOnIssues",
+        alias = "queue_on_issues",
+        alias = "queue-on-issues"
+    )]
+    pub queue_on_issues: Option<bool>,
     /// Whether to run async (delegate to hub). Default true.
     #[serde(default, rename = "async")]
     pub async_enabled: Option<bool>,
@@ -350,6 +369,7 @@ impl Default for Config {
             servers: Vec::new(),
             remote_servers: Vec::new(),
             tasks: Vec::new(),
+            skills: None,
             agents: Vec::new(),
             agents_registry: HashMap::new(),
             dependencies: HashMap::new(),
@@ -390,6 +410,22 @@ pub struct FlowSettings {
     /// Task to run when invoking `f deploy` with no subcommand.
     #[serde(default, rename = "deploy_task", alias = "deploy-task")]
     pub deploy_task: Option<String>,
+}
+
+/// Skills enforcement configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SkillsConfig {
+    /// Auto-sync flow.toml tasks into .ai/skills.
+    #[serde(
+        default,
+        rename = "sync_tasks",
+        alias = "sync-tasks",
+        alias = "syncTasks"
+    )]
+    pub sync_tasks: bool,
+    /// Skills to install from the registry when missing.
+    #[serde(default)]
+    pub install: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
