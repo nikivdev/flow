@@ -29,6 +29,10 @@ activate_on_cd_to_root = true     # optional, default false
 dependencies = ["fast"]           # optional, names from [deps] or [flox.install]
 shortcuts = ["s"]                 # optional aliases for task lookup
 
+[skills]              # optional: skill enforcement (gitignored by default)
+sync_tasks = true     # optional: generate skills for tasks
+install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/skills preferred, else registry)
+
 [[alias]]             # optional shell aliases (or use [aliases] table)
 fr = "f run"          # key/value pairs of alias -> command
 
@@ -50,6 +54,7 @@ fr = "f run"
 - `activate_on_cd_to_root`: tasks flagged run automatically when Flow is invoked via `activate` hooks.
 - `shortcuts`: case-insensitive aliases and abbreviations (auto-generated from task names) resolve tasks.
 - `alias`/`aliases`: emitted by `f setup` as shell `alias` lines.
+- `[skills]`: optional skill enforcement; `sync_tasks` generates `.ai/skills` from tasks and `install` ensures registry skills are present (skills are gitignored by default).
 
 ## Notes
 

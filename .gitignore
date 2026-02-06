@@ -2,6 +2,7 @@
 .cargo/
 .ai/internal/
 .ai/web/
+.ai/skills/
 .ai/todos/*.bike
 .claude/
 .codex/
@@ -24,6 +25,7 @@ node_modules
 package-lock.json
 yarn.lock
 .vercel
+env-local/
 *.db
 .repo_ignore
 i.*

@@ -72,8 +72,9 @@ export FLOW_DISABLE_TASK_FAILURE_HOOK=1
 
 ## Rise / Zed Behavior
 
-If your hook calls `rise work`, Flow automatically appends `--no-open` unless you
-explicitly allow it. This prevents Zed from opening on every failure.
+If your hook calls `rise work`, Flow automatically appends `--no-open` and strips
+`--focus` / `--focus-app` unless you explicitly allow opening. This prevents Zed
+or other apps from launching on every failure.
 
 To allow the open behavior:
 

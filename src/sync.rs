@@ -519,14 +519,34 @@ fn run_jj_sync(
     let origin_reachable =
         has_origin && git_capture(&["ls-remote", "--exit-code", "-q", "origin"]).is_ok();
 
+    // Keep jj fetch output small. In most workflows, only the current branch + upstream trunk are
+    // needed for a sync/rebase.
+    let upstream_branch_opt = resolve_upstream_branch();
+    let upstream_branch_for_fetch =
+        upstream_branch_opt.clone().unwrap_or_else(|| jj_default_branch(repo_root));
+
     if has_origin || has_upstream {
         println!("==> Fetching remotes via jj...");
         let mut fetched_any = false;
         let mut failures: Vec<String> = Vec::new();
 
         if has_origin && origin_reachable {
-            recorder.record("jj", "jj git fetch --remote origin");
-            if let Err(err) = jj_run_in(repo_root, &["git", "fetch", "--remote", "origin"]) {
+            recorder.record(
+                "jj",
+                format!("jj git fetch --remote origin --branch {}", current_branch),
+            );
+            if let Err(err) = jj_run_in(
+                repo_root,
+                &[
+                    "--quiet",
+                    "git",
+                    "fetch",
+                    "--remote",
+                    "origin",
+                    "--branch",
+                    &current_branch,
+                ],
+            ) {
                 failures.push(format!("origin: {}", err));
             } else {
                 fetched_any = true;
@@ -536,8 +556,25 @@ fn run_jj_sync(
         }
 
         if has_upstream {
-            recorder.record("jj", "jj git fetch --remote upstream");
-            if let Err(err) = jj_run_in(repo_root, &["git", "fetch", "--remote", "upstream"]) {
+            recorder.record(
+                "jj",
+                format!(
+                    "jj git fetch --remote upstream --branch {}",
+                    upstream_branch_for_fetch
+                ),
+            );
+            if let Err(err) = jj_run_in(
+                repo_root,
+                &[
+                    "--quiet",
+                    "git",
+                    "fetch",
+                    "--remote",
+                    "upstream",
+                    "--branch",
+                    &upstream_branch_for_fetch,
+                ],
+            ) {
                 failures.push(format!("upstream: {}", err));
             } else {
                 fetched_any = true;
@@ -546,7 +583,7 @@ fn run_jj_sync(
 
         if fetched_any {
             recorder.record("jj", "jj git import");
-            let _ = jj_run_in(repo_root, &["git", "import"]);
+            let _ = jj_run_in(repo_root, &["--quiet", "git", "import"]);
         } else if !failures.is_empty() {
             bail!("jj git fetch failed: {}", failures.join(", "));
         }
@@ -559,7 +596,7 @@ fn run_jj_sync(
 
     let mut dest_ref: Option<String> = None;
     if has_upstream {
-        if let Some(branch) = resolve_upstream_branch() {
+        if let Some(branch) = upstream_branch_opt {
             dest_ref = Some(format!("{}@upstream", branch));
         }
     }

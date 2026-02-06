@@ -4,7 +4,7 @@ use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -311,6 +311,116 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
     ("Env Var Secret", r#"(?i)(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[_A-Z]*\s*=\s*['"]?[0-9a-zA-Z\-_/+=]{32,}['"]?"#),
 ];
 
+const SECRET_SCAN_IGNORE_MARKERS: &[&str] = &[
+    "flow:secret:ignore",
+    "flow-secret-ignore",
+    "flow:secret-scan:ignore",
+    "gitleaks:allow",
+];
+
+fn should_ignore_secret_scan_line(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    SECRET_SCAN_IGNORE_MARKERS
+        .iter()
+        .any(|m| lower.contains(&m.to_lowercase()))
+}
+
+fn extract_first_quoted_value(s: &str) -> Option<&str> {
+    let (qpos, qch) = s
+        .char_indices()
+        .find(|(_, c)| *c == '"' || *c == '\'')?;
+    let end = s.rfind(qch)?;
+    if end <= qpos {
+        return None;
+    }
+    Some(&s[qpos + 1..end])
+}
+
+fn looks_like_identifier_reference(value: &str) -> bool {
+    let v = value.trim();
+    // Common false positive: secret *names* (env var identifiers), not secret *values*.
+    // Require underscore to avoid skipping high-entropy base32-ish strings.
+    !v.is_empty()
+        && v.len() >= 8
+        && v.contains('_')
+        && v.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == '.')
+}
+
+fn looks_like_secret_lookup(value: &str) -> bool {
+    let v = value.trim();
+
+    if v.starts_with("${") && v.ends_with('}') {
+        // ${VAR} is dynamic (not hardcoded). Defaults like ${VAR:-literal} are not treated as safe.
+        let inner = &v[2..v.len() - 1];
+        return !inner.contains(":-")
+            && !inner.contains("-")
+            && inner
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    }
+
+    if !(v.starts_with("$(") && v.ends_with(')')) {
+        return false;
+    }
+    let inner = v[2..v.len() - 1].trim();
+    // If the substitution contains quotes, assume it might embed a hardcoded secret.
+    if inner.contains('"') || inner.contains('\'') || inner.contains('`') {
+        return false;
+    }
+    let inner_lc = inner.to_lowercase();
+    // Allowlist common secret lookups (dynamic, not hardcoded).
+    inner_lc.starts_with("get_env ")
+        || inner_lc.starts_with("getenv ")
+        || inner_lc.starts_with("printenv ")
+        || inner_lc.starts_with("op read ")
+        || inner_lc.starts_with("pass show ")
+        || inner_lc.starts_with("security find-generic-password")
+        || inner_lc.starts_with("aws ssm get-parameter")
+        || inner_lc.starts_with("vault kv get")
+        || inner_lc.starts_with("bw get")
+        || inner_lc.starts_with("gcloud secrets versions access")
+}
+
+fn generic_secret_assignment_is_false_positive(content: &str, matched: &str) -> bool {
+    // Only apply these heuristics to the broad "Generic Secret Assignment" rule.
+    // If the value is an identifier or a dynamic lookup, it's not a hardcoded secret.
+    if let Some((_, rhs)) = matched.split_once('=') {
+        let rhs = rhs.trim_start();
+        // e.g. SECRET="$(printf "%s" "$output" | ...)" is dynamic; the literal match happens because
+        // the regex stops at the first inner quote. This should not block commits.
+        if rhs.starts_with("\"$(") || rhs.starts_with("'$(") || rhs.starts_with("`") {
+            return true;
+        }
+        // Dynamic references like "$VAR" or "${VAR}" are not hardcoded secrets.
+        if rhs.starts_with("\"$") || rhs.starts_with("'$") {
+            return true;
+        }
+    } else if let Some((_, rhs)) = matched.split_once(':') {
+        let rhs = rhs.trim_start();
+        if rhs.starts_with("\"$(") || rhs.starts_with("'$(") || rhs.starts_with("`") {
+            return true;
+        }
+        if rhs.starts_with("\"$") || rhs.starts_with("'$") {
+            return true;
+        }
+    }
+
+    if let Some(val) = extract_first_quoted_value(matched) {
+        let v = val.trim();
+        if looks_like_identifier_reference(v) {
+            return true;
+        }
+        if looks_like_secret_lookup(v) {
+            return true;
+        }
+    }
+
+    // If the whole line is clearly a dynamic lookup, treat as non-hardcoded.
+    // This catches cases where the regex match boundaries don't capture the full value cleanly.
+        let lc = content.to_lowercase();
+        lc.contains("$(get_env ")
+}
+
 /// Scan staged diff content for hardcoded secrets.
 /// Returns list of (file, line_num, pattern_name, matched_text) for detected secrets.
 fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String)> {
@@ -331,6 +441,7 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
     let mut findings: Vec<(String, usize, String, String)> = Vec::new();
     let mut current_file = String::new();
     let mut current_line: usize = 0;
+    let mut ignore_next_added_line = false;
 
     // Compile regexes
     let patterns: Vec<(&str, regex::Regex)> = SECRET_PATTERNS
@@ -344,6 +455,7 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
         // Track current file
         if line.starts_with("+++ b/") {
             current_file = line.strip_prefix("+++ b/").unwrap_or("").to_string();
+            ignore_next_added_line = false;
             continue;
         }
 
@@ -354,12 +466,37 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
                 let num_str: String = after_plus.chars().take_while(|c| c.is_ascii_digit()).collect();
                 current_line = num_str.parse().unwrap_or(0);
             }
+            ignore_next_added_line = false;
             continue;
         }
 
         // Only scan added lines (start with +, but not +++)
         if line.starts_with('+') && !line.starts_with("+++") {
             let content = &line[1..]; // Remove leading +
+
+            if ignore_next_added_line {
+                ignore_next_added_line = false;
+                current_line += 1;
+                continue;
+            }
+            // If a comment line contains the ignore marker, treat it as applying to the next line.
+            // This matches common tooling conventions and makes auto-fix more reliable.
+            let trimmed = content.trim_start();
+            if trimmed.starts_with('#') && should_ignore_secret_scan_line(trimmed) {
+                ignore_next_added_line = true;
+                current_line += 1;
+                continue;
+            }
+            if should_ignore_secret_scan_line(content) {
+                // One-line escape hatch. Prefer `# flow:secret:ignore` inline on the line being flagged.
+                current_line += 1;
+                continue;
+            }
+            if content.to_lowercase().contains("flow:secret:ignore-next") {
+                ignore_next_added_line = true;
+                current_line += 1;
+                continue;
+            }
 
             for (name, re) in &patterns {
                 if let Some(m) = re.find(content) {
@@ -383,6 +520,12 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
                         continue;
                     }
 
+                    if *name == "Generic Secret Assignment"
+                        && generic_secret_assignment_is_false_positive(content, matched)
+                    {
+                        continue;
+                    }
+
                     // Redact the middle of the matched secret for display
                     let redacted = if matched.len() > 12 {
                         format!("{}...{}", &matched[..6], &matched[matched.len()-4..])
@@ -402,6 +545,7 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
         } else if !line.starts_with('-') && !line.starts_with("\\") {
             // Context line (no prefix) - still increment line counter
             current_line += 1;
+            ignore_next_added_line = false;
         }
     }
 
@@ -422,14 +566,16 @@ fn warn_secrets_in_diff(
         return Ok(());
     }
 
-    println!("\n🔐 Potential secrets detected in staged changes:");
-    for (file, line, pattern, matched) in findings {
-        println!("   {}:{} - {} ({})", file, line, pattern, matched);
-    }
+    println!();
+    print_secret_findings(
+        "🔐 Potential secrets detected in staged changes:",
+        findings,
+    );
     println!();
     println!("If these are false positives (examples, placeholders, tests), you can:");
     println!("   - Set FLOW_ALLOW_SECRET_COMMIT=1 to override for this commit");
-    println!("   - Add comments like 'example' or use placeholder values like 'xxx'");
+    println!("   - Mark the line with '# flow:secret:ignore' (or add it on the line above to ignore the next line)");
+    println!("   - Use placeholder values like 'xxx' for example secrets");
     println!("   - Re-stage files if you recently edited them: git add <file>");
     println!();
 
@@ -449,30 +595,76 @@ fn warn_secrets_in_diff(
         println!();
     }
 
-    let task = build_fix_f_commit_task(findings);
-    let show_prompt = env::var("FLOW_FIX_COMMIT_PROMPT").ok().as_deref() == Some("1");
-    let agent_name = env::var("FLOW_FIX_COMMIT_AGENT").unwrap_or_else(|_| "fix-f-commit".to_string());
+    let agent_name =
+        env::var("FLOW_FIX_COMMIT_AGENT").unwrap_or_else(|_| "fix-f-commit".to_string());
     let agent_enabled = agent_name.trim().to_lowercase() != "off";
+    let hive_available = which::which("hive").is_ok();
+    let ai_available = which::which("ai").is_ok();
+    let interactive = io::stdin().is_terminal();
+    let mut current_findings = findings.to_vec();
 
-    let mut prompt_printed = false;
-    if agent_enabled {
+    let mut rescan_after_fix = |findings: &mut Vec<(String, usize, String, String)>| -> Result<()> {
+        git_run_in(repo_root, &["add", "."])?;
+        ensure_no_internal_staged(repo_root)?;
+        ensure_no_unwanted_staged(repo_root)?;
+        *findings = scan_diff_for_secrets(repo_root);
+        Ok(())
+    };
+
+    if interactive && agent_enabled && hive_available {
+        let task = build_fix_f_commit_task(&current_findings);
+        println!("Running fix-f-commit agent (hive)...");
         if let Err(err) = run_fix_f_commit_agent(repo_root, &agent_name, &task) {
             eprintln!("⚠ Failed to run fix-f-commit agent: {err}");
             eprintln!(
                 "  Create the agent at ~/.config/flow/agents/fix-f-commit.md or ~/.hive/agents/fix-f-commit/spec.md"
             );
             eprintln!();
-            eprintln!("Suggested prompt (copy/paste into your model):");
-            eprintln!("────────────────────────────────────────");
-            eprintln!("{}", task);
-            eprintln!("────────────────────────────────────────");
-            prompt_printed = true;
         }
-    } else {
+        rescan_after_fix(&mut current_findings)?;
+        if current_findings.is_empty() {
+            if prompt_yes_no_default_yes(
+                "Secret scan is clean after auto-fix. Continue with commit?",
+            )? {
+                return Ok(());
+            }
+            bail!("Commit aborted after auto-fix. Review changes and retry.");
+        }
+    } else if !agent_enabled {
         eprintln!("ℹ️  fix-f-commit agent disabled via FLOW_FIX_COMMIT_AGENT=off");
+    } else if !hive_available {
+        eprintln!("ℹ️  hive not found; skipping fix-f-commit agent");
     }
 
-    if (show_prompt || !agent_enabled) && !prompt_printed {
+    if interactive && !current_findings.is_empty() && ai_available {
+        if prompt_yes_no_default_yes("Run auto-fix with ai?")? {
+            let task = build_fix_f_commit_task(&current_findings);
+            println!("Running auto-fix with ai...");
+            if let Err(err) = run_fix_f_commit_ai(repo_root, &task) {
+                eprintln!("⚠ Failed to run ai auto-fix: {err}");
+            }
+            rescan_after_fix(&mut current_findings)?;
+            if current_findings.is_empty() {
+                if prompt_yes_no_default_yes(
+                    "Secret scan is clean after auto-fix. Continue with commit?",
+                )? {
+                    return Ok(());
+                }
+                bail!("Commit aborted after auto-fix. Review changes and retry.");
+            }
+        }
+    }
+
+    if current_findings != findings {
+        print_secret_findings(
+            "🔐 Potential secrets still detected in staged changes:",
+            &current_findings,
+        );
+        println!();
+    }
+
+    let task = build_fix_f_commit_task(&current_findings);
+    if !task.trim().is_empty() {
         eprintln!("Suggested prompt (copy/paste into your model):");
         eprintln!("────────────────────────────────────────");
         eprintln!("{}", task);
@@ -480,6 +672,30 @@ fn warn_secrets_in_diff(
     }
 
     bail!("Refusing to commit potential secrets. Review the findings above.")
+}
+
+fn should_run_sync_for_secret_fixes(repo_root: &Path) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    if env::var("FLOW_ALLOW_SECRET_COMMIT").ok().as_deref() == Some("1") {
+        return Ok(false);
+    }
+
+    let agent_name =
+        env::var("FLOW_FIX_COMMIT_AGENT").unwrap_or_else(|_| "fix-f-commit".to_string());
+    let hive_enabled =
+        agent_name.trim().to_lowercase() != "off" && which::which("hive").is_ok();
+    let ai_available = which::which("ai").is_ok();
+    if !hive_enabled && !ai_available {
+        return Ok(false);
+    }
+
+    git_run(&["add", "."])?;
+    ensure_no_internal_staged(repo_root)?;
+    ensure_no_unwanted_staged(repo_root)?;
+
+    Ok(!scan_diff_for_secrets(repo_root).is_empty())
 }
 
 fn run_fix_f_commit_agent(repo_root: &Path, agent: &str, task: &str) -> Result<()> {
@@ -504,6 +720,27 @@ fn run_fix_f_commit_agent(repo_root: &Path, agent: &str, task: &str) -> Result<(
     Ok(())
 }
 
+fn run_fix_f_commit_ai(repo_root: &Path, task: &str) -> Result<()> {
+    if which::which("ai").is_err() {
+        bail!("ai not found in PATH");
+    }
+
+    let status = Command::new("ai")
+        .args(["--prompt", task])
+        .current_dir(repo_root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run ai")?;
+
+    if !status.success() {
+        bail!("ai auto-fix failed");
+    }
+
+    Ok(())
+}
+
 fn build_fix_f_commit_task(findings: &[(String, usize, String, String)]) -> String {
     let mut summary = String::new();
     for (file, line, pattern, matched) in findings {
@@ -515,11 +752,22 @@ fn build_fix_f_commit_task(findings: &[(String, usize, String, String)]) -> Stri
 Findings:\n{summary}\n\
 Please remove or mask real secrets, replace with placeholders if needed, \
 and update .gitignore or docs/examples so the commit passes the secret scan. \
-If the match is a false positive, annotate with 'example' or use 'xxx' placeholders.\n\
+If the match is a false positive, prefer marking the flagged line with `flow:secret:ignore` (for example: `# flow:secret:ignore`). \
+If you must keep the pattern but want it to pass the scanner, use 'xxx' placeholders.\n\
 After fixing, restage changes."
     );
 
     sanitize_hive_task(&task)
+}
+
+fn print_secret_findings(
+    header: &str,
+    findings: &[(String, usize, String, String)],
+) {
+    println!("{}", header);
+    for (file, line, pattern, matched) in findings {
+        println!("   {}:{} - {} ({})", file, line, pattern, matched);
+    }
 }
 
 fn has_unstaged_changes(repo_root: &Path, file: &str) -> bool {
@@ -1221,6 +1469,13 @@ pub fn dry_run_context() -> Result<()> {
 pub fn run(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Result<()> {
     // Check if hub is running - if so, delegate
     if hub::hub_healthy(HUB_HOST, HUB_PORT) {
+        ensure_git_repo()?;
+        let repo_root = git_root_or_cwd();
+        ensure_commit_setup(&repo_root)?;
+        git_guard::ensure_clean_for_commit(&repo_root)?;
+        if should_run_sync_for_secret_fixes(&repo_root)? {
+            return run_sync(push, queue, include_unhash);
+        }
         return delegate_to_hub(push, queue, include_unhash);
     }
 
@@ -1420,7 +1675,7 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
 
     // Sync to gitedit if enabled
     let cwd = std::env::current_dir().unwrap_or_default();
-    if gitedit_globally_enabled() && gitedit_mirror_enabled() {
+    if gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit(&repo_root) {
         sync_to_gitedit(&cwd, "commit", &[], None, None);
     }
 
@@ -1576,6 +1831,22 @@ pub fn run_with_check(
     include_unhash: bool,
 ) -> Result<()> {
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
+        ensure_git_repo()?;
+        let repo_root = git_root_or_cwd();
+        ensure_commit_setup(&repo_root)?;
+        git_guard::ensure_clean_for_commit(&repo_root)?;
+        if should_run_sync_for_secret_fixes(&repo_root)? {
+            return run_with_check_sync(
+                push,
+                include_context,
+                review_selection,
+                author_message,
+                max_tokens,
+                false,
+                queue,
+                include_unhash,
+            );
+        }
         return delegate_to_hub_with_check(
             "commitWithCheck",
             push,
@@ -1612,6 +1883,22 @@ pub fn run_with_check_with_gitedit(
 ) -> Result<()> {
     let force_gitedit = gitedit_globally_enabled();
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
+        ensure_git_repo()?;
+        let repo_root = git_root_or_cwd();
+        ensure_commit_setup(&repo_root)?;
+        git_guard::ensure_clean_for_commit(&repo_root)?;
+        if should_run_sync_for_secret_fixes(&repo_root)? {
+            return run_with_check_sync(
+                push,
+                include_context,
+                review_selection,
+                author_message,
+                max_tokens,
+                force_gitedit,
+                queue,
+                include_unhash,
+            );
+        }
         return delegate_to_hub_with_check(
             "commit", // CLI command name
             push,
@@ -1890,12 +2177,63 @@ fn commit_queue_enabled_from_config() -> bool {
     true
 }
 
+fn commit_queue_on_issues_enabled(repo_root: &Path) -> bool {
+    if let Some(ts_config) = config::load_ts_config() {
+        if let Some(flow) = ts_config.flow {
+            if let Some(commit) = flow.commit {
+                if let Some(queue_on_issues) = commit.queue_on_issues {
+                    return queue_on_issues;
+                }
+            }
+        }
+    }
+
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            if let Some(commit) = cfg.commit {
+                if let Some(queue_on_issues) = commit.queue_on_issues {
+                    return queue_on_issues;
+                }
+            }
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            if let Some(commit) = cfg.commit {
+                if let Some(queue_on_issues) = commit.queue_on_issues {
+                    return queue_on_issues;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 fn prompt_yes_no(message: &str) -> Result<bool> {
     print!("{} [y/N]: ", message);
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     let answer = input.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+fn prompt_yes_no_default_yes(message: &str) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    print!("{} [Y/n]: ", message);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    if answer.is_empty() {
+        return Ok(true);
+    }
     Ok(answer == "y" || answer == "yes")
 }
 
@@ -1913,12 +2251,12 @@ pub fn run_with_check_sync(
     queue: CommitQueueMode,
     include_unhash: bool,
 ) -> Result<()> {
-    let queue_enabled = queue.enabled;
-    let push = push && !queue_enabled;
+    let push_requested = push;
+    let mut queue_enabled = queue.enabled;
     // Convert tokens to chars (roughly 4 chars per token)
     let max_context = max_tokens * 4;
     info!(
-        push = push,
+        push = push_requested && !queue_enabled,
         queue = queue_enabled,
         include_context = include_context,
         review_model = review_selection.model_label(),
@@ -2151,6 +2489,18 @@ pub fn run_with_check_sync(
         println!("✓ Review passed");
     }
 
+    if queue_enabled && queue.override_flag.is_none() && commit_queue_on_issues_enabled(&repo_root)
+    {
+        if review.issues_found || review.timed_out {
+            println!("ℹ️  Review found issues; keeping commit queued for approval.");
+        } else {
+            println!("ℹ️  Review passed; skipping queue because commit.queue_on_issues = true.");
+            queue_enabled = false;
+        }
+    }
+
+    let push = push_requested && !queue_enabled;
+
     let review_model_label = review_selection.model_label();
     let review_reviewer_label = if review_selection.is_claude() {
         "claude"
@@ -2317,8 +2667,12 @@ pub fn run_with_check_sync(
     let mut gitedit_sessions: Vec<ai::GitEditSessionData> = Vec::new();
     let mut gitedit_session_hash: Option<String> = None;
 
-    let gitedit_enabled = force_gitedit
-        || (gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit_with_check(&repo_root));
+    let gitedit_mirror_enabled = if force_gitedit {
+        gitedit_mirror_enabled_for_commit(&repo_root)
+    } else {
+        gitedit_mirror_enabled_for_commit_with_check(&repo_root)
+    };
+    let gitedit_enabled = gitedit_globally_enabled() && gitedit_mirror_enabled;
     let unhash_enabled = include_unhash && unhash_capture_enabled();
     let mut unhash_sessions: Vec<ai::GitEditSessionData> = Vec::new();
 
@@ -2543,7 +2897,7 @@ pub fn run_with_check_sync(
 
     // Sync to gitedit if enabled
     let should_sync = if force_gitedit {
-        true
+        gitedit_enabled
     } else {
         push && gitedit_enabled
     };
@@ -3458,10 +3812,7 @@ fn run_openrouter_review(
     let api_key = openrouter_api_key()?;
     let model_id = openrouter_model_id(model);
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .context("failed to create HTTP client")?;
+    let client = openrouter_http_client(Duration::from_secs(120))?;
 
     let body = ChatRequest {
         model: model_id.to_string(),
@@ -3485,26 +3836,14 @@ fn run_openrouter_review(
     );
     let start = std::time::Instant::now();
 
-    let resp = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("HTTP-Referer", "https://github.com/nikitavoloboev/flow")
-        .json(&body)
-        .send()
-        .context("failed to call OpenRouter API")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().unwrap_or_default();
-        bail!("OpenRouter API error {}: {}", status, text);
-    }
+    let parsed: ChatResponse = openrouter_chat_completion_with_retry(&client, &api_key, &body)
+        .context("OpenRouter request failed")?;
 
     info!(
         elapsed_ms = start.elapsed().as_millis() as u64,
         "OpenRouter responded"
     );
 
-    let parsed: ChatResponse = resp.json().context("failed to parse OpenRouter response")?;
     let output = parsed
         .choices
         .first()
@@ -3575,6 +3914,173 @@ fn run_openrouter_review(
         future_tasks,
         timed_out: false,
     })
+}
+
+const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+
+fn openrouter_http_client(timeout: Duration) -> Result<Client> {
+    Client::builder()
+        .timeout(timeout)
+        // OpenRouter occasionally drops pooled connections mid-body, producing
+        // `unexpected EOF during chunk size line`. Disabling idle pooling makes
+        // these transient failures much rarer for CLI-style, low-QPS usage.
+        .pool_max_idle_per_host(0)
+        .build()
+        .context("failed to create HTTP client")
+}
+
+fn openrouter_should_retry_error(err: &reqwest::Error) -> bool {
+    if err.is_timeout() || err.is_connect() || err.is_body() {
+        return true;
+    }
+
+    // reqwest/hyper doesn't expose a stable typed error for this; match common symptoms.
+    let msg = err.to_string().to_lowercase();
+    msg.contains("unexpected eof")
+        || msg.contains("chunk size line")
+        || msg.contains("connection closed")
+        || msg.contains("incomplete message")
+}
+
+fn openrouter_retry_after(resp: &reqwest::blocking::Response) -> Option<Duration> {
+    let value = resp.headers().get("retry-after")?.to_str().ok()?;
+    // Spec also allows HTTP-date; we only handle integer seconds.
+    let secs: u64 = value.trim().parse().ok()?;
+    Some(Duration::from_secs(secs))
+}
+
+fn openrouter_chat_completion_with_retry(
+    client: &Client,
+    api_key: &str,
+    body: &ChatRequest,
+) -> Result<ChatResponse> {
+    let max_attempts = 3usize;
+    let mut backoff = Duration::from_millis(250);
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 1..=max_attempts {
+        let resp = client
+            .post(OPENROUTER_CHAT_URL)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("HTTP-Referer", "https://github.com/nikitavoloboev/flow")
+            .header("Accept", "application/json")
+            .json(body)
+            .send();
+
+        let resp = match resp {
+            Ok(resp) => resp,
+            Err(err) => {
+                let retry = openrouter_should_retry_error(&err) && attempt < max_attempts;
+                let err = anyhow::Error::new(err).context("failed to call OpenRouter API");
+                if retry {
+                    info!(
+                        attempt = attempt,
+                        max_attempts = max_attempts,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "OpenRouter request error (transient), retrying"
+                    );
+                    last_err = Some(err);
+                    std::thread::sleep(backoff);
+                    backoff = backoff.saturating_mul(2);
+                    continue;
+                }
+                return Err(err);
+            }
+        };
+
+        let status = resp.status();
+        let retry_after = openrouter_retry_after(&resp);
+        let request_id = resp
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                resp.headers()
+                    .get("cf-ray")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+            });
+
+        let body_bytes = match resp.bytes() {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let retry = openrouter_should_retry_error(&err) && attempt < max_attempts;
+                let mut err =
+                    anyhow::Error::new(err).context("failed to read OpenRouter response body");
+                if let Some(rid) = request_id.as_deref() {
+                    err = err.context(format!("OpenRouter request id: {}", rid));
+                }
+                if retry {
+                    info!(
+                        attempt = attempt,
+                        max_attempts = max_attempts,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "OpenRouter body read error (transient), retrying"
+                    );
+                    last_err = Some(err);
+                    std::thread::sleep(backoff);
+                    backoff = backoff.saturating_mul(2);
+                    continue;
+                }
+                return Err(err);
+            }
+        };
+
+        if !status.is_success() {
+            let is_retryable_status =
+                status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            let text = String::from_utf8_lossy(&body_bytes).trim().to_string();
+
+            if is_retryable_status && attempt < max_attempts {
+                let sleep_for = retry_after.unwrap_or(backoff);
+                info!(
+                    attempt = attempt,
+                    max_attempts = max_attempts,
+                    status = %status,
+                    sleep_ms = sleep_for.as_millis() as u64,
+                    "OpenRouter returned transient status, retrying"
+                );
+                last_err = Some(anyhow::anyhow!("OpenRouter API error {}: {}", status, text));
+                std::thread::sleep(sleep_for);
+                backoff = backoff.saturating_mul(2);
+                continue;
+            }
+
+            let mut err = anyhow::anyhow!("OpenRouter API error {}: {}", status, text);
+            if let Some(rid) = request_id.as_deref() {
+                err = err.context(format!("OpenRouter request id: {}", rid));
+            }
+            return Err(err);
+        }
+
+        match serde_json::from_slice::<ChatResponse>(&body_bytes) {
+            Ok(parsed) => return Ok(parsed),
+            Err(err) => {
+                let snippet = {
+                    let s = String::from_utf8_lossy(&body_bytes);
+                    let s = s.trim();
+                    let max = 600usize;
+                    if s.len() > max {
+                        format!("{}...", &s[..max])
+                    } else {
+                        s.to_string()
+                    }
+                };
+                let mut err = anyhow::Error::new(err)
+                    .context("failed to decode OpenRouter JSON response")
+                    .context(format!("response snippet: {}", snippet));
+                if let Some(rid) = request_id.as_deref() {
+                    err = err.context(format!("OpenRouter request id: {}", rid));
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        anyhow::anyhow!("OpenRouter request failed after retries")
+    }))
 }
 
 /// Run Rise daemon to review staged changes for bugs and performance issues.
@@ -4255,13 +4761,64 @@ fn queue_commit_for_review(
 }
 
 fn open_review_in_rise(repo_root: &Path, commit_sha: &str) {
-    if which::which("rise").is_err() {
+    // Prefer rise-app (VS Code fork) because it has the best multi-file diff UX.
+    // Fall back to `rise review open` if rise-app isn't installed.
+    let (cmd, args): (String, Vec<String>) = if let Ok(rise_app_path) = which::which("rise-app")
+    {
+        // Ensure review file exists, then open it explicitly.
+        let review_file = rise_review_path(repo_root, commit_sha);
+        if !review_file.exists() {
+            // Best-effort recreate; failures here shouldn't block.
+            if let Ok(entry) = resolve_commit_queue_entry(repo_root, commit_sha) {
+                let _ = write_rise_review_session(repo_root, &entry);
+            }
+        }
+
+        // Some installations place the JS wrapper directly on PATH without a shebang.
+        // In that case, execute it with node.
+        let launch_with_node = fs::read(&rise_app_path)
+            .ok()
+            .and_then(|bytes| bytes.get(0..128).map(|chunk| String::from_utf8_lossy(chunk).to_string()))
+            .map(|head| !head.starts_with("#!") && (head.starts_with("/*") || head.starts_with("//")))
+            .unwrap_or(false);
+
+        if launch_with_node {
+            (
+                "node".to_string(),
+                vec![
+                    rise_app_path.display().to_string(),
+                    "review".to_string(),
+                    "--review-file".to_string(),
+                    review_file.display().to_string(),
+                ],
+            )
+        } else {
+            (
+                rise_app_path.display().to_string(),
+                vec![
+                    "review".to_string(),
+                    "--review-file".to_string(),
+                    review_file.display().to_string(),
+                ],
+            )
+        }
+    } else if which::which("rise").is_ok() {
+        (
+            "rise".to_string(),
+            vec![
+                "review".to_string(),
+                "open".to_string(),
+                "--queue".to_string(),
+                commit_sha.to_string(),
+            ],
+        )
+    } else {
         println!("Rise not found on PATH; skipping review open.");
         return;
-    }
+    };
 
-    let status = Command::new("rise")
-        .args(["review", "open", "--queue", commit_sha])
+    let status = Command::new(&cmd)
+        .args(&args)
         .current_dir(repo_root)
         .status();
 
@@ -4271,7 +4828,7 @@ fn open_review_in_rise(repo_root: &Path, commit_sha: &str) {
                 println!("⚠ Failed to open review (exit {}).", status);
             }
         }
-        Err(err) => println!("⚠ Failed to run rise review: {}", err),
+        Err(err) => println!("⚠ Failed to run review opener: {}", err),
     }
 }
 
@@ -4570,6 +5127,49 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 if !stat.trim().is_empty() {
                     println!();
                     println!("{}", stat.trim_end());
+                }
+            }
+            println!();
+            println!("Open diff UI:");
+            println!("  f commit-queue open {}", short_sha(&entry.commit_sha));
+            println!("Print diff:");
+            println!("  f commit-queue diff {}", short_sha(&entry.commit_sha));
+        }
+        CommitQueueAction::Open { hash } => {
+            let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
+            let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+            // Ensure the review session exists (Rise UI expects a review session file).
+            let _ = write_rise_review_session(&repo_root, &entry);
+            println!(
+                "Opening queued commit {} in Rise app...",
+                short_sha(&entry.commit_sha)
+            );
+            open_review_in_rise(&repo_root, &entry.commit_sha);
+        }
+        CommitQueueAction::Diff { hash } => {
+            let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
+            let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+            // Print a full patch (user can pipe to less -R).
+            let patch = git_capture_in(
+                &repo_root,
+                &[
+                    "show",
+                    "--color=always",
+                    "--patch",
+                    "--format=fuller",
+                    &entry.commit_sha,
+                ],
+            )?;
+            // Avoid panicking on SIGPIPE (e.g. `... | head`).
+            if let Err(err) = io::stdout().write_all(patch.trim_end().as_bytes()) {
+                if err.kind() != io::ErrorKind::BrokenPipe {
+                    return Err(err).context("failed to write diff to stdout");
+                }
+                return Ok(());
+            }
+            if let Err(err) = io::stdout().write_all(b"\n") {
+                if err.kind() != io::ErrorKind::BrokenPipe {
+                    return Err(err).context("failed to write diff newline to stdout");
                 }
             }
         }
@@ -5500,10 +6100,7 @@ fn generate_commit_message_openrouter(
         user_prompt.push_str(status);
     }
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .context("failed to create HTTP client")?;
+    let client = openrouter_http_client(Duration::from_secs(60))?;
 
     let body = ChatRequest {
         model: model_id.to_string(),
@@ -5520,21 +6117,8 @@ fn generate_commit_message_openrouter(
         temperature: 0.3,
     };
 
-    let resp = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("HTTP-Referer", "https://github.com/nikitavoloboev/flow")
-        .json(&body)
-        .send()
-        .context("failed to call OpenRouter API")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().unwrap_or_default();
-        bail!("OpenRouter API error {}: {}", status, text);
-    }
-
-    let parsed: ChatResponse = resp.json().context("failed to parse OpenRouter response")?;
+    let parsed: ChatResponse = openrouter_chat_completion_with_retry(&client, &api_key, &body)
+        .context("OpenRouter request failed")?;
 
     let message = parsed
         .choices
@@ -6118,6 +6702,18 @@ fn gitedit_mirror_enabled() -> bool {
             if let Ok(cfg) = config::load(&local_config) {
                 return cfg.options.gitedit_mirror.unwrap_or(false);
             }
+        }
+    }
+
+    false
+}
+
+/// Check if gitedit mirroring is enabled for commit in the repo root.
+fn gitedit_mirror_enabled_for_commit(repo_root: &std::path::Path) -> bool {
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            return cfg.options.gitedit_mirror.unwrap_or(false);
         }
     }
 

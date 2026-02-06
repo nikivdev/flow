@@ -162,6 +162,19 @@ Sensitive patterns include:
 - `.pem`, `.key`, `id_rsa`, `id_ed25519`
 - Files containing `password`, `secret`, `token`
 
+### Secret Scan (Staged Diff)
+
+Flow scans staged diffs for likely secrets (API keys, tokens, passwords). If a match
+is detected, the commit is blocked. In an interactive terminal, flow offers to run
+an auto-fix using `ai` to mask or replace the values, then asks for approval to
+continue.
+
+You can bypass the check for a single commit with:
+
+```
+FLOW_ALLOW_SECRET_COMMIT=1 f commit
+```
+
 ### Large Diffs
 
 Warns about files with significant changes:
@@ -238,6 +251,18 @@ model = "kimi-k2-thinking-turbo" # optional; uses Kimi default if omitted
 ```
 
 This uses `kimi --quiet` (print mode) with your existing Kimi CLI auth/config.
+
+### Queue Policy
+
+Queue only when review finds issues (auto-push on a clean review):
+
+```toml
+[commit]
+queue = true
+queue_on_issues = true
+```
+
+`--queue` / `--no-queue` still override this behavior.
 
 ### AI Session Context
 

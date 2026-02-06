@@ -275,7 +275,7 @@ f env delete KEY1 KEY2
 
 ## Codex Skills
 
-Manage Codex skills stored in `.ai/skills/`. Skills help Codex understand project-specific workflows.
+Manage Codex skills stored in `.ai/skills/` (gitignored by default). Skills help Codex understand project-specific workflows.
 
 ### Managing Skills
 
@@ -315,7 +315,17 @@ f skills sync
 
 This creates a skill for each task in `flow.toml`, so Codex automatically knows about your project's workflows.
 
+To auto-sync tasks or auto-install curated skills on demand, add a `[skills]` section to `flow.toml`:
+
+```toml
+[skills]
+sync_tasks = true
+install = ["linear", "github-pr"]
+```
+
 ### Skill Structure
+
+`.ai/skills/` is generated locally and should not be committed.
 
 ```
 .ai/skills/
@@ -494,7 +504,7 @@ alias f="flow"
     ├── sessions/
     │   └── claude/
     │       └── index.json
-    └── skills/            # Codex skills
+    └── skills/            # Codex skills (gitignored, materialized locally)
         └── <skill-name>/
             └── skill.md
 ```

@@ -201,7 +201,7 @@ fn main() -> Result<()> {
             }
             let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
                 .with_open_review(open_review);
-            let push = !opts.no_push && !queue.enabled;
+            let push = !opts.no_push;
             if let Some(message) = opts.fast.as_deref() {
                 commit::run_fast(message, push, queue, opts.hashed)?;
                 return Ok(());
@@ -270,7 +270,7 @@ fn main() -> Result<()> {
             }
             let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
                 .with_open_review(open_review);
-            let push = !opts.no_push && !queue.enabled;
+            let push = !opts.no_push;
             commit::run_sync(push, queue, opts.hashed)?;
         }
         Some(Commands::CommitWithCheck(opts)) => {
@@ -293,7 +293,7 @@ fn main() -> Result<()> {
             }
             let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
                 .with_open_review(open_review);
-            let push = !opts.no_push && !queue.enabled;
+            let push = !opts.no_push;
             let review_selection =
                 commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
             if opts.dry {

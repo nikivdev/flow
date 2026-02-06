@@ -1394,8 +1394,8 @@ fn maybe_run_task_failure_hook(
     let mut hook = hook;
     if env::var_os("FLOW_TASK_FAILURE_HOOK_ALLOW_OPEN").is_none() {
         let hook_lower = hook.to_ascii_lowercase();
-        if hook_lower.contains("rise work") && !hook_lower.contains("--no-open") {
-            hook.push_str(" --no-open");
+        if hook_lower.contains("rise work") {
+            hook = sanitize_rise_work_hook_no_open(&hook);
         }
     }
     let mut cmd = Command::new("sh");
@@ -1428,6 +1428,54 @@ fn maybe_run_task_failure_hook(
             eprintln!("⚠ failed to run task failure hook: {}", err);
         }
     }
+}
+
+fn sanitize_rise_work_hook_no_open(hook: &str) -> String {
+    let tokens = match shell_words::split(hook) {
+        Ok(tokens) => tokens,
+        Err(_) => {
+            let mut fallback = hook.to_string();
+            let lower = fallback.to_ascii_lowercase();
+            if !lower.contains("--no-open") {
+                fallback.push_str(" --no-open");
+            }
+            return fallback;
+        }
+    };
+
+    let mut cleaned: Vec<String> = Vec::new();
+    let mut skip_next = false;
+    for token in tokens {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let lower = token.to_ascii_lowercase();
+        if lower == "--focus" {
+            continue;
+        }
+        if lower == "--focus-app" || lower == "--app" || lower == "--target" {
+            skip_next = true;
+            continue;
+        }
+        if lower.starts_with("--focus-app=")
+            || lower.starts_with("--app=")
+            || lower.starts_with("--target=")
+        {
+            continue;
+        }
+        cleaned.push(token);
+    }
+
+    let mut rebuilt = shell_words::join(cleaned);
+    let lower = rebuilt.to_ascii_lowercase();
+    if !lower.contains("--no-open") {
+        if !rebuilt.is_empty() {
+            rebuilt.push(' ');
+        }
+        rebuilt.push_str("--no-open");
+    }
+    rebuilt
 }
 
 fn truncate_for_bundle(output: &str, max_chars: usize) -> String {

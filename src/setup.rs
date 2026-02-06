@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     agents,
     cli::{SetupOpts, SetupTarget, TaskRunOpts},
-    config, deploy, docs, start,
+    config, deploy, docs, skills, start,
     tasks::{self, load_project_config},
 };
 
@@ -45,6 +45,24 @@ pub fn run(opts: SetupOpts) -> Result<()> {
     }
 
     let (config_path, cfg) = load_project_config(config_path)?;
+
+    // Ensure Codex/Claude skills are present before running any setup task.
+    // This is the main entrypoint users expect to "load project skills".
+    let skills_summary = skills::ensure_project_skills_at(&project_root, &cfg)?;
+    if !skills_summary.is_noop() {
+        if skills_summary.task_skills_created > 0 || skills_summary.task_skills_updated > 0 {
+            println!(
+                "✓ Synced flow.toml tasks to .ai/skills (created {}, updated {})",
+                skills_summary.task_skills_created, skills_summary.task_skills_updated
+            );
+        }
+        if !skills_summary.installed_skills.is_empty() {
+            println!(
+                "✓ Installed skills: {}",
+                skills_summary.installed_skills.join(", ")
+            );
+        }
+    }
 
     ensure_bike_gitignore(&project_root)?;
     ensure_project_dependencies(&cfg)?;

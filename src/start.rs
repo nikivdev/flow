@@ -1,11 +1,11 @@
 //! Project bootstrap and initialization.
 //!
-//! Creates `.ai/` folder structure with public (tracked) and internal (gitignored) sections.
+//! Creates `.ai/` folder structure with tracked, generated, and internal (gitignored) sections.
 //!
 //! Structure:
 //!   .ai/
 //!   ├── actions/        # TRACKED - fixer/action scripts
-//!   ├── skills/         # TRACKED - shared skills
+//!   ├── skills/         # GITIGNORED - generated skills
 //!   ├── tools/          # TRACKED - shared tools
 //!   ├── review.md       # TRACKED - review instructions
 //!   └── internal/       # GITIGNORED - private data
@@ -43,7 +43,7 @@ pub fn run_at(project_root: &Path) -> Result<()> {
         println!("✓ Created .ai/ folder structure");
     }
 
-    // Add .ai/internal/ to .gitignore
+    // Add flow entries to .gitignore
     if !has_checkpoint(&project_root, checkpoints::GITIGNORE_UPDATED) {
         update_gitignore(&project_root)?;
         set_checkpoint(&project_root, checkpoints::GITIGNORE_UPDATED)?;
@@ -68,7 +68,7 @@ pub fn run_at(project_root: &Path) -> Result<()> {
     println!("\nStructure:");
     println!("  .ai/");
     println!("  ├── actions/      # Tracked - fixer scripts");
-    println!("  ├── skills/       # Tracked - shared skills");
+    println!("  ├── skills/       # Gitignored - generated skills");
     println!("  ├── tools/        # Tracked - shared tools");
     println!("  ├── flox/         # Tracked - flox manifest");
     println!("  ├── web/          # Gitignored - AI web UI");
@@ -126,7 +126,7 @@ fn create_ai_folder(project_root: &Path) -> Result<()> {
     let ai_dir = project_root.join(".ai");
     let internal_dir = ai_dir.join("internal");
 
-    // Public folders (tracked in git)
+    // Public folders (tracked in git or generated)
     let public_dirs = [
         ai_dir.clone(),
         ai_dir.join("actions"),
@@ -352,13 +352,14 @@ const FLOW_GITIGNORE_SECTION: &str = "\
 # flow
 .ai/internal/
 .ai/web/
+.ai/skills/
 .claude/
 .codex/
 .flox/
 ";
 
 /// Add flow section to .gitignore if not already present.
-fn update_gitignore(project_root: &Path) -> Result<()> {
+pub(crate) fn update_gitignore(project_root: &Path) -> Result<()> {
     let gitignore_path = project_root.join(".gitignore");
 
     let content = if gitignore_path.exists() {
@@ -367,7 +368,14 @@ fn update_gitignore(project_root: &Path) -> Result<()> {
         String::new()
     };
 
-    let required_entries = [".ai/internal/", ".ai/web/", ".claude/", ".codex/", ".flox/"];
+    let required_entries = [
+        ".ai/internal/",
+        ".ai/web/",
+        ".ai/skills/",
+        ".claude/",
+        ".codex/",
+        ".flox/",
+    ];
 
     // If flow section already exists, make sure required entries are present.
     if content.contains("# flow") {
@@ -392,11 +400,12 @@ fn update_gitignore(project_root: &Path) -> Result<()> {
     // Also check if all patterns are already present (legacy)
     let has_ai_internal = content.lines().any(|l| l.trim() == ".ai/internal/");
     let has_web = content.lines().any(|l| l.trim() == ".ai/web/");
+    let has_skills = content.lines().any(|l| l.trim() == ".ai/skills/");
     let has_claude = content.lines().any(|l| l.trim() == ".claude/");
     let has_codex = content.lines().any(|l| l.trim() == ".codex/");
     let has_flox = content.lines().any(|l| l.trim() == ".flox/");
 
-    if has_ai_internal && has_web && has_claude && has_codex && has_flox {
+    if has_ai_internal && has_web && has_skills && has_claude && has_codex && has_flox {
         return Ok(());
     }
 
@@ -463,6 +472,7 @@ mod tests {
         assert!(content.contains("# flow"));
         assert!(content.contains(".ai/internal/"));
         assert!(content.contains(".ai/web/"));
+        assert!(content.contains(".ai/skills/"));
         assert!(content.contains(".claude/"));
         assert!(content.contains(".codex/"));
     }
@@ -481,6 +491,7 @@ mod tests {
         assert!(content.contains("# flow"));
         assert!(content.contains(".ai/internal/"));
         assert!(content.contains(".ai/web/"));
+        assert!(content.contains(".ai/skills/"));
         assert!(content.contains(".claude/"));
         assert!(content.contains(".codex/"));
     }
@@ -492,7 +503,7 @@ mod tests {
 
         fs::write(
             root.join(".gitignore"),
-            "# flow\n.ai/internal/\n.ai/web/\n.claude/\n.codex/\n",
+            "# flow\n.ai/internal/\n.ai/web/\n.ai/skills/\n.claude/\n.codex/\n.flox/\n",
         )
         .unwrap();
 
@@ -502,6 +513,7 @@ mod tests {
         // Should not duplicate
         assert_eq!(content.matches("# flow").count(), 1);
         assert_eq!(content.matches(".ai/internal/").count(), 1);
+        assert_eq!(content.matches(".ai/skills/").count(), 1);
     }
 
     #[test]
@@ -521,5 +533,7 @@ mod tests {
         assert!(content.contains("# flow"));
         assert!(content.contains(".ai/internal/"));
         assert!(content.contains(".ai/web/"));
+        assert!(content.contains(".ai/skills/"));
+        assert!(content.contains(".flox/"));
     }
 }

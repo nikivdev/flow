@@ -337,7 +337,7 @@ pub enum Commands {
     Ext(ExtCommand),
     #[command(
         about = "Manage Codex skills (.ai/skills/).",
-        long_about = "Create, list, and manage Codex skills for this project. Skills are stored in .ai/skills/ and help Codex understand project-specific workflows."
+        long_about = "Create, list, and manage Codex skills for this project. Skills are stored in .ai/skills/ (gitignored by default) and help Codex understand project-specific workflows."
     )]
     Skills(SkillsCommand),
     #[command(
@@ -1341,6 +1341,16 @@ pub enum CommitQueueAction {
     List,
     /// Show details for a queued commit.
     Show {
+        /// Commit hash (short or full).
+        hash: String,
+    },
+    /// Open the queued commit diff in Rise app (multi-file diff UI).
+    Open {
+        /// Commit hash (short or full).
+        hash: String,
+    },
+    /// Print the full diff for a queued commit to stdout.
+    Diff {
         /// Commit hash (short or full).
         hash: String,
     },
