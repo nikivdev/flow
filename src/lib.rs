@@ -6,6 +6,7 @@ pub mod ai_server;
 pub mod archive;
 pub mod ask;
 pub mod auth;
+pub mod base_tool;
 pub mod changes;
 pub mod cli;
 pub mod code;

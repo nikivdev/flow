@@ -21,6 +21,17 @@ use crate::cli::UpgradeOpts;
 
 const UPGRADE_CHECK_INTERVAL_HOURS: u64 = 24;
 
+fn env_truthy(key: &str) -> bool {
+    match env::var(key)
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("1") | Some("true") | Some("yes") | Some("y") => true,
+        _ => false,
+    }
+}
+
 fn upgrade_repo() -> Result<(String, String)> {
     if let Ok(value) = env::var("FLOW_UPGRADE_REPO") {
         if let Some((owner, repo)) = value.trim().split_once('/') {
@@ -602,11 +613,13 @@ pub fn run(opts: UpgradeOpts) -> Result<()> {
     let temp_tarball = env::temp_dir().join("flow_upgrade.tar.gz");
     download_with_progress(&client, &tarball_asset.browser_download_url, &temp_tarball)?;
 
+    let insecure = env_truthy("FLOW_UPGRADE_INSECURE");
     if let Some(asset) = checksums_asset {
         let temp_checksums = env::temp_dir().join("flow_upgrade_checksums.txt");
         download_with_progress(&client, &asset.browser_download_url, &temp_checksums)?;
         let checksums = fs::read_to_string(&temp_checksums)
             .context("failed to read downloaded checksums.txt")?;
+
         if let Some(expected) = parse_sha256_from_checksums(&checksums, &tarball_asset.name) {
             let actual = sha256_file(&temp_tarball)?;
             if expected.to_lowercase() != actual.to_lowercase() {
@@ -618,15 +631,26 @@ pub fn run(opts: UpgradeOpts) -> Result<()> {
                 );
             }
             println!("Checksum verified.");
+        } else if insecure {
+            eprintln!(
+                "Warning: checksums.txt does not contain {}; skipping checksum verification (FLOW_UPGRADE_INSECURE=1).",
+                tarball_asset.name
+            );
         } else {
-            println!(
-                "Warning: checksums.txt does not contain {}; skipping checksum verification.",
+            bail!(
+                "checksums.txt does not contain {}. Refusing to install.\n\
+                 Set FLOW_UPGRADE_INSECURE=1 to bypass (not recommended).",
                 tarball_asset.name
             );
         }
         let _ = fs::remove_file(&temp_checksums);
+    } else if insecure {
+        eprintln!(
+            "Warning: checksums.txt not found in release assets; skipping checksum verification (FLOW_UPGRADE_INSECURE=1)."
+        );
     } else {
-        println!(
+        // Back-compat for older releases (e.g. v0.1.0) that don't ship checksums.txt.
+        eprintln!(
             "Warning: checksums.txt not found in release assets; skipping checksum verification."
         );
     }
