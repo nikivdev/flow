@@ -40,9 +40,6 @@ pub mod hub;
 pub mod info;
 pub mod init;
 pub mod install;
-#[cfg(feature = "jazz2")]
-pub mod jazz_state;
-#[cfg(not(feature = "jazz2"))]
 #[path = "jazz_state_stub.rs"]
 pub mod jazz_state;
 pub mod jj;
@@ -80,9 +77,6 @@ pub mod task_match;
 pub mod tasks;
 pub mod todo;
 pub mod tools;
-#[cfg(feature = "jazz2")]
-pub mod traces;
-#[cfg(not(feature = "jazz2"))]
 #[path = "traces_stub.rs"]
 pub mod traces;
 pub mod undo;
