@@ -315,9 +315,17 @@ install_flow() {
   # Provide both `f` and `flow` as entrypoints.
   base="$(basename "$install_path")"
   if [ "$base" = "f" ]; then
-    ln -sf "f" "$install_dir/flow" 2>/dev/null || true
+    if [ -e "$install_dir/flow" ] && [ -d "$install_dir/flow" ]; then
+      info "flow: warning: cannot create symlink $install_dir/flow (path is a directory)"
+    else
+      ln -sf "f" "$install_dir/flow" 2>/dev/null || true
+    fi
   elif [ "$base" = "flow" ]; then
-    ln -sf "flow" "$install_dir/f" 2>/dev/null || true
+    if [ -e "$install_dir/f" ] && [ -d "$install_dir/f" ]; then
+      info "flow: warning: cannot create symlink $install_dir/f (path is a directory)"
+    else
+      ln -sf "flow" "$install_dir/f" 2>/dev/null || true
+    fi
   fi
 
   # Cleanup

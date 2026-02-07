@@ -695,9 +695,24 @@ fn ensure_sibling_symlink(installed_path: &Path) -> Result<()> {
         };
 
         let link_path = parent.join(link_name);
+        if link_path.exists() && link_path.is_dir() {
+            eprintln!(
+                "Warning: cannot create {} symlink at {} (path is a directory)",
+                link_name,
+                link_path.display()
+            );
+            return Ok(());
+        }
+
         let _ = fs::remove_file(&link_path);
         // Use relative target so moving the directory keeps the link valid.
-        symlink(target_name, &link_path).ok();
+        if symlink(target_name, &link_path).is_err() {
+            eprintln!(
+                "Warning: failed to create {} symlink at {}",
+                link_name,
+                link_path.display()
+            );
+        }
         Ok(())
     }
 }
