@@ -1378,6 +1378,28 @@ pub enum CommitQueueAction {
         /// Commit hash (short or full).
         hash: String,
     },
+    /// Create or update a GitHub PR for a queued commit (pushes a bookmark/branch as the PR head).
+    PrCreate {
+        /// Commit hash (short or full).
+        hash: String,
+        /// Base branch for the PR (default: main).
+        #[arg(long, default_value = "main")]
+        base: String,
+        /// Create as a draft PR.
+        #[arg(long)]
+        draft: bool,
+        /// Open PR in browser after creating/finding it.
+        #[arg(long)]
+        open: bool,
+    },
+    /// Open the PR for a queued commit in the browser (creates it if missing).
+    PrOpen {
+        /// Commit hash (short or full).
+        hash: String,
+        /// Base branch for the PR if it needs to be created (default: main).
+        #[arg(long, default_value = "main")]
+        base: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
