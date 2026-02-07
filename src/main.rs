@@ -11,7 +11,7 @@ use flowd::{
     },
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fish_install, fish_trace,
     fix, fixup, git_guard, hash, health, help_search, history, hive, home, hub, info, init,
-    init_tracing, install, jj, latest, log_server, macos, notify, otp, palette, parallel,
+    init_tracing, install, jj, latest, log_server, macos, notify, otp, palette, parallel, pr,
     processes, projects, proxy, publish, push, registry, release, repos, services, setup, skills,
     ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade,
     upstream, web,
@@ -460,6 +460,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Proxy(cmd)) => {
             proxy_command(cmd)?;
+        }
+        Some(Commands::Pr(opts)) => {
+            pr::run(opts)?;
         }
         Some(Commands::TaskShortcut(args)) => {
             let Some(task_name) = args.first() else {

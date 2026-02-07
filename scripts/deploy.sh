@@ -15,6 +15,11 @@ cargo build "${BUILD_ARGS[@]}" --quiet
 SOURCE_F="${ROOT_DIR}/target/${TARGET_DIR}/f"
 SOURCE_LIN="${ROOT_DIR}/target/${TARGET_DIR}/lin"
 
+# Codesign source binaries so all copies inherit the signature
+source "${HOME}/.config/flow/codesign.sh" 2>/dev/null || true
+flow_codesign "$SOURCE_F" 2>/dev/null || true
+flow_codesign "$SOURCE_LIN" 2>/dev/null || true
+
 PRIMARY_DIR="${HOME}/bin"
 ALT_DIR="${HOME}/.local/bin"
 PRIMARY_F="$(command -v f 2>/dev/null || true)"

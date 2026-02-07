@@ -12,19 +12,20 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use sha1::{Digest, Sha1};
+use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha1::{Digest, Sha1};
 use tempfile::{Builder as TempBuilder, NamedTempFile, TempDir};
-use tracing::{debug, info};
-use regex::Regex;
+use tracing::{debug, info, warn};
 
 use crate::ai;
 use crate::cli::{CommitQueueAction, CommitQueueCommand, DaemonAction};
 use crate::config;
 use crate::daemon;
+use crate::env as flow_env;
 use crate::git_guard;
 use crate::hub;
 use crate::notify;
@@ -32,7 +33,6 @@ use crate::setup;
 use crate::supervisor;
 use crate::undo;
 use crate::vcs;
-use crate::env as flow_env;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
@@ -273,15 +273,24 @@ fn warn_sensitive_files(files: &[String]) -> Result<()> {
 const SECRET_PATTERNS: &[(&str, &str)] = &[
     // API Keys with known prefixes
     ("AWS Access Key", r"AKIA[0-9A-Z]{16}"),
-    ("AWS Secret Key", r#"(?i)aws.{0,20}secret.{0,20}['"][0-9a-zA-Z/+]{40}['"]"#),
+    (
+        "AWS Secret Key",
+        r#"(?i)aws.{0,20}secret.{0,20}['"][0-9a-zA-Z/+]{40}['"]"#,
+    ),
     ("GitHub Token", r"ghp_[0-9a-zA-Z]{36}"),
     ("GitHub OAuth", r"gho_[0-9a-zA-Z]{36}"),
     ("GitHub App Token", r"ghu_[0-9a-zA-Z]{36}"),
     ("GitHub Refresh Token", r"ghr_[0-9a-zA-Z]{36}"),
     ("GitLab Token", r"glpat-[0-9a-zA-Z\-_]{20,}"),
     ("Slack Token", r"xox[baprs]-[0-9a-zA-Z]{10,48}"),
-    ("Slack Webhook", r"https://hooks\.slack\.com/services/T[0-9A-Z]{8,}/B[0-9A-Z]{8,}/[0-9a-zA-Z]{24}"),
-    ("Discord Webhook", r"https://discord(?:app)?\.com/api/webhooks/[0-9]{17,}/[0-9a-zA-Z_-]{60,}"),
+    (
+        "Slack Webhook",
+        r"https://hooks\.slack\.com/services/T[0-9A-Z]{8,}/B[0-9A-Z]{8,}/[0-9a-zA-Z]{24}",
+    ),
+    (
+        "Discord Webhook",
+        r"https://discord(?:app)?\.com/api/webhooks/[0-9]{17,}/[0-9a-zA-Z_-]{60,}",
+    ),
     ("Stripe Key", r"sk_live_[0-9a-zA-Z]{24,}"),
     ("Stripe Restricted", r"rk_live_[0-9a-zA-Z]{24,}"),
     // OpenAI keys - multiple formats (legacy, project, service account)
@@ -291,25 +300,52 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
     ("Anthropic Key", r"sk-ant-[0-9a-zA-Z\-_]{90,}"),
     ("Google API Key", r"AIza[0-9A-Za-z\-_]{35}"),
     ("Groq API Key", r"gsk_[0-9a-zA-Z]{50,}"),
-    ("Mistral API Key", r#"(?i)mistral.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{32,}["']"#),
-    ("Cohere API Key", r#"(?i)cohere.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{40,}["']"#),
-    ("Heroku API Key", r"(?i)heroku.{0,20}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+    (
+        "Mistral API Key",
+        r#"(?i)mistral.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{32,}["']"#,
+    ),
+    (
+        "Cohere API Key",
+        r#"(?i)cohere.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{40,}["']"#,
+    ),
+    (
+        "Heroku API Key",
+        r"(?i)heroku.{0,20}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    ),
     ("NPM Token", r"npm_[0-9a-zA-Z]{36}"),
     ("PyPI Token", r"pypi-[0-9a-zA-Z_-]{50,}"),
     ("Telegram Bot Token", r"[0-9]{8,10}:[0-9A-Za-z_-]{35}"),
     ("Twilio Key", r"SK[0-9a-fA-F]{32}"),
     ("SendGrid Key", r"SG\.[0-9a-zA-Z_-]{22}\.[0-9a-zA-Z_-]{43}"),
     ("Mailgun Key", r"key-[0-9a-zA-Z]{32}"),
-    ("Private Key", r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),
-    ("Supabase Key", r"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[0-9a-zA-Z_-]{50,}"),
-    ("Firebase Key", r#"(?i)firebase.{0,20}["'][A-Za-z0-9_-]{30,}["']"#),
+    (
+        "Private Key",
+        r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+    ),
+    (
+        "Supabase Key",
+        r"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[0-9a-zA-Z_-]{50,}",
+    ),
+    (
+        "Firebase Key",
+        r#"(?i)firebase.{0,20}["'][A-Za-z0-9_-]{30,}["']"#,
+    ),
     // Generic patterns (higher false positive risk, but catch common mistakes)
-    ("Generic API Key Assignment", r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*['"][0-9a-zA-Z\-_]{20,}['"]"#),
-    ("Generic Secret Assignment", r#"(?i)(secret|password|passwd|pwd)\s*[:=]\s*['"][^'"]{8,}['"]"#),
+    (
+        "Generic API Key Assignment",
+        r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*['"][0-9a-zA-Z\-_]{20,}['"]"#,
+    ),
+    (
+        "Generic Secret Assignment",
+        r#"(?i)(secret|password|passwd|pwd)\s*[:=]\s*['"][^'"]{8,}['"]"#,
+    ),
     ("Bearer Token", r"(?i)bearer\s+[0-9a-zA-Z\-_.]{20,}"),
     ("Basic Auth", r"(?i)basic\s+[A-Za-z0-9+/=]{20,}"),
     // High-entropy strings that look like secrets (env var assignments)
-    ("Env Var Secret", r#"(?i)(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[_A-Z]*\s*=\s*['"]?[0-9a-zA-Z\-_/+=]{32,}['"]?"#),
+    (
+        "Env Var Secret",
+        r#"(?i)(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[_A-Z]*\s*=\s*['"]?[0-9a-zA-Z\-_/+=]{32,}['"]?"#,
+    ),
 ];
 
 const SECRET_SCAN_IGNORE_MARKERS: &[&str] = &[
@@ -327,9 +363,7 @@ fn should_ignore_secret_scan_line(content: &str) -> bool {
 }
 
 fn extract_first_quoted_value(s: &str) -> Option<&str> {
-    let (qpos, qch) = s
-        .char_indices()
-        .find(|(_, c)| *c == '"' || *c == '\'')?;
+    let (qpos, qch) = s.char_indices().find(|(_, c)| *c == '"' || *c == '\'')?;
     let end = s.rfind(qch)?;
     if end <= qpos {
         return None;
@@ -344,7 +378,8 @@ fn looks_like_identifier_reference(value: &str) -> bool {
     !v.is_empty()
         && v.len() >= 8
         && v.contains('_')
-        && v.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == '.')
+        && v.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == '.')
 }
 
 fn looks_like_secret_lookup(value: &str) -> bool {
@@ -418,8 +453,8 @@ fn generic_secret_assignment_is_false_positive(content: &str, matched: &str) -> 
 
     // If the whole line is clearly a dynamic lookup, treat as non-hardcoded.
     // This catches cases where the regex match boundaries don't capture the full value cleanly.
-        let lc = content.to_lowercase();
-        lc.contains("$(get_env ")
+    let lc = content.to_lowercase();
+    lc.contains("$(get_env ")
 }
 
 /// Scan staged diff content for hardcoded secrets.
@@ -447,9 +482,7 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
     // Compile regexes
     let patterns: Vec<(&str, regex::Regex)> = SECRET_PATTERNS
         .iter()
-        .filter_map(|(name, pattern)| {
-            regex::Regex::new(pattern).ok().map(|re| (*name, re))
-        })
+        .filter_map(|(name, pattern)| regex::Regex::new(pattern).ok().map(|re| (*name, re)))
         .collect();
 
     for line in diff.lines() {
@@ -464,7 +497,10 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
         if line.starts_with("@@") {
             if let Some(plus_pos) = line.find('+') {
                 let after_plus = &line[plus_pos + 1..];
-                let num_str: String = after_plus.chars().take_while(|c| c.is_ascii_digit()).collect();
+                let num_str: String = after_plus
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
                 current_line = num_str.parse().unwrap_or(0);
             }
             ignore_next_added_line = false;
@@ -516,7 +552,9 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
                         || matched_lower.contains("fixme")
                         || matched == "sk-..."
                         || matched == "sk-xxxx"
-                        || matched.chars().all(|c| c == 'x' || c == 'X' || c == '.' || c == '-' || c == '_')
+                        || matched
+                            .chars()
+                            .all(|c| c == 'x' || c == 'X' || c == '.' || c == '-' || c == '_')
                     {
                         continue;
                     }
@@ -529,7 +567,7 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
 
                     // Redact the middle of the matched secret for display
                     let redacted = if matched.len() > 12 {
-                        format!("{}...{}", &matched[..6], &matched[matched.len()-4..])
+                        format!("{}...{}", &matched[..6], &matched[matched.len() - 4..])
                     } else {
                         matched.to_string()
                     };
@@ -563,19 +601,20 @@ fn warn_secrets_in_diff(
     }
 
     if env::var("FLOW_ALLOW_SECRET_COMMIT").ok().as_deref() == Some("1") {
-        println!("\n⚠️  Warning: Potential secrets detected but FLOW_ALLOW_SECRET_COMMIT=1, continuing...");
+        println!(
+            "\n⚠️  Warning: Potential secrets detected but FLOW_ALLOW_SECRET_COMMIT=1, continuing..."
+        );
         return Ok(());
     }
 
     println!();
-    print_secret_findings(
-        "🔐 Potential secrets detected in staged changes:",
-        findings,
-    );
+    print_secret_findings("🔐 Potential secrets detected in staged changes:", findings);
     println!();
     println!("If these are false positives (examples, placeholders, tests), you can:");
     println!("   - Set FLOW_ALLOW_SECRET_COMMIT=1 to override for this commit");
-    println!("   - Mark the line with '# flow:secret:ignore' (or add it on the line above to ignore the next line)");
+    println!(
+        "   - Mark the line with '# flow:secret:ignore' (or add it on the line above to ignore the next line)"
+    );
     println!("   - Use placeholder values like 'xxx' for example secrets");
     println!("   - Re-stage files if you recently edited them: git add <file>");
     println!();
@@ -685,8 +724,7 @@ fn should_run_sync_for_secret_fixes(repo_root: &Path) -> Result<bool> {
 
     let agent_name =
         env::var("FLOW_FIX_COMMIT_AGENT").unwrap_or_else(|_| "fix-f-commit".to_string());
-    let hive_enabled =
-        agent_name.trim().to_lowercase() != "off" && which::which("hive").is_ok();
+    let hive_enabled = agent_name.trim().to_lowercase() != "off" && which::which("hive").is_ok();
     let ai_available = which::which("ai").is_ok();
     if !hive_enabled && !ai_available {
         return Ok(false);
@@ -745,7 +783,10 @@ fn run_fix_f_commit_ai(repo_root: &Path, task: &str) -> Result<()> {
 fn build_fix_f_commit_task(findings: &[(String, usize, String, String)]) -> String {
     let mut summary = String::new();
     for (file, line, pattern, matched) in findings {
-        summary.push_str(&format!("- {}:{} — {} ({})\n", file, line, pattern, matched));
+        summary.push_str(&format!(
+            "- {}:{} — {} ({})\n",
+            file, line, pattern, matched
+        ));
     }
 
     let task = format!(
@@ -761,10 +802,7 @@ After fixing, restage changes."
     sanitize_hive_task(&task)
 }
 
-fn print_secret_findings(
-    header: &str,
-    findings: &[(String, usize, String, String)],
-) {
+fn print_secret_findings(header: &str, findings: &[(String, usize, String, String)]) {
     println!("{}", header);
     for (file, line, pattern, matched) in findings {
         println!("   {}:{} - {} ({})", file, line, pattern, matched);
@@ -803,7 +841,10 @@ fn sanitize_hive_task(task: &str) -> String {
 fn resolve_hive_env() -> Vec<(String, String)> {
     let mut vars = Vec::new();
 
-    if std::env::var("CEREBRAS_API_KEY").map(|v| v.trim().is_empty()).unwrap_or(true) {
+    if std::env::var("CEREBRAS_API_KEY")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
         if is_local_env_backend() {
             if let Ok(store) =
                 crate::env::fetch_personal_env_vars(&["CEREBRAS_API_KEY".to_string()])
@@ -913,8 +954,7 @@ pub fn resolve_review_selection_from_config() -> Option<ReviewSelection> {
             Some(ReviewSelection::Opencode { model })
         }
         "openrouter" => {
-            let model =
-                model.unwrap_or_else(|| "arcee-ai/trinity-large-preview:free".to_string());
+            let model = model.unwrap_or_else(|| "arcee-ai/trinity-large-preview:free".to_string());
             Some(ReviewSelection::OpenRouter { model })
         }
         "rise" => {
@@ -1487,7 +1527,11 @@ pub fn run(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Result<(
 pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Result<()> {
     let queue_enabled = queue.enabled;
     let push = push && !queue_enabled;
-    info!(push = push, queue = queue_enabled, "starting commit workflow");
+    info!(
+        push = push,
+        queue = queue_enabled,
+        "starting commit workflow"
+    );
 
     // Ensure we're in a git repo
     ensure_git_repo()?;
@@ -1552,12 +1596,9 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
     print!("Generating commit message... ");
     io::stdout().flush()?;
     let mut message = match commit_message_override {
-        Some(CommitMessageOverride::Kimi { model }) => generate_commit_message_kimi(
-            &diff_for_prompt,
-            &status,
-            truncated,
-            model.as_deref(),
-        )?,
+        Some(CommitMessageOverride::Kimi { model }) => {
+            generate_commit_message_kimi(&diff_for_prompt, &status, truncated, model.as_deref())?
+        }
         None => {
             let commit_provider = commit_provider.as_ref().expect("commit provider missing");
             info!(model = MODEL, "calling OpenAI API");
@@ -1684,7 +1725,12 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
 }
 
 /// Run a fast commit with the provided message (no AI review).
-pub fn run_fast(message: &str, push: bool, queue: CommitQueueMode, include_unhash: bool) -> Result<()> {
+pub fn run_fast(
+    message: &str,
+    push: bool,
+    queue: CommitQueueMode,
+    include_unhash: bool,
+) -> Result<()> {
     let queue_enabled = queue.enabled;
     let push = push && !queue_enabled;
     ensure_git_repo()?;
@@ -2399,11 +2445,20 @@ pub fn run_with_check_sync(
             model.as_deref(),
         ),
     };
+    // Review is informational only. If the reviewer fails (provider flake, empty output, etc),
+    // proceed with a warning rather than blocking the commit workflow.
     let review = match review {
         Ok(review) => review,
         Err(err) => {
-            restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
-            return Err(err);
+            warn!(error = %err, "review failed; proceeding without review");
+            println!("⚠ Review failed: {err}");
+            ReviewResult {
+                issues_found: false,
+                issues: Vec::new(),
+                summary: Some(format!("Review failed: {err}")),
+                future_tasks: Vec::new(),
+                timed_out: true,
+            }
         }
     };
 
@@ -2569,8 +2624,12 @@ pub fn run_with_check_sync(
                 }
             }
             ReviewSelection::OpenRouter { model } => {
-                match generate_commit_message_openrouter(&diff_for_prompt, &status, truncated, model)
-                {
+                match generate_commit_message_openrouter(
+                    &diff_for_prompt,
+                    &status,
+                    truncated,
+                    model,
+                ) {
                     Ok(message) => message,
                     Err(err) => match commit_provider {
                         CommitMessageProvider::Remote { .. } => {
@@ -2654,12 +2713,9 @@ pub fn run_with_check_sync(
                     },
                 }
             }
-            _ => commit_message_from_provider(
-                commit_provider,
-                &diff_for_prompt,
-                &status,
-                truncated,
-            )?,
+            _ => {
+                commit_message_from_provider(commit_provider, &diff_for_prompt, &status, truncated)?
+            }
         }
     };
     let message = sanitize_commit_message(&message);
@@ -3658,8 +3714,14 @@ fn run_kimi_review(
             .context("failed to write prompt to kimi")?;
     }
 
-    let stdout = child.stdout.take().context("failed to capture kimi stdout")?;
-    let stderr = child.stderr.take().context("failed to capture kimi stderr")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture kimi stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture kimi stderr")?;
 
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>();
     let (stderr_tx, stderr_rx) = mpsc::channel::<String>();
@@ -3703,14 +3765,28 @@ fn run_kimi_review(
 
     let stdout_text = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
     if stdout_text.is_empty() {
-        bail!("kimi returned empty output");
+        warn!("kimi returned empty output; proceeding without review");
+        return Ok(ReviewResult {
+            issues_found: false,
+            issues: Vec::new(),
+            summary: Some("kimi returned empty output".to_string()),
+            future_tasks: Vec::new(),
+            timed_out: true,
+        });
     }
 
     // Parse the stream-json output from kimi
     // Format: {"role":"assistant","content":[{"type":"think","think":"..."},{"type":"text","text":"..."}]}
     let result = extract_kimi_text_content(&stdout_text).unwrap_or_else(|| stdout_text.clone());
     if result.is_empty() {
-        bail!("kimi returned empty review output (no text content in response)");
+        warn!("kimi returned empty review output; proceeding without review");
+        return Ok(ReviewResult {
+            issues_found: false,
+            issues: Vec::new(),
+            summary: Some("kimi returned empty review output".to_string()),
+            future_tasks: Vec::new(),
+            timed_out: true,
+        });
     }
 
     // Try to parse JSON from output
@@ -3853,7 +3929,17 @@ fn run_openrouter_review(
         .unwrap_or_default();
 
     if output.is_empty() {
-        bail!("OpenRouter returned empty review output");
+        warn!(
+            model = model_id,
+            "OpenRouter returned empty review output; proceeding without review"
+        );
+        return Ok(ReviewResult {
+            issues_found: false,
+            issues: Vec::new(),
+            summary: Some("OpenRouter returned empty review output".to_string()),
+            future_tasks: Vec::new(),
+            timed_out: true,
+        });
     }
 
     println!("{}", output);
@@ -4079,9 +4165,7 @@ fn openrouter_chat_completion_with_retry(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        anyhow::anyhow!("OpenRouter request failed after retries")
-    }))
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenRouter request failed after retries")))
 }
 
 /// Run Rise daemon to review staged changes for bugs and performance issues.
@@ -4181,7 +4265,7 @@ fn run_rise_review(
     })
 }
 
-fn ensure_git_repo() -> Result<()> {
+pub(crate) fn ensure_git_repo() -> Result<()> {
     let _ = vcs::ensure_jj_repo()?;
     let output = Command::new("git")
         .args(["rev-parse", "--git-dir"])
@@ -4196,7 +4280,7 @@ fn ensure_git_repo() -> Result<()> {
     Ok(())
 }
 
-fn git_root_or_cwd() -> std::path::PathBuf {
+pub(crate) fn git_root_or_cwd() -> std::path::PathBuf {
     match git_capture(&["rev-parse", "--show-toplevel"]) {
         Ok(root) => std::path::PathBuf::from(root.trim()),
         Err(_) => std::env::current_dir().unwrap_or_default(),
@@ -4282,7 +4366,9 @@ fn ensure_no_unwanted_staged(repo_root: &Path) -> Result<()> {
         if path == ".rise" || path.starts_with(".rise/") || path.contains("/.rise/") {
             ignore_entries.insert(".rise/");
         }
-        if path.ends_with(".pyc") || path.contains("/__pycache__/") || path.ends_with("/__pycache__")
+        if path.ends_with(".pyc")
+            || path.contains("/__pycache__/")
+            || path.ends_with("/__pycache__")
         {
             ignore_entries.insert("__pycache__/");
             ignore_entries.insert("*.pyc");
@@ -4363,7 +4449,10 @@ fn unwanted_reason(path: &str) -> Option<&'static str> {
     if path.ends_with(".pyc") {
         return Some("python bytecode");
     }
-    if path.ends_with("/__pycache__") || path.contains("/__pycache__/") || path.starts_with("__pycache__/") {
+    if path.ends_with("/__pycache__")
+        || path.contains("/__pycache__/")
+        || path.starts_with("__pycache__/")
+    {
         return Some("python cache");
     }
     None
@@ -4444,6 +4533,21 @@ fn record_undo_action(repo_root: &Path, pushed: bool, message: Option<&str>) {
 
 const COMMIT_QUEUE_DIR: &str = ".ai/internal/commit-queue";
 
+#[derive(Debug, Serialize)]
+struct CommitQueueEvent {
+    ts_ms: i64,
+    action: String, // queued, approved, dropped, updated, pr_create, ...
+    repo_root: String,
+    branch: String,
+    commit_sha: String,
+    subject: String,
+    record_path: Option<String>,
+    review_issues_found: bool,
+    review_issues_count: i64,
+    review_timed_out: bool,
+    review_summary: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CommitQueueEntry {
     version: u8,
@@ -4508,11 +4612,7 @@ struct RiseReviewSession {
 }
 
 fn short_sha(sha: &str) -> &str {
-    if sha.len() <= 7 {
-        sha
-    } else {
-        &sha[..7]
-    }
+    if sha.len() <= 7 { sha } else { &sha[..7] }
 }
 
 fn commit_queue_dir(repo_root: &Path) -> PathBuf {
@@ -4530,6 +4630,105 @@ fn write_commit_queue_entry(repo_root: &Path, entry: &CommitQueueEntry) -> Resul
     let path = commit_queue_entry_path(repo_root, &entry.commit_sha);
     fs::write(&path, payload).context("write commit queue entry")?;
     Ok(path)
+}
+
+fn commit_queue_events_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(
+        home.join(".config")
+            .join("flow")
+            .join("commit-queue")
+            .join("events.jsonl"),
+    )
+}
+
+fn append_commit_queue_event(event: &CommitQueueEvent) {
+    let Some(path) = commit_queue_events_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let Ok(line) = serde_json::to_string(event) else {
+        return;
+    };
+    // Best-effort. Append a single JSON object per line.
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(line.as_bytes())?;
+            f.write_all(b"\n")?;
+            Ok(())
+        });
+}
+
+fn emit_commit_queue_side_effects(
+    action: &str,
+    entry: &CommitQueueEntry,
+    record_path: Option<&Path>,
+    review: Option<&ReviewResult>,
+) {
+    let ts_ms = chrono::Utc::now().timestamp_millis();
+    let subject = entry
+        .message
+        .lines()
+        .next()
+        .unwrap_or("no message")
+        .trim()
+        .to_string();
+
+    let (issues_found, issues_count, timed_out, summary) = match review {
+        Some(r) => (
+            r.issues_found,
+            r.issues.len().min(i64::MAX as usize) as i64,
+            r.timed_out,
+            r.summary.clone(),
+        ),
+        None => (false, 0, false, None),
+    };
+
+    append_commit_queue_event(&CommitQueueEvent {
+        ts_ms,
+        action: action.to_string(),
+        repo_root: entry.repo_root.clone(),
+        branch: entry.branch.clone(),
+        commit_sha: entry.commit_sha.clone(),
+        subject: subject.clone(),
+        record_path: record_path.map(|p| p.display().to_string()),
+        review_issues_found: issues_found,
+        review_issues_count: issues_count,
+        review_timed_out: timed_out,
+        review_summary: summary.clone(),
+    });
+
+    // When a commit is queued due to issues, proactively suggest a Codex review on that commit.
+    // This is a Lin proposal (human-in-the-loop), not an auto-run.
+    if action == "queued" && (issues_found || timed_out) {
+        let title = format!("Review queued commit {}", short_sha(&entry.commit_sha));
+        let mut ctx = format!(
+            "Repo: {}\nBranch: {}\nCommit: {}\nSubject: {}\n",
+            entry.repo_root, entry.branch, entry.commit_sha, subject
+        );
+        if let Some(s) = summary
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            ctx.push_str("\nReview summary:\n");
+            ctx.push_str(s);
+            ctx.push('\n');
+        }
+
+        let action = format!(
+            "codex review --commit {} --title \"{}\"",
+            entry.commit_sha,
+            subject.replace('"', "'")
+        );
+        let _ = notify::send_proposal(&action, Some(&title), Some(&ctx), 60 * 30);
+    }
 }
 
 fn format_review_body(review: &ReviewResult) -> Option<String> {
@@ -4606,7 +4805,11 @@ fn resolve_review_files(repo_root: &Path, commit_sha: &str) -> Vec<RiseReviewFil
                 return Some(RiseReviewFileEntry {
                     status,
                     path,
-                    original_path: if original.is_empty() { None } else { Some(original) },
+                    original_path: if original.is_empty() {
+                        None
+                    } else {
+                        Some(original)
+                    },
                 });
             }
             let path = parts.next().unwrap_or_default().trim().to_string();
@@ -4643,7 +4846,8 @@ fn write_rise_review_session(repo_root: &Path, entry: &CommitQueueEntry) -> Resu
     };
 
     let path = review_dir.join(format!("review-{}.json", entry.commit_sha));
-    let payload = serde_json::to_string_pretty(&session).context("serialize rise review session")?;
+    let payload =
+        serde_json::to_string_pretty(&session).context("serialize rise review session")?;
     fs::write(&path, payload).context("write rise review session")?;
     Ok(path)
 }
@@ -4729,7 +4933,9 @@ fn queue_commit_for_review(
     message: &str,
     review: Option<&ReviewResult>,
 ) -> Result<String> {
-    let commit_sha = git_capture_in(repo_root, &["rev-parse", "HEAD"])?.trim().to_string();
+    let commit_sha = git_capture_in(repo_root, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
     let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "unknown".to_string())
         .trim()
@@ -4766,7 +4972,7 @@ fn queue_commit_for_review(
     };
 
     let path = write_commit_queue_entry(repo_root, &entry)?;
-    let _ = path;
+    emit_commit_queue_side_effects("queued", &entry, Some(&path), review);
     if let Err(err) = write_rise_review_session(repo_root, &entry) {
         debug!("failed to write rise review session: {}", err);
     }
@@ -4776,8 +4982,7 @@ fn queue_commit_for_review(
 fn open_review_in_rise(repo_root: &Path, commit_sha: &str) {
     // Prefer rise-app (VS Code fork) because it has the best multi-file diff UX.
     // Fall back to `rise review open` if rise-app isn't installed.
-    let (cmd, args): (String, Vec<String>) = if let Ok(rise_app_path) = which::which("rise-app")
-    {
+    let (cmd, args): (String, Vec<String>) = if let Ok(rise_app_path) = which::which("rise-app") {
         // Ensure review file exists, then open it explicitly.
         let review_file = rise_review_path(repo_root, commit_sha);
         if !review_file.exists() {
@@ -4791,8 +4996,14 @@ fn open_review_in_rise(repo_root: &Path, commit_sha: &str) {
         // In that case, execute it with node.
         let launch_with_node = fs::read(&rise_app_path)
             .ok()
-            .and_then(|bytes| bytes.get(0..128).map(|chunk| String::from_utf8_lossy(chunk).to_string()))
-            .map(|head| !head.starts_with("#!") && (head.starts_with("/*") || head.starts_with("//")))
+            .and_then(|bytes| {
+                bytes
+                    .get(0..128)
+                    .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+            })
+            .map(|head| {
+                !head.starts_with("#!") && (head.starts_with("/*") || head.starts_with("//"))
+            })
             .unwrap_or(false);
 
         if launch_with_node {
@@ -4894,7 +5105,12 @@ fn refresh_queue_entry_commit(repo_root: &Path, entry: &mut CommitQueueEntry) ->
     ) else {
         return Ok(false);
     };
-    let new_sha = output.split_whitespace().next().unwrap_or_default().trim().to_string();
+    let new_sha = output
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if new_sha.is_empty() || new_sha == entry.commit_sha {
         return Ok(false);
     }
@@ -5057,7 +5273,7 @@ fn jj_bookmark_exists(repo_root: &Path, name: &str) -> bool {
     false
 }
 
-fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
+pub(crate) fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("jj")
         .current_dir(repo_root)
         .args(args)
@@ -5069,7 +5285,7 @@ fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("jj")
         .current_dir(repo_root)
         .args(args)
@@ -5081,7 +5297,7 @@ fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn ensure_gh_available() -> Result<()> {
+pub(crate) fn ensure_gh_available() -> Result<()> {
     let status = Command::new("gh")
         .args(["--version"])
         .stdout(Stdio::null())
@@ -5094,7 +5310,7 @@ fn ensure_gh_available() -> Result<()> {
     Ok(())
 }
 
-fn gh_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn gh_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("gh")
         .current_dir(repo_root)
         .args(args)
@@ -5110,7 +5326,7 @@ fn gh_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn github_repo_from_remote_url(url: &str) -> Option<String> {
+pub(crate) fn github_repo_from_remote_url(url: &str) -> Option<String> {
     let trimmed = url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return None;
@@ -5129,7 +5345,7 @@ fn github_repo_from_remote_url(url: &str) -> Option<String> {
     None
 }
 
-fn resolve_github_repo(repo_root: &Path) -> Result<String> {
+pub(crate) fn resolve_github_repo(repo_root: &Path) -> Result<String> {
     // First try origin URL.
     if let Ok(url) = git_capture_in(repo_root, &["remote", "get-url", "origin"]) {
         if let Some(repo) = github_repo_from_remote_url(&url) {
@@ -5152,12 +5368,14 @@ fn resolve_github_repo(repo_root: &Path) -> Result<String> {
     .context("failed to resolve GitHub repo for current directory")?;
     let repo = repo.trim();
     if repo.is_empty() {
-        bail!("unable to determine GitHub repo (origin URL not GitHub, and `gh repo view` returned empty)");
+        bail!(
+            "unable to determine GitHub repo (origin URL not GitHub, and `gh repo view` returned empty)"
+        );
     }
     Ok(repo.to_string())
 }
 
-fn sanitize_ref_component(input: &str) -> String {
+pub(crate) fn sanitize_ref_component(input: &str) -> String {
     let mut out = String::new();
     let mut last_sep = false;
     for ch in input.chars() {
@@ -5197,16 +5415,26 @@ fn default_pr_head(entry: &CommitQueueEntry) -> String {
     )
 }
 
-fn ensure_pr_head_pushed(repo_root: &Path, head: &str, commit_sha: &str) -> Result<()> {
+pub(crate) fn ensure_pr_head_pushed(repo_root: &Path, head: &str, commit_sha: &str) -> Result<()> {
     // Prefer jj bookmarks when available.
     if which::which("jj").is_ok() {
         // Ensure bookmark points at the commit, then push it.
         jj_run_in(
             repo_root,
-            &["bookmark", "set", head, "-r", commit_sha, "--allow-backwards"],
+            &[
+                "bookmark",
+                "set",
+                head,
+                "-r",
+                commit_sha,
+                "--allow-backwards",
+            ],
         )?;
         // We often push a brand new review/pr bookmark as the PR head.
-        jj_run_in(repo_root, &["git", "push", "--bookmark", head, "--allow-new"])?;
+        jj_run_in(
+            repo_root,
+            &["git", "push", "--bookmark", head, "--allow-new"],
+        )?;
         return Ok(());
     }
 
@@ -5226,7 +5454,7 @@ fn pr_number_from_url(url: &str) -> Option<u64> {
     parts.last()?.parse().ok()
 }
 
-fn gh_find_open_pr_by_head(
+pub(crate) fn gh_find_open_pr_by_head(
     repo_root: &Path,
     repo: &str,
     head: &str,
@@ -5262,7 +5490,7 @@ fn gh_find_open_pr_by_head(
     }
 }
 
-fn gh_create_pr(
+pub(crate) fn gh_create_pr(
     repo_root: &Path,
     repo: &str,
     head: &str,
@@ -5272,17 +5500,7 @@ fn gh_create_pr(
     draft: bool,
 ) -> Result<(u64, String)> {
     let mut args: Vec<&str> = vec![
-        "pr",
-        "create",
-        "--repo",
-        repo,
-        "--head",
-        head,
-        "--base",
-        base,
-        "--title",
-        title,
-        "--body",
+        "pr", "create", "--repo", repo, "--head", head, "--base", base, "--title", title, "--body",
         body,
     ];
     if draft {
@@ -5323,7 +5541,7 @@ fn gh_create_pr(
     );
 }
 
-fn open_in_browser(url: &str) -> Result<()> {
+pub(crate) fn open_in_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let status = Command::new("open").arg(url).status()?;
@@ -5343,7 +5561,7 @@ fn open_in_browser(url: &str) -> Result<()> {
     }
 }
 
-fn commit_message_title_body(message: &str) -> (String, String) {
+pub(crate) fn commit_message_title_body(message: &str) -> (String, String) {
     let mut lines = message.lines();
     let title = lines.next().unwrap_or("no title").trim().to_string();
     let rest = lines.collect::<Vec<_>>().join("\n").trim().to_string();
@@ -5366,12 +5584,7 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             println!("Queued commits:");
             for mut entry in entries {
                 let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
-                let subject = entry
-                    .message
-                    .lines()
-                    .next()
-                    .unwrap_or("no message")
-                    .trim();
+                let subject = entry.message.lines().next().unwrap_or("no message").trim();
                 let created_at = format_queue_created_at(&entry.created_at);
                 let bookmark = entry
                     .review_bookmark
@@ -5469,9 +5682,8 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 );
             }
 
-            let current_branch =
-                git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
-                    .unwrap_or_else(|_| "unknown".to_string());
+            let current_branch = git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap_or_else(|_| "unknown".to_string());
             if current_branch.trim() != entry.branch && !force {
                 bail!(
                     "Queued commit was created on branch {} but current branch is {}. Checkout the branch or re-run with --force.",
@@ -5481,9 +5693,10 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
 
             if git_try_in(&repo_root, &["fetch", "--quiet"]).is_ok() {
-                if let Ok(counts) =
-                    git_capture_in(&repo_root, &["rev-list", "--left-right", "--count", "@{u}...HEAD"])
-                {
+                if let Ok(counts) = git_capture_in(
+                    &repo_root,
+                    &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+                ) {
                     let parts: Vec<&str> = counts.split_whitespace().collect();
                     if parts.len() == 2 {
                         let behind = parts[0].parse::<u64>().unwrap_or(0);
@@ -5540,6 +5753,12 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
 
             if pushed {
+                emit_commit_queue_side_effects(
+                    "approved",
+                    &entry,
+                    entry.record_path.as_deref(),
+                    None,
+                );
                 if let (Some(before_sha), Ok(after_sha)) = (
                     before_sha,
                     git_capture_in(&repo_root, &["rev-parse", "HEAD"]),
@@ -5577,9 +5796,8 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 let _ = refresh_queue_entry_commit(&repo_root, entry);
             }
 
-            let current_branch =
-                git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
-                    .unwrap_or_else(|_| "unknown".to_string());
+            let current_branch = git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap_or_else(|_| "unknown".to_string());
             let current_branch = current_branch.trim().to_string();
 
             let mut candidates = Vec::new();
@@ -5606,9 +5824,10 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
 
             if git_try_in(&repo_root, &["fetch", "--quiet"]).is_ok() {
-                if let Ok(counts) =
-                    git_capture_in(&repo_root, &["rev-list", "--left-right", "--count", "@{u}...HEAD"])
-                {
+                if let Ok(counts) = git_capture_in(
+                    &repo_root,
+                    &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+                ) {
                     let parts: Vec<&str> = counts.split_whitespace().collect();
                     if parts.len() == 2 {
                         let behind = parts[0].parse::<u64>().unwrap_or(0);
@@ -5684,8 +5903,8 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                     );
                 }
 
-                let head_sha = git_capture_in(&repo_root, &["rev-parse", "HEAD"])
-                    .unwrap_or_default();
+                let head_sha =
+                    git_capture_in(&repo_root, &["rev-parse", "HEAD"]).unwrap_or_default();
                 let head_sha = head_sha.trim();
                 let mut approved = 0;
                 let mut skipped = 0;
@@ -5723,6 +5942,7 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
         CommitQueueAction::Drop { hash } => {
             let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
             let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+            emit_commit_queue_side_effects("dropped", &entry, entry.record_path.as_deref(), None);
             if let Some(bookmark) = entry.review_bookmark.as_ref() {
                 delete_review_bookmark(&repo_root, bookmark);
             }
@@ -5744,33 +5964,35 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             let head = default_pr_head(&entry);
             ensure_pr_head_pushed(&repo_root, &head, &entry.commit_sha)?;
 
-            let (number, url) = if let Some(found) = gh_find_open_pr_by_head(&repo_root, &repo, &head)? {
-                found
-            } else {
-                let (title, body_rest) = commit_message_title_body(&entry.message);
-                let mut body = String::new();
-                if !body_rest.is_empty() {
-                    body.push_str(&body_rest);
-                    body.push_str("\n\n");
-                }
-                if let Some(summary) = entry
-                    .summary
-                    .as_deref()
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                {
-                    body.push_str("Review summary:\n");
-                    body.push_str(summary);
-                    body.push('\n');
-                }
-                gh_create_pr(&repo_root, &repo, &head, &base, &title, body.trim(), draft)?
-            };
+            let (number, url) =
+                if let Some(found) = gh_find_open_pr_by_head(&repo_root, &repo, &head)? {
+                    found
+                } else {
+                    let (title, body_rest) = commit_message_title_body(&entry.message);
+                    let mut body = String::new();
+                    if !body_rest.is_empty() {
+                        body.push_str(&body_rest);
+                        body.push_str("\n\n");
+                    }
+                    if let Some(summary) = entry
+                        .summary
+                        .as_deref()
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                    {
+                        body.push_str("Review summary:\n");
+                        body.push_str(summary);
+                        body.push('\n');
+                    }
+                    gh_create_pr(&repo_root, &repo, &head, &base, &title, body.trim(), draft)?
+                };
 
             entry.pr_number = Some(number);
             entry.pr_url = Some(url.clone());
             entry.pr_head = Some(head.clone());
             entry.pr_base = Some(base.clone());
             let _ = write_commit_queue_entry(&repo_root, &entry);
+            emit_commit_queue_side_effects("pr_create", &entry, entry.record_path.as_deref(), None);
 
             println!("PR: {}", url);
             if open {
@@ -5798,13 +6020,26 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 // Create it if missing (as draft).
                 ensure_pr_head_pushed(&repo_root, &head, &entry.commit_sha)?;
                 let (title, body_rest) = commit_message_title_body(&entry.message);
-                let (number, url) =
-                    gh_create_pr(&repo_root, &repo, &head, &base, &title, body_rest.trim(), true)?;
+                let (number, url) = gh_create_pr(
+                    &repo_root,
+                    &repo,
+                    &head,
+                    &base,
+                    &title,
+                    body_rest.trim(),
+                    true,
+                )?;
                 entry.pr_number = Some(number);
                 entry.pr_url = Some(url.clone());
                 entry.pr_head = Some(head.clone());
                 entry.pr_base = Some(base.clone());
                 let _ = write_commit_queue_entry(&repo_root, &entry);
+                emit_commit_queue_side_effects(
+                    "pr_open_create",
+                    &entry,
+                    entry.record_path.as_deref(),
+                    None,
+                );
                 url
             };
 
@@ -6069,7 +6304,7 @@ fn git_run(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn git_run_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
+pub(crate) fn git_run_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
     let mut cmd = Command::new("git");
     if args.first() == Some(&"commit") {
         cmd.env("FLOW_COMMIT", "1");
@@ -6174,7 +6409,7 @@ fn git_try_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn git_capture(args: &[&str]) -> Result<String> {
+pub(crate) fn git_capture(args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .output()
@@ -6187,7 +6422,7 @@ fn git_capture(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn git_capture_in(workdir: &std::path::Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git_capture_in(workdir: &std::path::Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .current_dir(workdir)
         .args(args)
@@ -6768,9 +7003,7 @@ fn openrouter_api_key() -> Result<String> {
     }
 
     if is_local_env_backend() {
-        if let Ok(vars) =
-            crate::env::fetch_personal_env_vars(&["OPENROUTER_API_KEY".to_string()])
-        {
+        if let Ok(vars) = crate::env::fetch_personal_env_vars(&["OPENROUTER_API_KEY".to_string()]) {
             if let Some(value) = vars.get("OPENROUTER_API_KEY") {
                 if !value.trim().is_empty() {
                     return Ok(value.clone());
@@ -6812,7 +7045,13 @@ fn record_review_tasks(repo_root: &Path, review: &ReviewResult, model_label: &st
     let Some(beads_dir) = review_tasks_beads_dir(repo_root) else {
         return;
     };
-    match write_review_tasks(&beads_dir, repo_root, tasks, review.summary.as_deref(), model_label) {
+    match write_review_tasks(
+        &beads_dir,
+        repo_root,
+        tasks,
+        review.summary.as_deref(),
+        model_label,
+    ) {
         Ok(created) => {
             if created > 0 {
                 println!(
@@ -6834,24 +7073,28 @@ fn review_tasks_beads_dir(repo_root: &Path) -> Option<std::path::PathBuf> {
         let trimmed = dir.trim();
         if !trimmed.is_empty() {
             let candidate = std::path::PathBuf::from(trimmed);
-            return Some(resolve_review_tasks_dir(repo_root, candidate, allow_in_repo));
+            return Some(resolve_review_tasks_dir(
+                repo_root,
+                candidate,
+                allow_in_repo,
+            ));
         }
     }
     if let Ok(root) = env::var("FLOW_REVIEW_TASKS_ROOT") {
         let trimmed = root.trim();
         if !trimmed.is_empty() {
             let candidate = std::path::PathBuf::from(trimmed).join(".beads");
-            return Some(resolve_review_tasks_dir(repo_root, candidate, allow_in_repo));
+            return Some(resolve_review_tasks_dir(
+                repo_root,
+                candidate,
+                allow_in_repo,
+            ));
         }
     }
     dirs::home_dir().map(|home| home.join(".beads"))
 }
 
-fn resolve_review_tasks_dir(
-    repo_root: &Path,
-    candidate: PathBuf,
-    allow_in_repo: bool,
-) -> PathBuf {
+fn resolve_review_tasks_dir(repo_root: &Path, candidate: PathBuf, allow_in_repo: bool) -> PathBuf {
     let resolved = if candidate.is_relative() {
         repo_root.join(candidate)
     } else {
@@ -6891,7 +7134,9 @@ fn write_review_tasks(
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "project".to_string());
-    let summary = summary.map(|text| text.trim()).filter(|text| !text.is_empty());
+    let summary = summary
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty());
 
     let mut created = 0;
     for task in tasks {
@@ -7476,11 +7721,7 @@ fn read_tail_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn write_agent_trace_file(
-    bundle_path: &Path,
-    rel_path: &str,
-    data: &[u8],
-) -> Result<()> {
+fn write_agent_trace_file(bundle_path: &Path, rel_path: &str, data: &[u8]) -> Result<()> {
     let target = bundle_path.join(rel_path);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
@@ -7557,7 +7798,10 @@ fn write_agent_traces(bundle_path: &Path, repo_root: &Path) {
             ("agent/fish/last.stdout", fish_dir.join("last.stdout")),
             ("agent/fish/last.stderr", fish_dir.join("last.stderr")),
             ("agent/fish/rise.meta", fish_dir.join("rise.meta")),
-            ("agent/fish/rise.history.jsonl", fish_dir.join("rise.history.jsonl")),
+            (
+                "agent/fish/rise.history.jsonl",
+                fish_dir.join("rise.history.jsonl"),
+            ),
         ];
         for (rel, path) in fish_files {
             if !path.exists() {
@@ -7607,9 +7851,7 @@ fn write_agent_learning(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| commit_message.to_string());
     let issues = review.map(|r| r.issues.clone()).unwrap_or_default();
-    let future_tasks = review
-        .map(|r| r.future_tasks.clone())
-        .unwrap_or_default();
+    let future_tasks = review.map(|r| r.future_tasks.clone()).unwrap_or_default();
 
     let root_cause = if !summary.trim().is_empty() {
         summary.clone()
@@ -7657,16 +7899,29 @@ fn write_agent_learning(
     }
     let _ = write_agent_trace_file(bundle_path, "agent/decision.md", decision_md.as_bytes());
     let _ = write_agent_trace_file(bundle_path, "agent/regression.md", regression_md.as_bytes());
-    let _ = write_agent_trace_file(bundle_path, "agent/patch_summary.md", patch_summary_md.as_bytes());
+    let _ = write_agent_trace_file(
+        bundle_path,
+        "agent/patch_summary.md",
+        patch_summary_md.as_bytes(),
+    );
 
-    let _ = append_learning_store(repo_root, &learn_json, &decision_md, &regression_md, &patch_summary_md);
+    let _ = append_learning_store(
+        repo_root,
+        &learn_json,
+        &decision_md,
+        &regression_md,
+        &patch_summary_md,
+    );
 }
 
 fn classify_learning_tags(texts: &[String]) -> Vec<String> {
     let mut tags = HashSet::new();
     for text in texts {
         let lowered = text.to_lowercase();
-        if lowered.contains("perf") || lowered.contains("performance") || lowered.contains("latency") {
+        if lowered.contains("perf")
+            || lowered.contains("performance")
+            || lowered.contains("latency")
+        {
             tags.insert("perf".to_string());
         }
         if lowered.contains("security") || lowered.contains("vulnerability") {
@@ -7692,9 +7947,15 @@ fn classify_learning_tags(texts: &[String]) -> Vec<String> {
 }
 
 fn render_learning_decision_md(learn: &serde_json::Value) -> String {
-    let summary = learn.get("root_cause").and_then(|v| v.as_str()).unwrap_or("n/a");
+    let summary = learn
+        .get("root_cause")
+        .and_then(|v| v.as_str())
+        .unwrap_or("n/a");
     let fix = learn.get("fix").and_then(|v| v.as_str()).unwrap_or("n/a");
-    let prevention = learn.get("prevention").and_then(|v| v.as_str()).unwrap_or("n/a");
+    let prevention = learn
+        .get("prevention")
+        .and_then(|v| v.as_str())
+        .unwrap_or("n/a");
     format!(
         "# Decision\n\n## Summary\n{}\n\n## Fix\n{}\n\n## Prevention\n{}\n",
         summary, fix, prevention
@@ -7702,8 +7963,14 @@ fn render_learning_decision_md(learn: &serde_json::Value) -> String {
 }
 
 fn render_learning_regression_md(learn: &serde_json::Value) -> String {
-    let issue = learn.get("issue").and_then(|v| v.as_str()).unwrap_or("none");
-    let prevention = learn.get("prevention").and_then(|v| v.as_str()).unwrap_or("n/a");
+    let issue = learn
+        .get("issue")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    let prevention = learn
+        .get("prevention")
+        .and_then(|v| v.as_str())
+        .unwrap_or("n/a");
     format!(
         "# Regression Guard\n\n- If you see: {}\n- Do: {}\n",
         issue, prevention
@@ -7781,20 +8048,22 @@ fn learning_store_root(repo_root: &Path) -> Result<PathBuf> {
     if let Ok(value) = env::var("FLOW_BASE_DIR") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed).join(".ai").join("internal").join("learn"));
+            return Ok(PathBuf::from(trimmed)
+                .join(".ai")
+                .join("internal")
+                .join("learn"));
         }
     }
 
     if let Some(home) = dirs::home_dir() {
-        return Ok(
-            home.join("code")
-                .join("org")
-                .join("linsa")
-                .join("base")
-                .join(".ai")
-                .join("internal")
-                .join("learn"),
-        );
+        return Ok(home
+            .join("code")
+            .join("org")
+            .join("linsa")
+            .join("base")
+            .join(".ai")
+            .join("internal")
+            .join("learn"));
     }
 
     Ok(repo_root.join(".ai").join("internal").join("learn"))
@@ -7889,8 +8158,8 @@ fn try_capture_unhash_bundle(
         None => ai::get_sessions_for_gitedit(&repo_root.to_path_buf()).unwrap_or_default(),
     };
     if !sessions_data.is_empty() {
-        let json = serde_json::to_string_pretty(&sessions_data)
-            .context("serialize sessions.json")?;
+        let json =
+            serde_json::to_string_pretty(&sessions_data).context("serialize sessions.json")?;
         fs::write(bundle_path.join("sessions.json"), json).context("write sessions.json")?;
     }
 
@@ -7948,8 +8217,7 @@ fn try_capture_unhash_bundle(
         gitedit_session_hash: gitedit_session_hash.map(|s| s.to_string()),
         session_count: sessions_data.len(),
     };
-    let meta_json =
-        serde_json::to_string_pretty(&metadata).context("serialize commit.json")?;
+    let meta_json = serde_json::to_string_pretty(&metadata).context("serialize commit.json")?;
     fs::write(bundle_path.join("commit.json"), meta_json).context("write commit.json")?;
 
     let out_file = TempBuilder::new()
@@ -7971,10 +8239,7 @@ fn try_capture_unhash_bundle(
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        debug!(
-            "unhash failed: {} {}{}",
-            output.status, stdout, stderr
-        );
+        debug!("unhash failed: {} {}{}", output.status, stdout, stderr);
         return Ok(None);
     }
 

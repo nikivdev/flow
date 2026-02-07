@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use crate::history::InvocationRecord;
 use crate::base_tool;
+use crate::history::InvocationRecord;
 
 pub fn record_task_run(record: &InvocationRecord) -> Result<()> {
     // Best-effort: never fail the parent task run if base isn't installed or errors out.

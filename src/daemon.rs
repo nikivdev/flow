@@ -17,15 +17,12 @@ use reqwest::blocking::Client;
 use crate::{
     cli::{DaemonAction, DaemonCommand},
     config::{self, DaemonConfig, DaemonRestartPolicy},
-    env,
-    supervisor,
+    env, supervisor,
 };
 
 /// Run the daemon command.
 pub fn run(cmd: DaemonCommand) -> Result<()> {
-    let action = cmd
-        .action
-        .unwrap_or(DaemonAction::Status { name: None });
+    let action = cmd.action.unwrap_or(DaemonAction::Status { name: None });
     let config_path = resolve_flow_toml_path();
 
     if supervisor::try_handle_daemon_action(&action, config_path.as_deref())? {
@@ -389,12 +386,6 @@ fn spawn_daemon_process(daemon: &DaemonConfig, binary: &Path) -> Result<SpawnedD
     cmd.stdin(std::process::Stdio::null())
         .stdout(stdout_file)
         .stderr(stderr_file);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
 
     let child = cmd
         .spawn()

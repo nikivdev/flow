@@ -207,7 +207,12 @@ pub struct JjConfig {
     #[serde(default)]
     pub remote: Option<String>,
     /// Auto-track bookmarks on create.
-    #[serde(default, rename = "auto_track", alias = "auto-track", alias = "autoTrack")]
+    #[serde(
+        default,
+        rename = "auto_track",
+        alias = "auto-track",
+        alias = "autoTrack"
+    )]
     pub auto_track: Option<bool>,
     /// Prefix for review bookmarks created by flow (e.g., "review").
     #[serde(

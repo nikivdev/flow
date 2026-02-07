@@ -5,6 +5,38 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::GitRepairOpts;
 
+/// Returns true when the repo has a `.jj` directory (jj colocated mode).
+fn is_jj_colocated(repo_root: &Path) -> bool {
+    repo_root.join(".jj").is_dir()
+}
+
+/// In a jj-colocated repo, detached HEAD is normal. Attach it to main/master
+/// so git operations (add, commit, push) work. This is safe because jj keeps
+/// git HEAD at the same commit as the main bookmark.
+fn jj_auto_checkout(repo_root: &Path) -> Result<bool> {
+    if !is_jj_colocated(repo_root) {
+        return Ok(false);
+    }
+    let target = if git_ref_exists(repo_root, "main") {
+        "main"
+    } else if git_ref_exists(repo_root, "master") {
+        "master"
+    } else {
+        return Ok(false);
+    };
+    // Silently attach HEAD — no file changes, just moves HEAD to the branch.
+    let status = Command::new("git")
+        .current_dir(repo_root)
+        .args(["checkout", target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(true),
+        _ => Ok(false),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GitState {
     rebase: bool,
@@ -50,7 +82,10 @@ fn ensure_clean_state(repo_root: &Path, action: &str) -> Result<()> {
         ));
     }
     if state.detached {
-        issues.push("detached HEAD".to_string());
+        // In jj-colocated repos, detached HEAD is normal — auto-fix it.
+        if !jj_auto_checkout(repo_root).unwrap_or(false) {
+            issues.push("detached HEAD".to_string());
+        }
     }
 
     if !issues.is_empty() {
@@ -99,18 +134,23 @@ pub fn run_git_repair(opts: GitRepairOpts) -> Result<()> {
     }
 
     if state.detached {
-        let target = if git_ref_exists(&repo_root, branch) {
-            branch.to_string()
-        } else if git_ref_exists(&repo_root, "master") {
-            "master".to_string()
+        // Try jj auto-checkout first (silent, safe).
+        if jj_auto_checkout(&repo_root).unwrap_or(false) {
+            did_work = true;
         } else {
-            bail!(
-                "Detached HEAD and branch '{}' not found. Checkout a branch manually.",
-                branch
-            );
-        };
-        git_run_in(&repo_root, &["checkout", &target])?;
-        did_work = true;
+            let target = if git_ref_exists(&repo_root, branch) {
+                branch.to_string()
+            } else if git_ref_exists(&repo_root, "master") {
+                "master".to_string()
+            } else {
+                bail!(
+                    "Detached HEAD and branch '{}' not found. Checkout a branch manually.",
+                    branch
+                );
+            };
+            git_run_in(&repo_root, &["checkout", &target])?;
+            did_work = true;
+        }
     }
 
     if did_work {

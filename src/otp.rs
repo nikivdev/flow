@@ -172,10 +172,7 @@ fn fetch_item(
 
 fn extract_totp_uri(item: &FullItem, field_label: Option<&str>) -> Result<String> {
     let fields = item.fields.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "item '{}' has no fields; expected a TOTP field",
-            item.title
-        )
+        anyhow::anyhow!("item '{}' has no fields; expected a TOTP field", item.title)
     })?;
 
     let mut candidates: Vec<&Field> = fields
@@ -238,7 +235,12 @@ fn compute_totp(uri: &str) -> Result<String> {
     compute_totp_from_secret(&secret, period, digits, &algorithm)
 }
 
-fn compute_totp_from_secret(secret: &str, period: u64, digits: u32, algorithm: &str) -> Result<String> {
+fn compute_totp_from_secret(
+    secret: &str,
+    period: u64,
+    digits: u32,
+    algorithm: &str,
+) -> Result<String> {
     let key = decode_base32(secret)?;
 
     let timestamp = SystemTime::now()

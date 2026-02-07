@@ -20,8 +20,8 @@ use crossterm::{
 use serde::Serialize;
 
 use crate::ai_context;
-use crate::commit;
 use crate::cli::SyncCommand;
+use crate::commit;
 use crate::config;
 
 #[derive(Serialize, Clone)]
@@ -74,18 +74,31 @@ struct SyncRecorder {
 
 impl SyncRecorder {
     fn new(cmd: &SyncCommand) -> Result<Self> {
-        let repo_root = git_capture(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|_| ".".to_string());
+        let repo_root =
+            git_capture(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|_| ".".to_string());
         let repo_root = repo_root.trim().to_string();
         let repo_name = std::path::Path::new(&repo_root)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("repo")
             .to_string();
-        let branch_before = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default().trim().to_string();
-        let head_before = git_capture(&["rev-parse", "HEAD"]).unwrap_or_default().trim().to_string();
-        let upstream_before = git_capture(&["rev-parse", "--abbrev-ref", "@{upstream}"]).ok().map(|s| s.trim().to_string());
-        let origin_url = git_capture(&["remote", "get-url", "origin"]).ok().map(|s| s.trim().to_string());
-        let upstream_url = git_capture(&["remote", "get-url", "upstream"]).ok().map(|s| s.trim().to_string());
+        let branch_before = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let head_before = git_capture(&["rev-parse", "HEAD"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let upstream_before = git_capture(&["rev-parse", "--abbrev-ref", "@{upstream}"])
+            .ok()
+            .map(|s| s.trim().to_string());
+        let origin_url = git_capture(&["remote", "get-url", "origin"])
+            .ok()
+            .map(|s| s.trim().to_string());
+        let upstream_url = git_capture(&["remote", "get-url", "upstream"])
+            .ok()
+            .map(|s| s.trim().to_string());
         let status_before = git_capture(&["status", "--porcelain"]).unwrap_or_default();
 
         let mut recorder = SyncRecorder {
@@ -104,7 +117,13 @@ impl SyncRecorder {
             rebase: cmd.rebase,
             pushed: !cmd.no_push,
         };
-        recorder.record("start", format!("sync start (rebase={}, stash={}, push={})", cmd.rebase, cmd.stash, !cmd.no_push));
+        recorder.record(
+            "start",
+            format!(
+                "sync start (rebase={}, stash={}, push={})",
+                cmd.rebase, cmd.stash, !cmd.no_push
+            ),
+        );
         Ok(recorder)
     }
 
@@ -147,9 +166,17 @@ impl SyncRecorder {
             return;
         }
 
-        let branch_after = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default().trim().to_string();
-        let head_after = git_capture(&["rev-parse", "HEAD"]).unwrap_or_default().trim().to_string();
-        let upstream_after = git_capture(&["rev-parse", "--abbrev-ref", "@{upstream}"]).ok().map(|s| s.trim().to_string());
+        let branch_after = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let head_after = git_capture(&["rev-parse", "HEAD"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let upstream_after = git_capture(&["rev-parse", "--abbrev-ref", "@{upstream}"])
+            .ok()
+            .map(|s| s.trim().to_string());
         let status_after = git_capture(&["status", "--porcelain"]).unwrap_or_default();
 
         let snapshot = SyncSnapshot {
@@ -215,28 +242,43 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
             return run_jj_sync(repo_root_path, &cmd, auto_fix, &mut recorder);
         }
 
-    // Check for unmerged files (can exist even without active merge/rebase)
-    let unmerged = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
-    if !unmerged.trim().is_empty() {
-        let unmerged_files: Vec<&str> = unmerged.lines().filter(|l| !l.is_empty()).collect();
-        println!(
-            "==> Found {} unmerged files, resolving...",
-            unmerged_files.len()
-        );
-        recorder.record("unmerged", format!("found {} unmerged files", unmerged_files.len()));
+        // Check for unmerged files (can exist even without active merge/rebase)
+        let unmerged = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+        if !unmerged.trim().is_empty() {
+            let unmerged_files: Vec<&str> = unmerged.lines().filter(|l| !l.is_empty()).collect();
+            println!(
+                "==> Found {} unmerged files, resolving...",
+                unmerged_files.len()
+            );
+            recorder.record(
+                "unmerged",
+                format!("found {} unmerged files", unmerged_files.len()),
+            );
 
-        let should_fix = auto_fix || prompt_for_auto_fix()?;
-        if should_fix {
-            if try_resolve_conflicts()? {
-                let _ = git_run(&["add", "-A"]);
-                // Check if we're in a merge
-                if is_merge_in_progress() {
-                    let _ = Command::new("git").args(["commit", "--no-edit"]).output();
+            let should_fix = auto_fix || prompt_for_auto_fix()?;
+            if should_fix {
+                if try_resolve_conflicts()? {
+                    let _ = git_run(&["add", "-A"]);
+                    // Check if we're in a merge
+                    if is_merge_in_progress() {
+                        let _ = Command::new("git").args(["commit", "--no-edit"]).output();
+                    }
+                    println!("  ✓ Unmerged files resolved");
+                } else {
+                    // Couldn't resolve - reset the conflicted files to HEAD
+                    println!("  Could not auto-resolve. Resetting unmerged files...");
+                    for file in &unmerged_files {
+                        let _ = Command::new("git")
+                            .args(["checkout", "HEAD", "--", file])
+                            .output();
+                    }
+                    if is_merge_in_progress() {
+                        let _ = Command::new("git").args(["merge", "--abort"]).output();
+                    }
                 }
-                println!("  ✓ Unmerged files resolved");
             } else {
-                // Couldn't resolve - reset the conflicted files to HEAD
-                println!("  Could not auto-resolve. Resetting unmerged files...");
+                // User declined - reset the files
+                println!("  Resetting unmerged files...");
                 for file in &unmerged_files {
                     let _ = Command::new("git")
                         .args(["checkout", "HEAD", "--", file])
@@ -246,112 +288,110 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
                     let _ = Command::new("git").args(["merge", "--abort"]).output();
                 }
             }
-        } else {
-            // User declined - reset the files
-            println!("  Resetting unmerged files...");
-            for file in &unmerged_files {
-                let _ = Command::new("git")
-                    .args(["checkout", "HEAD", "--", file])
-                    .output();
-            }
-            if is_merge_in_progress() {
-                let _ = Command::new("git").args(["merge", "--abort"]).output();
-            }
         }
-    }
 
-    // Check for in-progress rebase/merge and handle it
-    if is_rebase_in_progress() {
-        println!("==> Rebase in progress, attempting to resolve...");
-        let should_fix = auto_fix || prompt_for_rebase_action()?;
-        if should_fix {
-            if try_resolve_rebase_conflicts()? {
-                println!("  ✓ Rebase completed");
+        // Check for in-progress rebase/merge and handle it
+        if is_rebase_in_progress() {
+            println!("==> Rebase in progress, attempting to resolve...");
+            let should_fix = auto_fix || prompt_for_rebase_action()?;
+            if should_fix {
+                if try_resolve_rebase_conflicts()? {
+                    println!("  ✓ Rebase completed");
+                } else {
+                    println!("  Could not auto-resolve. Aborting rebase...");
+                    let _ = Command::new("git").args(["rebase", "--abort"]).output();
+                }
             } else {
-                println!("  Could not auto-resolve. Aborting rebase...");
+                println!("  Aborting rebase...");
                 let _ = Command::new("git").args(["rebase", "--abort"]).output();
             }
-        } else {
-            println!("  Aborting rebase...");
-            let _ = Command::new("git").args(["rebase", "--abort"]).output();
         }
-    }
 
-    // Check for in-progress merge
-    if is_merge_in_progress() {
-        println!("==> Merge in progress, attempting to resolve...");
-        let should_fix = auto_fix || prompt_for_auto_fix()?;
-        if should_fix {
-            if try_resolve_conflicts()? {
-                let _ = git_run(&["add", "-A"]);
-                let _ = Command::new("git").args(["commit", "--no-edit"]).output();
-                println!("  ✓ Merge completed");
+        // Check for in-progress merge
+        if is_merge_in_progress() {
+            println!("==> Merge in progress, attempting to resolve...");
+            let should_fix = auto_fix || prompt_for_auto_fix()?;
+            if should_fix {
+                if try_resolve_conflicts()? {
+                    let _ = git_run(&["add", "-A"]);
+                    let _ = Command::new("git").args(["commit", "--no-edit"]).output();
+                    println!("  ✓ Merge completed");
+                } else {
+                    println!("  Could not auto-resolve. Aborting merge...");
+                    let _ = Command::new("git").args(["merge", "--abort"]).output();
+                }
             } else {
-                println!("  Could not auto-resolve. Aborting merge...");
+                println!("  Aborting merge...");
                 let _ = Command::new("git").args(["merge", "--abort"]).output();
             }
-        } else {
-            println!("  Aborting merge...");
-            let _ = Command::new("git").args(["merge", "--abort"]).output();
         }
-    }
 
-    let current = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let current = current.trim();
+        let current = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let current = current.trim();
 
-    // Check for uncommitted changes
-    let status = git_capture(&["status", "--porcelain"])?;
-    let has_changes = !status.trim().is_empty();
+        // Check for uncommitted changes
+        let status = git_capture(&["status", "--porcelain"])?;
+        let has_changes = !status.trim().is_empty();
 
-    if has_changes && !cmd.stash {
-        println!("You have uncommitted changes. Use --stash to auto-stash them.");
-        recorder.record("stash", "skipped (uncommitted changes without --stash)");
-        bail!("Uncommitted changes");
-    }
+        if has_changes && !cmd.stash {
+            println!("You have uncommitted changes. Use --stash to auto-stash them.");
+            recorder.record("stash", "skipped (uncommitted changes without --stash)");
+            bail!("Uncommitted changes");
+        }
 
-    // Stash if needed
-    let mut stashed = false;
-    if has_changes && cmd.stash {
-        println!("==> Stashing local changes...");
-        let stash_count_before = git_capture(&["stash", "list"])
-            .map(|s| s.lines().count())
-            .unwrap_or(0);
+        // Stash if needed
+        let mut stashed = false;
+        if has_changes && cmd.stash {
+            println!("==> Stashing local changes...");
+            let stash_count_before = git_capture(&["stash", "list"])
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
 
-        let _ = git_run(&["stash", "push", "-m", "f sync auto-stash"]);
+            let _ = git_run(&["stash", "push", "-m", "f sync auto-stash"]);
 
-        let stash_count_after = git_capture(&["stash", "list"])
-            .map(|s| s.lines().count())
-            .unwrap_or(0);
-        stashed = stash_count_after > stash_count_before;
-    }
-    recorder.set_stashed(stashed);
-    if has_changes && cmd.stash {
-        recorder.record("stash", format!("stashed={}", stashed));
-    }
+            let stash_count_after = git_capture(&["stash", "list"])
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
+            stashed = stash_count_after > stash_count_before;
+        }
+        recorder.set_stashed(stashed);
+        if has_changes && cmd.stash {
+            recorder.record("stash", format!("stashed={}", stashed));
+        }
 
-    // Check if we have an origin remote
-    let has_origin = git_capture(&["remote", "get-url", "origin"]).is_ok();
-    let has_upstream = git_capture(&["remote", "get-url", "upstream"]).is_ok();
+        // Check if we have an origin remote
+        let has_origin = git_capture(&["remote", "get-url", "origin"]).is_ok();
+        let has_upstream = git_capture(&["remote", "get-url", "upstream"]).is_ok();
 
-    // Check if origin remote is reachable (repo exists on remote)
-    let origin_reachable =
-        has_origin && git_capture(&["ls-remote", "--exit-code", "-q", "origin"]).is_ok();
+        // Check if origin remote is reachable (repo exists on remote)
+        let origin_reachable =
+            has_origin && git_capture(&["ls-remote", "--exit-code", "-q", "origin"]).is_ok();
 
-    // Step 1: Pull from origin (if tracking branch exists and repo is reachable)
-    if has_origin && origin_reachable {
-        let tracking = git_capture(&["rev-parse", "--abbrev-ref", "@{upstream}"]);
-        if tracking.is_ok() {
-            println!("==> Pulling from origin...");
-            recorder.record("pull", format!("pulling from origin (rebase={})", cmd.rebase));
-            if cmd.rebase {
-                if let Err(_) = git_run(&["pull", "--rebase", "origin", current]) {
-                    // Check if we're in a rebase conflict
-                    if is_rebase_in_progress() {
-                        let should_fix = auto_fix || prompt_for_auto_fix()?;
-                        if should_fix {
-                            if try_resolve_rebase_conflicts()? {
-                                println!("  ✓ Rebase conflicts auto-resolved");
-                                recorder.record("pull", "rebase conflicts auto-resolved");
+        // Step 1: Pull from origin (if tracking branch exists and repo is reachable)
+        if has_origin && origin_reachable {
+            let tracking = git_capture(&["rev-parse", "--abbrev-ref", "@{upstream}"]);
+            if tracking.is_ok() {
+                println!("==> Pulling from origin...");
+                recorder.record(
+                    "pull",
+                    format!("pulling from origin (rebase={})", cmd.rebase),
+                );
+                if cmd.rebase {
+                    if let Err(_) = git_run(&["pull", "--rebase", "origin", current]) {
+                        // Check if we're in a rebase conflict
+                        if is_rebase_in_progress() {
+                            let should_fix = auto_fix || prompt_for_auto_fix()?;
+                            if should_fix {
+                                if try_resolve_rebase_conflicts()? {
+                                    println!("  ✓ Rebase conflicts auto-resolved");
+                                    recorder.record("pull", "rebase conflicts auto-resolved");
+                                } else {
+                                    restore_stash(stashed);
+                                    recorder.record("pull", "rebase conflicts unresolved");
+                                    bail!(
+                                        "Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue"
+                                    );
+                                }
                             } else {
                                 restore_stash(stashed);
                                 recorder.record("pull", "rebase conflicts unresolved");
@@ -361,30 +401,31 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
                             }
                         } else {
                             restore_stash(stashed);
-                            recorder.record("pull", "rebase conflicts unresolved");
-                            bail!(
-                                "Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue"
-                            );
+                            recorder.record("pull", "git pull --rebase failed");
+                            bail!("git pull --rebase failed");
                         }
-                    } else {
-                        restore_stash(stashed);
-                        recorder.record("pull", "git pull --rebase failed");
-                        bail!("git pull --rebase failed");
                     }
-                }
-            } else {
-                if let Err(_) = git_run(&["pull", "origin", current]) {
-                    // Check for merge conflicts
-                    let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"])
-                        .unwrap_or_default();
-                    if !conflicts.trim().is_empty() {
-                        let should_fix = auto_fix || prompt_for_auto_fix()?;
-                        if should_fix {
-                            if try_resolve_conflicts()? {
-                                let _ = git_run(&["add", "-A"]);
-                                let _ = Command::new("git").args(["commit", "--no-edit"]).output();
-                                println!("  ✓ Merge conflicts auto-resolved");
-                                recorder.record("pull", "merge conflicts auto-resolved");
+                } else {
+                    if let Err(_) = git_run(&["pull", "origin", current]) {
+                        // Check for merge conflicts
+                        let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"])
+                            .unwrap_or_default();
+                        if !conflicts.trim().is_empty() {
+                            let should_fix = auto_fix || prompt_for_auto_fix()?;
+                            if should_fix {
+                                if try_resolve_conflicts()? {
+                                    let _ = git_run(&["add", "-A"]);
+                                    let _ =
+                                        Command::new("git").args(["commit", "--no-edit"]).output();
+                                    println!("  ✓ Merge conflicts auto-resolved");
+                                    recorder.record("pull", "merge conflicts auto-resolved");
+                                } else {
+                                    restore_stash(stashed);
+                                    recorder.record("pull", "merge conflicts unresolved");
+                                    bail!(
+                                        "Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit"
+                                    );
+                                }
                             } else {
                                 restore_stash(stashed);
                                 recorder.record("pull", "merge conflicts unresolved");
@@ -394,90 +435,83 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
                             }
                         } else {
                             restore_stash(stashed);
-                            recorder.record("pull", "merge conflicts unresolved");
-                            bail!(
-                                "Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit"
-                            );
+                            recorder.record("pull", "git pull failed");
+                            bail!("git pull failed");
                         }
-                    } else {
-                        restore_stash(stashed);
-                        recorder.record("pull", "git pull failed");
-                        bail!("git pull failed");
                     }
                 }
-            }
-            recorder.record("pull", "pull complete");
-        } else {
-            println!("==> No tracking branch, skipping pull");
-            recorder.record("pull", "skipped (no tracking branch)");
-        }
-    } else if has_origin && !origin_reachable {
-        println!("==> Origin repo not found, skipping pull");
-        recorder.record("pull", "skipped (origin not reachable)");
-    }
-
-    // Step 2: Sync upstream if it exists
-    if has_upstream {
-        println!("==> Syncing upstream...");
-        recorder.record("upstream", "syncing upstream");
-        if let Err(e) = sync_upstream_internal(current, auto_fix, &mut recorder) {
-            restore_stash(stashed);
-            return Err(e);
-        }
-    } else {
-        recorder.record("upstream", "skipped (no upstream remote)");
-    }
-
-    // Step 3: Push to origin
-    if has_origin && !cmd.no_push {
-        // Check if origin == upstream (read-only clone, no fork)
-        let origin_url = git_capture(&["remote", "get-url", "origin"]).unwrap_or_default();
-        let upstream_url = git_capture(&["remote", "get-url", "upstream"]).unwrap_or_default();
-        let is_read_only =
-            has_upstream && normalize_git_url(&origin_url) == normalize_git_url(&upstream_url);
-
-        if is_read_only {
-            println!("==> Skipping push (origin == upstream, read-only clone)");
-            println!("  To push, create a fork first: gh repo fork --remote");
-            recorder.record("push", "skipped (origin == upstream)");
-        } else if !origin_reachable {
-            // Origin repo doesn't exist
-            if cmd.create_repo {
-                println!("==> Creating origin repo...");
-                if try_create_origin_repo()? {
-                    println!("==> Pushing to origin...");
-                    git_run(&["push", "-u", "origin", current])?;
-                    recorder.record("push", "created repo and pushed to origin");
-                } else {
-                    println!("  Could not create repo, skipping push");
-                    recorder.record("push", "skipped (create repo failed)");
-                }
+                recorder.record("pull", "pull complete");
             } else {
-                println!("==> Origin repo not found, skipping push");
-                println!("  Use --create-repo to create it");
-                recorder.record("push", "skipped (origin not found)");
+                println!("==> No tracking branch, skipping pull");
+                recorder.record("pull", "skipped (no tracking branch)");
             }
-        } else {
-            println!("==> Pushing to origin...");
-            let push_result = push_with_autofix(current, auto_fix, cmd.max_fix_attempts);
-            if let Err(e) = push_result {
+        } else if has_origin && !origin_reachable {
+            println!("==> Origin repo not found, skipping pull");
+            recorder.record("pull", "skipped (origin not reachable)");
+        }
+
+        // Step 2: Sync upstream if it exists
+        if has_upstream {
+            println!("==> Syncing upstream...");
+            recorder.record("upstream", "syncing upstream");
+            if let Err(e) = sync_upstream_internal(current, auto_fix, &mut recorder) {
                 restore_stash(stashed);
-                recorder.record("push", "push failed");
                 return Err(e);
             }
-            recorder.record("push", "push complete");
+        } else {
+            recorder.record("upstream", "skipped (no upstream remote)");
         }
-    } else if cmd.no_push {
-        recorder.record("push", "skipped (--no-push)");
-    } else {
-        recorder.record("push", "skipped (no origin)");
-    }
 
-    // Restore stash
-    restore_stash(stashed);
-    if stashed {
-        recorder.record("stash", "stash restored");
-    }
+        // Step 3: Push to origin
+        if has_origin && !cmd.no_push {
+            // Check if origin == upstream (read-only clone, no fork)
+            let origin_url = git_capture(&["remote", "get-url", "origin"]).unwrap_or_default();
+            let upstream_url = git_capture(&["remote", "get-url", "upstream"]).unwrap_or_default();
+            let is_read_only =
+                has_upstream && normalize_git_url(&origin_url) == normalize_git_url(&upstream_url);
+
+            if is_read_only {
+                println!("==> Skipping push (origin == upstream, read-only clone)");
+                println!("  To push, create a fork first: gh repo fork --remote");
+                recorder.record("push", "skipped (origin == upstream)");
+            } else if !origin_reachable {
+                // Origin repo doesn't exist
+                if cmd.create_repo {
+                    println!("==> Creating origin repo...");
+                    if try_create_origin_repo()? {
+                        println!("==> Pushing to origin...");
+                        git_run(&["push", "-u", "origin", current])?;
+                        recorder.record("push", "created repo and pushed to origin");
+                    } else {
+                        println!("  Could not create repo, skipping push");
+                        recorder.record("push", "skipped (create repo failed)");
+                    }
+                } else {
+                    println!("==> Origin repo not found, skipping push");
+                    println!("  Use --create-repo to create it");
+                    recorder.record("push", "skipped (origin not found)");
+                }
+            } else {
+                println!("==> Pushing to origin...");
+                let push_result = push_with_autofix(current, auto_fix, cmd.max_fix_attempts);
+                if let Err(e) = push_result {
+                    restore_stash(stashed);
+                    recorder.record("push", "push failed");
+                    return Err(e);
+                }
+                recorder.record("push", "push complete");
+            }
+        } else if cmd.no_push {
+            recorder.record("push", "skipped (--no-push)");
+        } else {
+            recorder.record("push", "skipped (no origin)");
+        }
+
+        // Restore stash
+        restore_stash(stashed);
+        if stashed {
+            recorder.record("stash", "stash restored");
+        }
 
         println!("\n✓ Sync complete!");
         recorder.record("complete", "sync complete");
@@ -504,8 +538,8 @@ fn run_jj_sync(
         bail!("Unmerged files detected. Resolve them before syncing.");
     }
 
-    let head_ref = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])
-        .unwrap_or_else(|_| "HEAD".to_string());
+    let head_ref =
+        git_capture(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|_| "HEAD".to_string());
     let head_ref = head_ref.trim();
     let current_branch = if head_ref == "HEAD" || head_ref.is_empty() {
         recorder.record("jj", "detached head (ignored, using default branch)");
@@ -522,8 +556,9 @@ fn run_jj_sync(
     // Keep jj fetch output small. In most workflows, only the current branch + upstream trunk are
     // needed for a sync/rebase.
     let upstream_branch_opt = resolve_upstream_branch();
-    let upstream_branch_for_fetch =
-        upstream_branch_opt.clone().unwrap_or_else(|| jj_default_branch(repo_root));
+    let upstream_branch_for_fetch = upstream_branch_opt
+        .clone()
+        .unwrap_or_else(|| jj_default_branch(repo_root));
 
     if has_origin || has_upstream {
         println!("==> Fetching remotes via jj...");
@@ -626,7 +661,9 @@ fn run_jj_sync(
             if let Err(err) = jj_run_in(repo_root, &["rebase", "-d", &dest]) {
                 recorder.record("jj", "jj rebase failed");
                 if !is_read_only {
-                    println!("==> Rebase blocked by immutable commits; retrying with --ignore-immutable...");
+                    println!(
+                        "==> Rebase blocked by immutable commits; retrying with --ignore-immutable..."
+                    );
                     recorder.record("jj", "jj rebase retry --ignore-immutable");
                     jj_run_in(repo_root, &["rebase", "--ignore-immutable", "-d", &dest])?;
                 } else {
@@ -634,6 +671,11 @@ fn run_jj_sync(
                 }
             }
             did_rebase = true;
+
+            // Auto-resolve conflicts from rebase (lockfiles, etc.).
+            if let Some(ref d) = dest_ref {
+                try_resolve_jj_conflicts(repo_root, d, auto_fix, recorder)?;
+            }
 
             if commit::commit_queue_has_entries(repo_root) {
                 if let Ok(updated) = commit::refresh_commit_queue(repo_root) {
@@ -689,13 +731,32 @@ fn run_jj_sync(
         recorder.record("push", "skipped (no origin)");
     }
 
+    // Rise: keep overlay bookmark on top of latest target.
+    if let Some(ref dest) = dest_ref {
+        if has_rise_bookmark(repo_root) {
+            println!("==> Rebasing rise overlay onto {}...", dest);
+            recorder.record("rise", format!("jj rebase -b rise -d {}", dest));
+            match jj_run_in(repo_root, &["rebase", "-b", "rise", "-d", dest]) {
+                Ok(()) => recorder.record("rise", "rise bookmark rebased"),
+                Err(e) => {
+                    println!("  Warning: rise rebase failed: {}", e);
+                    recorder.record("rise", format!("rise rebase failed: {}", e));
+                }
+            }
+        }
+    }
+
     println!("\n✓ Sync complete (jj)!");
     recorder.record("complete", "sync complete (jj)");
     Ok(())
 }
 
 /// Sync from upstream remote into current branch.
-fn sync_upstream_internal(current_branch: &str, auto_fix: bool, recorder: &mut SyncRecorder) -> Result<()> {
+fn sync_upstream_internal(
+    current_branch: &str,
+    auto_fix: bool,
+    recorder: &mut SyncRecorder,
+) -> Result<()> {
     // Fetch upstream
     git_run(&["fetch", "upstream", "--prune"])?;
     recorder.record("upstream", "fetched upstream");
@@ -731,7 +792,10 @@ fn sync_upstream_internal(current_branch: &str, auto_fix: bool, recorder: &mut S
 
     if behind > 0 {
         println!("  Merging {} commits from upstream...", behind);
-        recorder.record("upstream", format!("merging {} commits from upstream", behind));
+        recorder.record(
+            "upstream",
+            format!("merging {} commits from upstream", behind),
+        );
 
         // Try fast-forward first
         if git_run(&["merge", "--ff-only", &upstream_ref]).is_err() {
@@ -883,16 +947,195 @@ fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn has_rise_bookmark(repo_root: &Path) -> bool {
+    let output = jj_capture_in(repo_root, &["bookmark", "list"]).unwrap_or_default();
+    output.lines().any(|line| {
+        line.trim_start()
+            .split(':')
+            .next()
+            .map_or(false, |name| name.trim() == "rise")
+    })
+}
+
 fn jj_has_divergence(repo_root: &Path, current: &str, dest: &str) -> Result<bool> {
     let revset = format!("{}..{}", dest, current);
-    let output = jj_capture_in(repo_root, &["log", "-r", &revset, "--no-graph", "-T", "commit_id"])?;
+    let output = jj_capture_in(
+        repo_root,
+        &["log", "-r", &revset, "--no-graph", "-T", "commit_id"],
+    )?;
     Ok(!output.trim().is_empty())
+}
+
+/// Check for JJ conflicts after rebase and auto-resolve what we can.
+///
+/// Lockfiles are resolved by restoring from the rebase destination (accept upstream).
+/// Code conflicts are attempted with Claude if auto_fix is enabled.
+/// Returns Ok(true) if all conflicts resolved, Ok(false) if some remain.
+fn try_resolve_jj_conflicts(
+    repo_root: &Path,
+    dest: &str,
+    auto_fix: bool,
+    recorder: &mut SyncRecorder,
+) -> Result<bool> {
+    // Check if working copy has conflicts via jj log.
+    let status = jj_capture_in(
+        repo_root,
+        &["log", "-r", "@", "--no-graph", "-T", "conflict"],
+    )?;
+    if !status.trim().contains("true") {
+        return Ok(true);
+    }
+
+    // Get list of conflicted files from jj status.
+    let jj_status = jj_capture_in(repo_root, &["status"])?;
+    let conflicted_files: Vec<&str> = jj_status
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("C ") {
+                Some(trimmed.strip_prefix("C ").unwrap().trim())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if conflicted_files.is_empty() {
+        // Conflict detected but no files listed — odd state, report it.
+        println!("  Warning: jj reports conflicts but no conflicted files found in status");
+        return Ok(false);
+    }
+
+    println!(
+        "==> {} conflicted file(s) after rebase: {}",
+        conflicted_files.len(),
+        conflicted_files.join(", ")
+    );
+    recorder.record(
+        "conflicts",
+        format!("{} conflicted file(s)", conflicted_files.len()),
+    );
+
+    let auto_generated = [
+        "STATS.md",
+        "stats.md",
+        "CHANGELOG.md",
+        "changelog.md",
+        "package-lock.json",
+        "yarn.lock",
+        "bun.lock",
+        "pnpm-lock.yaml",
+        "Cargo.lock",
+        "Gemfile.lock",
+        "poetry.lock",
+        "composer.lock",
+    ];
+
+    let mut resolved_count = 0;
+    let mut needs_claude: Vec<String> = Vec::new();
+
+    for file in &conflicted_files {
+        let filename = file.rsplit('/').next().unwrap_or(file);
+        if auto_generated
+            .iter()
+            .any(|&ag| filename.eq_ignore_ascii_case(ag))
+        {
+            println!("  Auto-resolving {} (accepting upstream)", file);
+            if jj_run_in(repo_root, &["restore", "--from", dest, file]).is_ok() {
+                resolved_count += 1;
+                recorder.record("conflicts", format!("auto-resolved {}", file));
+            } else {
+                println!("  Warning: failed to restore {} from {}", file, dest);
+                needs_claude.push(file.to_string());
+            }
+        } else {
+            needs_claude.push(file.to_string());
+        }
+    }
+
+    if needs_claude.is_empty() {
+        println!("  ✓ All conflicts auto-resolved");
+        return Ok(true);
+    }
+
+    if !auto_fix {
+        println!(
+            "  {} conflict(s) remaining: {}",
+            needs_claude.len(),
+            needs_claude.join(", ")
+        );
+        return Ok(false);
+    }
+
+    // Try Claude for remaining code conflicts.
+    println!(
+        "  Trying Claude for {} remaining conflict(s)...",
+        needs_claude.len()
+    );
+    let context = ai_context::load_command_context("sync").unwrap_or_default();
+    let context_section = if !context.is_empty() {
+        format!("## Context\n\n{}\n\n", context)
+    } else {
+        String::new()
+    };
+
+    for file in &needs_claude {
+        let file_path = repo_root.join(file);
+        let content = std::fs::read_to_string(&file_path).unwrap_or_default();
+        if content.contains("<<<<<<<") || content.contains("%%%%%%%") || content.contains("+++++++")
+        {
+            let truncated = if content.len() > 8000 {
+                &content[..8000]
+            } else {
+                &content
+            };
+            let prompt = format!(
+                "{}This file has JJ merge conflicts (markers: <<<<<<< / %%%%%%% / +++++++ / >>>>>>>). Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
+                context_section, truncated
+            );
+
+            let output = Command::new("claude")
+                .args(["--print", "--dangerously-skip-permissions", &prompt])
+                .output();
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let resolved = String::from_utf8_lossy(&out.stdout);
+                    if !resolved.contains("<<<<<<<")
+                        && !resolved.contains(">>>>>>>")
+                        && !resolved.contains("%%%%%%%")
+                    {
+                        if std::fs::write(&file_path, resolved.as_ref()).is_ok() {
+                            resolved_count += 1;
+                            recorder.record("conflicts", format!("claude-resolved {}", file));
+                            println!("  ✓ Resolved {}", file);
+                            continue;
+                        }
+                    }
+                }
+            }
+            println!("  ✗ Could not resolve {}", file);
+        }
+    }
+
+    let all_resolved = resolved_count == conflicted_files.len();
+    if !all_resolved {
+        let remaining = conflicted_files.len() - resolved_count;
+        println!(
+            "  {} conflict(s) remain. Resolve manually, then run `jj squash`.",
+            remaining
+        );
+    }
+    Ok(all_resolved)
 }
 
 fn jj_stash_commits(repo_root: &Path, current: &str, dest: &str) -> Result<String> {
     let ts = Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let stash_name = format!("f-sync-stash/{}/{}", current, ts);
-    jj_run_in(repo_root, &["bookmark", "create", &stash_name, "-r", current])?;
+    jj_run_in(
+        repo_root,
+        &["bookmark", "create", &stash_name, "-r", current],
+    )?;
     jj_run_in(repo_root, &["bookmark", "set", current, "-r", dest])?;
     jj_run_in(repo_root, &["edit", current])?;
     Ok(stash_name)
@@ -1554,7 +1797,11 @@ fn write_sync_snapshot(snapshot: &SyncSnapshot) -> Result<()> {
         let target_dir = base.join("sync");
         if !target_dir.exists() {
             if let Err(err) = fs::create_dir_all(&target_dir) {
-                eprintln!("warn: unable to create sync log dir {}: {}", target_dir.display(), err);
+                eprintln!(
+                    "warn: unable to create sync log dir {}: {}",
+                    target_dir.display(),
+                    err
+                );
                 continue;
             }
         }

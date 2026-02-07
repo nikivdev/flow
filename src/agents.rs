@@ -175,8 +175,13 @@ fn run_agents_rules(profile: Option<&str>, repo: Option<&str>) -> Result<()> {
         bail!("Missing profile file: {}", source.display());
     }
     let target = repo_path.join("agents.md");
-    fs::copy(&source, &target)
-        .with_context(|| format!("failed to copy {} to {}", source.display(), target.display()))?;
+    fs::copy(&source, &target).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            source.display(),
+            target.display()
+        )
+    })?;
 
     let default_path = agents_dir.join(".default");
     fs::write(&default_path, &profile_name)

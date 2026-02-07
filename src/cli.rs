@@ -491,6 +491,32 @@ pub enum Commands {
         alias = "px"
     )]
     Proxy(ProxyCommand),
+    #[command(
+        about = "Create a GitHub PR from the current branch.",
+        long_about = "Creates a branch/bookmark from the latest commit, pushes it, and opens a GitHub PR. Works with both jj and pure git."
+    )]
+    Pr(PrOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PrOpts {
+    /// Arguments:
+    /// - `preview`: create the PR on your fork (origin) only (no upstream).
+    /// - `TITLE`: optional PR title. If provided, Flow will create a commit/change for current working copy changes.
+    #[arg(value_name = "ARGS", num_args = 0.., trailing_var_arg = true)]
+    pub args: Vec<String>,
+    /// Base branch (default: main).
+    #[arg(long, default_value = "main")]
+    pub base: String,
+    /// Create as draft PR.
+    #[arg(long)]
+    pub draft: bool,
+    /// Custom branch name (auto-generated from commit message if omitted).
+    #[arg(long, short)]
+    pub branch: Option<String>,
+    /// Don't open in browser after creation.
+    #[arg(long)]
+    pub no_open: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1366,12 +1392,24 @@ pub enum CommitQueueAction {
         /// Push even if the commit is not at HEAD.
         #[arg(long, short = 'f')]
         force: bool,
+        /// Allow pushing even if the queued commit has review issues recorded.
+        #[arg(long)]
+        allow_issues: bool,
+        /// Allow pushing even if the review timed out or is missing.
+        #[arg(long)]
+        allow_unreviewed: bool,
     },
     /// Approve all queued commits on the current branch (push once).
     ApproveAll {
         /// Push even if the branch is behind its remote.
         #[arg(long, short = 'f')]
         force: bool,
+        /// Allow pushing even if some queued commits have review issues recorded.
+        #[arg(long)]
+        allow_issues: bool,
+        /// Allow pushing even if some queued commits have review timed out / missing.
+        #[arg(long)]
+        allow_unreviewed: bool,
     },
     /// Remove a commit from the queue without pushing.
     Drop {

@@ -54,6 +54,7 @@ pub mod opentui_prompt;
 pub mod otp;
 pub mod palette;
 pub mod parallel;
+pub mod pr;
 pub mod processes;
 pub mod projects;
 pub mod proxy;
