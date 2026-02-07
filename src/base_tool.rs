@@ -40,7 +40,11 @@ pub fn run_with_stdin(bin: &Path, args: &[String], stdin: &str) -> Result<()> {
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        // This path is currently only used for best-effort "task run" ingestion.
+        // If the user has some other `base` binary on PATH (or an older one),
+        // it may print usage/errors like "unrecognized subcommand 'ingest'".
+        // We intentionally silence stderr to avoid confusing noise during normal runs.
+        .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("failed to spawn {} {}", bin.display(), args.join(" ")))?;
 
@@ -56,4 +60,3 @@ pub fn run_with_stdin(bin: &Path, args: &[String], stdin: &str) -> Result<()> {
     }
     Ok(())
 }
-
