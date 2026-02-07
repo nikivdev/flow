@@ -59,8 +59,6 @@ sha1 = "0.10"
 data-encoding = "2.6"
 opentui-lite = { path = "crates/opentui-lite" }
 cojson-core = { git = "https://github.com/garden-co/jazz", rev = "c5b673823e81b55eff6304b673eeea32e1e0ebb4", package = "cojson-core" }
-groove = { git = "https://github.com/1focus-ai/jazz", branch = "main", optional = true }
-groove-rocksdb = { git = "https://github.com/1focus-ai/jazz", branch = "main", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -71,4 +69,3 @@ tempfile = "3"
 
 [features]
 default = []
-jazz2 = ["groove", "groove-rocksdb"]
