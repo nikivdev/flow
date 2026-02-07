@@ -22,6 +22,18 @@ Upgrade to the latest release:
 f upgrade
 ```
 
+Upgrade to the latest canary build:
+
+```sh
+f upgrade --canary
+```
+
+Switch back to stable:
+
+```sh
+f upgrade --stable
+```
+
 If you fork Flow (or publish releases under a different repo), set:
 
 - `FLOW_UPGRADE_REPO=owner/repo`
@@ -53,6 +65,17 @@ f release signing sync
 
 Notarization is optional for a CLI distributed via `curl | sh` (downloads via `curl`
 typically do not set the quarantine attribute), but can be added later if desired.
+
+## Releasing (Maintainers)
+
+Stable releases are cut by pushing a git tag that starts with `v`:
+
+1. Bump version in `Cargo.toml`
+2. Push the commit to `main`
+3. Create + push tag: `vX.Y.Z` (this triggers `.github/workflows/release.yml`)
+
+Canary releases are published automatically on every push to `main` via
+`.github/workflows/canary.yml` (GitHub release tag: `canary`).
 
 ## Local Build (macOS, Flow + Jazz/Groove)
 

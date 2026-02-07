@@ -3083,6 +3083,17 @@ pub struct UpgradeOpts {
     /// Upgrade to a specific version (e.g., "0.2.0" or "v0.2.0").
     #[arg(value_name = "VERSION")]
     pub version: Option<String>,
+    /// Upgrade to the latest canary build (GitHub release tag: "canary").
+    ///
+    /// This is similar to `bun upgrade --canary`: canary releases are updated frequently and may
+    /// contain untested changes.
+    #[arg(long, conflicts_with = "stable", conflicts_with = "version")]
+    pub canary: bool,
+    /// Upgrade to the latest stable release (GitHub "latest" release).
+    ///
+    /// This is useful to switch back after installing canary.
+    #[arg(long, conflicts_with = "canary", conflicts_with = "version")]
+    pub stable: bool,
     /// Print what would happen without making changes.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
