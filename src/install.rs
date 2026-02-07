@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
@@ -26,6 +27,7 @@ pub fn run(mut opts: InstallOpts) -> Result<()> {
     match opts.backend {
         InstallBackend::Registry => registry::install(opts),
         InstallBackend::Flox => install_with_flox(&opts),
+        InstallBackend::Parm => install_with_parm(&opts),
         InstallBackend::Auto => {
             if registry_configured(&opts) {
                 if let Err(err) = registry::install(opts.clone()) {
@@ -143,6 +145,138 @@ fn install_with_flox(opts: &InstallOpts) -> Result<()> {
         println!("Add {} to PATH to use it everywhere.", bin_dir.display());
     }
     Ok(())
+}
+
+fn install_with_parm(opts: &InstallOpts) -> Result<()> {
+    let name = opts.name.as_deref().unwrap_or("").trim();
+    if name.is_empty() {
+        bail!("package name is required");
+    }
+
+    if !opts.bin.is_none() {
+        // Parm determines which executables exist inside the release asset.
+        // We keep Flow's `--bin` flag for other backends, but it doesn't map cleanly.
+        eprintln!("Note: --bin is ignored for --backend parm");
+    }
+    if opts.force {
+        eprintln!("Note: --force is ignored for --backend parm");
+    }
+
+    let bin_dir = opts.bin_dir.clone().unwrap_or_else(default_bin_dir);
+    fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
+
+    let owner_repo = resolve_owner_repo(name)?;
+    let owner_repo = match opts
+        .version
+        .as_deref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        Some(version) => format!("{}@{}", owner_repo, version),
+        None => owner_repo,
+    };
+
+    let parm_bin = which::which("parm").context(
+        "parm not found on PATH. Install it first (macOS/Linux):\n  curl -fsSL https://raw.githubusercontent.com/yhoundz/parm/master/scripts/install.sh | sh",
+    )?;
+
+    // Configure parm to symlink into the same directory Flow uses for tools.
+    // This makes installs predictable and avoids relying on parm defaults.
+    let config_status = Command::new(&parm_bin)
+        .args([
+            "config",
+            "set",
+            &format!("parm_bin_path={}", bin_dir.display()),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run parm config set")?;
+    if !config_status.success() {
+        bail!("parm config set failed");
+    }
+
+    let mut cmd = Command::new(&parm_bin);
+    cmd.args(["install", &owner_repo]);
+    if opts.no_verify {
+        cmd.arg("--no-verify");
+    }
+
+    if let Some(token) = resolve_github_token()? {
+        cmd.env("PARM_GITHUB_TOKEN", token);
+    }
+
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run parm install")?;
+    if !status.success() {
+        bail!("parm install failed");
+    }
+
+    if !path_in_env(&bin_dir) {
+        println!("Add {} to PATH to use it everywhere.", bin_dir.display());
+    }
+    Ok(())
+}
+
+fn resolve_owner_repo(raw: &str) -> Result<String> {
+    if raw.contains('/') {
+        return Ok(raw.to_string());
+    }
+
+    // Prefer explicit env var; fall back to Flow personal env store.
+    let owner = std::env::var("FLOW_INSTALL_OWNER")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            crate::env::get_personal_env_var("FLOW_INSTALL_OWNER")
+                .ok()
+                .flatten()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+
+    let Some(owner) = owner else {
+        bail!(
+            "package name '{}' is missing owner (expected owner/repo).\nSet FLOW_INSTALL_OWNER (env or Flow personal env store) or pass owner/repo directly.",
+            raw
+        );
+    };
+
+    Ok(format!("{}/{}", owner, raw))
+}
+
+fn resolve_github_token() -> Result<Option<String>> {
+    for key in ["PARM_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(Some(trimmed.to_string()));
+            }
+        }
+    }
+
+    for key in [
+        "PARM_GITHUB_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "FLOW_GITHUB_TOKEN",
+    ] {
+        if let Ok(Some(value)) = crate::env::get_personal_env_var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(Some(trimmed.to_string()));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn ensure_flox_tools_env(root: &Path, packages: &[(String, FloxInstallSpec)]) -> Result<()> {

@@ -3,7 +3,7 @@ use anyhow::{Result, bail};
 use crate::{
     cli::{GhReleaseCommand, ReleaseAction, ReleaseCommand, ReleaseOpts},
     config::Config,
-    gh_release, registry,
+    gh_release, registry, release_signing,
     tasks::{self, find_task},
 };
 use std::path::Path;
@@ -45,8 +45,12 @@ fn resolve_release_task(cfg: &crate::config::Config) -> Result<String> {
 }
 
 pub fn run(cmd: ReleaseCommand) -> Result<()> {
-    if let Some(ReleaseAction::Github(cmd)) = cmd.action.clone() {
-        return gh_release::run(cmd);
+    if let Some(action) = cmd.action.clone() {
+        match action {
+            ReleaseAction::Github(cmd) => return gh_release::run(cmd),
+            ReleaseAction::Signing(cmd) => return release_signing::run(cmd),
+            _ => {}
+        }
     }
 
     let (config_path, cfg) = tasks::load_project_config(cmd.config.clone())?;
@@ -58,6 +62,7 @@ pub fn run(cmd: ReleaseCommand) -> Result<()> {
             config: config_path,
             args: opts.args,
         }),
+        Some(ReleaseAction::Signing(cmd)) => release_signing::run(cmd),
         None => run_default(&config_path, &cfg),
     }
 }

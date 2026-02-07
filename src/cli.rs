@@ -375,7 +375,7 @@ pub enum Commands {
     #[command(
         about = "Invoke gen AI agents.",
         long_about = "Run gen agents with prompts. Supports project and global agents. Special: flow (flow-aware).",
-        alias = "a"
+        alias = "ag"
     )]
     Agents(AgentsCommand),
     #[command(
@@ -389,6 +389,11 @@ pub enum Commands {
         long_about = "Comprehensive git sync: pulls from origin, merges upstream changes if configured, and pushes. One command to keep your fork in sync."
     )]
     Sync(SyncCommand),
+    #[command(
+        about = "Push current branch to a configured private mirror remote.",
+        long_about = "Pushes the current branch to a private mirror remote (typically on GitHub). When the repo is a read-only clone (origin == upstream), Flow can repoint origin to your mirror based on FLOW_PUSH_OWNER (or --owner) and push there."
+    )]
+    Push(PushCommand),
     #[command(
         about = "Jujutsu (jj) workflow helpers.",
         long_about = "Initialize jj, manage workspaces/bookmarks, and sync with git remotes in a safe, structured flow."
@@ -472,7 +477,7 @@ pub enum Commands {
     #[command(
         about = "Install a binary from the Flow registry.",
         long_about = "Download a binary from a Flow registry and install it into your PATH.",
-        alias = "i"
+        alias = "inst"
     )]
     Install(InstallCommand),
     #[command(
@@ -1787,6 +1792,34 @@ pub struct ServicesCommand {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct PushCommand {
+    /// Git remote name to push to (default: origin).
+    #[arg(long, default_value = "origin")]
+    pub remote: String,
+    /// Owner/org for the mirror repo (overrides FLOW_PUSH_OWNER / personal env store).
+    #[arg(long)]
+    pub owner: Option<String>,
+    /// Override repo name (defaults to upstream/origin repo name or folder name).
+    #[arg(long)]
+    pub repo: Option<String>,
+    /// Create the target repo if it does not exist (requires `gh` auth).
+    #[arg(long)]
+    pub create_repo: bool,
+    /// Overwrite an existing remote URL when it points elsewhere.
+    #[arg(long)]
+    pub force: bool,
+    /// Do not attempt to unlock Flow-managed SSH key before pushing.
+    #[arg(long)]
+    pub no_ssh: bool,
+    /// TTL (hours) for Flow SSH key unlock (default: 24).
+    #[arg(long, default_value = "24")]
+    pub ttl_hours: u64,
+    /// Print what would be done without changing remotes or pushing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct SshCommand {
     #[command(subcommand)]
     pub action: Option<SshAction>,
@@ -2740,6 +2773,50 @@ pub enum ReleaseAction {
     /// Manage GitHub releases.
     #[command(alias = "gh")]
     Github(GhReleaseCommand),
+    /// Manage macOS code signing and GitHub Actions secrets for releases.
+    Signing(ReleaseSigningCommand),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReleaseSigningCommand {
+    #[command(subcommand)]
+    pub action: ReleaseSigningAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ReleaseSigningAction {
+    /// Show current signing setup status (Keychain + Flow env store).
+    Status,
+    /// Store signing secrets into Flow personal env store.
+    Store(ReleaseSigningStoreOpts),
+    /// Sync signing secrets from Flow env store into GitHub Actions secrets.
+    Sync(ReleaseSigningSyncOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReleaseSigningStoreOpts {
+    /// Path to exported .p12 file (Developer ID Application certificate + key).
+    #[arg(long)]
+    pub p12: Option<PathBuf>,
+    /// Password for the .p12 (must match what the release workflow imports with).
+    #[arg(long)]
+    pub p12_password: Option<String>,
+    /// Signing identity passed to `codesign` (e.g. "Developer ID Application: ... (TEAMID)").
+    #[arg(long)]
+    pub identity: Option<String>,
+    /// Dry run: show what would be stored without writing to env store.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReleaseSigningSyncOpts {
+    /// GitHub repo in "owner/repo" form (defaults to repo inferred from current directory).
+    #[arg(long)]
+    pub repo: Option<String>,
+    /// Dry run: show what would be synced without calling `gh`.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -2854,6 +2931,8 @@ pub enum InstallBackend {
     Auto,
     Registry,
     Flox,
+    /// Install GitHub release binaries via the external `parm` tool.
+    Parm,
 }
 
 #[derive(Args, Debug, Clone)]
