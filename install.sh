@@ -219,7 +219,7 @@ get_checksum_for_file() {
 #endregion
 
 install_flow() {
-  version="${FLOW_VERSION:-latest}"
+  version="${FLOW_VERSION:-canary}"
   os="${FLOW_OS:-$(get_os)}"
   arch="${FLOW_ARCH:-$(get_arch)}"
   target="$(get_target "$os" "$arch")"
