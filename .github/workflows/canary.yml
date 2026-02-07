@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -118,4 +118,3 @@ jobs:
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
