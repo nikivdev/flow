@@ -224,6 +224,15 @@ fn fetch_release_by_tag(client: &Client, tag: &str) -> Result<GitHubRelease> {
         .send()
         .context("Failed to fetch release info from GitHub")?;
 
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        bail!(
+            "Release tag '{}' not found in {}/{}.\n\
+             If you meant canary: wait for the canary workflow to publish it (GitHub release tag: canary).",
+            tag,
+            owner,
+            repo
+        );
+    }
     if !response.status().is_success() {
         bail!(
             "GitHub API returned status {}: {}",
@@ -515,27 +524,39 @@ pub fn run(opts: UpgradeOpts) -> Result<()> {
 
     // Fetch release
     println!("Checking for updates...");
-    let release = match opts
+    let requested_version = opts
         .version
         .as_deref()
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
-    {
-        Some(version) => fetch_release_by_tag(&client, &normalize_tag(version))?,
-        None => fetch_latest_release(&client)?,
+        .map(|v| v.to_string());
+
+    let (release, latest_display, skip_version_check) = if opts.canary {
+        let release = fetch_release_by_tag(&client, "canary")?;
+        (release, "canary".to_string(), true)
+    } else if let Some(version) = requested_version.as_deref() {
+        let tag = normalize_tag(version);
+        let release = fetch_release_by_tag(&client, &tag)?;
+        (release, parse_version(&tag).to_string(), true) // allow downgrades when version is explicit
+    } else {
+        let release = fetch_latest_release(&client)?;
+        let latest = parse_version(&release.tag_name).to_string();
+        (release, latest, opts.stable)
     };
-    let latest = parse_version(&release.tag_name);
 
-    println!("Latest version: {}", latest);
-
-    // Check if upgrade is needed
-    if !opts.force && !is_newer_version(current, latest) {
-        println!("Already on the latest version.");
-        return Ok(());
-    }
+    println!("Latest version: {}", latest_display);
 
     if opts.force {
         println!("Forcing upgrade...");
+    }
+
+    // Check if upgrade is needed (stable channel only).
+    if !opts.force && !skip_version_check {
+        let latest = parse_version(&release.tag_name);
+        if !is_newer_version(current, latest) {
+            println!("Already on the latest version.");
+            return Ok(());
+        }
     }
 
     // Detect platform and find the right asset.
@@ -623,25 +644,62 @@ pub fn run(opts: UpgradeOpts) -> Result<()> {
     // Replace the executable
     println!("Installing...");
     replace_executable(&new_exe, &output_path)?;
+    ensure_sibling_symlink(&output_path).ok();
 
     // Cleanup
     fs::remove_file(&temp_tarball).ok();
     fs::remove_file(&new_exe).ok();
 
     // Update cache
-    let cache = VersionCache {
-        last_checked: VersionCache::now_timestamp(),
-        latest_version: latest.to_string(),
-        current_version: latest.to_string(),
-    };
-    cache.save().ok();
+    // Update cache (only meaningful for stable).
+    if !opts.canary {
+        let latest = parse_version(&release.tag_name);
+        let cache = VersionCache {
+            last_checked: VersionCache::now_timestamp(),
+            latest_version: latest.to_string(),
+            current_version: latest.to_string(),
+        };
+        cache.save().ok();
+    }
 
     println!();
-    println!("Successfully upgraded to flow {}", latest);
+    println!("Successfully upgraded to flow {}", latest_display);
     println!();
     println!("Release notes: {}", release.html_url);
 
     Ok(())
+}
+
+fn ensure_sibling_symlink(installed_path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = installed_path;
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let parent = installed_path.parent().context("missing parent dir")?;
+        let Some(name) = installed_path.file_name().and_then(|n| n.to_str()) else {
+            return Ok(());
+        };
+
+        // Support both `f upgrade ...` and `flow upgrade ...` by keeping a sibling symlink.
+        let (link_name, target_name) = if name == "f" {
+            ("flow", "f")
+        } else if name == "flow" {
+            ("f", "flow")
+        } else {
+            return Ok(());
+        };
+
+        let link_path = parent.join(link_name);
+        let _ = fs::remove_file(&link_path);
+        // Use relative target so moving the directory keeps the link valid.
+        symlink(target_name, &link_path).ok();
+        Ok(())
+    }
 }
 
 /// Check for upgrades in the background (non-blocking).

@@ -312,6 +312,14 @@ install_flow() {
   fi
   chmod +x "$install_path"
 
+  # Provide both `f` and `flow` as entrypoints.
+  base="$(basename "$install_path")"
+  if [ "$base" = "f" ]; then
+    ln -sf "f" "$install_dir/flow" 2>/dev/null || true
+  elif [ "$base" = "flow" ]; then
+    ln -sf "flow" "$install_dir/f" 2>/dev/null || true
+  fi
+
   # Cleanup
   rm -rf "$download_dir" "$extract_dir"
 
