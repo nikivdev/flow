@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tempfile::{Builder as TempBuilder, NamedTempFile, TempDir};
 use tracing::{debug, info};
+use regex::Regex;
 
 use crate::ai;
 use crate::cli::{CommitQueueAction, CommitQueueCommand, DaemonAction};
@@ -4453,6 +4454,14 @@ struct CommitQueueEntry {
     message: String,
     review_bookmark: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     analysis: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     review: Option<String>,
@@ -4746,6 +4755,10 @@ fn queue_commit_for_review(
         commit_sha: commit_sha.clone(),
         message: message.to_string(),
         review_bookmark,
+        pr_url: None,
+        pr_number: None,
+        pr_head: None,
+        pr_base: None,
         analysis: None,
         review: review_body,
         summary,
@@ -5066,6 +5079,275 @@ fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
         bail!("jj {} failed", args.join(" "));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn ensure_gh_available() -> Result<()> {
+    let status = Command::new("gh")
+        .args(["--version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to run `gh` (GitHub CLI)")?;
+    if !status.success() {
+        bail!("`gh` is installed but not working");
+    }
+    Ok(())
+}
+
+fn gh_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("gh")
+        .current_dir(repo_root)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run gh {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn github_repo_from_remote_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // https://github.com/owner/repo(.git)
+    if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        return Some(rest.trim_end_matches(".git").to_string());
+    }
+
+    // git@github.com:owner/repo(.git)
+    if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        return Some(rest.trim_end_matches(".git").to_string());
+    }
+
+    None
+}
+
+fn resolve_github_repo(repo_root: &Path) -> Result<String> {
+    // First try origin URL.
+    if let Ok(url) = git_capture_in(repo_root, &["remote", "get-url", "origin"]) {
+        if let Some(repo) = github_repo_from_remote_url(&url) {
+            return Ok(repo);
+        }
+    }
+
+    // Fallback: ask `gh` (works for GitHub Enterprise too if authenticated).
+    let repo = gh_capture_in(
+        repo_root,
+        &[
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ],
+    )
+    .context("failed to resolve GitHub repo for current directory")?;
+    let repo = repo.trim();
+    if repo.is_empty() {
+        bail!("unable to determine GitHub repo (origin URL not GitHub, and `gh repo view` returned empty)");
+    }
+    Ok(repo.to_string())
+}
+
+fn sanitize_ref_component(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_sep = false;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+            last_sep = false;
+        } else if !last_sep {
+            out.push('-');
+            last_sep = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn default_pr_head(entry: &CommitQueueEntry) -> String {
+    if let Some(head) = entry
+        .pr_head
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        return head.to_string();
+    }
+    if let Some(bookmark) = entry
+        .review_bookmark
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        return bookmark.to_string();
+    }
+    // Fallback if jj bookmark wasn't created for some reason.
+    format!(
+        "pr/{}-{}",
+        sanitize_ref_component(&entry.branch),
+        short_sha(&entry.commit_sha)
+    )
+}
+
+fn ensure_pr_head_pushed(repo_root: &Path, head: &str, commit_sha: &str) -> Result<()> {
+    // Prefer jj bookmarks when available.
+    if which::which("jj").is_ok() {
+        // Ensure bookmark points at the commit, then push it.
+        jj_run_in(
+            repo_root,
+            &["bookmark", "set", head, "-r", commit_sha, "--allow-backwards"],
+        )?;
+        // We often push a brand new review/pr bookmark as the PR head.
+        jj_run_in(repo_root, &["git", "push", "--bookmark", head, "--allow-new"])?;
+        return Ok(());
+    }
+
+    // Fallback: create/update a git branch and push it.
+    git_run_in(repo_root, &["branch", "-f", head, commit_sha])?;
+    git_run_in(repo_root, &["push", "-u", "origin", head])?;
+    Ok(())
+}
+
+fn extract_pr_url(text: &str) -> Option<String> {
+    let re = Regex::new(r"https://github\\.com/[^/\\s]+/[^/\\s]+/pull/\\d+").ok()?;
+    re.find(text).map(|m| m.as_str().to_string())
+}
+
+fn pr_number_from_url(url: &str) -> Option<u64> {
+    let parts: Vec<&str> = url.trim_end_matches('/').split('/').collect();
+    parts.last()?.parse().ok()
+}
+
+fn gh_find_open_pr_by_head(
+    repo_root: &Path,
+    repo: &str,
+    head: &str,
+) -> Result<Option<(u64, String)>> {
+    let out = gh_capture_in(
+        repo_root,
+        &[
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            head,
+            "--state",
+            "open",
+            "--json",
+            "number,url",
+            "-q",
+            ".[0] | [.number, .url] | @tsv",
+        ],
+    )
+    .unwrap_or_default();
+    let line = out.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = line.split_whitespace();
+    let number = parts.next().and_then(|v| v.parse::<u64>().ok());
+    let url = parts.next().map(|v| v.to_string());
+    match (number, url) {
+        (Some(n), Some(u)) => Ok(Some((n, u))),
+        _ => Ok(None),
+    }
+}
+
+fn gh_create_pr(
+    repo_root: &Path,
+    repo: &str,
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<(u64, String)> {
+    let mut args: Vec<&str> = vec![
+        "pr",
+        "create",
+        "--repo",
+        repo,
+        "--head",
+        head,
+        "--base",
+        base,
+        "--title",
+        title,
+        "--body",
+        body,
+    ];
+    if draft {
+        args.push("--draft");
+    }
+
+    let output = Command::new("gh")
+        .current_dir(repo_root)
+        .args(&args)
+        .output()
+        .with_context(|| format!("failed to run gh {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    // gh typically prints the PR URL, but some versions/configs can produce no stdout.
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if let Some(url) = extract_pr_url(&combined) {
+        let number = pr_number_from_url(&url)
+            .ok_or_else(|| anyhow::anyhow!("failed to parse PR number from URL {}", url))?;
+        return Ok((number, url));
+    }
+
+    if let Some(found) = gh_find_open_pr_by_head(repo_root, repo, head)? {
+        return Ok(found);
+    }
+
+    bail!(
+        "failed to determine PR URL after creation (gh output had no URL and PR lookup by head returned empty)"
+    );
+}
+
+fn open_in_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("open").arg(url).status()?;
+        if !status.success() {
+            bail!("failed to open browser");
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let status = Command::new("xdg-open").arg(url).status()?;
+        if !status.success() {
+            bail!("failed to open browser");
+        }
+        Ok(())
+    }
+}
+
+fn commit_message_title_body(message: &str) -> (String, String) {
+    let mut lines = message.lines();
+    let title = lines.next().unwrap_or("no title").trim().to_string();
+    let rest = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    (title, rest)
 }
 
 pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
@@ -5446,6 +5728,88 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
             remove_commit_queue_entry_by_entry(&repo_root, &entry)?;
             println!("Dropped queued commit {}", short_sha(&entry.commit_sha));
+        }
+        CommitQueueAction::PrCreate {
+            hash,
+            base,
+            draft,
+            open,
+        } => {
+            ensure_gh_available()?;
+            let repo = resolve_github_repo(&repo_root)?;
+
+            let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
+            let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+
+            let head = default_pr_head(&entry);
+            ensure_pr_head_pushed(&repo_root, &head, &entry.commit_sha)?;
+
+            let (number, url) = if let Some(found) = gh_find_open_pr_by_head(&repo_root, &repo, &head)? {
+                found
+            } else {
+                let (title, body_rest) = commit_message_title_body(&entry.message);
+                let mut body = String::new();
+                if !body_rest.is_empty() {
+                    body.push_str(&body_rest);
+                    body.push_str("\n\n");
+                }
+                if let Some(summary) = entry
+                    .summary
+                    .as_deref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    body.push_str("Review summary:\n");
+                    body.push_str(summary);
+                    body.push('\n');
+                }
+                gh_create_pr(&repo_root, &repo, &head, &base, &title, body.trim(), draft)?
+            };
+
+            entry.pr_number = Some(number);
+            entry.pr_url = Some(url.clone());
+            entry.pr_head = Some(head.clone());
+            entry.pr_base = Some(base.clone());
+            let _ = write_commit_queue_entry(&repo_root, &entry);
+
+            println!("PR: {}", url);
+            if open {
+                let _ = open_in_browser(&url);
+            }
+        }
+        CommitQueueAction::PrOpen { hash, base } => {
+            ensure_gh_available()?;
+            let repo = resolve_github_repo(&repo_root)?;
+
+            let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
+            let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+
+            let head = default_pr_head(&entry);
+            let url = if let Some(url) = entry
+                .pr_url
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                url.to_string()
+            } else if let Some((_n, url)) = gh_find_open_pr_by_head(&repo_root, &repo, &head)? {
+                url
+            } else {
+                // Create it if missing (as draft).
+                ensure_pr_head_pushed(&repo_root, &head, &entry.commit_sha)?;
+                let (title, body_rest) = commit_message_title_body(&entry.message);
+                let (number, url) =
+                    gh_create_pr(&repo_root, &repo, &head, &base, &title, body_rest.trim(), true)?;
+                entry.pr_number = Some(number);
+                entry.pr_url = Some(url.clone());
+                entry.pr_head = Some(head.clone());
+                entry.pr_base = Some(base.clone());
+                let _ = write_commit_queue_entry(&repo_root, &entry);
+                url
+            };
+
+            println!("{}", url);
+            let _ = open_in_browser(&url);
         }
     }
 
