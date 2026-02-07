@@ -18,6 +18,11 @@ env:
 
 jobs:
   build:
+    env:
+      # Don't reference `secrets.*` in `if:` expressions; GitHub rejects that at workflow-parse time.
+      MACOS_SIGN_P12_B64: ${{ secrets.MACOS_SIGN_P12_B64 }}
+      MACOS_SIGN_P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
     strategy:
       matrix:
         include:
@@ -54,16 +59,14 @@ jobs:
           cargo build --release --target ${{ matrix.target }}
 
       - name: Import code-signing certificates (macOS)
-        if: runner.os == 'macOS' && secrets.MACOS_SIGN_P12_B64 != ''
+        if: runner.os == 'macOS' && env.MACOS_SIGN_P12_B64 != ''
         uses: apple-actions/import-codesign-certs@v3
         with:
-          p12-file-base64: ${{ secrets.MACOS_SIGN_P12_B64 }}
-          p12-password: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+          p12-file-base64: ${{ env.MACOS_SIGN_P12_B64 }}
+          p12-password: ${{ env.MACOS_SIGN_P12_PASSWORD }}
 
       - name: Codesign (macOS)
-        if: runner.os == 'macOS' && secrets.MACOS_SIGN_P12_B64 != '' && secrets.MACOS_SIGN_IDENTITY != ''
-        env:
-          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        if: runner.os == 'macOS' && env.MACOS_SIGN_P12_B64 != '' && env.MACOS_SIGN_IDENTITY != ''
         run: |
           BIN="target/${{ matrix.target }}/release/f"
           codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" "$BIN"
