@@ -6,13 +6,13 @@ use clap::{Parser, error::ErrorKind};
 use flowd::{
     agents, ai, archive, auth, changes,
     cli::{
-        Cli, Commands, InstallAction, ProxyAction, ProxyCommand, ReviewAction, RerunOpts,
+        Cli, Commands, InstallAction, ProxyAction, ProxyCommand, RerunOpts, ReviewAction,
         ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
     },
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fish_install, fish_trace,
-    fix, fixup, git_guard, hash, health, help_search, history, hive, home, hub, info,
-    init, init_tracing, install, jj, latest, log_server, macos, notify, otp, palette, parallel,
-    processes, projects, proxy, publish, registry, release, repos, services, setup, skills,
+    fix, fixup, git_guard, hash, health, help_search, history, hive, home, hub, info, init,
+    init_tracing, install, jj, latest, log_server, macos, notify, otp, palette, parallel,
+    processes, projects, proxy, publish, push, registry, release, repos, services, setup, skills,
     ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade,
     upstream, web,
 };
@@ -237,13 +237,11 @@ fn main() -> Result<()> {
         Some(Commands::CommitQueue(cmd)) => {
             commit::run_commit_queue(cmd)?;
         }
-        Some(Commands::Review(cmd)) => {
-            match cmd.action {
-                Some(ReviewAction::Latest) | None => {
-                    commit::open_latest_queue_review()?;
-                }
+        Some(Commands::Review(cmd)) => match cmd.action {
+            Some(ReviewAction::Latest) | None => {
+                commit::open_latest_queue_review()?;
             }
-        }
+        },
         Some(Commands::GitRepair(opts)) => {
             git_guard::run_git_repair(opts)?;
         }
@@ -407,6 +405,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Sync(cmd)) => {
             sync::run(cmd)?;
+        }
+        Some(Commands::Push(cmd)) => {
+            push::run(cmd)?;
         }
         Some(Commands::Info) => {
             info::run()?;
@@ -692,7 +693,10 @@ fn proxy_command(cmd: ProxyCommand) -> Result<()> {
             println!("To add a proxy, edit flow.toml:");
             println!();
             println!("[[proxies]]");
-            println!("name = \"{}\"", opts.name.unwrap_or_else(|| "myservice".to_string()));
+            println!(
+                "name = \"{}\"",
+                opts.name.unwrap_or_else(|| "myservice".to_string())
+            );
             println!("target = \"{}\"", opts.target);
             if let Some(host) = opts.host {
                 println!("host = \"{}\"", host);
@@ -707,7 +711,10 @@ fn proxy_command(cmd: ProxyCommand) -> Result<()> {
                 println!("No proxy targets configured.");
                 println!("Add [[proxies]] sections to flow.toml");
             } else {
-                println!("{:<15} {:<25} {:<15} {:<15}", "NAME", "TARGET", "HOST", "PATH");
+                println!(
+                    "{:<15} {:<25} {:<15} {:<15}",
+                    "NAME", "TARGET", "HOST", "PATH"
+                );
                 println!("{}", "-".repeat(70));
                 for p in &config.proxies {
                     println!(

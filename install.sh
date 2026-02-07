@@ -67,6 +67,52 @@ shasum_bin() {
     echo ""
   fi
 }
+
+validate_repo() {
+  repo="$1"
+  if [ -z "${repo:-}" ]; then
+    error "FLOW_UPGRADE_REPO is empty"
+  fi
+
+  owner="${repo%/*}"
+  name="${repo#*/}"
+  if [ "$owner" = "$repo" ] || [ "$name" = "$repo" ]; then
+    error "invalid repo '${repo}' (expected owner/repo)"
+  fi
+  case "$owner" in */*) error "invalid repo '${repo}' (expected owner/repo)" ;; esac
+  case "$name" in */*) error "invalid repo '${repo}' (expected owner/repo)" ;; esac
+
+  case "$owner" in *[!A-Za-z0-9._-]*)
+    error "invalid repo owner '${owner}' (allowed: A-Z a-z 0-9 . _ -)"
+    ;;
+  esac
+  case "$name" in *[!A-Za-z0-9._-]*)
+    error "invalid repo name '${name}' (allowed: A-Z a-z 0-9 . _ -)"
+    ;;
+  esac
+}
+
+validate_token() {
+  token="$1"
+  case "$token" in
+    *[!A-Za-z0-9._-]*)
+      error "invalid GitHub token characters (refusing to use it)"
+      ;;
+  esac
+}
+
+validate_version() {
+  version="$1"
+  case "$version" in
+    v*) tag="${version#v}" ;;
+    *) tag="$version" ;;
+  esac
+  case "$tag" in
+    ""|*[!0-9A-Za-z._-]*)
+      error "invalid release version '${version}'"
+      ;;
+  esac
+}
 #endregion
 
 #region download helpers
@@ -75,7 +121,11 @@ download_file() {
   file="$2"
   if command -v curl >/dev/null 2>&1; then
     debug ">" curl -fsSL -o "$file" "$url"
-    curl -fsSL -o "$file" "$url"
+    if [ "${FLOW_DEBUG-}" = "true" ] || [ "${FLOW_DEBUG-}" = "1" ]; then
+      curl -fsSL -o "$file" "$url"
+    else
+      curl -fsSL -o "$file" "$url" 2>/dev/null
+    fi
   elif command -v wget >/dev/null 2>&1; then
     debug ">" wget -qO "$file" "$url"
     wget -qO "$file" "$url"
@@ -87,7 +137,20 @@ download_file() {
 fetch_url() {
   url="$1"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url"
+    case "$url" in
+      https://api.github.com/*)
+        token="${GITHUB_TOKEN:-${GH_TOKEN:-${FLOW_GITHUB_TOKEN:-}}}"
+        if [ -n "${token:-}" ]; then
+          validate_token "$token"
+          curl -fsSL -H "Authorization: Bearer $token" "$url"
+        else
+          curl -fsSL "$url"
+        fi
+        ;;
+      *)
+        curl -fsSL "$url"
+        ;;
+    esac
   elif command -v wget >/dev/null 2>&1; then
     wget -qO- "$url"
   else
@@ -96,16 +159,48 @@ fetch_url() {
 }
 
 get_latest_version() {
-  url="https://api.github.com/repos/nikitavoloboev/flow/releases/latest"
-  fetch_url "$url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+  repo="${FLOW_UPGRADE_REPO:-}"
+  if [ -z "${repo:-}" ] && [ -n "${FLOW_GITHUB_OWNER:-}" ] && [ -n "${FLOW_GITHUB_REPO:-}" ]; then
+    repo="${FLOW_GITHUB_OWNER}/${FLOW_GITHUB_REPO}"
+  fi
+  repo="${repo:-nikivdev/flow}"
+  validate_repo "$repo"
+
+  url="https://api.github.com/repos/${repo}/releases/latest"
+  version="$(fetch_url "$url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')"
+  validate_version "$version"
+  echo "$version"
 }
 
 get_checksum() {
   version="$1"
   target="$2"
-  url="https://github.com/nikitavoloboev/flow/releases/download/${version}/checksums.txt"
+  repo="${FLOW_UPGRADE_REPO:-}"
+  if [ -z "${repo:-}" ] && [ -n "${FLOW_GITHUB_OWNER:-}" ] && [ -n "${FLOW_GITHUB_REPO:-}" ]; then
+    repo="${FLOW_GITHUB_OWNER}/${FLOW_GITHUB_REPO}"
+  fi
+  repo="${repo:-nikivdev/flow}"
+  validate_repo "$repo"
+
+  url="https://github.com/${repo}/releases/download/${version}/checksums.txt"
   checksums="$(fetch_url "$url" 2>/dev/null)" || return 1
   echo "$checksums" | grep "flow-${target}.tar.gz" | awk '{print $1}'
+}
+
+get_checksum_for_file() {
+  version="$1"
+  file="$2"
+  repo="${FLOW_UPGRADE_REPO:-}"
+  if [ -z "${repo:-}" ] && [ -n "${FLOW_GITHUB_OWNER:-}" ] && [ -n "${FLOW_GITHUB_REPO:-}" ]; then
+    repo="${FLOW_GITHUB_OWNER}/${FLOW_GITHUB_REPO}"
+  fi
+  repo="${repo:-nikivdev/flow}"
+  validate_repo "$repo"
+
+  url="https://github.com/${repo}/releases/download/${version}/checksums.txt"
+  checksums="$(fetch_url "$url" 2>/dev/null)" || return 1
+  # checksums.txt format: "<sha256> <filename>"
+  echo "$checksums" | awk -v f="$file" '$2==f {print $1}'
 }
 #endregion
 
@@ -128,14 +223,33 @@ install_flow() {
       error "failed to fetch latest version"
     fi
   fi
+  validate_version "$version"
   info "flow: version: $version"
 
   # URLs - try CDN first, fallback to GitHub
   cdn_url="https://cdn.myflow.sh/${version}/flow-${target}.tar.gz"
-  github_url="https://github.com/nikitavoloboev/flow/releases/download/${version}/flow-${target}.tar.gz"
+  repo="${FLOW_UPGRADE_REPO:-}"
+  if [ -z "${repo:-}" ] && [ -n "${FLOW_GITHUB_OWNER:-}" ] && [ -n "${FLOW_GITHUB_REPO:-}" ]; then
+    repo="${FLOW_GITHUB_OWNER}/${FLOW_GITHUB_REPO}"
+  fi
+  repo="${repo:-nikivdev/flow}"
+  validate_repo "$repo"
+  github_url="https://github.com/${repo}/releases/download/${version}/flow-${target}.tar.gz"
 
   download_dir="$(mktemp -d)"
   tarball="$download_dir/flow.tar.gz"
+
+  asset_file="flow-${target}.tar.gz"
+  legacy_os="$os"
+  if [ "$legacy_os" = "macos" ]; then
+    legacy_os="darwin"
+  fi
+  legacy_arch="amd64"
+  if [ "$arch" = "arm64" ]; then
+    legacy_arch="arm64"
+  fi
+  legacy_file="flow_${version}_${legacy_os}_${legacy_arch}.tar.gz"
+  legacy_url="https://github.com/${repo}/releases/download/${version}/${legacy_file}"
 
   # Try CDN first (faster)
   info "flow: downloading..."
@@ -143,13 +257,27 @@ install_flow() {
     debug "flow: downloaded from CDN"
   else
     debug "flow: trying GitHub..."
-    download_file "$github_url" "$tarball" || error "download failed"
+    if download_file "$github_url" "$tarball"; then
+      asset_file="flow-${target}.tar.gz"
+    elif download_file "$legacy_url" "$tarball"; then
+      asset_file="$legacy_file"
+    else
+      error "download failed"
+    fi
   fi
 
   # Verify checksum if available
   shasum="$(shasum_bin)"
   if [ -n "$shasum" ]; then
-    expected="$(get_checksum "$version" "$target" 2>/dev/null)" || true
+    expected="$(get_checksum_for_file "$version" "$asset_file" 2>/dev/null)" || true
+    if [ -z "${expected:-}" ]; then
+      # Back-compat: allow checksums.txt to contain either naming scheme.
+      if [ "$asset_file" = "$legacy_file" ]; then
+        expected="$(get_checksum_for_file "$version" "flow-${target}.tar.gz" 2>/dev/null)" || true
+      elif [ "$asset_file" = "flow-${target}.tar.gz" ]; then
+        expected="$(get_checksum_for_file "$version" "$legacy_file" 2>/dev/null)" || true
+      fi
+    fi
     if [ -n "${expected:-}" ]; then
       debug "flow: verifying checksum..."
       actual="$($shasum "$tarball" | awk '{print $1}')"
@@ -158,6 +286,8 @@ install_flow() {
         error "checksum mismatch"
       fi
       info "flow: checksum verified"
+    else
+      info "flow: warning: checksum not verified (checksums.txt missing or entry not found)"
     fi
   fi
 

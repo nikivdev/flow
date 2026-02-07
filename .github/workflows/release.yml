@@ -48,6 +48,22 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.target }}
 
+      - name: Import code-signing certificates (macOS)
+        if: runner.os == 'macOS' && secrets.MACOS_SIGN_P12_B64 != ''
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.MACOS_SIGN_P12_B64 }}
+          p12-password: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+
+      - name: Codesign (macOS)
+        if: runner.os == 'macOS' && secrets.MACOS_SIGN_P12_B64 != '' && secrets.MACOS_SIGN_IDENTITY != ''
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          BIN="target/${{ matrix.target }}/release/f"
+          codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" "$BIN"
+          codesign -vvv --strict "$BIN"
+
       - name: Package
         run: |
           mkdir -p dist

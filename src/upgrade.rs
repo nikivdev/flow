@@ -15,17 +15,36 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::cli::UpgradeOpts;
 
-const GITHUB_OWNER: &str = "nikivdev";
-const GITHUB_REPO: &str = "flow";
 const UPGRADE_CHECK_INTERVAL_HOURS: u64 = 24;
 
-fn upgrade_repo() -> (String, String) {
-    let owner = env::var("FLOW_GITHUB_OWNER").unwrap_or_else(|_| GITHUB_OWNER.to_string());
-    let repo = env::var("FLOW_GITHUB_REPO").unwrap_or_else(|_| GITHUB_REPO.to_string());
-    (owner, repo)
+fn upgrade_repo() -> Result<(String, String)> {
+    if let Ok(value) = env::var("FLOW_UPGRADE_REPO") {
+        if let Some((owner, repo)) = value.trim().split_once('/') {
+            if !owner.trim().is_empty() && !repo.trim().is_empty() {
+                return Ok((owner.trim().to_string(), repo.trim().to_string()));
+            }
+        }
+    }
+
+    if let (Ok(owner), Ok(repo)) = (env::var("FLOW_GITHUB_OWNER"), env::var("FLOW_GITHUB_REPO")) {
+        let owner = owner.trim();
+        let repo = repo.trim();
+        if !owner.is_empty() && !repo.is_empty() {
+            return Ok((owner.to_string(), repo.to_string()));
+        }
+    }
+
+    if let Some((owner, repo)) = parse_github_owner_repo(env!("CARGO_PKG_REPOSITORY")) {
+        return Ok((owner, repo));
+    }
+
+    bail!(
+        "upgrade source repo not configured.\nSet FLOW_UPGRADE_REPO=owner/repo (recommended) or FLOW_GITHUB_OWNER/FLOW_GITHUB_REPO."
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,15 +124,36 @@ pub fn current_version() -> &'static str {
 }
 
 /// Detect the current platform (os, arch).
-fn detect_platform() -> Result<(String, String)> {
+fn detect_release_target() -> Result<&'static str> {
+    if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "x86_64") {
+            return Ok("x86_64-apple-darwin");
+        }
+        if cfg!(target_arch = "aarch64") {
+            return Ok("aarch64-apple-darwin");
+        }
+        bail!("Unsupported macOS architecture");
+    }
+    if cfg!(target_os = "linux") {
+        if cfg!(target_arch = "x86_64") {
+            return Ok("x86_64-unknown-linux-gnu");
+        }
+        if cfg!(target_arch = "aarch64") {
+            return Ok("aarch64-unknown-linux-gnu");
+        }
+        bail!("Unsupported Linux architecture");
+    }
+
+    bail!("Unsupported operating system for self-upgrade (only macOS/Linux supported)");
+}
+
+fn detect_legacy_platform() -> Result<(&'static str, &'static str)> {
     let os = if cfg!(target_os = "macos") {
         "darwin"
     } else if cfg!(target_os = "linux") {
         "linux"
-    } else if cfg!(target_os = "windows") {
-        "windows"
     } else {
-        bail!("Unsupported operating system");
+        bail!("Unsupported operating system for self-upgrade (only macOS/Linux supported)");
     };
 
     let arch = if cfg!(target_arch = "aarch64") {
@@ -124,22 +164,63 @@ fn detect_platform() -> Result<(String, String)> {
         bail!("Unsupported architecture");
     };
 
-    Ok((os.to_string(), arch.to_string()))
+    Ok((os, arch))
 }
 
 /// Fetch the latest release info from GitHub.
 fn fetch_latest_release(client: &Client) -> Result<GitHubRelease> {
-    let (owner, repo) = upgrade_repo();
+    let (owner, repo) = upgrade_repo()?;
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases/latest",
         owner, repo
     );
 
-    let response = client
+    let mut request = client
         .get(&url)
         .header("User-Agent", format!("flow/{}", current_version()))
         .header("Accept", "application/vnd.github.v3+json")
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(30));
+
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .send()
+        .context("Failed to fetch release info from GitHub")?;
+
+    if !response.status().is_success() {
+        bail!(
+            "GitHub API returned status {}: {}",
+            response.status(),
+            response.text().unwrap_or_default()
+        );
+    }
+
+    response
+        .json::<GitHubRelease>()
+        .context("Failed to parse GitHub release response")
+}
+
+/// Fetch a release by tag (e.g. "v0.1.0") from GitHub.
+fn fetch_release_by_tag(client: &Client, tag: &str) -> Result<GitHubRelease> {
+    let (owner, repo) = upgrade_repo()?;
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/releases/tags/{}",
+        owner, repo, tag
+    );
+
+    let mut request = client
+        .get(&url)
+        .header("User-Agent", format!("flow/{}", current_version()))
+        .header("Accept", "application/vnd.github.v3+json")
+        .timeout(Duration::from_secs(30));
+
+    if let Some(token) = github_token() {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
         .send()
         .context("Failed to fetch release info from GitHub")?;
 
@@ -211,6 +292,70 @@ fn download_with_progress(client: &Client, url: &str, dest: &Path) -> Result<()>
 
     file.write_all(&bytes)?;
     Ok(())
+}
+
+fn github_token() -> Option<String> {
+    for key in ["GITHUB_TOKEN", "GH_TOKEN", "FLOW_GITHUB_TOKEN"] {
+        if let Ok(value) = env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let rest = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest
+    } else {
+        return None;
+    };
+
+    let rest = rest.trim_end_matches(".git");
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+fn normalize_tag(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.starts_with('v') {
+        trimmed.to_string()
+    } else {
+        format!("v{}", trimmed)
+    }
+}
+
+fn parse_sha256_from_checksums(checksums: &str, filename: &str) -> Option<String> {
+    for line in checksums.lines() {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let file = parts.next()?;
+        if file.trim() == filename {
+            return Some(hash.trim().to_string());
+        }
+    }
+    None
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Extract tarball and find the binary.
@@ -365,9 +510,20 @@ pub fn run(opts: UpgradeOpts) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    // Fetch latest release
+    let (owner, repo) = upgrade_repo()?;
+    println!("Upgrade source: {}/{}", owner, repo);
+
+    // Fetch release
     println!("Checking for updates...");
-    let release = fetch_latest_release(&client)?;
+    let release = match opts
+        .version
+        .as_deref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        Some(version) => fetch_release_by_tag(&client, &normalize_tag(version))?,
+        None => fetch_latest_release(&client)?,
+    };
     let latest = parse_version(&release.tag_name);
 
     println!("Latest version: {}", latest);
@@ -382,35 +538,77 @@ pub fn run(opts: UpgradeOpts) -> Result<()> {
         println!("Forcing upgrade...");
     }
 
-    // Detect platform and find the right asset
-    let (os, arch) = detect_platform()?;
-    let asset_name = format!("flow_{}_{}_{}.", release.tag_name, os, arch);
+    // Detect platform and find the right asset.
+    // Preferred format (new): `flow-<target>.tar.gz` (where <target> is the rust target triple).
+    // Legacy format (old): `flow_<tag>_<os>_<arch>.tar.gz`.
+    let target = detect_release_target()?;
+    let asset_name = format!("flow-{}.tar.gz", target);
+    let (legacy_os, legacy_arch) = detect_legacy_platform()?;
+    let legacy_asset_name =
+        format!("flow_{}_{}_{}.tar.gz", release.tag_name, legacy_os, legacy_arch);
 
-    let asset = release
+    let tarball_asset = release
         .assets
         .iter()
-        .find(|a| a.name.starts_with(&asset_name) || a.name.contains(&format!("{}_{}", os, arch)))
+        .find(|a| a.name == asset_name)
+        .or_else(|| release.assets.iter().find(|a| a.name == legacy_asset_name))
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No release asset found for {}/{}. Available: {:?}",
-                os,
-                arch,
+                "No release asset found for {}. Available: {:?}",
+                target,
                 release.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
             )
         })?;
 
-    println!("Downloading {}...", asset.name);
+    let checksums_asset = release.assets.iter().find(|a| a.name == "checksums.txt");
+
+    println!("Downloading {}...", tarball_asset.name);
 
     // Dry run mode
     if opts.dry_run {
-        println!("\n[dry-run] Would download: {}", asset.browser_download_url);
+        println!(
+            "\n[dry-run] Would download: {}",
+            tarball_asset.browser_download_url
+        );
+        if let Some(asset) = checksums_asset {
+            println!("[dry-run] Would download: {}", asset.browser_download_url);
+        }
         println!("[dry-run] Would install to: {}", output_path.display());
         return Ok(());
     }
 
     // Download the release
     let temp_tarball = env::temp_dir().join("flow_upgrade.tar.gz");
-    download_with_progress(&client, &asset.browser_download_url, &temp_tarball)?;
+    download_with_progress(&client, &tarball_asset.browser_download_url, &temp_tarball)?;
+
+    if let Some(asset) = checksums_asset {
+        let temp_checksums = env::temp_dir().join("flow_upgrade_checksums.txt");
+        download_with_progress(&client, &asset.browser_download_url, &temp_checksums)?;
+        let checksums = fs::read_to_string(&temp_checksums)
+            .context("failed to read downloaded checksums.txt")?;
+        if let Some(expected) = parse_sha256_from_checksums(&checksums, &tarball_asset.name) {
+            let actual = sha256_file(&temp_tarball)?;
+            if expected.to_lowercase() != actual.to_lowercase() {
+                bail!(
+                    "checksum mismatch for {} (expected {}, got {})",
+                    tarball_asset.name,
+                    expected,
+                    actual
+                );
+            }
+            println!("Checksum verified.");
+        } else {
+            println!(
+                "Warning: checksums.txt does not contain {}; skipping checksum verification.",
+                tarball_asset.name
+            );
+        }
+        let _ = fs::remove_file(&temp_checksums);
+    } else {
+        println!(
+            "Warning: checksums.txt not found in release assets; skipping checksum verification."
+        );
+    }
 
     // Extract and find the binary
     println!("Extracting...");

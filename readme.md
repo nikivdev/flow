@@ -2,11 +2,59 @@
 
 > Everything you need to move your project faster
 
-<!-- todo: curl install, full automate -->
+## Install (Public)
 
-Install this CLI (currently by cloning repo and buliding rust binary).
+Install the latest release (macOS/Linux):
 
-## Local build (macOS, Flow + Jazz/Groove)
+```sh
+curl -fsSL https://myflow.sh/install.sh | sh
+# or:
+curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/install.sh | sh
+```
+
+Then run `f --version` and `f doctor`.
+
+## Upgrade
+
+Upgrade to the latest release:
+
+```sh
+f upgrade
+```
+
+If you fork Flow (or publish releases under a different repo), set:
+
+- `FLOW_UPGRADE_REPO=owner/repo`
+- `FLOW_GITHUB_TOKEN` (or `GITHUB_TOKEN` / `GH_TOKEN`) to avoid GitHub API rate limits
+
+## Supported Platforms
+
+Release artifacts are built for:
+
+- macOS: `arm64`, `x86_64`
+- Linux (glibc): `arm64`, `x86_64`
+
+## Release Signing (Maintainers)
+
+The GitHub Actions release workflow can code-sign macOS binaries if these repository
+secrets are configured:
+
+- `MACOS_SIGN_P12_B64`: base64-encoded `.p12` certificate
+- `MACOS_SIGN_P12_PASSWORD`: password for the `.p12`
+- `MACOS_SIGN_IDENTITY`: signing identity (e.g. `Developer ID Application: ... (TEAMID)`)
+
+Flow can store these values in the Flow personal env store and sync them to GitHub:
+
+```sh
+f release signing status
+f release signing store --p12 /path/to/cert.p12 --p12-password '...' --identity 'Developer ID Application: ... (TEAMID)'
+f release signing sync
+```
+
+Notarization is optional for a CLI distributed via `curl | sh` (downloads via `curl`
+typically do not set the quarantine attribute), but can be added later if desired.
+
+## Local Build (macOS, Flow + Jazz/Groove)
 
 If you want a local dev build that uses the Jazz/Groove crates from a local
 checkout, use the macOS installer script:
@@ -59,7 +107,7 @@ For available features, see [docs](docs) or feed `f --help` to AI.
 
 ## Examples
 
-All projects of [Nikita](https://github.com/nikivdev) run on flow. Like [rust](https://github.com/nikivdev/rust) & flow itself.
+Projects run on flow, including flow itself.
 
 ## Contributing
 
