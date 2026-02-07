@@ -4,6 +4,10 @@ set -eu
 # Flow CLI installer
 # Usage: curl -fsSL https://myflow.sh/install.sh | sh
 
+# Security posture:
+# - We require SHA-256 verification by default.
+# - Set FLOW_INSTALL_INSECURE=1 (or true/yes) to bypass verification.
+
 #region logging
 if [ "${FLOW_DEBUG-}" = "true" ] || [ "${FLOW_DEBUG-}" = "1" ]; then
   debug() { echo "$@" >&2; }
@@ -20,6 +24,13 @@ fi
 error() {
   echo "error: $@" >&2
   exit 1
+}
+
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|y|Y) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 #endregion
 
@@ -94,6 +105,9 @@ validate_repo() {
 
 validate_token() {
   token="$1"
+  if [ -z "${token:-}" ]; then
+    error "GitHub token is empty"
+  fi
   case "$token" in
     *[!A-Za-z0-9._-]*)
       error "invalid GitHub token characters (refusing to use it)"
@@ -122,9 +136,9 @@ download_file() {
   if command -v curl >/dev/null 2>&1; then
     debug ">" curl -fsSL -o "$file" "$url"
     if [ "${FLOW_DEBUG-}" = "true" ] || [ "${FLOW_DEBUG-}" = "1" ]; then
-      curl -fsSL -o "$file" "$url"
+      curl -fsSL --proto '=https' --tlsv1.2 -o "$file" "$url"
     else
-      curl -fsSL -o "$file" "$url" 2>/dev/null
+      curl -fsSL --proto '=https' --tlsv1.2 -o "$file" "$url" 2>/dev/null
     fi
   elif command -v wget >/dev/null 2>&1; then
     debug ">" wget -qO "$file" "$url"
@@ -142,13 +156,13 @@ fetch_url() {
         token="${GITHUB_TOKEN:-${GH_TOKEN:-${FLOW_GITHUB_TOKEN:-}}}"
         if [ -n "${token:-}" ]; then
           validate_token "$token"
-          curl -fsSL -H "Authorization: Bearer $token" "$url"
+          curl -fsSL --proto '=https' --tlsv1.2 -H "Authorization: Bearer ${token}" "$url"
         else
-          curl -fsSL "$url"
+          curl -fsSL --proto '=https' --tlsv1.2 "$url"
         fi
         ;;
       *)
-        curl -fsSL "$url"
+        curl -fsSL --proto '=https' --tlsv1.2 "$url"
         ;;
     esac
   elif command -v wget >/dev/null 2>&1; then
@@ -238,6 +252,7 @@ install_flow() {
 
   download_dir="$(mktemp -d)"
   tarball="$download_dir/flow.tar.gz"
+  download_source="unknown"
 
   asset_file="flow-${target}.tar.gz"
   legacy_os="$os"
@@ -255,12 +270,15 @@ install_flow() {
   info "flow: downloading..."
   if command -v curl >/dev/null 2>&1 && curl -fsSL -o "$tarball" "$cdn_url" 2>/dev/null; then
     debug "flow: downloaded from CDN"
+    download_source="cdn"
   else
     debug "flow: trying GitHub..."
     if download_file "$github_url" "$tarball"; then
       asset_file="flow-${target}.tar.gz"
+      download_source="github"
     elif download_file "$legacy_url" "$tarball"; then
       asset_file="$legacy_file"
+      download_source="legacy"
     else
       error "download failed"
     fi
@@ -278,6 +296,17 @@ install_flow() {
         expected="$(get_checksum_for_file "$version" "$legacy_file" 2>/dev/null)" || true
       fi
     fi
+    if [ -z "${expected:-}" ]; then
+      if is_truthy "${FLOW_INSTALL_INSECURE-}"; then
+        info "flow: warning: checksum not verified (FLOW_INSTALL_INSECURE=1)"
+      elif [ "${download_source:-}" = "cdn" ]; then
+        rm -rf "$download_dir" "$extract_dir" 2>/dev/null || true
+        error "checksum verification failed for CDN download (checksums.txt missing or entry not found). Refusing to install.\nSet FLOW_INSTALL_INSECURE=1 to bypass (not recommended)."
+      else
+        info "flow: warning: checksum not verified (checksums.txt missing or entry not found; legacy release?)"
+        expected=""
+      fi
+    fi
     if [ -n "${expected:-}" ]; then
       debug "flow: verifying checksum..."
       actual="$($shasum "$tarball" | awk '{print $1}')"
@@ -286,8 +315,12 @@ install_flow() {
         error "checksum mismatch"
       fi
       info "flow: checksum verified"
+    fi
+  else
+    if is_truthy "${FLOW_INSTALL_INSECURE-}"; then
+      info "flow: warning: sha256 tool not found, skipping checksum verification (FLOW_INSTALL_INSECURE=1)"
     else
-      info "flow: warning: checksum not verified (checksums.txt missing or entry not found)"
+      error "sha256 tool not found (need shasum or sha256sum). Refusing to install.\nSet FLOW_INSTALL_INSECURE=1 to bypass (not recommended)."
     fi
   fi
 

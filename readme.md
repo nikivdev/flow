@@ -14,6 +14,10 @@ curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/install.sh | sh
 
 Then run `f --version` and `f doctor`.
 
+The installer verifies SHA-256 checksums when available. If you are installing a legacy release
+that doesn't ship `checksums.txt`, it will warn and continue (GitHub download only). To bypass
+verification explicitly (not recommended), set `FLOW_INSTALL_INSECURE=1`.
+
 ## Upgrade
 
 Upgrade to the latest release:
@@ -39,6 +43,9 @@ If you fork Flow (or publish releases under a different repo), set:
 - `FLOW_UPGRADE_REPO=owner/repo`
 - `FLOW_GITHUB_TOKEN` (or `GITHUB_TOKEN` / `GH_TOKEN`) to avoid GitHub API rate limits
 
+If you are upgrading to a very old tag that doesn't ship `checksums.txt`, you can force bypassing
+checksum verification with `FLOW_UPGRADE_INSECURE=1` (not recommended).
+
 ## Supported Platforms
 
 Release artifacts are built for:
@@ -62,6 +69,9 @@ f release signing status
 f release signing store --p12 /path/to/cert.p12 --p12-password '...' --identity 'Developer ID Application: ... (TEAMID)'
 f release signing sync
 ```
+
+Note: Apple provides a `.cer` download, but CI signing needs a `.p12` that includes the private key.
+Export the "Developer ID Application: ..." identity as `.p12` from Keychain Access.
 
 Notarization is optional for a CLI distributed via `curl | sh` (downloads via `curl`
 typically do not set the quarantine attribute), but can be added later if desired.
