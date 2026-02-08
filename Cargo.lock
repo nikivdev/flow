@@ -3636,11 +3636,3 @@ dependencies = [
  "quote",
  "syn",
 ]
-
-[[patch.unused]]
-name = "groove"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "groove-rocksdb"
-version = "0.1.0"

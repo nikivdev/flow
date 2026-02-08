@@ -1366,12 +1366,24 @@ pub enum CommitQueueAction {
         /// Push even if the commit is not at HEAD.
         #[arg(long, short = 'f')]
         force: bool,
+        /// Allow pushing even if the queued commit has review issues recorded.
+        #[arg(long)]
+        allow_issues: bool,
+        /// Allow pushing even if the review timed out or is missing.
+        #[arg(long)]
+        allow_unreviewed: bool,
     },
     /// Approve all queued commits on the current branch (push once).
     ApproveAll {
         /// Push even if the branch is behind its remote.
         #[arg(long, short = 'f')]
         force: bool,
+        /// Allow pushing even if some queued commits have review issues recorded.
+        #[arg(long)]
+        allow_issues: bool,
+        /// Allow pushing even if some queued commits have review timed out / missing.
+        #[arg(long)]
+        allow_unreviewed: bool,
     },
     /// Remove a commit from the queue without pushing.
     Drop {

@@ -30,6 +30,7 @@ use crate::hub;
 use crate::notify;
 use crate::setup;
 use crate::supervisor;
+use crate::todo;
 use crate::undo;
 use crate::vcs;
 use crate::env as flow_env;
@@ -1611,7 +1612,7 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
     log_commit_event_for_repo(&repo_root, &message, "commit", None, None);
 
     if queue_enabled {
-        match queue_commit_for_review(&repo_root, &message, None) {
+        match queue_commit_for_review(&repo_root, &message, None, None, None, Vec::new()) {
             Ok(sha) => {
                 print_queue_instructions(&sha);
                 if queue.open_review {
@@ -1754,7 +1755,7 @@ pub fn run_fast(message: &str, push: bool, queue: CommitQueueMode, include_unhas
     log_commit_event_for_repo(&repo_root, &full_message, "commit", None, None);
 
     if queue_enabled {
-        match queue_commit_for_review(&repo_root, &full_message, None) {
+        match queue_commit_for_review(&repo_root, &full_message, None, None, None, Vec::new()) {
             Ok(sha) => {
                 print_queue_instructions(&sha);
                 if queue.open_review {
@@ -2813,8 +2814,66 @@ pub fn run_with_check_sync(
         context_len,
     );
 
+    // Record review issues as project-scoped todos so they cannot be ignored.
+    // This is best-effort: never block commits on todo persistence.
+    let mut review_todo_ids: Vec<String> = Vec::new();
+    let committed_sha = git_capture_in(&repo_root, &["rev-parse", "HEAD"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(commit_sha) = committed_sha.as_deref() {
+        if !env_flag("FLOW_REVIEW_ISSUES_TODOS_DISABLE") {
+            if review.issues_found && !review.issues.is_empty() {
+                match todo::record_review_issues_as_todos(
+                    &repo_root,
+                    commit_sha,
+                    &review.issues,
+                    review.summary.as_deref(),
+                    &review_model_label,
+                ) {
+                    Ok(ids) => {
+                        if !ids.is_empty() {
+                            println!("Added {} review issue todo(s) to .ai/todos", ids.len());
+                        }
+                        review_todo_ids.extend(ids);
+                    }
+                    Err(err) => println!("⚠ Failed to record review issues as todos: {}", err),
+                }
+            }
+
+            if review.timed_out {
+                let issue = format!(
+                    "Re-run review: review timed out for commit {}",
+                    short_sha(commit_sha)
+                );
+                match todo::record_review_issues_as_todos(
+                    &repo_root,
+                    commit_sha,
+                    &vec![issue],
+                    review.summary.as_deref(),
+                    &review_model_label,
+                ) {
+                    Ok(ids) => {
+                        if !ids.is_empty() {
+                            println!("Added {} review todo(s) to .ai/todos", ids.len());
+                        }
+                        review_todo_ids.extend(ids);
+                    }
+                    Err(err) => println!("⚠ Failed to record review timeout todo: {}", err),
+                }
+            }
+        }
+    }
+
     if queue_enabled {
-        match queue_commit_for_review(&repo_root, &full_message, Some(&review)) {
+        match queue_commit_for_review(
+            &repo_root,
+            &full_message,
+            Some(&review),
+            Some(&review_model_label),
+            Some(review_reviewer_label),
+            review_todo_ids,
+        ) {
             Ok(sha) => {
                 print_queue_instructions(&sha);
                 if queue.open_review {
@@ -4453,6 +4512,18 @@ struct CommitQueueEntry {
     commit_sha: String,
     message: String,
     review_bookmark: Option<String>,
+    #[serde(default)]
+    review_completed: bool,
+    #[serde(default)]
+    review_issues_found: bool,
+    #[serde(default)]
+    review_timed_out: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_reviewer: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    review_todo_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pr_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4728,6 +4799,9 @@ fn queue_commit_for_review(
     repo_root: &Path,
     message: &str,
     review: Option<&ReviewResult>,
+    review_model: Option<&str>,
+    review_reviewer: Option<&str>,
+    review_todo_ids: Vec<String>,
 ) -> Result<String> {
     let commit_sha = git_capture_in(repo_root, &["rev-parse", "HEAD"])?.trim().to_string();
     let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -4748,13 +4822,19 @@ fn queue_commit_for_review(
     let review_body = review.and_then(format_review_body);
 
     let entry = CommitQueueEntry {
-        version: 1,
+        version: 2,
         created_at: chrono::Utc::now().to_rfc3339(),
         repo_root: repo_root.display().to_string(),
         branch,
         commit_sha: commit_sha.clone(),
         message: message.to_string(),
         review_bookmark,
+        review_completed: review.is_some(),
+        review_issues_found: review.map(|r| r.issues_found).unwrap_or(false),
+        review_timed_out: review.map(|r| r.timed_out).unwrap_or(false),
+        review_model: review_model.map(|s| s.to_string()),
+        review_reviewer: review_reviewer.map(|s| s.to_string()),
+        review_todo_ids,
         pr_url: None,
         pr_number: None,
         pr_head: None,
@@ -5402,6 +5482,28 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             println!("────────────────────────────────────────");
             println!("{}", entry.message.trim_end());
             println!("────────────────────────────────────────");
+            let issues_present = entry.review_issues_found
+                || entry
+                    .review
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+            if entry.review_timed_out {
+                println!();
+                println!("Review: timed out or failed");
+            }
+            if issues_present {
+                if let Some(body) = entry.review.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty())
+                {
+                    println!();
+                    println!("Review issues:");
+                    println!("{}", body);
+                }
+            }
+            if !entry.review_todo_ids.is_empty() {
+                println!();
+                println!("Todos: {}", entry.review_todo_ids.join(", "));
+            }
             if let Ok(stat) = git_capture_in(
                 &repo_root,
                 &["show", "--stat", "--format=", &entry.commit_sha],
@@ -5455,10 +5557,37 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 }
             }
         }
-        CommitQueueAction::Approve { hash, force } => {
+        CommitQueueAction::Approve {
+            hash,
+            force,
+            allow_issues,
+            allow_unreviewed,
+        } => {
             git_guard::ensure_clean_for_push(&repo_root)?;
             let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
             let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+
+            let issues_present = entry.review_issues_found
+                || entry
+                    .review
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+            let unreviewed = (entry.version >= 2 && !entry.review_completed) || entry.review_timed_out;
+
+            if issues_present && !allow_issues && !force {
+                bail!(
+                    "Queued commit {} has review issues. Fix them, or re-run with --allow-issues.",
+                    short_sha(&entry.commit_sha)
+                );
+            }
+            if unreviewed && !allow_unreviewed && !force {
+                bail!(
+                    "Queued commit {} does not have a clean review (timed out/missing). Re-run review, or re-run with --allow-unreviewed.",
+                    short_sha(&entry.commit_sha)
+                );
+            }
+
             let head_sha = git_capture_in(&repo_root, &["rev-parse", "HEAD"])?;
             let head_sha = head_sha.trim();
             if head_sha != entry.commit_sha && !force {
@@ -5565,7 +5694,11 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 println!("✓ Approved and pushed {}", short_sha(&entry.commit_sha));
             }
         }
-        CommitQueueAction::ApproveAll { force } => {
+        CommitQueueAction::ApproveAll {
+            force,
+            allow_issues,
+            allow_unreviewed,
+        } => {
             git_guard::ensure_clean_for_push(&repo_root)?;
             let mut entries = load_commit_queue_entries(&repo_root)?;
             if entries.is_empty() {
@@ -5603,6 +5736,40 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                     );
                 }
                 return Ok(());
+            }
+
+            if !force {
+                let mut bad_issues: Vec<String> = Vec::new();
+                let mut bad_unreviewed: Vec<String> = Vec::new();
+                for entry in &candidates {
+                    let issues_present = entry.review_issues_found
+                        || entry
+                            .review
+                            .as_deref()
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false);
+                    let unreviewed =
+                        (entry.version >= 2 && !entry.review_completed) || entry.review_timed_out;
+                    if issues_present && !allow_issues {
+                        bad_issues.push(short_sha(&entry.commit_sha).to_string());
+                    }
+                    if unreviewed && !allow_unreviewed {
+                        bad_unreviewed.push(short_sha(&entry.commit_sha).to_string());
+                    }
+                }
+
+                if !bad_unreviewed.is_empty() {
+                    bail!(
+                        "Some queued commits do not have a clean review (timed out/missing): {}. Re-run review or use --allow-unreviewed.",
+                        bad_unreviewed.join(", ")
+                    );
+                }
+                if !bad_issues.is_empty() {
+                    bail!(
+                        "Some queued commits have review issues: {}. Fix them or use --allow-issues.",
+                        bad_issues.join(", ")
+                    );
+                }
             }
 
             if git_try_in(&repo_root, &["fetch", "--quiet"]).is_ok() {
