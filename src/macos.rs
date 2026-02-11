@@ -173,12 +173,7 @@ fn run_list(opts: MacosListOpts) -> Result<()> {
             } else {
                 "disabled".to_string()
             };
-            println!(
-                "  {} [{}] - {}",
-                svc.id,
-                svc.category.as_str(),
-                status
-            );
+            println!("  {} [{}] - {}", svc.id, svc.category.as_str(), status);
         }
         println!();
     }
@@ -202,16 +197,8 @@ fn run_status() -> Result<()> {
 
     println!("Running non-Apple services:\n");
     for svc in running {
-        let pid_str = svc
-            .pid
-            .map(|p| format!(" (pid {})", p))
-            .unwrap_or_default();
-        println!(
-            "  {} [{}]{}",
-            svc.id,
-            svc.category.as_str(),
-            pid_str
-        );
+        let pid_str = svc.pid.map(|p| format!(" (pid {})", p)).unwrap_or_default();
+        println!("  {} [{}]{}", svc.id, svc.category.as_str(), pid_str);
         if let Some(prog) = &svc.program {
             println!("    {}", prog);
         }
@@ -318,10 +305,7 @@ fn run_disable(opts: MacosDisableOpts) -> Result<()> {
     }
 
     if !opts.yes {
-        print!(
-            "Disable service '{}'? [y/N] ",
-            svc.id
-        );
+        print!("Disable service '{}'? [y/N] ", svc.id);
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -506,10 +490,7 @@ fn parse_plist(path: &Path, service_type: ServiceType) -> Option<LaunchdService>
 fn enrich_with_launchctl_status(services: &mut [LaunchdService]) {
     // Query user domain
     let uid = get_uid();
-    if let Ok(output) = Command::new("launchctl")
-        .args(["list"])
-        .output()
-    {
+    if let Ok(output) = Command::new("launchctl").args(["list"]).output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             parse_launchctl_list(&stdout, services);
@@ -583,10 +564,7 @@ fn categorize_service(label: &str) -> ServiceCategory {
     }
 
     // AI tools
-    if label.contains("lmstudio")
-        || label.contains("ollama")
-        || label.contains("copilot")
-    {
+    if label.contains("lmstudio") || label.contains("ollama") || label.contains("copilot") {
         return ServiceCategory::Ai;
     }
 
@@ -847,10 +825,7 @@ mod tests {
 
     #[test]
     fn test_pattern_match() {
-        let patterns = vec![
-            "com.nikiv.*".to_string(),
-            "exact.match".to_string(),
-        ];
+        let patterns = vec!["com.nikiv.*".to_string(), "exact.match".to_string()];
 
         assert!(is_pattern_match("com.nikiv.service", &patterns));
         assert!(is_pattern_match("com.nikiv.other", &patterns));

@@ -190,6 +190,71 @@ pub struct CommitConfig {
         alias = "queueOnIssues"
     )]
     pub queue_on_issues: Option<bool>,
+    /// Open the queued commit in Rise automatically after committing.
+    #[serde(
+        default,
+        rename = "open_review",
+        alias = "open-review",
+        alias = "openReview"
+    )]
+    pub open_review: Option<bool>,
+    /// Require an explicit Rise review approval before `f commit-queue approve*` can push.
+    #[serde(
+        default,
+        rename = "require_rise_approval",
+        alias = "require-rise-approval",
+        alias = "requireRiseApproval"
+    )]
+    pub require_rise_approval: Option<bool>,
+    /// Commit guardrails (blocked paths, large file limits, etc).
+    #[serde(default)]
+    pub guardrails: Option<CommitGuardrailsConfig>,
+}
+
+/// Commit guardrails (used by `f commit` and `f commit-queue approve*`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CommitGuardrailsConfig {
+    /// Hard-fail if any staged/queued file is >= this size (bytes). Default: 100MB.
+    #[serde(
+        default,
+        rename = "max_file_bytes",
+        alias = "max-file-bytes",
+        alias = "maxFileBytes"
+    )]
+    pub max_file_bytes: Option<u64>,
+    /// Warn if any staged/queued file is >= this size (bytes). Default: unset.
+    #[serde(
+        default,
+        rename = "warn_file_bytes",
+        alias = "warn-file-bytes",
+        alias = "warnFileBytes"
+    )]
+    pub warn_file_bytes: Option<u64>,
+    /// Additional blocked path patterns (gitignore-style patterns).
+    /// Example: ["**/.next/**", "**/.turbo/**"]
+    #[serde(
+        default,
+        rename = "block_paths",
+        alias = "block-paths",
+        alias = "blockPaths"
+    )]
+    pub block_paths: Vec<String>,
+    /// Allowlist patterns that override block_paths (gitignore-style patterns).
+    #[serde(
+        default,
+        rename = "allow_paths",
+        alias = "allow-paths",
+        alias = "allowPaths"
+    )]
+    pub allow_paths: Vec<String>,
+    /// Fail if a staged/queued path matches .gitignore (tracked-but-ignored landmine).
+    #[serde(
+        default,
+        rename = "fail_on_tracked_ignored",
+        alias = "fail-on-tracked-ignored",
+        alias = "failOnTrackedIgnored"
+    )]
+    pub fail_on_tracked_ignored: Option<bool>,
 }
 
 /// Jujutsu (jj) workflow config.
@@ -207,7 +272,12 @@ pub struct JjConfig {
     #[serde(default)]
     pub remote: Option<String>,
     /// Auto-track bookmarks on create.
-    #[serde(default, rename = "auto_track", alias = "auto-track", alias = "autoTrack")]
+    #[serde(
+        default,
+        rename = "auto_track",
+        alias = "auto-track",
+        alias = "autoTrack"
+    )]
     pub auto_track: Option<bool>,
     /// Prefix for review bookmarks created by flow (e.g., "review").
     #[serde(
@@ -341,6 +411,22 @@ pub struct TsCommitConfig {
         alias = "queue-on-issues"
     )]
     pub queue_on_issues: Option<bool>,
+    /// Open the queued commit in Rise automatically after committing.
+    #[serde(
+        default,
+        rename = "openReview",
+        alias = "open_review",
+        alias = "open-review"
+    )]
+    pub open_review: Option<bool>,
+    /// Require an explicit Rise review approval before pushing queued commits.
+    #[serde(
+        default,
+        rename = "requireRiseApproval",
+        alias = "require_rise_approval",
+        alias = "require-rise-approval"
+    )]
+    pub require_rise_approval: Option<bool>,
     /// Whether to run async (delegate to hub). Default true.
     #[serde(default, rename = "async")]
     pub async_enabled: Option<bool>,

@@ -5,6 +5,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use uuid::Uuid;
 
 use crate::ai;
@@ -19,6 +20,8 @@ struct TodoItem {
     updated_at: Option<String>,
     note: Option<String>,
     session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_ref: Option<String>,
 }
 
 pub fn run(cmd: TodoCommand) -> Result<()> {
@@ -129,6 +132,7 @@ fn add(
         updated_at: None,
         note: note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
         session: session_ref,
+        external_ref: None,
     };
     items.push(item.clone());
     save_items(&path, &items)?;
@@ -249,6 +253,24 @@ fn load_items() -> Result<(PathBuf, Vec<TodoItem>)> {
     Ok((path, items))
 }
 
+fn load_items_at_root(root: &Path) -> Result<(PathBuf, Vec<TodoItem>)> {
+    let dir = root.join(".ai").join("todos");
+    let path = dir.join("todos.json");
+
+    if !path.exists() {
+        return Ok((path, Vec::new()));
+    }
+
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok((path, Vec::new()));
+    }
+    let items = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok((path, items))
+}
+
 fn save_items(path: &Path, items: &[TodoItem]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -256,6 +278,111 @@ fn save_items(path: &Path, items: &[TodoItem]) -> Result<()> {
     let content = serde_json::to_string_pretty(items)?;
     fs::write(path, content)?;
     Ok(())
+}
+
+fn todo_title_compact(title: &str) -> String {
+    let trimmed = title.trim().trim_start_matches('-').trim();
+    let max_len = 120;
+    let mut out = String::new();
+    let mut count = 0;
+    for ch in trimmed.chars() {
+        if count >= max_len {
+            out.push_str("...");
+            break;
+        }
+        out.push(ch);
+        count += 1;
+    }
+    if out.is_empty() {
+        "todo".to_string()
+    } else {
+        out
+    }
+}
+
+fn external_ref_for_review_issue(commit_sha: &str, issue: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(commit_sha.trim().as_bytes());
+    hasher.update(b":");
+    hasher.update(issue.trim().as_bytes());
+    let hex = hex::encode(hasher.finalize());
+    let short = hex.get(..12).unwrap_or(&hex);
+    format!("flow-review-issue-{}", short)
+}
+
+/// Record review issues as project-scoped todos under `.ai/todos/todos.json`.
+/// Returns ids for created items (deduplicated by `external_ref`).
+pub fn record_review_issues_as_todos(
+    repo_root: &Path,
+    commit_sha: &str,
+    issues: &[String],
+    summary: Option<&str>,
+    model_label: &str,
+) -> Result<Vec<String>> {
+    if issues.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (path, mut items) = load_items_at_root(repo_root)?;
+    let mut existing_refs = std::collections::HashSet::new();
+    for item in &items {
+        if let Some(r) = item
+            .external_ref
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            existing_refs.insert(r.to_string());
+        }
+    }
+
+    let mut created_ids = Vec::new();
+    let now = Utc::now().to_rfc3339();
+    let summary = summary.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    for issue in issues {
+        let ext = external_ref_for_review_issue(commit_sha, issue);
+        if existing_refs.contains(&ext) {
+            continue;
+        }
+
+        let title = todo_title_compact(issue);
+        let mut note = String::new();
+        note.push_str("Source: flow review\n");
+        note.push_str("Commit: ");
+        note.push_str(commit_sha.trim());
+        note.push('\n');
+        note.push_str("Model: ");
+        note.push_str(model_label.trim());
+        note.push('\n');
+        if let Some(summary) = summary {
+            note.push_str("Review summary: ");
+            note.push_str(summary);
+            note.push('\n');
+        }
+        note.push('\n');
+        note.push_str(issue.trim());
+
+        let id = Uuid::new_v4().simple().to_string();
+        items.push(TodoItem {
+            id: id.clone(),
+            title,
+            status: status_to_string(TodoStatusArg::Pending).to_string(),
+            created_at: now.clone(),
+            updated_at: None,
+            note: Some(note),
+            session: None,
+            external_ref: Some(ext.clone()),
+        });
+        existing_refs.insert(ext);
+        created_ids.push(id);
+    }
+
+    if !created_ids.is_empty() {
+        save_items(&path, &items)?;
+    }
+
+    Ok(created_ids)
 }
 
 fn find_item_index(items: &[TodoItem], id: &str) -> Result<usize> {

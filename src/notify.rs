@@ -8,6 +8,18 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Proposal format matching Lin's ProposalService.swift
 #[derive(Debug, Serialize, Deserialize)]
 struct Proposal {
@@ -40,6 +52,66 @@ fn get_proposals_path() -> Result<PathBuf> {
         .join("Lin")
         .join("proposals.json");
     Ok(path)
+}
+
+/// Send a proposal to Lin (best-effort).
+///
+/// Disable by setting `FLOW_NOTIFY_DISABLE=1`.
+pub fn send_proposal(
+    action: &str,
+    title: Option<&str>,
+    context: Option<&str>,
+    expires: i64,
+) -> Result<()> {
+    if env_flag("FLOW_NOTIFY_DISABLE") {
+        return Ok(());
+    }
+
+    let proposals_path = get_proposals_path()?;
+
+    // Ensure the directory exists
+    if let Some(parent) = proposals_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Read existing proposals
+    let mut proposals: Vec<Proposal> = if proposals_path.exists() {
+        let content = fs::read_to_string(&proposals_path)?;
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Get current timestamp
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("Time went backwards")?
+        .as_secs() as i64;
+
+    // Create title from action if not provided
+    let title = title.map(|s| s.to_string()).unwrap_or_else(|| {
+        if action.starts_with("f ") {
+            format!("Run: {}", &action[2..])
+        } else {
+            format!("Run: {}", action)
+        }
+    });
+
+    let proposal = Proposal {
+        id: Uuid::new_v4().to_string(),
+        timestamp: now,
+        title,
+        action: action.to_string(),
+        context: context.map(|s| s.to_string()),
+        expires_at: now + expires,
+    };
+
+    proposals.push(proposal);
+
+    let content = serde_json::to_string_pretty(&proposals)?;
+    fs::write(&proposals_path, content)?;
+
+    Ok(())
 }
 
 /// Run the notify command - write a proposal to Lin's proposals.json.
@@ -136,6 +208,10 @@ impl AlertKind {
 /// Send an alert to Lin's notification banner.
 /// Alerts are shown as floating banners - errors/warnings stay for 10+ seconds.
 pub fn send_alert(text: &str, kind: AlertKind) -> Result<()> {
+    if env_flag("FLOW_NOTIFY_DISABLE") {
+        return Ok(());
+    }
+
     let alerts_path = get_alerts_path()?;
 
     // Ensure the directory exists

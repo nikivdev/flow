@@ -12,19 +12,21 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use sha1::{Digest, Sha1};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha1::{Digest, Sha1};
 use tempfile::{Builder as TempBuilder, NamedTempFile, TempDir};
-use tracing::{debug, info};
-use regex::Regex;
+use tracing::{debug, info, warn};
 
 use crate::ai;
-use crate::cli::{CommitQueueAction, CommitQueueCommand, DaemonAction};
+use crate::cli::{CommitQueueAction, CommitQueueCommand, DaemonAction, RiseReviewDecisionArg};
 use crate::config;
 use crate::daemon;
+use crate::env as flow_env;
 use crate::git_guard;
 use crate::hub;
 use crate::notify;
@@ -32,7 +34,6 @@ use crate::setup;
 use crate::supervisor;
 use crate::undo;
 use crate::vcs;
-use crate::env as flow_env;
 
 const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
@@ -273,15 +274,24 @@ fn warn_sensitive_files(files: &[String]) -> Result<()> {
 const SECRET_PATTERNS: &[(&str, &str)] = &[
     // API Keys with known prefixes
     ("AWS Access Key", r"AKIA[0-9A-Z]{16}"),
-    ("AWS Secret Key", r#"(?i)aws.{0,20}secret.{0,20}['"][0-9a-zA-Z/+]{40}['"]"#),
+    (
+        "AWS Secret Key",
+        r#"(?i)aws.{0,20}secret.{0,20}['"][0-9a-zA-Z/+]{40}['"]"#,
+    ),
     ("GitHub Token", r"ghp_[0-9a-zA-Z]{36}"),
     ("GitHub OAuth", r"gho_[0-9a-zA-Z]{36}"),
     ("GitHub App Token", r"ghu_[0-9a-zA-Z]{36}"),
     ("GitHub Refresh Token", r"ghr_[0-9a-zA-Z]{36}"),
     ("GitLab Token", r"glpat-[0-9a-zA-Z\-_]{20,}"),
     ("Slack Token", r"xox[baprs]-[0-9a-zA-Z]{10,48}"),
-    ("Slack Webhook", r"https://hooks\.slack\.com/services/T[0-9A-Z]{8,}/B[0-9A-Z]{8,}/[0-9a-zA-Z]{24}"),
-    ("Discord Webhook", r"https://discord(?:app)?\.com/api/webhooks/[0-9]{17,}/[0-9a-zA-Z_-]{60,}"),
+    (
+        "Slack Webhook",
+        r"https://hooks\.slack\.com/services/T[0-9A-Z]{8,}/B[0-9A-Z]{8,}/[0-9a-zA-Z]{24}",
+    ),
+    (
+        "Discord Webhook",
+        r"https://discord(?:app)?\.com/api/webhooks/[0-9]{17,}/[0-9a-zA-Z_-]{60,}",
+    ),
     ("Stripe Key", r"sk_live_[0-9a-zA-Z]{24,}"),
     ("Stripe Restricted", r"rk_live_[0-9a-zA-Z]{24,}"),
     // OpenAI keys - multiple formats (legacy, project, service account)
@@ -291,25 +301,52 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
     ("Anthropic Key", r"sk-ant-[0-9a-zA-Z\-_]{90,}"),
     ("Google API Key", r"AIza[0-9A-Za-z\-_]{35}"),
     ("Groq API Key", r"gsk_[0-9a-zA-Z]{50,}"),
-    ("Mistral API Key", r#"(?i)mistral.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{32,}["']"#),
-    ("Cohere API Key", r#"(?i)cohere.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{40,}["']"#),
-    ("Heroku API Key", r"(?i)heroku.{0,20}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
+    (
+        "Mistral API Key",
+        r#"(?i)mistral.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{32,}["']"#,
+    ),
+    (
+        "Cohere API Key",
+        r#"(?i)cohere.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{40,}["']"#,
+    ),
+    (
+        "Heroku API Key",
+        r"(?i)heroku.{0,20}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    ),
     ("NPM Token", r"npm_[0-9a-zA-Z]{36}"),
     ("PyPI Token", r"pypi-[0-9a-zA-Z_-]{50,}"),
     ("Telegram Bot Token", r"[0-9]{8,10}:[0-9A-Za-z_-]{35}"),
     ("Twilio Key", r"SK[0-9a-fA-F]{32}"),
     ("SendGrid Key", r"SG\.[0-9a-zA-Z_-]{22}\.[0-9a-zA-Z_-]{43}"),
     ("Mailgun Key", r"key-[0-9a-zA-Z]{32}"),
-    ("Private Key", r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),
-    ("Supabase Key", r"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[0-9a-zA-Z_-]{50,}"),
-    ("Firebase Key", r#"(?i)firebase.{0,20}["'][A-Za-z0-9_-]{30,}["']"#),
+    (
+        "Private Key",
+        r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+    ),
+    (
+        "Supabase Key",
+        r"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[0-9a-zA-Z_-]{50,}",
+    ),
+    (
+        "Firebase Key",
+        r#"(?i)firebase.{0,20}["'][A-Za-z0-9_-]{30,}["']"#,
+    ),
     // Generic patterns (higher false positive risk, but catch common mistakes)
-    ("Generic API Key Assignment", r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*['"][0-9a-zA-Z\-_]{20,}['"]"#),
-    ("Generic Secret Assignment", r#"(?i)(secret|password|passwd|pwd)\s*[:=]\s*['"][^'"]{8,}['"]"#),
+    (
+        "Generic API Key Assignment",
+        r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*['"][0-9a-zA-Z\-_]{20,}['"]"#,
+    ),
+    (
+        "Generic Secret Assignment",
+        r#"(?i)(secret|password|passwd|pwd)\s*[:=]\s*['"][^'"]{8,}['"]"#,
+    ),
     ("Bearer Token", r"(?i)bearer\s+[0-9a-zA-Z\-_.]{20,}"),
     ("Basic Auth", r"(?i)basic\s+[A-Za-z0-9+/=]{20,}"),
     // High-entropy strings that look like secrets (env var assignments)
-    ("Env Var Secret", r#"(?i)(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[_A-Z]*\s*=\s*['"]?[0-9a-zA-Z\-_/+=]{32,}['"]?"#),
+    (
+        "Env Var Secret",
+        r#"(?i)(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[_A-Z]*\s*=\s*['"]?[0-9a-zA-Z\-_/+=]{32,}['"]?"#,
+    ),
 ];
 
 const SECRET_SCAN_IGNORE_MARKERS: &[&str] = &[
@@ -327,9 +364,7 @@ fn should_ignore_secret_scan_line(content: &str) -> bool {
 }
 
 fn extract_first_quoted_value(s: &str) -> Option<&str> {
-    let (qpos, qch) = s
-        .char_indices()
-        .find(|(_, c)| *c == '"' || *c == '\'')?;
+    let (qpos, qch) = s.char_indices().find(|(_, c)| *c == '"' || *c == '\'')?;
     let end = s.rfind(qch)?;
     if end <= qpos {
         return None;
@@ -344,7 +379,8 @@ fn looks_like_identifier_reference(value: &str) -> bool {
     !v.is_empty()
         && v.len() >= 8
         && v.contains('_')
-        && v.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == '.')
+        && v.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == '.')
 }
 
 fn looks_like_secret_lookup(value: &str) -> bool {
@@ -418,8 +454,8 @@ fn generic_secret_assignment_is_false_positive(content: &str, matched: &str) -> 
 
     // If the whole line is clearly a dynamic lookup, treat as non-hardcoded.
     // This catches cases where the regex match boundaries don't capture the full value cleanly.
-        let lc = content.to_lowercase();
-        lc.contains("$(get_env ")
+    let lc = content.to_lowercase();
+    lc.contains("$(get_env ")
 }
 
 /// Scan staged diff content for hardcoded secrets.
@@ -447,9 +483,7 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
     // Compile regexes
     let patterns: Vec<(&str, regex::Regex)> = SECRET_PATTERNS
         .iter()
-        .filter_map(|(name, pattern)| {
-            regex::Regex::new(pattern).ok().map(|re| (*name, re))
-        })
+        .filter_map(|(name, pattern)| regex::Regex::new(pattern).ok().map(|re| (*name, re)))
         .collect();
 
     for line in diff.lines() {
@@ -464,7 +498,10 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
         if line.starts_with("@@") {
             if let Some(plus_pos) = line.find('+') {
                 let after_plus = &line[plus_pos + 1..];
-                let num_str: String = after_plus.chars().take_while(|c| c.is_ascii_digit()).collect();
+                let num_str: String = after_plus
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
                 current_line = num_str.parse().unwrap_or(0);
             }
             ignore_next_added_line = false;
@@ -516,7 +553,9 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
                         || matched_lower.contains("fixme")
                         || matched == "sk-..."
                         || matched == "sk-xxxx"
-                        || matched.chars().all(|c| c == 'x' || c == 'X' || c == '.' || c == '-' || c == '_')
+                        || matched
+                            .chars()
+                            .all(|c| c == 'x' || c == 'X' || c == '.' || c == '-' || c == '_')
                     {
                         continue;
                     }
@@ -529,7 +568,7 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
 
                     // Redact the middle of the matched secret for display
                     let redacted = if matched.len() > 12 {
-                        format!("{}...{}", &matched[..6], &matched[matched.len()-4..])
+                        format!("{}...{}", &matched[..6], &matched[matched.len() - 4..])
                     } else {
                         matched.to_string()
                     };
@@ -563,19 +602,20 @@ fn warn_secrets_in_diff(
     }
 
     if env::var("FLOW_ALLOW_SECRET_COMMIT").ok().as_deref() == Some("1") {
-        println!("\n⚠️  Warning: Potential secrets detected but FLOW_ALLOW_SECRET_COMMIT=1, continuing...");
+        println!(
+            "\n⚠️  Warning: Potential secrets detected but FLOW_ALLOW_SECRET_COMMIT=1, continuing..."
+        );
         return Ok(());
     }
 
     println!();
-    print_secret_findings(
-        "🔐 Potential secrets detected in staged changes:",
-        findings,
-    );
+    print_secret_findings("🔐 Potential secrets detected in staged changes:", findings);
     println!();
     println!("If these are false positives (examples, placeholders, tests), you can:");
     println!("   - Set FLOW_ALLOW_SECRET_COMMIT=1 to override for this commit");
-    println!("   - Mark the line with '# flow:secret:ignore' (or add it on the line above to ignore the next line)");
+    println!(
+        "   - Mark the line with '# flow:secret:ignore' (or add it on the line above to ignore the next line)"
+    );
     println!("   - Use placeholder values like 'xxx' for example secrets");
     println!("   - Re-stage files if you recently edited them: git add <file>");
     println!();
@@ -604,10 +644,13 @@ fn warn_secrets_in_diff(
     let interactive = io::stdin().is_terminal();
     let mut current_findings = findings.to_vec();
 
-    let mut rescan_after_fix = |findings: &mut Vec<(String, usize, String, String)>| -> Result<()> {
+    let rescan_after_fix = |findings: &mut Vec<(String, usize, String, String)>| -> Result<()> {
         git_run_in(repo_root, &["add", "."])?;
         ensure_no_internal_staged(repo_root)?;
         ensure_no_unwanted_staged(repo_root)?;
+        ensure_no_build_artifacts_staged(repo_root)?;
+        ensure_no_large_files_staged(repo_root)?;
+        ensure_no_tracked_ignored_staged(repo_root)?;
         *findings = scan_diff_for_secrets(repo_root);
         Ok(())
     };
@@ -685,16 +728,18 @@ fn should_run_sync_for_secret_fixes(repo_root: &Path) -> Result<bool> {
 
     let agent_name =
         env::var("FLOW_FIX_COMMIT_AGENT").unwrap_or_else(|_| "fix-f-commit".to_string());
-    let hive_enabled =
-        agent_name.trim().to_lowercase() != "off" && which::which("hive").is_ok();
+    let hive_enabled = agent_name.trim().to_lowercase() != "off" && which::which("hive").is_ok();
     let ai_available = which::which("ai").is_ok();
     if !hive_enabled && !ai_available {
         return Ok(false);
     }
 
-    git_run(&["add", "."])?;
+    git_run_in(repo_root, &["add", "."])?;
     ensure_no_internal_staged(repo_root)?;
     ensure_no_unwanted_staged(repo_root)?;
+    ensure_no_build_artifacts_staged(repo_root)?;
+    ensure_no_large_files_staged(repo_root)?;
+    ensure_no_tracked_ignored_staged(repo_root)?;
 
     Ok(!scan_diff_for_secrets(repo_root).is_empty())
 }
@@ -745,7 +790,10 @@ fn run_fix_f_commit_ai(repo_root: &Path, task: &str) -> Result<()> {
 fn build_fix_f_commit_task(findings: &[(String, usize, String, String)]) -> String {
     let mut summary = String::new();
     for (file, line, pattern, matched) in findings {
-        summary.push_str(&format!("- {}:{} — {} ({})\n", file, line, pattern, matched));
+        summary.push_str(&format!(
+            "- {}:{} — {} ({})\n",
+            file, line, pattern, matched
+        ));
     }
 
     let task = format!(
@@ -761,10 +809,7 @@ After fixing, restage changes."
     sanitize_hive_task(&task)
 }
 
-fn print_secret_findings(
-    header: &str,
-    findings: &[(String, usize, String, String)],
-) {
+fn print_secret_findings(header: &str, findings: &[(String, usize, String, String)]) {
     println!("{}", header);
     for (file, line, pattern, matched) in findings {
         println!("   {}:{} - {} ({})", file, line, pattern, matched);
@@ -803,7 +848,10 @@ fn sanitize_hive_task(task: &str) -> String {
 fn resolve_hive_env() -> Vec<(String, String)> {
     let mut vars = Vec::new();
 
-    if std::env::var("CEREBRAS_API_KEY").map(|v| v.trim().is_empty()).unwrap_or(true) {
+    if std::env::var("CEREBRAS_API_KEY")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
         if is_local_env_backend() {
             if let Ok(store) =
                 crate::env::fetch_personal_env_vars(&["CEREBRAS_API_KEY".to_string()])
@@ -913,8 +961,7 @@ pub fn resolve_review_selection_from_config() -> Option<ReviewSelection> {
             Some(ReviewSelection::Opencode { model })
         }
         "openrouter" => {
-            let model =
-                model.unwrap_or_else(|| "arcee-ai/trinity-large-preview:free".to_string());
+            let model = model.unwrap_or_else(|| "arcee-ai/trinity-large-preview:free".to_string());
             Some(ReviewSelection::OpenRouter { model })
         }
         "rise" => {
@@ -1034,6 +1081,45 @@ struct ReviewResult {
 #[derive(Debug)]
 struct StagedSnapshot {
     patch_path: Option<std::path::PathBuf>,
+}
+
+/// Ensures `f commit` doesn't permanently mutate the user's staging area if we abort.
+///
+/// Typical flow:
+/// - capture staged snapshot
+/// - stage everything (`git add .`)
+/// - run checks/review
+/// - on early failure, restore original staged snapshot automatically
+/// - on successful `git commit`, disarm so we don't re-stage old changes
+struct StagedSnapshotGuard {
+    workdir: std::path::PathBuf,
+    snapshot: StagedSnapshot,
+    armed: bool,
+}
+
+impl StagedSnapshotGuard {
+    fn new(workdir: std::path::PathBuf, snapshot: StagedSnapshot) -> Self {
+        Self {
+            workdir,
+            snapshot,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+        cleanup_staged_snapshot(&self.snapshot);
+    }
+}
+
+impl Drop for StagedSnapshotGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = restore_staged_snapshot_in(&self.workdir, &self.snapshot);
+        cleanup_staged_snapshot(&self.snapshot);
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1487,7 +1573,11 @@ pub fn run(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Result<(
 pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Result<()> {
     let queue_enabled = queue.enabled;
     let push = push && !queue_enabled;
-    info!(push = push, queue = queue_enabled, "starting commit workflow");
+    info!(
+        push = push,
+        queue = queue_enabled,
+        "starting commit workflow"
+    );
 
     // Ensure we're in a git repo
     ensure_git_repo()?;
@@ -1495,6 +1585,10 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
     let repo_root = git_root_or_cwd();
     ensure_commit_setup(&repo_root)?;
     git_guard::ensure_clean_for_commit(&repo_root)?;
+
+    // Capture current staged changes so we can restore if we cancel.
+    let staged_snapshot = capture_staged_snapshot_in(&repo_root)?;
+    let mut staged_guard = StagedSnapshotGuard::new(repo_root.clone(), staged_snapshot);
 
     let commit_message_override = resolve_commit_message_override(&repo_root);
     let commit_provider = if commit_message_override.is_none() {
@@ -1510,11 +1604,26 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
     // Stage all changes
     print!("Staging changes... ");
     io::stdout().flush()?;
-    git_run(&["add", "."])?;
+    git_run_in(&repo_root, &["add", "."])?;
     println!("done");
     debug!("staged all changes");
     ensure_no_internal_staged(&repo_root)?;
-    ensure_no_unwanted_staged(&repo_root)?;
+    if let Err(err) = ensure_no_unwanted_staged(&repo_root) {
+        // ensure_no_unwanted_staged already fixed staging (unstaged + gitignore). Keep that state.
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_build_artifacts_staged(&repo_root) {
+        // ensure_no_build_artifacts_staged already fixed staging (unstaged + gitignore). Keep that state.
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_large_files_staged(&repo_root) {
+        // ensure_no_large_files_staged already fixed staging (unstaged). Keep that state.
+        staged_guard.disarm();
+        return Err(err);
+    }
+    ensure_no_tracked_ignored_staged(&repo_root)?;
 
     // Check for sensitive files before proceeding
     let cwd = std::env::current_dir()?;
@@ -1530,14 +1639,14 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
     warn_large_diffs(&large_diffs)?;
 
     // Get diff
-    let diff = git_capture(&["diff", "--cached"])?;
+    let diff = git_capture_in(&repo_root, &["diff", "--cached"])?;
     if diff.trim().is_empty() {
         bail!("No staged changes to commit");
     }
     debug!(diff_len = diff.len(), "got cached diff");
 
     // Get status
-    let status = git_capture(&["status", "--short"]).unwrap_or_default();
+    let status = git_capture_in(&repo_root, &["status", "--short"]).unwrap_or_default();
     debug!(status_lines = status.lines().count(), "got git status");
 
     // Truncate diff if needed
@@ -1552,12 +1661,9 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
     print!("Generating commit message... ");
     io::stdout().flush()?;
     let mut message = match commit_message_override {
-        Some(CommitMessageOverride::Kimi { model }) => generate_commit_message_kimi(
-            &diff_for_prompt,
-            &status,
-            truncated,
-            model.as_deref(),
-        )?,
+        Some(CommitMessageOverride::Kimi { model }) => {
+            generate_commit_message_kimi(&diff_for_prompt, &status, truncated, model.as_deref())?
+        }
         None => {
             let commit_provider = commit_provider.as_ref().expect("commit provider missing");
             info!(model = MODEL, "calling OpenAI API");
@@ -1604,9 +1710,10 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
         args.push("-m");
         args.push(p);
     }
-    git_run(&args)?;
+    git_run_in(&repo_root, &args)?;
     println!("✓ Committed");
     info!("created commit");
+    staged_guard.disarm();
 
     log_commit_event_for_repo(&repo_root, &message, "commit", None, None);
 
@@ -1614,7 +1721,8 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
         match queue_commit_for_review(&repo_root, &message, None) {
             Ok(sha) => {
                 print_queue_instructions(&sha);
-                if queue.open_review {
+                let should_open = queue.open_review || commit_open_review_enabled(&repo_root);
+                if should_open {
                     open_review_in_rise(&repo_root, &sha);
                 }
             }
@@ -1628,7 +1736,7 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
         print!("Pushing... ");
         io::stdout().flush()?;
 
-        match git_push_try() {
+        match git_push_try_in(&repo_root) {
             PushResult::Success => {
                 println!("done");
                 info!("pushed to remote");
@@ -1644,12 +1752,12 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
                 print!("Pulling with rebase... ");
                 io::stdout().flush()?;
 
-                match git_try(&["pull", "--rebase"]) {
+                match git_try_in(&repo_root, &["pull", "--rebase"]) {
                     Ok(_) => {
                         println!("done");
                         print!("Pushing... ");
                         io::stdout().flush()?;
-                        git_run(&["push"])?;
+                        git_run_in(&repo_root, &["push"])?;
                         println!("done");
                         info!("pulled and pushed to remote");
                         pushed = true;
@@ -1684,13 +1792,22 @@ pub fn run_sync(push: bool, queue: CommitQueueMode, include_unhash: bool) -> Res
 }
 
 /// Run a fast commit with the provided message (no AI review).
-pub fn run_fast(message: &str, push: bool, queue: CommitQueueMode, include_unhash: bool) -> Result<()> {
+pub fn run_fast(
+    message: &str,
+    push: bool,
+    queue: CommitQueueMode,
+    include_unhash: bool,
+) -> Result<()> {
     let queue_enabled = queue.enabled;
     let push = push && !queue_enabled;
     ensure_git_repo()?;
     let repo_root = git_root_or_cwd();
     ensure_commit_setup(&repo_root)?;
     git_guard::ensure_clean_for_commit(&repo_root)?;
+
+    // Capture current staged changes so we can restore if we cancel.
+    let staged_snapshot = capture_staged_snapshot_in(&repo_root)?;
+    let mut staged_guard = StagedSnapshotGuard::new(repo_root.clone(), staged_snapshot);
 
     // Run pre-commit fixers if configured (fast lint/format)
     if let Ok(fixed) = run_fixers(&repo_root) {
@@ -1702,10 +1819,71 @@ pub fn run_fast(message: &str, push: bool, queue: CommitQueueMode, include_unhas
     // Stage all changes
     print!("Staging changes... ");
     io::stdout().flush()?;
-    git_run(&["add", "."])?;
+    git_run_in(&repo_root, &["add", "."])?;
     println!("done");
     ensure_no_internal_staged(&repo_root)?;
-    ensure_no_unwanted_staged(&repo_root)?;
+    if let Err(err) = ensure_no_unwanted_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_build_artifacts_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_large_files_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    ensure_no_tracked_ignored_staged(&repo_root)?;
+    ensure_no_tracked_ignored_staged(&repo_root)?;
+    if let Err(err) = ensure_no_unwanted_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_build_artifacts_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_large_files_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_unwanted_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_build_artifacts_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_large_files_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_unwanted_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_build_artifacts_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_large_files_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_unwanted_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_build_artifacts_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_large_files_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
 
     // Check for sensitive files before proceeding
     let cwd = std::env::current_dir()?;
@@ -1717,12 +1895,12 @@ pub fn run_fast(message: &str, push: bool, queue: CommitQueueMode, include_unhas
     warn_secrets_in_diff(&repo_root, &secret_findings)?;
 
     // Ensure we actually have changes
-    let diff = git_capture(&["diff", "--cached"])?;
+    let diff = git_capture_in(&repo_root, &["diff", "--cached"])?;
     if diff.trim().is_empty() {
         bail!("No staged changes to commit");
     }
 
-    let status = git_capture(&["status", "--short"]).unwrap_or_default();
+    let status = git_capture_in(&repo_root, &["status", "--short"]).unwrap_or_default();
     let mut full_message = message.to_string();
 
     if include_unhash && unhash_capture_enabled() {
@@ -1745,11 +1923,23 @@ pub fn run_fast(message: &str, push: bool, queue: CommitQueueMode, include_unhas
         }
     }
 
-    ensure_no_unwanted_staged(&repo_root)?;
+    if let Err(err) = ensure_no_unwanted_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_build_artifacts_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_large_files_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
 
     // Commit
-    git_run(&["commit", "-m", &full_message])?;
+    git_run_in(&repo_root, &["commit", "-m", &full_message])?;
     println!("✓ Committed");
+    staged_guard.disarm();
 
     log_commit_event_for_repo(&repo_root, &full_message, "commit", None, None);
 
@@ -1757,7 +1947,8 @@ pub fn run_fast(message: &str, push: bool, queue: CommitQueueMode, include_unhas
         match queue_commit_for_review(&repo_root, &full_message, None) {
             Ok(sha) => {
                 print_queue_instructions(&sha);
-                if queue.open_review {
+                let should_open = queue.open_review || commit_open_review_enabled(&repo_root);
+                if should_open {
                     open_review_in_rise(&repo_root, &sha);
                 }
             }
@@ -1771,7 +1962,7 @@ pub fn run_fast(message: &str, push: bool, queue: CommitQueueMode, include_unhas
         print!("Pushing... ");
         io::stdout().flush()?;
 
-        match git_push_try() {
+        match git_push_try_in(&repo_root) {
             PushResult::Success => {
                 println!("done");
                 pushed = true;
@@ -1784,12 +1975,12 @@ pub fn run_fast(message: &str, push: bool, queue: CommitQueueMode, include_unhas
                 print!("Pulling with rebase... ");
                 io::stdout().flush()?;
 
-                match git_try(&["pull", "--rebase"]) {
+                match git_try_in(&repo_root, &["pull", "--rebase"]) {
                     Ok(_) => {
                         println!("done");
                         print!("Pushing... ");
                         io::stdout().flush()?;
-                        git_run(&["push"])?;
+                        git_run_in(&repo_root, &["push"])?;
                         println!("done");
                         pushed = true;
                     }
@@ -2214,6 +2405,98 @@ fn commit_queue_on_issues_enabled(repo_root: &Path) -> bool {
     false
 }
 
+fn commit_open_review_enabled(repo_root: &Path) -> bool {
+    if let Ok(v) = env::var("FLOW_COMMIT_OPEN_REVIEW") {
+        let v = v.trim().to_ascii_lowercase();
+        if v == "1" || v == "true" || v == "yes" {
+            return true;
+        }
+        if v == "0" || v == "false" || v == "no" {
+            return false;
+        }
+    }
+
+    if let Some(ts_config) = config::load_ts_config() {
+        if let Some(flow) = ts_config.flow {
+            if let Some(commit) = flow.commit {
+                if let Some(open) = commit.open_review {
+                    return open;
+                }
+            }
+        }
+    }
+
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            if let Some(commit) = cfg.commit {
+                if let Some(open) = commit.open_review {
+                    return open;
+                }
+            }
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            if let Some(commit) = cfg.commit {
+                if let Some(open) = commit.open_review {
+                    return open;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn commit_require_rise_approval_enabled(repo_root: &Path) -> bool {
+    if env_truthy("FLOW_REQUIRE_RISE_APPROVAL") {
+        return true;
+    }
+    if let Ok(v) = env::var("FLOW_REQUIRE_RISE_APPROVAL") {
+        let v = v.trim().to_ascii_lowercase();
+        if v == "0" || v == "false" || v == "no" {
+            return false;
+        }
+    }
+
+    if let Some(ts_config) = config::load_ts_config() {
+        if let Some(flow) = ts_config.flow {
+            if let Some(commit) = flow.commit {
+                if let Some(required) = commit.require_rise_approval {
+                    return required;
+                }
+            }
+        }
+    }
+
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            if let Some(commit) = cfg.commit {
+                if let Some(required) = commit.require_rise_approval {
+                    return required;
+                }
+            }
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            if let Some(commit) = cfg.commit {
+                if let Some(required) = commit.require_rise_approval {
+                    return required;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 fn prompt_yes_no(message: &str) -> Result<bool> {
     print!("{} [y/N]: ", message);
     io::stdout().flush()?;
@@ -2274,6 +2557,7 @@ pub fn run_with_check_sync(
 
     // Capture current staged changes so we can restore if we cancel.
     let staged_snapshot = capture_staged_snapshot_in(&repo_root)?;
+    let mut staged_guard = StagedSnapshotGuard::new(repo_root.clone(), staged_snapshot);
 
     // Run pre-commit fixers if configured
     if let Ok(fixed) = run_fixers(&repo_root) {
@@ -2288,6 +2572,18 @@ pub fn run_with_check_sync(
     git_run_in(&repo_root, &["add", "."])?;
     println!("done");
     ensure_no_internal_staged(&repo_root)?;
+    if let Err(err) = ensure_no_unwanted_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_build_artifacts_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_large_files_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
 
     // Check for sensitive files before proceeding
     let sensitive_files = check_sensitive_files(&repo_root);
@@ -2399,11 +2695,20 @@ pub fn run_with_check_sync(
             model.as_deref(),
         ),
     };
+    // Review is informational only. If the reviewer fails (provider flake, empty output, etc),
+    // proceed with a warning rather than blocking the commit workflow.
     let review = match review {
         Ok(review) => review,
         Err(err) => {
-            restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
-            return Err(err);
+            warn!(error = %err, "review failed; proceeding without review");
+            println!("⚠ Review failed: {err}");
+            ReviewResult {
+                issues_found: false,
+                issues: Vec::new(),
+                summary: Some(format!("Review failed: {err}")),
+                future_tasks: Vec::new(),
+                timed_out: true,
+            }
         }
     };
 
@@ -2569,8 +2874,12 @@ pub fn run_with_check_sync(
                 }
             }
             ReviewSelection::OpenRouter { model } => {
-                match generate_commit_message_openrouter(&diff_for_prompt, &status, truncated, model)
-                {
+                match generate_commit_message_openrouter(
+                    &diff_for_prompt,
+                    &status,
+                    truncated,
+                    model,
+                ) {
                     Ok(message) => message,
                     Err(err) => match commit_provider {
                         CommitMessageProvider::Remote { .. } => {
@@ -2654,12 +2963,9 @@ pub fn run_with_check_sync(
                     },
                 }
             }
-            _ => commit_message_from_provider(
-                commit_provider,
-                &diff_for_prompt,
-                &status,
-                truncated,
-            )?,
+            _ => {
+                commit_message_from_provider(commit_provider, &diff_for_prompt, &status, truncated)?
+            }
         }
     };
     let message = sanitize_commit_message(&message);
@@ -2751,7 +3057,18 @@ pub fn run_with_check_sync(
     }
 
     ensure_no_internal_staged(&repo_root)?;
-    ensure_no_unwanted_staged(&repo_root)?;
+    if let Err(err) = ensure_no_unwanted_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_build_artifacts_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
+    if let Err(err) = ensure_no_large_files_staged(&repo_root) {
+        staged_guard.disarm();
+        return Err(err);
+    }
 
     // Commit
     let paragraphs = split_paragraphs(&full_message);
@@ -2760,8 +3077,9 @@ pub fn run_with_check_sync(
         args.push("-m");
         args.push(p);
     }
-    git_run(&args)?;
+    git_run_in(&repo_root, &args)?;
     println!("✓ Committed");
+    staged_guard.disarm();
 
     if let Ok(commit_sha) = git_capture_in(&repo_root, &["rev-parse", "HEAD"]) {
         let branch = git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -2817,7 +3135,8 @@ pub fn run_with_check_sync(
         match queue_commit_for_review(&repo_root, &full_message, Some(&review)) {
             Ok(sha) => {
                 print_queue_instructions(&sha);
-                if queue.open_review {
+                let should_open = queue.open_review || commit_open_review_enabled(&repo_root);
+                if should_open {
                     open_review_in_rise(&repo_root, &sha);
                 }
             }
@@ -2831,7 +3150,7 @@ pub fn run_with_check_sync(
         print!("Pushing... ");
         io::stdout().flush()?;
 
-        match git_push_try() {
+        match git_push_try_in(&repo_root) {
             PushResult::Success => {
                 println!("done");
                 pushed = true;
@@ -2844,12 +3163,12 @@ pub fn run_with_check_sync(
                 print!("Pulling with rebase... ");
                 io::stdout().flush()?;
 
-                match git_try(&["pull", "--rebase"]) {
+                match git_try_in(&repo_root, &["pull", "--rebase"]) {
                     Ok(_) => {
                         println!("done");
                         print!("Pushing... ");
                         io::stdout().flush()?;
-                        git_run(&["push"])?;
+                        git_run_in(&repo_root, &["push"])?;
                         println!("done");
                         pushed = true;
                     }
@@ -2873,8 +3192,6 @@ pub fn run_with_check_sync(
 
     // Record undo action (use full_message which contains the commit message)
     record_undo_action(&repo_root, pushed, Some(&full_message));
-
-    cleanup_staged_snapshot(&staged_snapshot);
 
     // Save checkpoint for next commit
     if include_context {
@@ -3658,8 +3975,14 @@ fn run_kimi_review(
             .context("failed to write prompt to kimi")?;
     }
 
-    let stdout = child.stdout.take().context("failed to capture kimi stdout")?;
-    let stderr = child.stderr.take().context("failed to capture kimi stderr")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture kimi stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture kimi stderr")?;
 
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>();
     let (stderr_tx, stderr_rx) = mpsc::channel::<String>();
@@ -3703,14 +4026,28 @@ fn run_kimi_review(
 
     let stdout_text = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
     if stdout_text.is_empty() {
-        bail!("kimi returned empty output");
+        warn!("kimi returned empty output; proceeding without review");
+        return Ok(ReviewResult {
+            issues_found: false,
+            issues: Vec::new(),
+            summary: Some("kimi returned empty output".to_string()),
+            future_tasks: Vec::new(),
+            timed_out: true,
+        });
     }
 
     // Parse the stream-json output from kimi
     // Format: {"role":"assistant","content":[{"type":"think","think":"..."},{"type":"text","text":"..."}]}
     let result = extract_kimi_text_content(&stdout_text).unwrap_or_else(|| stdout_text.clone());
     if result.is_empty() {
-        bail!("kimi returned empty review output (no text content in response)");
+        warn!("kimi returned empty review output; proceeding without review");
+        return Ok(ReviewResult {
+            issues_found: false,
+            issues: Vec::new(),
+            summary: Some("kimi returned empty review output".to_string()),
+            future_tasks: Vec::new(),
+            timed_out: true,
+        });
     }
 
     // Try to parse JSON from output
@@ -3853,7 +4190,17 @@ fn run_openrouter_review(
         .unwrap_or_default();
 
     if output.is_empty() {
-        bail!("OpenRouter returned empty review output");
+        warn!(
+            model = model_id,
+            "OpenRouter returned empty review output; proceeding without review"
+        );
+        return Ok(ReviewResult {
+            issues_found: false,
+            issues: Vec::new(),
+            summary: Some("OpenRouter returned empty review output".to_string()),
+            future_tasks: Vec::new(),
+            timed_out: true,
+        });
     }
 
     println!("{}", output);
@@ -4079,9 +4426,7 @@ fn openrouter_chat_completion_with_retry(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        anyhow::anyhow!("OpenRouter request failed after retries")
-    }))
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("OpenRouter request failed after retries")))
 }
 
 /// Run Rise daemon to review staged changes for bugs and performance issues.
@@ -4181,7 +4526,7 @@ fn run_rise_review(
     })
 }
 
-fn ensure_git_repo() -> Result<()> {
+pub(crate) fn ensure_git_repo() -> Result<()> {
     let _ = vcs::ensure_jj_repo()?;
     let output = Command::new("git")
         .args(["rev-parse", "--git-dir"])
@@ -4196,7 +4541,7 @@ fn ensure_git_repo() -> Result<()> {
     Ok(())
 }
 
-fn git_root_or_cwd() -> std::path::PathBuf {
+pub(crate) fn git_root_or_cwd() -> std::path::PathBuf {
     match git_capture(&["rev-parse", "--show-toplevel"]) {
         Ok(root) => std::path::PathBuf::from(root.trim()),
         Err(_) => std::env::current_dir().unwrap_or_default(),
@@ -4282,7 +4627,9 @@ fn ensure_no_unwanted_staged(repo_root: &Path) -> Result<()> {
         if path == ".rise" || path.starts_with(".rise/") || path.contains("/.rise/") {
             ignore_entries.insert(".rise/");
         }
-        if path.ends_with(".pyc") || path.contains("/__pycache__/") || path.ends_with("/__pycache__")
+        if path.ends_with(".pyc")
+            || path.contains("/__pycache__/")
+            || path.ends_with("/__pycache__")
         {
             ignore_entries.insert("__pycache__/");
             ignore_entries.insert("*.pyc");
@@ -4363,10 +4710,442 @@ fn unwanted_reason(path: &str) -> Option<&'static str> {
     if path.ends_with(".pyc") {
         return Some("python bytecode");
     }
-    if path.ends_with("/__pycache__") || path.contains("/__pycache__/") || path.starts_with("__pycache__/") {
+    if path.ends_with("/__pycache__")
+        || path.contains("/__pycache__/")
+        || path.starts_with("__pycache__/")
+    {
         return Some("python cache");
     }
     None
+}
+
+fn env_truthy(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
+#[derive(Clone)]
+struct CommitGuardrails {
+    max_file_bytes: u64,
+    warn_file_bytes: Option<u64>,
+    block: Gitignore,
+    allow: Gitignore,
+    fail_on_tracked_ignored: bool,
+}
+
+fn merge_commit_guardrails(base: &mut config::CommitGuardrailsConfig, other: config::CommitGuardrailsConfig) {
+    if other.max_file_bytes.is_some() {
+        base.max_file_bytes = other.max_file_bytes;
+    }
+    if other.warn_file_bytes.is_some() {
+        base.warn_file_bytes = other.warn_file_bytes;
+    }
+    if other.fail_on_tracked_ignored.is_some() {
+        base.fail_on_tracked_ignored = other.fail_on_tracked_ignored;
+    }
+    if !other.block_paths.is_empty() {
+        base.block_paths.extend(other.block_paths);
+    }
+    if !other.allow_paths.is_empty() {
+        base.allow_paths.extend(other.allow_paths);
+    }
+}
+
+fn load_commit_guardrails_cfg(repo_root: &Path) -> config::CommitGuardrailsConfig {
+    let mut cfg = config::CommitGuardrailsConfig::default();
+
+    // Global defaults
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(loaded) = config::load(&global_config) {
+            if let Some(commit) = loaded.commit {
+                if let Some(guardrails) = commit.guardrails {
+                    merge_commit_guardrails(&mut cfg, guardrails);
+                }
+            }
+        }
+    }
+
+    // Project overrides
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(loaded) = config::load(&local_config) {
+            if let Some(commit) = loaded.commit {
+                if let Some(guardrails) = commit.guardrails {
+                    merge_commit_guardrails(&mut cfg, guardrails);
+                }
+            }
+        }
+    }
+
+    // Env overrides (highest priority)
+    if let Ok(v) = env::var("FLOW_COMMIT_MAX_FILE_BYTES") {
+        if let Ok(parsed) = v.trim().parse::<u64>() {
+            cfg.max_file_bytes = Some(parsed);
+        }
+    }
+    if let Ok(v) = env::var("FLOW_COMMIT_WARN_FILE_BYTES") {
+        if let Ok(parsed) = v.trim().parse::<u64>() {
+            cfg.warn_file_bytes = Some(parsed);
+        }
+    }
+    if let Ok(v) = env::var("FLOW_COMMIT_FAIL_ON_TRACKED_IGNORED") {
+        let v = v.trim().to_ascii_lowercase();
+        cfg.fail_on_tracked_ignored = Some(v == "1" || v == "true" || v == "yes");
+    }
+
+    cfg
+}
+
+fn build_gitignore_matcher(repo_root: &Path, patterns: &[String]) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(repo_root);
+    for p in patterns {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Treat as gitignore-style patterns relative to repo_root.
+        let _ = builder.add_line(None, trimmed);
+    }
+    builder.build().unwrap_or_else(|_| {
+        GitignoreBuilder::new(repo_root)
+            .build()
+            .expect("empty gitignore matcher must build")
+    })
+}
+
+fn load_commit_guardrails(repo_root: &Path) -> CommitGuardrails {
+    let cfg = load_commit_guardrails_cfg(repo_root);
+
+    // GitHub hard limit is 100MB per file. Default to that.
+    let max_file_bytes = cfg.max_file_bytes.unwrap_or(100 * 1024 * 1024);
+    let warn_file_bytes = cfg.warn_file_bytes;
+
+    // Built-in blocked patterns (high-signal build outputs).
+    let mut block_patterns = vec!["**/.build/**".to_string(), "**/DerivedData/**".to_string()];
+    block_patterns.extend(cfg.block_paths);
+
+    let allow = build_gitignore_matcher(repo_root, &cfg.allow_paths);
+    let block = build_gitignore_matcher(repo_root, &block_patterns);
+
+    CommitGuardrails {
+        max_file_bytes,
+        warn_file_bytes,
+        block,
+        allow,
+        fail_on_tracked_ignored: cfg.fail_on_tracked_ignored.unwrap_or(true),
+    }
+}
+
+fn path_is_allowlisted(guardrails: &CommitGuardrails, path: &str) -> bool {
+    let p = Path::new(path);
+    guardrails
+        .allow
+        .matched_path_or_any_parents(p, false)
+        .is_ignore()
+}
+
+fn path_is_blocked(guardrails: &CommitGuardrails, path: &str) -> bool {
+    if path_is_allowlisted(guardrails, path) {
+        return false;
+    }
+    let p = Path::new(path);
+    guardrails
+        .block
+        .matched_path_or_any_parents(p, false)
+        .is_ignore()
+}
+
+fn blocked_path_reason(path: &str) -> Option<&'static str> {
+    if path == ".build" || path.starts_with(".build/") || path.contains("/.build/") {
+        return Some("swift build artifacts (.build/)");
+    }
+    if path == "DerivedData" || path.starts_with("DerivedData/") || path.contains("/DerivedData/") {
+        return Some("Xcode build artifacts (DerivedData/)");
+    }
+    None
+}
+
+fn build_artifacts_staged_paths(repo_root: &Path) -> Vec<(String, String)> {
+    let guardrails = load_commit_guardrails(repo_root);
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--name-status", "-z"])
+        .current_dir(repo_root)
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = raw.split('\0').collect();
+    let mut i = 0;
+    while i < parts.len() {
+        let status = parts[i];
+        i += 1;
+        if status.is_empty() {
+            continue;
+        }
+        let path = if status.starts_with('R') || status.starts_with('C') {
+            if i + 1 >= parts.len() {
+                break;
+            }
+            let new_path = parts[i + 1];
+            i += 2;
+            new_path
+        } else {
+            if i >= parts.len() {
+                break;
+            }
+            let path = parts[i];
+            i += 1;
+            path
+        };
+
+        if status.starts_with('D') {
+            continue;
+        }
+
+        if path_is_blocked(&guardrails, path) {
+            let reason = blocked_path_reason(path).unwrap_or("blocked path (commit guardrails)");
+            out.push((path.to_string(), reason.to_string()));
+        }
+    }
+    out
+}
+
+fn ensure_no_build_artifacts_staged(repo_root: &Path) -> Result<()> {
+    if env_truthy("FLOW_ALLOW_BUILD_ARTIFACT_COMMIT") || env_truthy("FLOW_ALLOW_UNWANTED_COMMIT") {
+        return Ok(());
+    }
+
+    let staged = build_artifacts_staged_paths(repo_root);
+    if staged.is_empty() {
+        return Ok(());
+    }
+
+    let mut ignore_entries = HashSet::new();
+    for (path, reason) in &staged {
+        println!("Refusing to commit build artifact: {} ({})", path, reason);
+        // Prefer adding a coarse ignore that matches the default blocked patterns.
+        if path.contains(".build/") || path.ends_with("/.build") || path.ends_with("/.build/") {
+            ignore_entries.insert("**/.build/");
+        }
+        if path.contains("DerivedData/") || path.ends_with("/DerivedData") || path.ends_with("/DerivedData/") {
+            ignore_entries.insert("**/DerivedData/");
+        }
+    }
+
+    for entry in &ignore_entries {
+        let _ = setup::add_gitignore_entry(repo_root, entry);
+    }
+
+    for (path, _) in &staged {
+        let _ = git_run_in(repo_root, &["reset", "HEAD", "--", path.as_str()]);
+    }
+
+    if ignore_entries.is_empty() {
+        println!("Unstaged blocked paths.");
+    } else {
+        println!("Added ignore rules for build artifacts and unstaged them.");
+    }
+    println!("Re-run `f commit` after verifying the changes.");
+    println!("Set FLOW_ALLOW_BUILD_ARTIFACT_COMMIT=1 to override.");
+    bail!("Refusing to commit build artifacts");
+}
+
+fn staged_non_deleted_paths(repo_root: &Path) -> Vec<String> {
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--name-status", "-z"])
+        .current_dir(repo_root)
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = raw.split('\0').collect();
+    let mut i = 0;
+    while i < parts.len() {
+        let status = parts[i];
+        i += 1;
+        if status.is_empty() {
+            continue;
+        }
+        let path = if status.starts_with('R') || status.starts_with('C') {
+            if i + 1 >= parts.len() {
+                break;
+            }
+            let new_path = parts[i + 1];
+            i += 2;
+            new_path
+        } else {
+            if i >= parts.len() {
+                break;
+            }
+            let path = parts[i];
+            i += 1;
+            path
+        };
+
+        if status.starts_with('D') {
+            continue;
+        }
+
+        if !path.is_empty() {
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
+fn staged_blob_size_bytes(repo_root: &Path, path: &str) -> Option<u64> {
+    // Read from the index, not the working tree.
+    let spec = format!(":{}", path);
+    let output = Command::new("git")
+        .args(["cat-file", "-s", &spec])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+fn fmt_mib(bytes: u64) -> String {
+    let mib = (bytes as f64) / (1024.0 * 1024.0);
+    format!("{:.1} MiB", mib)
+}
+
+fn ensure_no_large_files_staged(repo_root: &Path) -> Result<()> {
+    if env_truthy("FLOW_ALLOW_LARGE_FILE_COMMIT") {
+        return Ok(());
+    }
+
+    let guardrails = load_commit_guardrails(repo_root);
+
+    let paths = staged_non_deleted_paths(repo_root);
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut offenders: Vec<(String, u64)> = Vec::new();
+    let mut warnings: Vec<(String, u64)> = Vec::new();
+    for path in paths {
+        if let Some(size) = staged_blob_size_bytes(repo_root, &path) {
+            if size >= guardrails.max_file_bytes {
+                offenders.push((path, size));
+            } else if let Some(warn) = guardrails.warn_file_bytes {
+                if size >= warn {
+                    warnings.push((path, size));
+                }
+            }
+        }
+    }
+
+    if !warnings.is_empty() {
+        println!("⚠️  Large files staged (warning threshold):");
+        for (path, size) in &warnings {
+            println!("  - {} ({})", path, fmt_mib(*size));
+        }
+        println!();
+    }
+
+    if offenders.is_empty() {
+        return Ok(());
+    }
+
+    println!(
+        "Refusing to commit oversized files (limit: {} bytes):",
+        guardrails.max_file_bytes
+    );
+    for (path, size) in &offenders {
+        println!("  - {} ({})", path, fmt_mib(*size));
+        let _ = git_run_in(repo_root, &["reset", "HEAD", "--", path.as_str()]);
+    }
+    println!();
+    println!("Fix options:");
+    println!("  - Delete/move build outputs and re-run `f commit`");
+    println!("  - Add the path to .gitignore if it's a generated artifact");
+    println!("  - If you truly need it in git, use Git LFS (or another artifact store)");
+    println!("Set FLOW_ALLOW_LARGE_FILE_COMMIT=1 to override (not recommended).");
+    bail!("Refusing to commit oversized files");
+}
+
+fn ensure_no_tracked_ignored_staged(repo_root: &Path) -> Result<()> {
+    if env_truthy("FLOW_ALLOW_TRACKED_IGNORED_COMMIT") {
+        return Ok(());
+    }
+    let guardrails = load_commit_guardrails(repo_root);
+    if !guardrails.fail_on_tracked_ignored {
+        return Ok(());
+    }
+
+    let paths = staged_non_deleted_paths(repo_root);
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    // Detect tracked-but-ignored paths via git itself.
+    // This finds files that are in the index (-c) but also ignored (-i) by exclude rules.
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["ls-files", "-ci", "--exclude-standard", "-z"])
+        .output()
+        .context("failed to run git ls-files")?;
+
+    let ignored_tracked: HashSet<String> = if output.status.success() {
+        let raw = String::from_utf8_lossy(&output.stdout);
+        raw.split('\0')
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| p.to_string())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    if ignored_tracked.is_empty() {
+        return Ok(());
+    }
+
+    let mut offenders = Vec::new();
+    for p in &paths {
+        if ignored_tracked.contains(p) {
+            offenders.push(p.clone());
+        }
+    }
+    if offenders.is_empty() {
+        return Ok(());
+    }
+
+    println!("Refusing to commit tracked files that match ignore rules (tracked-but-ignored landmine):");
+    for p in &offenders {
+        println!("  - {}", p);
+    }
+    println!();
+    println!("Fix options:");
+    println!("  - If these should NOT be tracked: git rm -r --cached <path> && git commit");
+    println!("  - If these SHOULD be tracked: remove/adjust the matching .gitignore rule");
+    println!("Set FLOW_ALLOW_TRACKED_IGNORED_COMMIT=1 to override.");
+    bail!("Refusing to commit tracked-but-ignored files");
 }
 
 fn log_commit_event_for_repo(
@@ -4444,6 +5223,21 @@ fn record_undo_action(repo_root: &Path, pushed: bool, message: Option<&str>) {
 
 const COMMIT_QUEUE_DIR: &str = ".ai/internal/commit-queue";
 
+#[derive(Debug, Serialize)]
+struct CommitQueueEvent {
+    ts_ms: i64,
+    action: String, // queued, approved, dropped, updated, pr_create, ...
+    repo_root: String,
+    branch: String,
+    commit_sha: String,
+    subject: String,
+    record_path: Option<String>,
+    review_issues_found: bool,
+    review_issues_count: i64,
+    review_timed_out: bool,
+    review_summary: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CommitQueueEntry {
     version: u8,
@@ -4453,6 +5247,15 @@ struct CommitQueueEntry {
     commit_sha: String,
     message: String,
     review_bookmark: Option<String>,
+    /// True if an AI review ran for this commit (even if it timed out).
+    #[serde(default)]
+    review_ran: bool,
+    #[serde(default)]
+    review_issues_found: bool,
+    #[serde(default)]
+    review_timed_out: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    review_issues: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pr_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4504,15 +5307,15 @@ struct RiseReviewSession {
     review: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "patchPath")]
+    patch_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "decisionPath")]
+    decision_path: Option<String>,
     files: Vec<RiseReviewFileEntry>,
 }
 
 fn short_sha(sha: &str) -> &str {
-    if sha.len() <= 7 {
-        sha
-    } else {
-        &sha[..7]
-    }
+    if sha.len() <= 7 { sha } else { &sha[..7] }
 }
 
 fn commit_queue_dir(repo_root: &Path) -> PathBuf {
@@ -4530,6 +5333,105 @@ fn write_commit_queue_entry(repo_root: &Path, entry: &CommitQueueEntry) -> Resul
     let path = commit_queue_entry_path(repo_root, &entry.commit_sha);
     fs::write(&path, payload).context("write commit queue entry")?;
     Ok(path)
+}
+
+fn commit_queue_events_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(
+        home.join(".config")
+            .join("flow")
+            .join("commit-queue")
+            .join("events.jsonl"),
+    )
+}
+
+fn append_commit_queue_event(event: &CommitQueueEvent) {
+    let Some(path) = commit_queue_events_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let Ok(line) = serde_json::to_string(event) else {
+        return;
+    };
+    // Best-effort. Append a single JSON object per line.
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(line.as_bytes())?;
+            f.write_all(b"\n")?;
+            Ok(())
+        });
+}
+
+fn emit_commit_queue_side_effects(
+    action: &str,
+    entry: &CommitQueueEntry,
+    record_path: Option<&Path>,
+    review: Option<&ReviewResult>,
+) {
+    let ts_ms = chrono::Utc::now().timestamp_millis();
+    let subject = entry
+        .message
+        .lines()
+        .next()
+        .unwrap_or("no message")
+        .trim()
+        .to_string();
+
+    let (issues_found, issues_count, timed_out, summary) = match review {
+        Some(r) => (
+            r.issues_found,
+            r.issues.len().min(i64::MAX as usize) as i64,
+            r.timed_out,
+            r.summary.clone(),
+        ),
+        None => (false, 0, false, None),
+    };
+
+    append_commit_queue_event(&CommitQueueEvent {
+        ts_ms,
+        action: action.to_string(),
+        repo_root: entry.repo_root.clone(),
+        branch: entry.branch.clone(),
+        commit_sha: entry.commit_sha.clone(),
+        subject: subject.clone(),
+        record_path: record_path.map(|p| p.display().to_string()),
+        review_issues_found: issues_found,
+        review_issues_count: issues_count,
+        review_timed_out: timed_out,
+        review_summary: summary.clone(),
+    });
+
+    // When a commit is queued due to issues, proactively suggest a Codex review on that commit.
+    // This is a Lin proposal (human-in-the-loop), not an auto-run.
+    if action == "queued" && (issues_found || timed_out) {
+        let title = format!("Review queued commit {}", short_sha(&entry.commit_sha));
+        let mut ctx = format!(
+            "Repo: {}\nBranch: {}\nCommit: {}\nSubject: {}\n",
+            entry.repo_root, entry.branch, entry.commit_sha, subject
+        );
+        if let Some(s) = summary
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            ctx.push_str("\nReview summary:\n");
+            ctx.push_str(s);
+            ctx.push('\n');
+        }
+
+        let action = format!(
+            "codex review --commit {} --title \"{}\"",
+            entry.commit_sha,
+            subject.replace('"', "'")
+        );
+        let _ = notify::send_proposal(&action, Some(&title), Some(&ctx), 60 * 30);
+    }
 }
 
 fn format_review_body(review: &ReviewResult) -> Option<String> {
@@ -4606,7 +5508,11 @@ fn resolve_review_files(repo_root: &Path, commit_sha: &str) -> Vec<RiseReviewFil
                 return Some(RiseReviewFileEntry {
                     status,
                     path,
-                    original_path: if original.is_empty() { None } else { Some(original) },
+                    original_path: if original.is_empty() {
+                        None
+                    } else {
+                        Some(original)
+                    },
                 });
             }
             let path = parts.next().unwrap_or_default().trim().to_string();
@@ -4622,10 +5528,173 @@ fn resolve_review_files(repo_root: &Path, commit_sha: &str) -> Vec<RiseReviewFil
         .collect()
 }
 
+fn commit_changed_paths(repo_root: &Path, commit_sha: &str) -> Vec<String> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args([
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            "-M",
+            "-z",
+            commit_sha,
+        ])
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = raw.split('\0').collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < parts.len() {
+        let status = parts[i];
+        i += 1;
+        if status.is_empty() {
+            continue;
+        }
+        let path = if status.starts_with('R') || status.starts_with('C') {
+            if i + 1 >= parts.len() {
+                break;
+            }
+            let new_path = parts[i + 1];
+            i += 2;
+            new_path
+        } else {
+            if i >= parts.len() {
+                break;
+            }
+            let path = parts[i];
+            i += 1;
+            path
+        };
+
+        if status.starts_with('D') {
+            continue;
+        }
+        if !path.is_empty() {
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
+fn commit_blob_size_bytes(repo_root: &Path, commit_sha: &str, path: &str) -> Option<u64> {
+    let spec = format!("{}:{}", commit_sha, path);
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["cat-file", "-s", &spec])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+fn ensure_commit_tree_guardrails(repo_root: &Path, commit_sha: &str) -> Result<()> {
+    if env_truthy("FLOW_ALLOW_LARGE_FILE_COMMIT") && env_truthy("FLOW_ALLOW_BUILD_ARTIFACT_COMMIT") {
+        return Ok(());
+    }
+
+    let guardrails = load_commit_guardrails(repo_root);
+    let paths = commit_changed_paths(repo_root, commit_sha);
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut blocked = Vec::new();
+    let mut internal = Vec::new();
+    let mut oversized = Vec::new();
+    let mut warnings = Vec::new();
+
+    for path in &paths {
+        if path.starts_with(".ai/internal/") || path == ".ai/internal" {
+            internal.push(path.clone());
+            continue;
+        }
+        if path_is_blocked(&guardrails, path) && !env_truthy("FLOW_ALLOW_BUILD_ARTIFACT_COMMIT") {
+            blocked.push(path.clone());
+        }
+        if let Some(size) = commit_blob_size_bytes(repo_root, commit_sha, path) {
+            if size >= guardrails.max_file_bytes && !env_truthy("FLOW_ALLOW_LARGE_FILE_COMMIT") {
+                oversized.push((path.clone(), size));
+            } else if let Some(warn) = guardrails.warn_file_bytes {
+                if size >= warn {
+                    warnings.push((path.clone(), size));
+                }
+            }
+        }
+    }
+
+    if !warnings.is_empty() {
+        println!("⚠️  Large files in commit (warning threshold):");
+        for (path, size) in &warnings {
+            println!("  - {} ({})", path, fmt_mib(*size));
+        }
+        println!();
+    }
+
+    if internal.is_empty() && blocked.is_empty() && oversized.is_empty() {
+        return Ok(());
+    }
+
+    if !internal.is_empty() {
+        println!("Refusing to push commit that touches internal .ai files:");
+        for p in &internal {
+            println!("  - {}", p);
+        }
+        println!("Remove these from the commit before approving.");
+        bail!("Refusing to push internal .ai files");
+    }
+
+    if !blocked.is_empty() {
+        println!("Refusing to push commit that contains blocked paths:");
+        for p in &blocked {
+            let reason = blocked_path_reason(p).unwrap_or("blocked by commit guardrails");
+            println!("  - {} ({})", p, reason);
+        }
+        println!();
+        println!("Fix options:");
+        println!("  - Rewrite the commit to remove these paths, then re-queue");
+        println!("  - Add an allowlist rule in flow.toml under [commit.guardrails.allow_paths]");
+        println!("Set FLOW_ALLOW_BUILD_ARTIFACT_COMMIT=1 to override (not recommended).");
+        bail!("Refusing to push blocked paths");
+    }
+
+    if !oversized.is_empty() {
+        println!("Refusing to push commit with oversized files (limit: {} bytes):", guardrails.max_file_bytes);
+        for (p, size) in &oversized {
+            println!("  - {} ({})", p, fmt_mib(*size));
+        }
+        println!();
+        println!("Fix options:");
+        println!("  - Rewrite the commit to remove these files, then re-queue");
+        println!("  - Use Git LFS or an artifact store");
+        println!("Set FLOW_ALLOW_LARGE_FILE_COMMIT=1 to override (not recommended).");
+        bail!("Refusing to push oversized files");
+    }
+
+    Ok(())
+}
+
 fn write_rise_review_session(repo_root: &Path, entry: &CommitQueueEntry) -> Result<PathBuf> {
     let review_dir = repo_root.join(RISE_REVIEW_DIR);
     fs::create_dir_all(&review_dir)
         .with_context(|| format!("failed to create {}", review_dir.display()))?;
+
+    let patch_path = write_rise_review_patch(repo_root, &entry.commit_sha).ok();
+    let decision_path = rise_review_decision_path(repo_root, &entry.commit_sha);
 
     let session = RiseReviewSession {
         version: 1,
@@ -4639,11 +5708,22 @@ fn write_rise_review_session(repo_root: &Path, entry: &CommitQueueEntry) -> Resu
         analysis: entry.analysis.clone(),
         review: entry.review.clone(),
         summary: entry.summary.clone(),
+        patch_path: patch_path
+            .as_ref()
+            .and_then(|p| p.strip_prefix(repo_root).ok())
+            .and_then(|p| p.to_str())
+            .map(|s| s.to_string()),
+        decision_path: decision_path
+            .strip_prefix(repo_root)
+            .ok()
+            .and_then(|p| p.to_str())
+            .map(|s| s.to_string()),
         files: resolve_review_files(repo_root, &entry.commit_sha),
     };
 
     let path = review_dir.join(format!("review-{}.json", entry.commit_sha));
-    let payload = serde_json::to_string_pretty(&session).context("serialize rise review session")?;
+    let payload =
+        serde_json::to_string_pretty(&session).context("serialize rise review session")?;
     fs::write(&path, payload).context("write rise review session")?;
     Ok(path)
 }
@@ -4654,10 +5734,92 @@ fn rise_review_path(repo_root: &Path, commit_sha: &str) -> PathBuf {
         .join(format!("review-{}.json", commit_sha))
 }
 
+fn rise_review_patch_path(repo_root: &Path, commit_sha: &str) -> PathBuf {
+    repo_root
+        .join(RISE_REVIEW_DIR)
+        .join(format!("patch-{}.diff", commit_sha))
+}
+
+fn rise_review_decision_path(repo_root: &Path, commit_sha: &str) -> PathBuf {
+    repo_root
+        .join(RISE_REVIEW_DIR)
+        .join(format!("decision-{}.json", commit_sha))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RiseReviewDecision {
+    version: u8,
+    #[serde(rename = "decided_at")]
+    decided_at: String,
+    status: String, // "approved" | "needs-fix"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>, // "flow" | "rise-app" | ...
+}
+
+fn load_rise_review_decision(repo_root: &Path, commit_sha: &str) -> Option<RiseReviewDecision> {
+    let path = rise_review_decision_path(repo_root, commit_sha);
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<RiseReviewDecision>(&content).ok()
+}
+
+fn write_rise_review_decision(
+    repo_root: &Path,
+    commit_sha: &str,
+    status: &str,
+    note: Option<&str>,
+    source: Option<&str>,
+) -> Result<PathBuf> {
+    let review_dir = repo_root.join(RISE_REVIEW_DIR);
+    fs::create_dir_all(&review_dir)
+        .with_context(|| format!("failed to create {}", review_dir.display()))?;
+
+    let decision = RiseReviewDecision {
+        version: 1,
+        decided_at: chrono::Utc::now().to_rfc3339(),
+        status: status.to_string(),
+        note: note.map(|s| s.to_string()).filter(|s| !s.trim().is_empty()),
+        source: source.map(|s| s.to_string()),
+    };
+    let path = rise_review_decision_path(repo_root, commit_sha);
+    let payload = serde_json::to_string_pretty(&decision).context("serialize rise review decision")?;
+    fs::write(&path, payload).context("write rise review decision")?;
+    Ok(path)
+}
+
+fn write_rise_review_patch(repo_root: &Path, commit_sha: &str) -> Result<PathBuf> {
+    let review_dir = repo_root.join(RISE_REVIEW_DIR);
+    fs::create_dir_all(&review_dir)
+        .with_context(|| format!("failed to create {}", review_dir.display()))?;
+
+    let patch = git_capture_in(
+        repo_root,
+        &[
+            "show",
+            "--color=never",
+            "--patch",
+            "--format=fuller",
+            commit_sha,
+        ],
+    )?;
+    let path = rise_review_patch_path(repo_root, commit_sha);
+    fs::write(&path, patch).context("write rise review patch")?;
+    Ok(path)
+}
+
 fn delete_rise_review_session(repo_root: &Path, commit_sha: &str) {
     let path = rise_review_path(repo_root, commit_sha);
     if path.exists() {
         let _ = fs::remove_file(path);
+    }
+    let patch_path = rise_review_patch_path(repo_root, commit_sha);
+    if patch_path.exists() {
+        let _ = fs::remove_file(patch_path);
+    }
+    let decision_path = rise_review_decision_path(repo_root, commit_sha);
+    if decision_path.exists() {
+        let _ = fs::remove_file(decision_path);
     }
 }
 
@@ -4729,7 +5891,9 @@ fn queue_commit_for_review(
     message: &str,
     review: Option<&ReviewResult>,
 ) -> Result<String> {
-    let commit_sha = git_capture_in(repo_root, &["rev-parse", "HEAD"])?.trim().to_string();
+    let commit_sha = git_capture_in(repo_root, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
     let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "unknown".to_string())
         .trim()
@@ -4746,15 +5910,23 @@ fn queue_commit_for_review(
             }
         });
     let review_body = review.and_then(format_review_body);
+    let (review_ran, review_issues_found, review_timed_out, review_issues) = match review {
+        Some(r) => (true, r.issues_found, r.timed_out, r.issues.clone()),
+        None => (false, false, false, Vec::new()),
+    };
 
     let entry = CommitQueueEntry {
-        version: 1,
+        version: 2,
         created_at: chrono::Utc::now().to_rfc3339(),
         repo_root: repo_root.display().to_string(),
         branch,
         commit_sha: commit_sha.clone(),
         message: message.to_string(),
         review_bookmark,
+        review_ran,
+        review_issues_found,
+        review_timed_out,
+        review_issues,
         pr_url: None,
         pr_number: None,
         pr_head: None,
@@ -4766,7 +5938,7 @@ fn queue_commit_for_review(
     };
 
     let path = write_commit_queue_entry(repo_root, &entry)?;
-    let _ = path;
+    emit_commit_queue_side_effects("queued", &entry, Some(&path), review);
     if let Err(err) = write_rise_review_session(repo_root, &entry) {
         debug!("failed to write rise review session: {}", err);
     }
@@ -4776,8 +5948,7 @@ fn queue_commit_for_review(
 fn open_review_in_rise(repo_root: &Path, commit_sha: &str) {
     // Prefer rise-app (VS Code fork) because it has the best multi-file diff UX.
     // Fall back to `rise review open` if rise-app isn't installed.
-    let (cmd, args): (String, Vec<String>) = if let Ok(rise_app_path) = which::which("rise-app")
-    {
+    let (cmd, args): (String, Vec<String>) = if let Ok(rise_app_path) = which::which("rise-app") {
         // Ensure review file exists, then open it explicitly.
         let review_file = rise_review_path(repo_root, commit_sha);
         if !review_file.exists() {
@@ -4791,8 +5962,14 @@ fn open_review_in_rise(repo_root: &Path, commit_sha: &str) {
         // In that case, execute it with node.
         let launch_with_node = fs::read(&rise_app_path)
             .ok()
-            .and_then(|bytes| bytes.get(0..128).map(|chunk| String::from_utf8_lossy(chunk).to_string()))
-            .map(|head| !head.starts_with("#!") && (head.starts_with("/*") || head.starts_with("//")))
+            .and_then(|bytes| {
+                bytes
+                    .get(0..128)
+                    .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+            })
+            .map(|head| {
+                !head.starts_with("#!") && (head.starts_with("/*") || head.starts_with("//"))
+            })
             .unwrap_or(false);
 
         if launch_with_node {
@@ -4894,7 +6071,12 @@ fn refresh_queue_entry_commit(repo_root: &Path, entry: &mut CommitQueueEntry) ->
     ) else {
         return Ok(false);
     };
-    let new_sha = output.split_whitespace().next().unwrap_or_default().trim().to_string();
+    let new_sha = output
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if new_sha.is_empty() || new_sha == entry.commit_sha {
         return Ok(false);
     }
@@ -5057,7 +6239,7 @@ fn jj_bookmark_exists(repo_root: &Path, name: &str) -> bool {
     false
 }
 
-fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
+pub(crate) fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("jj")
         .current_dir(repo_root)
         .args(args)
@@ -5069,7 +6251,7 @@ fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("jj")
         .current_dir(repo_root)
         .args(args)
@@ -5081,7 +6263,7 @@ fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn ensure_gh_available() -> Result<()> {
+pub(crate) fn ensure_gh_available() -> Result<()> {
     let status = Command::new("gh")
         .args(["--version"])
         .stdout(Stdio::null())
@@ -5094,7 +6276,7 @@ fn ensure_gh_available() -> Result<()> {
     Ok(())
 }
 
-fn gh_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn gh_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("gh")
         .current_dir(repo_root)
         .args(args)
@@ -5110,7 +6292,7 @@ fn gh_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn github_repo_from_remote_url(url: &str) -> Option<String> {
+pub(crate) fn github_repo_from_remote_url(url: &str) -> Option<String> {
     let trimmed = url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return None;
@@ -5129,7 +6311,7 @@ fn github_repo_from_remote_url(url: &str) -> Option<String> {
     None
 }
 
-fn resolve_github_repo(repo_root: &Path) -> Result<String> {
+pub(crate) fn resolve_github_repo(repo_root: &Path) -> Result<String> {
     // First try origin URL.
     if let Ok(url) = git_capture_in(repo_root, &["remote", "get-url", "origin"]) {
         if let Some(repo) = github_repo_from_remote_url(&url) {
@@ -5152,12 +6334,14 @@ fn resolve_github_repo(repo_root: &Path) -> Result<String> {
     .context("failed to resolve GitHub repo for current directory")?;
     let repo = repo.trim();
     if repo.is_empty() {
-        bail!("unable to determine GitHub repo (origin URL not GitHub, and `gh repo view` returned empty)");
+        bail!(
+            "unable to determine GitHub repo (origin URL not GitHub, and `gh repo view` returned empty)"
+        );
     }
     Ok(repo.to_string())
 }
 
-fn sanitize_ref_component(input: &str) -> String {
+pub(crate) fn sanitize_ref_component(input: &str) -> String {
     let mut out = String::new();
     let mut last_sep = false;
     for ch in input.chars() {
@@ -5197,16 +6381,26 @@ fn default_pr_head(entry: &CommitQueueEntry) -> String {
     )
 }
 
-fn ensure_pr_head_pushed(repo_root: &Path, head: &str, commit_sha: &str) -> Result<()> {
+pub(crate) fn ensure_pr_head_pushed(repo_root: &Path, head: &str, commit_sha: &str) -> Result<()> {
     // Prefer jj bookmarks when available.
     if which::which("jj").is_ok() {
         // Ensure bookmark points at the commit, then push it.
         jj_run_in(
             repo_root,
-            &["bookmark", "set", head, "-r", commit_sha, "--allow-backwards"],
+            &[
+                "bookmark",
+                "set",
+                head,
+                "-r",
+                commit_sha,
+                "--allow-backwards",
+            ],
         )?;
         // We often push a brand new review/pr bookmark as the PR head.
-        jj_run_in(repo_root, &["git", "push", "--bookmark", head, "--allow-new"])?;
+        jj_run_in(
+            repo_root,
+            &["git", "push", "--bookmark", head, "--allow-new"],
+        )?;
         return Ok(());
     }
 
@@ -5226,7 +6420,7 @@ fn pr_number_from_url(url: &str) -> Option<u64> {
     parts.last()?.parse().ok()
 }
 
-fn gh_find_open_pr_by_head(
+pub(crate) fn gh_find_open_pr_by_head(
     repo_root: &Path,
     repo: &str,
     head: &str,
@@ -5262,7 +6456,7 @@ fn gh_find_open_pr_by_head(
     }
 }
 
-fn gh_create_pr(
+pub(crate) fn gh_create_pr(
     repo_root: &Path,
     repo: &str,
     head: &str,
@@ -5272,17 +6466,7 @@ fn gh_create_pr(
     draft: bool,
 ) -> Result<(u64, String)> {
     let mut args: Vec<&str> = vec![
-        "pr",
-        "create",
-        "--repo",
-        repo,
-        "--head",
-        head,
-        "--base",
-        base,
-        "--title",
-        title,
-        "--body",
+        "pr", "create", "--repo", repo, "--head", head, "--base", base, "--title", title, "--body",
         body,
     ];
     if draft {
@@ -5323,7 +6507,7 @@ fn gh_create_pr(
     );
 }
 
-fn open_in_browser(url: &str) -> Result<()> {
+pub(crate) fn open_in_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let status = Command::new("open").arg(url).status()?;
@@ -5343,7 +6527,7 @@ fn open_in_browser(url: &str) -> Result<()> {
     }
 }
 
-fn commit_message_title_body(message: &str) -> (String, String) {
+pub(crate) fn commit_message_title_body(message: &str) -> (String, String) {
     let mut lines = message.lines();
     let title = lines.next().unwrap_or("no title").trim().to_string();
     let rest = lines.collect::<Vec<_>>().join("\n").trim().to_string();
@@ -5366,25 +6550,32 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             println!("Queued commits:");
             for mut entry in entries {
                 let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
-                let subject = entry
-                    .message
-                    .lines()
-                    .next()
-                    .unwrap_or("no message")
-                    .trim();
+                let subject = entry.message.lines().next().unwrap_or("no message").trim();
                 let created_at = format_queue_created_at(&entry.created_at);
                 let bookmark = entry
                     .review_bookmark
                     .as_ref()
                     .map(|b| format!(" {}", b))
                     .unwrap_or_default();
+                let decision = load_rise_review_decision(&repo_root, &entry.commit_sha)
+                    .map(|d| format!(" [{}]", d.status))
+                    .unwrap_or_default();
+                let review_flags = if entry.review_issues_found {
+                    " [review-issues]".to_string()
+                } else if !entry.review_ran || entry.review_timed_out {
+                    " [unreviewed]".to_string()
+                } else {
+                    String::new()
+                };
                 println!(
-                    "  {}  {}  {}  {}{}",
+                    "  {}  {}  {}  {}{}{}{}",
                     short_sha(&entry.commit_sha),
                     entry.branch,
                     created_at,
                     subject,
-                    bookmark
+                    bookmark,
+                    decision,
+                    review_flags
                 );
             }
         }
@@ -5455,7 +6646,60 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 }
             }
         }
-        CommitQueueAction::Approve { hash, force } => {
+        CommitQueueAction::ReviewStatus { hash } => {
+            let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
+            let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+            let decision = load_rise_review_decision(&repo_root, &entry.commit_sha);
+            match decision {
+                Some(d) => {
+                    println!("Commit: {}", entry.commit_sha);
+                    println!("Rise decision: {}", d.status);
+                    println!("Decided: {}", d.decided_at);
+                    if let Some(note) = d.note.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty())
+                    {
+                        println!("Note: {}", note);
+                    }
+                }
+                None => {
+                    println!("Commit: {}", entry.commit_sha);
+                    println!("Rise decision: (missing)");
+                    println!(
+                        "Write one with: f commit-queue review-mark {} --status approved",
+                        short_sha(&entry.commit_sha)
+                    );
+                }
+            }
+        }
+        CommitQueueAction::ReviewMark { hash, status, note } => {
+            let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
+            let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+            let status_str = match status {
+                RiseReviewDecisionArg::Approved => "approved",
+                RiseReviewDecisionArg::NeedsFix => "needs-fix",
+            };
+            let _ = write_rise_review_session(&repo_root, &entry);
+            let path = write_rise_review_decision(
+                &repo_root,
+                &entry.commit_sha,
+                status_str,
+                note.as_deref(),
+                Some("flow"),
+            )?;
+            println!(
+                "Wrote Rise review decision for {}: {} ({})",
+                short_sha(&entry.commit_sha),
+                status_str,
+                path.strip_prefix(&repo_root)
+                    .unwrap_or(&path)
+                    .display()
+            );
+        }
+        CommitQueueAction::Approve {
+            hash,
+            force,
+            allow_issues,
+            allow_unreviewed,
+        } => {
             git_guard::ensure_clean_for_push(&repo_root)?;
             let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
             let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
@@ -5469,9 +6713,8 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 );
             }
 
-            let current_branch =
-                git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
-                    .unwrap_or_else(|_| "unknown".to_string());
+            let current_branch = git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap_or_else(|_| "unknown".to_string());
             if current_branch.trim() != entry.branch && !force {
                 bail!(
                     "Queued commit was created on branch {} but current branch is {}. Checkout the branch or re-run with --force.",
@@ -5481,9 +6724,10 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
 
             if git_try_in(&repo_root, &["fetch", "--quiet"]).is_ok() {
-                if let Ok(counts) =
-                    git_capture_in(&repo_root, &["rev-list", "--left-right", "--count", "@{u}...HEAD"])
-                {
+                if let Ok(counts) = git_capture_in(
+                    &repo_root,
+                    &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+                ) {
                     let parts: Vec<&str> = counts.split_whitespace().collect();
                     if parts.len() == 2 {
                         let behind = parts[0].parse::<u64>().unwrap_or(0);
@@ -5495,6 +6739,38 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                         }
                     }
                 }
+            }
+
+            // Final safety gates before pushing.
+            ensure_commit_tree_guardrails(&repo_root, &entry.commit_sha)?;
+            if commit_require_rise_approval_enabled(&repo_root) && !allow_unreviewed {
+                let decision = load_rise_review_decision(&repo_root, &entry.commit_sha);
+                let approved = decision
+                    .as_ref()
+                    .map(|d| d.status.trim() == "approved")
+                    .unwrap_or(false);
+                if !approved && !force {
+                    bail!(
+                        "Rise approval required for {}. Run `f commit-queue open {}` then mark it via `f commit-queue review-mark {} --status approved` (or pass --allow-unreviewed).",
+                        short_sha(&entry.commit_sha),
+                        short_sha(&entry.commit_sha),
+                        short_sha(&entry.commit_sha)
+                    );
+                }
+            }
+            if entry.review_issues_found && !allow_issues && !force {
+                bail!(
+                    "Queued commit {} has review issues recorded. Use `f commit-queue show {}` and fix, or re-run with --allow-issues.",
+                    short_sha(&entry.commit_sha),
+                    short_sha(&entry.commit_sha)
+                );
+            }
+            if (!entry.review_ran || entry.review_timed_out) && !allow_unreviewed && !force {
+                bail!(
+                    "Queued commit {} is unreviewed (or review timed out). Open it in Rise (`f commit-queue open {}`) or re-run with --allow-unreviewed.",
+                    short_sha(&entry.commit_sha),
+                    short_sha(&entry.commit_sha)
+                );
             }
 
             let before_sha = git_capture_in(&repo_root, &["rev-parse", "@{u}"]).ok();
@@ -5540,6 +6816,12 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
 
             if pushed {
+                emit_commit_queue_side_effects(
+                    "approved",
+                    &entry,
+                    entry.record_path.as_deref(),
+                    None,
+                );
                 if let (Some(before_sha), Ok(after_sha)) = (
                     before_sha,
                     git_capture_in(&repo_root, &["rev-parse", "HEAD"]),
@@ -5565,7 +6847,11 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 println!("✓ Approved and pushed {}", short_sha(&entry.commit_sha));
             }
         }
-        CommitQueueAction::ApproveAll { force } => {
+        CommitQueueAction::ApproveAll {
+            force,
+            allow_issues,
+            allow_unreviewed,
+        } => {
             git_guard::ensure_clean_for_push(&repo_root)?;
             let mut entries = load_commit_queue_entries(&repo_root)?;
             if entries.is_empty() {
@@ -5577,9 +6863,8 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 let _ = refresh_queue_entry_commit(&repo_root, entry);
             }
 
-            let current_branch =
-                git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
-                    .unwrap_or_else(|_| "unknown".to_string());
+            let current_branch = git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap_or_else(|_| "unknown".to_string());
             let current_branch = current_branch.trim().to_string();
 
             let mut candidates = Vec::new();
@@ -5606,9 +6891,10 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
 
             if git_try_in(&repo_root, &["fetch", "--quiet"]).is_ok() {
-                if let Ok(counts) =
-                    git_capture_in(&repo_root, &["rev-list", "--left-right", "--count", "@{u}...HEAD"])
-                {
+                if let Ok(counts) = git_capture_in(
+                    &repo_root,
+                    &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+                ) {
                     let parts: Vec<&str> = counts.split_whitespace().collect();
                     if parts.len() == 2 {
                         let behind = parts[0].parse::<u64>().unwrap_or(0);
@@ -5619,6 +6905,64 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                             );
                         }
                     }
+                }
+            }
+
+            // Final safety gates before pushing.
+            for entry in &candidates {
+                ensure_commit_tree_guardrails(&repo_root, &entry.commit_sha)?;
+            }
+            if commit_require_rise_approval_enabled(&repo_root) && !allow_unreviewed && !force {
+                let mut missing = Vec::new();
+                for entry in &candidates {
+                    let decision = load_rise_review_decision(&repo_root, &entry.commit_sha);
+                    let approved = decision
+                        .as_ref()
+                        .map(|d| d.status.trim() == "approved")
+                        .unwrap_or(false);
+                    if !approved {
+                        missing.push(entry.commit_sha.clone());
+                    }
+                }
+                if !missing.is_empty() {
+                    println!("Rise approval required for the following queued commit(s):");
+                    for sha in &missing {
+                        println!("  - {}", short_sha(sha));
+                    }
+                    println!();
+                    bail!("Missing Rise approvals. Open and mark them approved, or pass --allow-unreviewed.");
+                }
+            }
+            if !allow_issues && !force {
+                let mut with_issues = Vec::new();
+                for entry in &candidates {
+                    if entry.review_issues_found {
+                        with_issues.push(entry.commit_sha.clone());
+                    }
+                }
+                if !with_issues.is_empty() {
+                    println!("Queued commit(s) have review issues recorded:");
+                    for sha in &with_issues {
+                        println!("  - {}", short_sha(sha));
+                    }
+                    println!();
+                    bail!("Fix review issues or pass --allow-issues.");
+                }
+            }
+            if !allow_unreviewed && !force {
+                let mut unreviewed = Vec::new();
+                for entry in &candidates {
+                    if !entry.review_ran || entry.review_timed_out {
+                        unreviewed.push(entry.commit_sha.clone());
+                    }
+                }
+                if !unreviewed.is_empty() {
+                    println!("Queued commit(s) are unreviewed (or review timed out):");
+                    for sha in &unreviewed {
+                        println!("  - {}", short_sha(sha));
+                    }
+                    println!();
+                    bail!("Review them in Rise or pass --allow-unreviewed.");
                 }
             }
 
@@ -5684,8 +7028,8 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                     );
                 }
 
-                let head_sha = git_capture_in(&repo_root, &["rev-parse", "HEAD"])
-                    .unwrap_or_default();
+                let head_sha =
+                    git_capture_in(&repo_root, &["rev-parse", "HEAD"]).unwrap_or_default();
                 let head_sha = head_sha.trim();
                 let mut approved = 0;
                 let mut skipped = 0;
@@ -5723,6 +7067,7 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
         CommitQueueAction::Drop { hash } => {
             let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
             let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+            emit_commit_queue_side_effects("dropped", &entry, entry.record_path.as_deref(), None);
             if let Some(bookmark) = entry.review_bookmark.as_ref() {
                 delete_review_bookmark(&repo_root, bookmark);
             }
@@ -5744,33 +7089,35 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             let head = default_pr_head(&entry);
             ensure_pr_head_pushed(&repo_root, &head, &entry.commit_sha)?;
 
-            let (number, url) = if let Some(found) = gh_find_open_pr_by_head(&repo_root, &repo, &head)? {
-                found
-            } else {
-                let (title, body_rest) = commit_message_title_body(&entry.message);
-                let mut body = String::new();
-                if !body_rest.is_empty() {
-                    body.push_str(&body_rest);
-                    body.push_str("\n\n");
-                }
-                if let Some(summary) = entry
-                    .summary
-                    .as_deref()
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                {
-                    body.push_str("Review summary:\n");
-                    body.push_str(summary);
-                    body.push('\n');
-                }
-                gh_create_pr(&repo_root, &repo, &head, &base, &title, body.trim(), draft)?
-            };
+            let (number, url) =
+                if let Some(found) = gh_find_open_pr_by_head(&repo_root, &repo, &head)? {
+                    found
+                } else {
+                    let (title, body_rest) = commit_message_title_body(&entry.message);
+                    let mut body = String::new();
+                    if !body_rest.is_empty() {
+                        body.push_str(&body_rest);
+                        body.push_str("\n\n");
+                    }
+                    if let Some(summary) = entry
+                        .summary
+                        .as_deref()
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                    {
+                        body.push_str("Review summary:\n");
+                        body.push_str(summary);
+                        body.push('\n');
+                    }
+                    gh_create_pr(&repo_root, &repo, &head, &base, &title, body.trim(), draft)?
+                };
 
             entry.pr_number = Some(number);
             entry.pr_url = Some(url.clone());
             entry.pr_head = Some(head.clone());
             entry.pr_base = Some(base.clone());
             let _ = write_commit_queue_entry(&repo_root, &entry);
+            emit_commit_queue_side_effects("pr_create", &entry, entry.record_path.as_deref(), None);
 
             println!("PR: {}", url);
             if open {
@@ -5798,13 +7145,26 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 // Create it if missing (as draft).
                 ensure_pr_head_pushed(&repo_root, &head, &entry.commit_sha)?;
                 let (title, body_rest) = commit_message_title_body(&entry.message);
-                let (number, url) =
-                    gh_create_pr(&repo_root, &repo, &head, &base, &title, body_rest.trim(), true)?;
+                let (number, url) = gh_create_pr(
+                    &repo_root,
+                    &repo,
+                    &head,
+                    &base,
+                    &title,
+                    body_rest.trim(),
+                    true,
+                )?;
                 entry.pr_number = Some(number);
                 entry.pr_url = Some(url.clone());
                 entry.pr_head = Some(head.clone());
                 entry.pr_base = Some(base.clone());
                 let _ = write_commit_queue_entry(&repo_root, &entry);
+                emit_commit_queue_side_effects(
+                    "pr_open_create",
+                    &entry,
+                    entry.record_path.as_deref(),
+                    None,
+                );
                 url
             };
 
@@ -6069,7 +7429,7 @@ fn git_run(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn git_run_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
+pub(crate) fn git_run_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
     let mut cmd = Command::new("git");
     if args.first() == Some(&"commit") {
         cmd.env("FLOW_COMMIT", "1");
@@ -6088,49 +7448,11 @@ fn git_run_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Try to run a git command, returning Ok/Err without bailing.
-fn git_try(args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
-
-    if !status.success() {
-        bail!("git {} failed", args.join(" "));
-    }
-    Ok(())
-}
-
 /// Push result indicating success, remote ahead, or no remote repo.
 enum PushResult {
     Success,
     RemoteAhead,
     NoRemoteRepo,
-}
-
-/// Try to push and detect if failure is due to missing remote repo.
-fn git_push_try() -> PushResult {
-    let output = Command::new("git").args(["push"]).output().ok();
-
-    let Some(output) = output else {
-        return PushResult::RemoteAhead;
-    };
-
-    if output.status.success() {
-        return PushResult::Success;
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-    if stderr.contains("repository not found")
-        || stderr.contains("does not exist")
-        || stderr.contains("could not read from remote")
-    {
-        PushResult::NoRemoteRepo
-    } else {
-        PushResult::RemoteAhead
-    }
 }
 
 fn git_push_try_in(workdir: &std::path::Path) -> PushResult {
@@ -6174,7 +7496,7 @@ fn git_try_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn git_capture(args: &[&str]) -> Result<String> {
+pub(crate) fn git_capture(args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .output()
@@ -6187,7 +7509,7 @@ fn git_capture(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn git_capture_in(workdir: &std::path::Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git_capture_in(workdir: &std::path::Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .current_dir(workdir)
         .args(args)
@@ -6768,9 +8090,7 @@ fn openrouter_api_key() -> Result<String> {
     }
 
     if is_local_env_backend() {
-        if let Ok(vars) =
-            crate::env::fetch_personal_env_vars(&["OPENROUTER_API_KEY".to_string()])
-        {
+        if let Ok(vars) = crate::env::fetch_personal_env_vars(&["OPENROUTER_API_KEY".to_string()]) {
             if let Some(value) = vars.get("OPENROUTER_API_KEY") {
                 if !value.trim().is_empty() {
                     return Ok(value.clone());
@@ -6812,7 +8132,13 @@ fn record_review_tasks(repo_root: &Path, review: &ReviewResult, model_label: &st
     let Some(beads_dir) = review_tasks_beads_dir(repo_root) else {
         return;
     };
-    match write_review_tasks(&beads_dir, repo_root, tasks, review.summary.as_deref(), model_label) {
+    match write_review_tasks(
+        &beads_dir,
+        repo_root,
+        tasks,
+        review.summary.as_deref(),
+        model_label,
+    ) {
         Ok(created) => {
             if created > 0 {
                 println!(
@@ -6834,24 +8160,28 @@ fn review_tasks_beads_dir(repo_root: &Path) -> Option<std::path::PathBuf> {
         let trimmed = dir.trim();
         if !trimmed.is_empty() {
             let candidate = std::path::PathBuf::from(trimmed);
-            return Some(resolve_review_tasks_dir(repo_root, candidate, allow_in_repo));
+            return Some(resolve_review_tasks_dir(
+                repo_root,
+                candidate,
+                allow_in_repo,
+            ));
         }
     }
     if let Ok(root) = env::var("FLOW_REVIEW_TASKS_ROOT") {
         let trimmed = root.trim();
         if !trimmed.is_empty() {
             let candidate = std::path::PathBuf::from(trimmed).join(".beads");
-            return Some(resolve_review_tasks_dir(repo_root, candidate, allow_in_repo));
+            return Some(resolve_review_tasks_dir(
+                repo_root,
+                candidate,
+                allow_in_repo,
+            ));
         }
     }
     dirs::home_dir().map(|home| home.join(".beads"))
 }
 
-fn resolve_review_tasks_dir(
-    repo_root: &Path,
-    candidate: PathBuf,
-    allow_in_repo: bool,
-) -> PathBuf {
+fn resolve_review_tasks_dir(repo_root: &Path, candidate: PathBuf, allow_in_repo: bool) -> PathBuf {
     let resolved = if candidate.is_relative() {
         repo_root.join(candidate)
     } else {
@@ -6891,7 +8221,9 @@ fn write_review_tasks(
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "project".to_string());
-    let summary = summary.map(|text| text.trim()).filter(|text| !text.is_empty());
+    let summary = summary
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty());
 
     let mut created = 0;
     for task in tasks {
@@ -7476,11 +8808,7 @@ fn read_tail_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn write_agent_trace_file(
-    bundle_path: &Path,
-    rel_path: &str,
-    data: &[u8],
-) -> Result<()> {
+fn write_agent_trace_file(bundle_path: &Path, rel_path: &str, data: &[u8]) -> Result<()> {
     let target = bundle_path.join(rel_path);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
@@ -7557,7 +8885,10 @@ fn write_agent_traces(bundle_path: &Path, repo_root: &Path) {
             ("agent/fish/last.stdout", fish_dir.join("last.stdout")),
             ("agent/fish/last.stderr", fish_dir.join("last.stderr")),
             ("agent/fish/rise.meta", fish_dir.join("rise.meta")),
-            ("agent/fish/rise.history.jsonl", fish_dir.join("rise.history.jsonl")),
+            (
+                "agent/fish/rise.history.jsonl",
+                fish_dir.join("rise.history.jsonl"),
+            ),
         ];
         for (rel, path) in fish_files {
             if !path.exists() {
@@ -7607,9 +8938,7 @@ fn write_agent_learning(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| commit_message.to_string());
     let issues = review.map(|r| r.issues.clone()).unwrap_or_default();
-    let future_tasks = review
-        .map(|r| r.future_tasks.clone())
-        .unwrap_or_default();
+    let future_tasks = review.map(|r| r.future_tasks.clone()).unwrap_or_default();
 
     let root_cause = if !summary.trim().is_empty() {
         summary.clone()
@@ -7657,16 +8986,29 @@ fn write_agent_learning(
     }
     let _ = write_agent_trace_file(bundle_path, "agent/decision.md", decision_md.as_bytes());
     let _ = write_agent_trace_file(bundle_path, "agent/regression.md", regression_md.as_bytes());
-    let _ = write_agent_trace_file(bundle_path, "agent/patch_summary.md", patch_summary_md.as_bytes());
+    let _ = write_agent_trace_file(
+        bundle_path,
+        "agent/patch_summary.md",
+        patch_summary_md.as_bytes(),
+    );
 
-    let _ = append_learning_store(repo_root, &learn_json, &decision_md, &regression_md, &patch_summary_md);
+    let _ = append_learning_store(
+        repo_root,
+        &learn_json,
+        &decision_md,
+        &regression_md,
+        &patch_summary_md,
+    );
 }
 
 fn classify_learning_tags(texts: &[String]) -> Vec<String> {
     let mut tags = HashSet::new();
     for text in texts {
         let lowered = text.to_lowercase();
-        if lowered.contains("perf") || lowered.contains("performance") || lowered.contains("latency") {
+        if lowered.contains("perf")
+            || lowered.contains("performance")
+            || lowered.contains("latency")
+        {
             tags.insert("perf".to_string());
         }
         if lowered.contains("security") || lowered.contains("vulnerability") {
@@ -7692,9 +9034,15 @@ fn classify_learning_tags(texts: &[String]) -> Vec<String> {
 }
 
 fn render_learning_decision_md(learn: &serde_json::Value) -> String {
-    let summary = learn.get("root_cause").and_then(|v| v.as_str()).unwrap_or("n/a");
+    let summary = learn
+        .get("root_cause")
+        .and_then(|v| v.as_str())
+        .unwrap_or("n/a");
     let fix = learn.get("fix").and_then(|v| v.as_str()).unwrap_or("n/a");
-    let prevention = learn.get("prevention").and_then(|v| v.as_str()).unwrap_or("n/a");
+    let prevention = learn
+        .get("prevention")
+        .and_then(|v| v.as_str())
+        .unwrap_or("n/a");
     format!(
         "# Decision\n\n## Summary\n{}\n\n## Fix\n{}\n\n## Prevention\n{}\n",
         summary, fix, prevention
@@ -7702,8 +9050,14 @@ fn render_learning_decision_md(learn: &serde_json::Value) -> String {
 }
 
 fn render_learning_regression_md(learn: &serde_json::Value) -> String {
-    let issue = learn.get("issue").and_then(|v| v.as_str()).unwrap_or("none");
-    let prevention = learn.get("prevention").and_then(|v| v.as_str()).unwrap_or("n/a");
+    let issue = learn
+        .get("issue")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    let prevention = learn
+        .get("prevention")
+        .and_then(|v| v.as_str())
+        .unwrap_or("n/a");
     format!(
         "# Regression Guard\n\n- If you see: {}\n- Do: {}\n",
         issue, prevention
@@ -7781,20 +9135,22 @@ fn learning_store_root(repo_root: &Path) -> Result<PathBuf> {
     if let Ok(value) = env::var("FLOW_BASE_DIR") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed).join(".ai").join("internal").join("learn"));
+            return Ok(PathBuf::from(trimmed)
+                .join(".ai")
+                .join("internal")
+                .join("learn"));
         }
     }
 
     if let Some(home) = dirs::home_dir() {
-        return Ok(
-            home.join("code")
-                .join("org")
-                .join("linsa")
-                .join("base")
-                .join(".ai")
-                .join("internal")
-                .join("learn"),
-        );
+        return Ok(home
+            .join("code")
+            .join("org")
+            .join("linsa")
+            .join("base")
+            .join(".ai")
+            .join("internal")
+            .join("learn"));
     }
 
     Ok(repo_root.join(".ai").join("internal").join("learn"))
@@ -7889,8 +9245,8 @@ fn try_capture_unhash_bundle(
         None => ai::get_sessions_for_gitedit(&repo_root.to_path_buf()).unwrap_or_default(),
     };
     if !sessions_data.is_empty() {
-        let json = serde_json::to_string_pretty(&sessions_data)
-            .context("serialize sessions.json")?;
+        let json =
+            serde_json::to_string_pretty(&sessions_data).context("serialize sessions.json")?;
         fs::write(bundle_path.join("sessions.json"), json).context("write sessions.json")?;
     }
 
@@ -7948,8 +9304,7 @@ fn try_capture_unhash_bundle(
         gitedit_session_hash: gitedit_session_hash.map(|s| s.to_string()),
         session_count: sessions_data.len(),
     };
-    let meta_json =
-        serde_json::to_string_pretty(&metadata).context("serialize commit.json")?;
+    let meta_json = serde_json::to_string_pretty(&metadata).context("serialize commit.json")?;
     fs::write(bundle_path.join("commit.json"), meta_json).context("write commit.json")?;
 
     let out_file = TempBuilder::new()
@@ -7971,10 +9326,7 @@ fn try_capture_unhash_bundle(
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        debug!(
-            "unhash failed: {} {}{}",
-            output.status, stdout, stderr
-        );
+        debug!("unhash failed: {} {}{}", output.status, stdout, stderr);
         return Ok(None);
     }
 

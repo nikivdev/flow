@@ -491,6 +491,51 @@ pub enum Commands {
         alias = "px"
     )]
     Proxy(ProxyCommand),
+    #[command(
+        about = "Create a GitHub PR from the current branch.",
+        long_about = "Creates a branch/bookmark from the latest commit, pushes it, and opens a GitHub PR. Works with both jj and pure git."
+    )]
+    Pr(PrOpts),
+    #[command(
+        about = "Stash current jj changes and move to main.",
+        long_about = "Bookmarks the current change, then moves the working copy to main@upstream (or main@origin). Restore later with `jj edit <name>`."
+    )]
+    Stash(StashOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PrOpts {
+    /// First positional token:
+    /// - `preview`: create the PR on your fork (origin) only (no upstream).
+    /// - otherwise: treated as the start of the PR title.
+    #[arg(value_name = "MODE_OR_TITLE")]
+    pub mode_or_title: Option<String>,
+    /// Remaining title tokens (optional). If a title is provided and there are
+    /// uncommitted changes, Flow will create a commit/change from the working copy.
+    #[arg(value_name = "TITLE", num_args = 0..)]
+    pub title_rest: Vec<String>,
+    /// Base branch (default: main).
+    #[arg(long, default_value = "main")]
+    pub base: String,
+    /// Create as draft PR.
+    #[arg(long)]
+    pub draft: bool,
+    /// Custom branch name (auto-generated from commit message if omitted).
+    #[arg(long, short)]
+    pub branch: Option<String>,
+    /// Don't open in browser after creation.
+    #[arg(long)]
+    pub no_open: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct StashOpts {
+    /// Bookmark name for the stash (default: stash-<timestamp>).
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+    /// Target revision to move to after stashing (default: main@upstream or main@origin).
+    #[arg(long, short)]
+    pub target: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1338,6 +1383,10 @@ pub struct GitRepairOpts {
     /// Dry run - show what would be repaired.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
+    /// After repair, switch to target branch and cherry-pick current HEAD onto it.
+    /// Useful for landing work from jj/keep/* back onto main safely.
+    #[arg(long)]
+    pub land_main: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -1359,6 +1408,22 @@ pub enum CommitQueueAction {
         /// Commit hash (short or full).
         hash: String,
     },
+    /// Show Rise review decision status for a queued commit.
+    ReviewStatus {
+        /// Commit hash (short or full).
+        hash: String,
+    },
+    /// Mark a queued commit as reviewed in Rise (writes a decision file under .ai/internal/).
+    ReviewMark {
+        /// Commit hash (short or full).
+        hash: String,
+        /// Decision status.
+        #[arg(long, value_enum, default_value = "approved")]
+        status: RiseReviewDecisionArg,
+        /// Optional note (stored with the decision).
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Approve a queued commit and push it.
     Approve {
         /// Commit hash (short or full).
@@ -1366,12 +1431,24 @@ pub enum CommitQueueAction {
         /// Push even if the commit is not at HEAD.
         #[arg(long, short = 'f')]
         force: bool,
+        /// Allow pushing even if the queued commit has review issues recorded.
+        #[arg(long)]
+        allow_issues: bool,
+        /// Allow pushing even if the review timed out or is missing.
+        #[arg(long)]
+        allow_unreviewed: bool,
     },
     /// Approve all queued commits on the current branch (push once).
     ApproveAll {
         /// Push even if the branch is behind its remote.
         #[arg(long, short = 'f')]
         force: bool,
+        /// Allow pushing even if some queued commits have review issues recorded.
+        #[arg(long)]
+        allow_issues: bool,
+        /// Allow pushing even if some queued commits have review timed out / missing.
+        #[arg(long)]
+        allow_unreviewed: bool,
     },
     /// Remove a commit from the queue without pushing.
     Drop {
@@ -1400,6 +1477,13 @@ pub enum CommitQueueAction {
         #[arg(long, default_value = "main")]
         base: String,
     },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum RiseReviewDecisionArg {
+    Approved,
+    #[value(alias = "needs-fix", alias = "needs_fixes", alias = "needs-fixes")]
+    NeedsFix,
 }
 
 #[derive(Subcommand, Debug, Clone)]
