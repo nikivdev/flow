@@ -1,70 +1,134 @@
-# How to Use Flow to Store and Work With Env Vars
+# How to Use Flow Env Store (Project + Personal)
 
-Flow stores project env vars either in cloud or locally on disk. You can
-inject them into commands without ever printing values to stdout.
+This is the context-optimized workflow for current Flow behavior.
 
-## Storage Backends
+## Important Scope Rule
 
-Flow supports two backends:
+- `f env set KEY=VALUE` writes to **personal** env scope.
+- `f env project set KEY=VALUE` writes to **project** env scope.
 
-| Backend | Storage Location | Use Case |
-|---------|-----------------|----------|
-| `cloud` | Cloud (myflow.sh) | Team sharing, Cloudflare deploys |
-| `local` | `~/.config/flow/env-local/` | Solo dev, offline, no account needed |
+If you need deploy/runtime envs for a project, use `f env project ...`.
 
-### Choosing a Backend
+## Backend Choice
 
-Set in `~/.config/flow/config.ts`:
+Flow supports:
+
+- `cloud` (myflow.sh): shared/team-friendly.
+- `local` (`~/.config/flow/env-local/`): offline/no-account.
+
+Set backend in `~/.config/flow/config.ts`:
 
 ```ts
 export default {
-  flow: {
-    env: {
-      backend: "local"  // or "cloud"
-    }
-  }
+  flow: { env: { backend: "cloud" } } // or "local"
 }
 ```
 
-Or set the environment variable:
+Or per shell:
 
 ```bash
 export FLOW_ENV_BACKEND=local
 ```
 
-If neither is set, Flow tries cloud first and prompts to fall back to local
-storage when unavailable.
-
----
-
-## Local Storage (No Account Needed)
-
-The simplest way to use env vars without any cloud service.
-
-### Quick Start
+## Fast Path (Project Env, Production)
 
 ```bash
-# Force local backend
-export FLOW_ENV_BACKEND=local
+# 1) Login once if using cloud
+f env login
 
-# Store a secret
-f env set API_KEY=sk-xxx
+# 2) Set project env vars (not personal)
+f env project set DATABASE_URL=postgres://... -e production
+f env project set RESEND_API_KEY=re_... -e production
 
-# Store a personal/global secret
-f env set --personal ANTHROPIC_API_KEY=sk-xxx
+# 3) Verify (masked)
+f env project list -e production
 
-# Run with secrets injected
-f env run -- npm start
-f env run --personal -k ANTHROPIC_API_KEY -- ./my-script
+# 4) Run app with injected project envs
+f env run -e production -- pnpm start
+
+# 5) Optional: write current project envs to local .env
+f env pull -e production
 ```
 
-### How Local Storage Works
+## Personal Tokens (User Scope)
 
-Env vars are stored as plain `.env` files:
+Use for developer-specific tokens (GitHub, CLI auth, etc.):
+
+```bash
+f env set GITHUB_TOKEN=ghp_...
+f env get --personal GITHUB_TOKEN -f value
+f env run --personal -k GITHUB_TOKEN -- gh auth status
+```
+
+## Environment Names
+
+Supported environments:
+
+- `production` (default)
+- `staging`
+- `dev`
+
+Example:
+
+```bash
+f env project set API_URL=https://staging.example.com -e staging
+f env run -e staging -- pnpm dev
+```
+
+## Guided Flows
+
+Use these when `flow.toml` already declares required keys:
+
+```bash
+f env keys
+f env guide -e production
+f env setup
+```
+
+## Deploy Integration
+
+### Cloudflare Workers
+
+In `flow.toml`:
+
+```toml
+[cloudflare]
+env_source = "cloud" # or "local" for local backend reads
+env_keys = ["DATABASE_URL", "BETTER_AUTH_SECRET", "APP_BASE_URL"]
+env_vars = ["APP_BASE_URL"] # non-secret vars
+environment = "production"
+```
+
+Apply:
+
+```bash
+f env apply
+```
+
+### Host Deploys
+
+In `flow.toml`:
+
+```toml
+[host]
+env_source = "flow" # or "local"
+env_keys = ["DATABASE_URL", "RESEND_API_KEY"]
+environment = "production"
+```
+
+Then:
+
+```bash
+f deploy
+```
+
+## Local Backend Storage Layout
+
+When backend is `local`, Flow writes plain `.env` files:
 
 ```
 ~/.config/flow/env-local/
-├── <project-name>/
+├── <project-or-space>/
 │   ├── production.env
 │   ├── staging.env
 │   └── dev.env
@@ -72,202 +136,12 @@ Env vars are stored as plain `.env` files:
     └── production.env
 ```
 
-Each file is a standard `.env` format:
+These files are not encrypted.
 
-```bash
-# Environment: production
-API_KEY=sk-xxx
-DATABASE_URL=postgres://...
-```
+## Quick Troubleshooting
 
-### Security Note
-
-Local env files are **not encrypted**. They rely on filesystem permissions.
-For sensitive production secrets, consider using cloud with Touch ID gating.
-
----
-
-## Cloud Storage
-
-For team sharing and Cloudflare deployments.
-
-### Prerequisites
-
-1) Create a cloud API token.
-2) Login once:
-
-```bash
-f env login
-```
-
-### Bootstrapping cloud (first deploy)
-
-If the cloud backend is not deployed yet, use local storage to deploy it once:
-
-```bash
-export FLOW_ENV_BACKEND=local
-f env set --personal CLOUDFLARE_API_TOKEN=...
-f deploy web
-```
-
-After `https://myflow.sh` is live, create a cloud token there and run:
-
-```bash
-f env login
-```
-
-## Store envs in cloud
-
-Push a local .env file:
-
-```bash
-f env push
-f env push -e staging
-```
-
-Set or delete individual keys:
-
-```bash
-f env set KEY=value
-f env delete KEY1 KEY2
-```
-
-List keys (masked values):
-
-```bash
-f env list
-```
-
-## Interactive setup (TUI)
-
-Use the wizard to pick a .env file, select keys, and push to cloud:
-
-```bash
-f env setup
-```
-
-If your project has `[cloudflare].env_source = "cloud"`, `f env setup` uses
-the keys from `env_keys` and `env_vars` and prompts only for missing values.
-
-## Guided setup from flow.toml
-
-If your project declares required keys in `flow.toml`, you can prompt for
-missing values:
-
-```bash
-f env guide
-f env guide -e staging
-```
-
-This uses `[cloudflare].env_keys` and `[cloudflare].env_vars` to decide what
-to ask for.
-
-## Pull envs back to a local .env
-
-```bash
-f env pull
-f env pull -e production
-```
-
-## Use envs without printing them
-
-Fetch values:
-
-```bash
-f env get OPENAI_API_KEY -f value
-f env get KEY1 KEY2 -f json
-```
-
-Run a command with injected envs:
-
-```bash
-f env run -- node server.js
-f env run -k API_KEY -k SECRET -- ./app
-```
-
-Use personal envs instead of project envs:
-
-```bash
-f env get --personal KEY
-f env run --personal -- npm start
-```
-
-## Host deploy integration (Linux)
-
-When deploying to a Linux host with `[host]` in `flow.toml`, you can have Flow
-pull env vars from the Flow env store and upload them as a `.env` file at deploy time:
-
-```toml
-[host]
-env_source = "flow" # or "local" to force local backend
-env_keys = ["API_KEY", "SECRET"]
-environment = "production"
-```
-
-Store values locally:
-
-```bash
-FLOW_ENV_BACKEND=local f env set API_KEY=...
-```
-
-Then deploy:
-
-```bash
-f deploy
-```
-
-To store project envs under a personal space, set in `flow.toml`:
-
-```toml
-env_space = "nikiv"
-env_space_kind = "personal"
-```
-
-## Apply envs to Cloudflare Workers
-
-Set the Cloudflare section in `flow.toml`:
-
-```toml
-[cloudflare]
-path = "packages/web"
-env_source = "cloud"
-env_keys = [
-  "DATABASE_URL",
-  "BETTER_AUTH_SECRET",
-  "APP_BASE_URL",
-  "OPENROUTER_API_KEY",
-  "OPENROUTER_MODEL",
-]
-env_vars = ["APP_BASE_URL", "OPENROUTER_MODEL"]
-environment = "production"
-```
-
-Then apply envs to the worker:
-
-```bash
-f env apply
-```
-
-- Keys in `env_vars` are set as `wrangler vars set`.
-- Everything else is set as `wrangler secret put`.
-- The cloud environment defaults to `production` or uses
-  `cloudflare.environment` if set.
-
-## Example: Provision Jazz worker envs
-
-Create a Jazz worker account and store env vars in cloud:
-
-```bash
-f db jazz new --name gitedit-mirror \
-  --peer "wss://cloud.jazz.tools/?key=jazz-gitedit-prod" \
-  --environment production
-```
-
-This writes `JAZZ_MIRROR_ACCOUNT_ID` and `JAZZ_MIRROR_ACCOUNT_SECRET` to cloud,
-which you can then apply to Cloudflare with `f env apply`.
-
-## Notes
-
-- Secrets are never printed to stdout.
-- `f env apply` uses project envs only (not personal).
-- Keep `APP_BASE_URL` in vars (not secrets) so it shows up in Wrangler vars.
+- "Not logged in": run `f env login` (or force local backend).
+- Values not found: check environment (`-e staging` vs `production`).
+- Command injection not working: keep `--` before command.
+  - Correct: `f env run -k API_KEY -- node app.js`
+  - Wrong: `f env run -k API_KEY node app.js`

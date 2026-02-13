@@ -14,6 +14,8 @@ release_task = "release"
 gitedit_mirror = true
 # Enable gitedit.dev mirroring for commitWithCheck
 commit_with_check_gitedit_mirror = true
+# Larger default review window for big diffs during `f commit`.
+commit_with_check_timeout_secs = 300
 gitedit_url = "https://gitedit.dev"
 commit_with_check_review_url = "http://100.114.156.47:3000/review"
 # Enable myflow.sh mirroring for commits

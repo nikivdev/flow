@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use axum::{
     Router,
     extract::{Path as AxumPath, Query, State},
-    http::StatusCode,
+    http::{Method, StatusCode},
     response::{
         IntoResponse, Json,
         sse::{Event, KeepAlive, Sse},
@@ -22,23 +22,40 @@ use axum::{
 use futures::{Stream, StreamExt};
 use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     cli::DaemonOpts,
     config::{self, Config, ServerConfig},
     log_store::{self, LogEntry, LogQuery},
+    running,
     screen::ScreenBroadcaster,
     servers::{LogLine, ManagedServer, ServerSnapshot},
+    supervisor,
     terminal,
 };
 
 const LOG_BUFFER_CAPACITY: usize = 2048;
 
 type ServerStore = Arc<RwLock<HashMap<String, Arc<ManagedServer>>>>;
+
+/// Unified process snapshot returned by GET /processes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProcessSnapshot {
+    name: String,
+    source: String,
+    project: Option<String>,
+    command: String,
+    status: String,
+    pid: Option<u32>,
+    port: Option<u16>,
+    #[serde(rename = "startedAt")]
+    started_at: Option<u128>,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -100,6 +117,11 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
         }
     });
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(Any);
+
     let router = Router::new()
         .route("/health", get(health))
         .route("/screen/latest", get(screen_latest))
@@ -108,9 +130,16 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
         .route("/logs", get(all_logs))
         .route("/servers/:name/logs", get(server_logs))
         .route("/servers/:name/logs/stream", get(server_logs_stream))
+        // Unified process management endpoints
+        .route("/processes", get(processes_list))
+        .route("/processes/:name/start", post(process_start))
+        .route("/processes/:name/stop", post(process_stop))
+        .route("/processes/:name/restart", post(process_restart))
+        .route("/processes/:name/logs/stream", get(process_logs_stream))
         // Log ingestion endpoints
         .route("/logs/ingest", post(logs_ingest))
         .route("/logs/query", get(logs_query))
+        .layer(cors)
         .with_state(state);
 
     let addr = SocketAddr::from((opts.host, opts.port));
@@ -291,6 +320,356 @@ async fn server_logs_stream(
     } else {
         sse
     }
+}
+
+// ============================================================================
+// Unified Process Management Endpoints
+// ============================================================================
+
+/// GET /processes - Returns all running processes from servers, daemons, and tasks.
+async fn processes_list(State(state): State<AppState>) -> impl IntoResponse {
+    let mut snapshots: Vec<ProcessSnapshot> = Vec::new();
+
+    // 1. Managed servers from ServerStore
+    {
+        let servers = state.servers.read().await;
+        let futures_iter = servers
+            .values()
+            .cloned()
+            .map(|server| async move { server.snapshot().await });
+        let server_snapshots: Vec<ServerSnapshot> = futures::future::join_all(futures_iter).await;
+        for s in server_snapshots {
+            snapshots.push(ProcessSnapshot {
+                name: s.name.clone(),
+                source: "server".to_string(),
+                project: None,
+                command: if s.args.is_empty() {
+                    s.command.clone()
+                } else {
+                    format!("{} {}", s.command, s.args.join(" "))
+                },
+                status: s.status.clone(),
+                pid: s.pid,
+                port: s.port,
+                started_at: None,
+            });
+        }
+    }
+
+    // 2. Supervisor daemons via IPC
+    if let Ok(socket_path) = supervisor::resolve_socket_path(None) {
+        if socket_path.exists() {
+            let ipc_result = tokio::task::spawn_blocking(move || {
+                let request = supervisor::IpcRequest {
+                    action: supervisor::SupervisorIpcAction::Status {
+                        config_path: None,
+                    },
+                };
+                supervisor::send_request(&socket_path, &request)
+            })
+            .await;
+
+            if let Ok(Ok(response)) = ipc_result {
+                if let Some(daemons) = response.daemons {
+                    for d in daemons {
+                        // Skip duplicates already covered by managed servers
+                        if snapshots.iter().any(|s| s.name == d.name) {
+                            continue;
+                        }
+                        let port = d
+                            .health_url
+                            .as_deref()
+                            .and_then(|url| url.rsplit(':').next())
+                            .and_then(|port_path| {
+                                port_path.split('/').next().and_then(|p| p.parse().ok())
+                            });
+                        snapshots.push(ProcessSnapshot {
+                            name: d.name,
+                            source: "daemon".to_string(),
+                            project: None,
+                            command: d
+                                .description
+                                .unwrap_or_default(),
+                            status: if d.running { "running".to_string() } else { "stopped".to_string() },
+                            pid: d.pid,
+                            port,
+                            started_at: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Running tasks from running.json
+    let task_result = tokio::task::spawn_blocking(|| running::load_running_processes()).await;
+    if let Ok(Ok(processes)) = task_result {
+        for procs in processes.projects.values() {
+            for p in procs {
+                snapshots.push(ProcessSnapshot {
+                    name: p.task_name.clone(),
+                    source: "task".to_string(),
+                    project: p.project_name.clone(),
+                    command: p.command.clone(),
+                    status: "running".to_string(),
+                    pid: Some(p.pid),
+                    port: None,
+                    started_at: Some(p.started_at),
+                });
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(snapshots)).into_response()
+}
+
+/// POST /processes/:name/start
+async fn process_start(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> impl IntoResponse {
+    // Try managed server first
+    {
+        let servers = state.servers.read().await;
+        if let Some(server) = servers.get(&name) {
+            return match server.start().await {
+                Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "message": format!("{name} started") }))).into_response(),
+                Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() }))).into_response(),
+            };
+        }
+    }
+
+    // Try supervisor daemon
+    let daemon_name = name.clone();
+    let ipc_result = tokio::task::spawn_blocking(move || {
+        let socket_path = supervisor::resolve_socket_path(None)?;
+        let request = supervisor::IpcRequest {
+            action: supervisor::SupervisorIpcAction::StartDaemon {
+                name: daemon_name,
+                config_path: None,
+            },
+        };
+        supervisor::send_request(&socket_path, &request)
+    })
+    .await;
+
+    match ipc_result {
+        Ok(Ok(resp)) if resp.ok => {
+            (StatusCode::OK, Json(json!({ "ok": true, "message": resp.message }))).into_response()
+        }
+        Ok(Ok(resp)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": resp.message }))).into_response()
+        }
+        _ => {
+            (StatusCode::NOT_FOUND, Json(json!({ "error": format!("unknown process {name}") }))).into_response()
+        }
+    }
+}
+
+/// POST /processes/:name/stop
+async fn process_stop(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> impl IntoResponse {
+    // Try managed server first
+    {
+        let servers = state.servers.read().await;
+        if let Some(server) = servers.get(&name) {
+            return match server.stop().await {
+                Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "message": format!("{name} stopped") }))).into_response(),
+                Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() }))).into_response(),
+            };
+        }
+    }
+
+    // Try supervisor daemon
+    let daemon_name = name.clone();
+    let ipc_result = tokio::task::spawn_blocking(move || {
+        let socket_path = supervisor::resolve_socket_path(None)?;
+        let request = supervisor::IpcRequest {
+            action: supervisor::SupervisorIpcAction::StopDaemon {
+                name: daemon_name,
+                config_path: None,
+            },
+        };
+        supervisor::send_request(&socket_path, &request)
+    })
+    .await;
+
+    match ipc_result {
+        Ok(Ok(resp)) if resp.ok => {
+            (StatusCode::OK, Json(json!({ "ok": true, "message": resp.message }))).into_response()
+        }
+        Ok(Ok(resp)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": resp.message }))).into_response()
+        }
+        _ => {
+            (StatusCode::NOT_FOUND, Json(json!({ "error": format!("unknown process {name}") }))).into_response()
+        }
+    }
+}
+
+/// POST /processes/:name/restart
+async fn process_restart(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> impl IntoResponse {
+    // Try managed server: stop then start
+    {
+        let servers = state.servers.read().await;
+        if let Some(server) = servers.get(&name) {
+            let _ = server.stop().await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            return match server.start().await {
+                Ok(()) => (StatusCode::OK, Json(json!({ "ok": true, "message": format!("{name} restarted") }))).into_response(),
+                Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() }))).into_response(),
+            };
+        }
+    }
+
+    // Try supervisor daemon
+    let daemon_name = name.clone();
+    let ipc_result = tokio::task::spawn_blocking(move || {
+        let socket_path = supervisor::resolve_socket_path(None)?;
+        let request = supervisor::IpcRequest {
+            action: supervisor::SupervisorIpcAction::RestartDaemon {
+                name: daemon_name,
+                config_path: None,
+            },
+        };
+        supervisor::send_request(&socket_path, &request)
+    })
+    .await;
+
+    match ipc_result {
+        Ok(Ok(resp)) if resp.ok => {
+            (StatusCode::OK, Json(json!({ "ok": true, "message": resp.message }))).into_response()
+        }
+        Ok(Ok(resp)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": resp.message }))).into_response()
+        }
+        _ => {
+            (StatusCode::NOT_FOUND, Json(json!({ "error": format!("unknown process {name}") }))).into_response()
+        }
+    }
+}
+
+/// GET /processes/:name/logs/stream - SSE log stream for any process type.
+async fn process_logs_stream(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Sse<Pin<Box<DynSseStream>>> {
+    // Check if it's a managed server — delegate to existing broadcast
+    let server = {
+        let guard = state.servers.read().await;
+        guard.get(&name).cloned()
+    };
+
+    if let Some(server) = server {
+        let receiver = server.subscribe();
+        let stream = BroadcastStream::new(receiver).filter_map(|result| async move {
+            match result {
+                Ok(line) => match serde_json::to_string(&line) {
+                    Ok(payload) => Some(Ok(Event::default().data(payload))),
+                    Err(_) => None,
+                },
+                Err(_) => None,
+            }
+        });
+
+        return Sse::new(Box::pin(stream) as Pin<Box<DynSseStream>>).keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(5))
+                .text(":flowd process log keep-alive"),
+        );
+    }
+
+    // For daemons/tasks: tail log files via polling
+    let log_path = find_process_log_path(&name).await;
+
+    let stream: Pin<Box<DynSseStream>> = match log_path {
+        Some(path) => {
+            let stream = futures::stream::unfold(
+                (path, 0u64),
+                |(path, last_pos)| async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let metadata = tokio::fs::metadata(&path).await.ok()?;
+                    let file_len = metadata.len();
+                    if file_len <= last_pos {
+                        return Some((Vec::new(), (path, last_pos)));
+                    }
+                    let mut file = tokio::fs::File::open(&path).await.ok()?;
+                    tokio::io::AsyncSeekExt::seek(
+                        &mut file,
+                        std::io::SeekFrom::Start(last_pos),
+                    )
+                    .await
+                    .ok()?;
+                    let mut buf = vec![0u8; (file_len - last_pos).min(65536) as usize];
+                    let n = tokio::io::AsyncReadExt::read(&mut file, &mut buf).await.ok()?;
+                    buf.truncate(n);
+                    let new_pos = last_pos + n as u64;
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let events: Vec<std::result::Result<Event, Infallible>> = text
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(|line| {
+                            Ok(Event::default().data(
+                                serde_json::to_string(&json!({
+                                    "line": line,
+                                    "stream": "stdout",
+                                    "timestamp_ms": running::now_ms(),
+                                }))
+                                .unwrap_or_default(),
+                            ))
+                        })
+                        .collect();
+                    Some((events, (path, new_pos)))
+                },
+            )
+            .flat_map(futures::stream::iter);
+            Box::pin(stream)
+        }
+        None => {
+            let stream = futures::stream::once(async move {
+                Ok(Event::default().data(
+                    json!({ "error": format!("no logs found for {name}") }).to_string(),
+                ))
+            });
+            Box::pin(stream)
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(5))
+            .text(":flowd process log keep-alive"),
+    )
+}
+
+/// Find log file path for a daemon or task by name.
+async fn find_process_log_path(name: &str) -> Option<std::path::PathBuf> {
+    let state_dir = config::global_state_dir();
+
+    // Check daemon stdout log
+    let daemon_log = state_dir.join("daemons").join(name).join("stdout.log");
+    if tokio::fs::metadata(&daemon_log).await.is_ok() {
+        return Some(daemon_log);
+    }
+
+    // Check task log files under ~/.config/flow/logs/
+    let logs_dir = state_dir.join("logs");
+    if let Ok(mut entries) = tokio::fs::read_dir(&logs_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let project_dir = entry.path();
+            let task_log = project_dir.join(format!("{name}.log"));
+            if tokio::fs::metadata(&task_log).await.is_ok() {
+                return Some(task_log);
+            }
+        }
+    }
+
+    None
 }
 
 async fn reload_config(path: &Path, servers: &ServerStore) -> Result<()> {

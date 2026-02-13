@@ -385,6 +385,86 @@ pub fn record_review_issues_as_todos(
     Ok(created_ids)
 }
 
+/// Mark review-timeout follow-up todos as completed for the given todo ids.
+/// Returns number of todos updated.
+pub fn complete_review_timeout_todos(repo_root: &Path, ids: &[String]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let targets: std::collections::HashSet<String> = ids
+        .iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    if targets.is_empty() {
+        return Ok(0);
+    }
+
+    let (path, mut items) = load_items_at_root(repo_root)?;
+    let mut updated = 0usize;
+    let now = Utc::now().to_rfc3339();
+
+    for item in &mut items {
+        if !targets.contains(&item.id) {
+            continue;
+        }
+        if !is_review_timeout_followup(item) {
+            continue;
+        }
+        if item.status == status_to_string(TodoStatusArg::Completed) {
+            continue;
+        }
+        item.status = status_to_string(TodoStatusArg::Completed).to_string();
+        item.updated_at = Some(now.clone());
+        updated += 1;
+    }
+
+    if updated > 0 {
+        save_items(&path, &items)?;
+    }
+
+    Ok(updated)
+}
+
+/// Count review todos by ids that are still not completed.
+pub fn count_open_todos(repo_root: &Path, ids: &[String]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let targets: std::collections::HashSet<String> = ids
+        .iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    if targets.is_empty() {
+        return Ok(0);
+    }
+
+    let (_path, items) = load_items_at_root(repo_root)?;
+    let mut open = 0usize;
+    for item in items {
+        if !targets.contains(&item.id) {
+            continue;
+        }
+        if item.status != status_to_string(TodoStatusArg::Completed) {
+            open += 1;
+        }
+    }
+    Ok(open)
+}
+
+fn is_review_timeout_followup(item: &TodoItem) -> bool {
+    let title = item.title.trim().to_lowercase();
+    if title.starts_with("re-run review:") || title.contains("review timed out") {
+        return true;
+    }
+    item.note
+        .as_deref()
+        .map(|n| n.to_lowercase().contains("review timed out"))
+        .unwrap_or(false)
+}
+
 fn find_item_index(items: &[TodoItem], id: &str) -> Result<usize> {
     let mut matches = Vec::new();
     for (idx, item) in items.iter().enumerate() {

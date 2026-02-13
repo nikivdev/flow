@@ -13,13 +13,13 @@ use crate::cli::{DaemonAction, SupervisorAction, SupervisorCommand};
 use crate::{config, daemon, projects, running};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct IpcRequest {
-    action: SupervisorIpcAction,
+pub struct IpcRequest {
+    pub action: SupervisorIpcAction,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum SupervisorIpcAction {
+pub enum SupervisorIpcAction {
     Ping,
     StartDaemon {
         name: String,
@@ -42,21 +42,21 @@ enum SupervisorIpcAction {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct IpcResponse {
-    ok: bool,
-    message: Option<String>,
-    daemons: Option<Vec<DaemonStatusView>>,
+pub struct IpcResponse {
+    pub ok: bool,
+    pub message: Option<String>,
+    pub daemons: Option<Vec<DaemonStatusView>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct DaemonStatusView {
-    name: String,
-    running: bool,
-    pid: Option<u32>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonStatusView {
+    pub name: String,
+    pub running: bool,
+    pub pid: Option<u32>,
     #[serde(default)]
-    healthy: Option<bool>,
-    health_url: Option<String>,
-    description: Option<String>,
+    pub healthy: Option<bool>,
+    pub health_url: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -167,7 +167,7 @@ pub fn try_handle_daemon_action(action: &DaemonAction, config_path: Option<&Path
     Ok(true)
 }
 
-fn resolve_socket_path(override_path: Option<&Path>) -> Result<PathBuf> {
+pub fn resolve_socket_path(override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(config::expand_path(&path.to_string_lossy()));
     }
@@ -1116,7 +1116,7 @@ fn print_list_views(daemons: &[DaemonStatusView]) {
     }
 }
 
-fn send_request(socket_path: &Path, request: &IpcRequest) -> Result<IpcResponse> {
+pub fn send_request(socket_path: &Path, request: &IpcRequest) -> Result<IpcResponse> {
     #[cfg(unix)]
     {
         let mut stream = std::os::unix::net::UnixStream::connect(socket_path)?;

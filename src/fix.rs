@@ -1,4 +1,6 @@
+use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -7,10 +9,7 @@ use crate::cli::FixOpts;
 use crate::opentui_prompt;
 
 pub fn run(opts: FixOpts) -> Result<()> {
-    let message = opts.message.join(" ").trim().to_string();
-    if message.is_empty() {
-        bail!("provide a fix message, e.g. `f fix last commit had spotify api leaked`");
-    }
+    let message = resolve_fix_message(&opts.message)?;
 
     let repo_root = git_top_level()?;
     if try_run_commit_repair(&repo_root, &message)? {
@@ -41,6 +40,47 @@ pub fn run(opts: FixOpts) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_fix_message(parts: &[String]) -> Result<String> {
+    let joined = parts.join(" ").trim().to_string();
+    if joined.is_empty() {
+        bail!("provide a fix message, e.g. `f fix last commit had spotify api leaked`");
+    }
+
+    let Some(path) = detect_fix_input_file(parts) else {
+        return Ok(joined);
+    };
+
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read fix input file {}", path.display()))?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        bail!("fix input file is empty: {}", path.display());
+    }
+
+    println!("Loaded fix context from {}", path.display());
+    Ok(format!(
+        "Use this report as the source of truth for what to fix.\n\nReport file: {}\n\n{}",
+        path.display(),
+        trimmed
+    ))
+}
+
+fn detect_fix_input_file(parts: &[String]) -> Option<PathBuf> {
+    if parts.len() != 1 {
+        return None;
+    }
+    let raw = parts[0].trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = raw.strip_prefix('@').unwrap_or(raw);
+    let path = PathBuf::from(candidate);
+    if !path.is_file() {
+        return None;
+    }
+    Some(path.canonicalize().unwrap_or(path))
 }
 
 fn try_run_commit_repair(repo_root: &std::path::Path, message: &str) -> Result<bool> {

@@ -1452,6 +1452,14 @@ pub enum CommitQueueAction {
         /// Commit hash (short or full).
         hash: String,
     },
+    /// Re-run AI review for queued commits and refresh queue/todo metadata.
+    Review {
+        /// Commit hashes (short or full). If omitted, reviews current branch queue entries.
+        hashes: Vec<String>,
+        /// Review all queued commits across branches.
+        #[arg(long)]
+        all: bool,
+    },
     /// Approve a queued commit and push it.
     Approve {
         /// Commit hash (short or full).
@@ -1632,7 +1640,7 @@ pub struct FixupOpts {
 
 #[derive(Args, Debug, Clone)]
 pub struct FixOpts {
-    /// Description of what to fix.
+    /// Description of what to fix, or a path to a markdown fix report.
     #[arg(value_name = "MESSAGE", trailing_var_arg = true)]
     pub message: Vec<String>,
     /// Skip unrolling the last commit.
