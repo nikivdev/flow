@@ -37,6 +37,80 @@ use crate::{
     task_failure_agents, task_match,
 };
 
+/// Fire-and-forget log ingester that batches output lines and POSTs them to the
+/// Flow daemon's `/logs/ingest` endpoint on a background thread.
+struct LogIngester {
+    tx: std::sync::mpsc::Sender<String>,
+}
+
+impl LogIngester {
+    fn new(project: &str, service: &str) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let project = project.to_string();
+        let service = service.to_string();
+        thread::spawn(move || {
+            let client = match Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let mut batch: Vec<serde_json::Value> = Vec::new();
+            let flush_interval = Duration::from_millis(500);
+            let mut last_flush = Instant::now();
+
+            loop {
+                match rx.recv_timeout(flush_interval) {
+                    Ok(line) => {
+                        batch.push(json!({
+                            "project": project,
+                            "content": line,
+                            "timestamp": running::now_ms() as i64,
+                            "type": "log",
+                            "service": service,
+                            "format": "text",
+                        }));
+                        // Flush if batch is large enough or interval has passed
+                        if batch.len() >= 50 || last_flush.elapsed() >= flush_interval {
+                            let _ = client
+                                .post("http://127.0.0.1:9050/logs/ingest")
+                                .json(&batch)
+                                .send();
+                            batch.clear();
+                            last_flush = Instant::now();
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if !batch.is_empty() {
+                            let _ = client
+                                .post("http://127.0.0.1:9050/logs/ingest")
+                                .json(&batch)
+                                .send();
+                            batch.clear();
+                            last_flush = Instant::now();
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        if !batch.is_empty() {
+                            let _ = client
+                                .post("http://127.0.0.1:9050/logs/ingest")
+                                .json(&batch)
+                                .send();
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    fn send(&self, line: &str) {
+        let _ = self.tx.send(line.to_string());
+    }
+}
+
 /// Global state for cancel cleanup handler.
 static CANCEL_HANDLER_SET: AtomicBool = AtomicBool::new(false);
 static FISHX_WARNED: AtomicBool = AtomicBool::new(false);
@@ -2174,12 +2248,22 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
         })
     };
 
+    // Create log ingester for fire-and-forget streaming to daemon
+    let ingester = ctx.as_ref().map(|c| {
+        Arc::new(LogIngester::new(
+            c.project_name.as_deref().unwrap_or("unknown"),
+            &c.task_name,
+        ))
+    });
+
     // Thread to read PTY output and tee to stdout + capture
     let output_clone = output.clone();
     let log_file_clone = log_file.clone();
+    let ingester_clone = ingester.clone();
     let output_handle = thread::spawn(move || {
         let mut stdout = std::io::stdout();
         let mut buf = [0u8; 4096];
+        let mut line_buf = String::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
@@ -2194,11 +2278,28 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
                         }
                     }
 
+                    let text = String::from_utf8_lossy(&buf[..n]);
+
                     if let Ok(mut out) = output_clone.lock() {
-                        out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        out.push_str(&text);
+                    }
+
+                    if let Some(ref ing) = ingester_clone {
+                        line_buf.push_str(&text);
+                        while let Some(pos) = line_buf.find('\n') {
+                            let line = line_buf[..pos].to_string();
+                            ing.send(&line);
+                            line_buf = line_buf[pos + 1..].to_string();
+                        }
                     }
                 }
                 Err(_) => break,
+            }
+        }
+        // Flush remaining partial line
+        if let Some(ref ing) = ingester_clone {
+            if !line_buf.is_empty() {
+                ing.send(&line_buf);
             }
         }
     });
@@ -2355,6 +2456,15 @@ fn run_command_with_pipes(
         }
         None => (None, None),
     };
+
+    // Create log ingester for fire-and-forget streaming to daemon
+    let ingester = ctx.as_ref().map(|c| {
+        Arc::new(LogIngester::new(
+            c.project_name.as_deref().unwrap_or("unknown"),
+            &c.task_name,
+        ))
+    });
+
     let mut handles = Vec::new();
 
     if let Some(stdout) = child.stdout.take() {
@@ -2363,6 +2473,7 @@ fn run_command_with_pipes(
             std::io::stdout(),
             output.clone(),
             log_file.clone(),
+            ingester.clone(),
         ));
     }
     if let Some(stderr) = child.stderr.take() {
@@ -2371,6 +2482,7 @@ fn run_command_with_pipes(
             std::io::stderr(),
             output.clone(),
             log_file.clone(),
+            ingester.clone(),
         ));
     }
 
@@ -2402,6 +2514,7 @@ fn tee_stream<R, W>(
     mut writer: W,
     buffer: Arc<Mutex<String>>,
     log_file: Option<Arc<Mutex<File>>>,
+    ingester: Option<Arc<LogIngester>>,
 ) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
@@ -2409,6 +2522,7 @@ where
 {
     thread::spawn(move || {
         let mut chunk = [0u8; 4096];
+        let mut line_buf = String::new();
         loop {
             let read = match reader.read(&mut chunk) {
                 Ok(0) => break,
@@ -2426,8 +2540,25 @@ where
                 }
             }
 
+            let text = String::from_utf8_lossy(&chunk[..read]);
+
             if let Ok(mut buf) = buffer.lock() {
-                buf.push_str(&String::from_utf8_lossy(&chunk[..read]));
+                buf.push_str(&text);
+            }
+
+            if let Some(ref ing) = ingester {
+                line_buf.push_str(&text);
+                while let Some(pos) = line_buf.find('\n') {
+                    let line = line_buf[..pos].to_string();
+                    ing.send(&line);
+                    line_buf = line_buf[pos + 1..].to_string();
+                }
+            }
+        }
+        // Flush remaining partial line
+        if let Some(ref ing) = ingester {
+            if !line_buf.is_empty() {
+                ing.send(&line_buf);
             }
         }
     })

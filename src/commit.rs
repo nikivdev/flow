@@ -3023,6 +3023,23 @@ pub fn run_with_check_sync(
         &review_run_id,
     );
 
+    let review_report_path = match write_commit_review_markdown_report(
+        &repo_root,
+        &review,
+        review_reviewer_label,
+        &review_model_label,
+        committed_sha.as_deref(),
+        &full_message,
+        &review_run_id,
+        &review_todo_ids,
+    ) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            println!("⚠ Failed to write review report: {}", err);
+            None
+        }
+    };
+
     if queue_enabled {
         match queue_commit_for_review(
             &repo_root,
@@ -3169,6 +3186,11 @@ pub fn run_with_check_sync(
         );
     }
 
+    if let Some(path) = review_report_path.as_ref() {
+        println!("Review report: {}", path.display());
+        println!("Run: f fix {}", path.display());
+    }
+
     Ok(())
 }
 
@@ -3290,6 +3312,123 @@ fn beads_rust_beads_dir() -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+fn flow_commit_reports_dir() -> Option<PathBuf> {
+    if let Ok(value) = env::var("FLOW_COMMIT_REPORT_DIR") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    dirs::home_dir().map(|home| home.join(".flow").join("commits"))
+}
+
+fn write_commit_review_markdown_report(
+    repo_root: &Path,
+    review: &ReviewResult,
+    reviewer: &str,
+    model_label: &str,
+    committed_sha: Option<&str>,
+    commit_message: &str,
+    review_run_id: &str,
+    review_todo_ids: &[String],
+) -> Result<PathBuf> {
+    let Some(report_dir) = flow_commit_reports_dir() else {
+        bail!("could not resolve commit report directory");
+    };
+    fs::create_dir_all(&report_dir)?;
+
+    let project_name = flow_project_name(repo_root);
+    let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".to_string())
+        .trim()
+        .to_string();
+    let sha_short = committed_sha.map(short_sha).unwrap_or("unknown");
+    let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let file_name = format!(
+        "{}-{}-{}-{}.md",
+        safe_label_value(&project_name),
+        safe_label_value(&branch),
+        sha_short,
+        stamp
+    );
+    let path = report_dir.join(file_name);
+
+    let mut md = String::new();
+    md.push_str("# Flow Commit Review\n\n");
+    md.push_str("- Generated: ");
+    md.push_str(&chrono::Utc::now().to_rfc3339());
+    md.push_str("\n- Project: ");
+    md.push_str(&project_name);
+    md.push_str("\n- Repo Root: ");
+    md.push_str(&repo_root.display().to_string());
+    md.push_str("\n- Branch: ");
+    md.push_str(&branch);
+    md.push_str("\n- Commit: ");
+    md.push_str(sha_short);
+    md.push_str("\n- Reviewer: ");
+    md.push_str(reviewer);
+    md.push_str("\n- Model: ");
+    md.push_str(model_label);
+    md.push_str("\n- Review Run ID: ");
+    md.push_str(review_run_id);
+    md.push_str("\n- Timed Out: ");
+    md.push_str(if review.timed_out { "yes" } else { "no" });
+    md.push_str("\n\n## Commit Message\n\n```text\n");
+    md.push_str(commit_message.trim());
+    md.push_str("\n```\n");
+
+    if let Some(summary) = review
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        md.push_str("\n## Summary\n\n");
+        md.push_str(summary);
+        md.push('\n');
+    }
+
+    md.push_str("\n## Issues\n\n");
+    if review.issues.is_empty() {
+        md.push_str("0. (none)\n");
+    } else {
+        for (idx, issue) in review.issues.iter().enumerate() {
+            md.push_str(&(idx + 1).to_string());
+            md.push_str(". ");
+            md.push_str(issue.trim());
+            md.push('\n');
+        }
+    }
+
+    md.push_str("\n## Future Tasks\n\n");
+    if review.future_tasks.is_empty() {
+        md.push_str("0. (none)\n");
+    } else {
+        for (idx, task) in review.future_tasks.iter().enumerate() {
+            md.push_str(&(idx + 1).to_string());
+            md.push_str(". ");
+            md.push_str(task.trim());
+            md.push('\n');
+        }
+    }
+
+    if !review_todo_ids.is_empty() {
+        md.push_str("\n## Todo IDs\n\n");
+        for todo_id in review_todo_ids {
+            md.push_str("- ");
+            md.push_str(todo_id.trim());
+            md.push('\n');
+        }
+    }
+
+    md.push_str("\n## Next Step\n\n```bash\nf fix ");
+    md.push_str(&path.display().to_string());
+    md.push_str("\n```\n");
+
+    fs::write(&path, md).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
 }
 
 fn write_beads_commit_review_record(
@@ -5547,6 +5686,34 @@ pub fn commit_queue_has_entries(repo_root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn commit_queue_has_entries_on_branch(repo_root: &Path, branch: &str) -> bool {
+    let target = branch.trim();
+    if target.is_empty() {
+        return commit_queue_has_entries(repo_root);
+    }
+    load_commit_queue_entries(repo_root)
+        .map(|entries| entries.iter().any(|entry| entry.branch.trim() == target))
+        .unwrap_or_else(|_| commit_queue_has_entries(repo_root))
+}
+
+pub fn commit_queue_has_entries_reachable_from_head(repo_root: &Path) -> bool {
+    let head = match git_capture_in(repo_root, &["rev-parse", "HEAD"]) {
+        Ok(value) => value.trim().to_string(),
+        Err(_) => return commit_queue_has_entries(repo_root),
+    };
+    if head.is_empty() {
+        return commit_queue_has_entries(repo_root);
+    }
+
+    load_commit_queue_entries(repo_root)
+        .map(|entries| {
+            entries
+                .iter()
+                .any(|entry| git_is_ancestor(repo_root, &entry.commit_sha, &head))
+        })
+        .unwrap_or_else(|_| commit_queue_has_entries(repo_root))
+}
+
 pub fn refresh_commit_queue(repo_root: &Path) -> Result<usize> {
     let mut entries = load_commit_queue_entries(repo_root)?;
     let mut updated = 0;
@@ -5556,6 +5723,139 @@ pub fn refresh_commit_queue(repo_root: &Path) -> Result<usize> {
         }
     }
     Ok(updated)
+}
+
+fn queued_commit_patch(repo_root: &Path, commit_sha: &str) -> Result<String> {
+    git_capture_in(
+        repo_root,
+        &["show", "--format=", "--patch", "--no-color", commit_sha],
+    )
+}
+
+fn with_temp_worktree_for_commit<T, F>(repo_root: &Path, commit_sha: &str, f: F) -> Result<T>
+where
+    F: FnOnce(&Path) -> Result<T>,
+{
+    let tmp = TempDir::new().context("create temp worktree dir")?;
+    let worktree_path = tmp.path().join("repo");
+    let worktree_str = worktree_path.to_string_lossy().to_string();
+
+    git_run_in(repo_root, &["worktree", "add", "--detach", &worktree_str, commit_sha])?;
+
+    let result = f(&worktree_path);
+
+    if let Err(err) = git_run_in(repo_root, &["worktree", "remove", "--force", &worktree_str]) {
+        debug!(
+            worktree = %worktree_str,
+            error = %err,
+            "failed to remove temp worktree for queue review"
+        );
+    }
+
+    result
+}
+
+fn run_codex_review_for_queued_commit(
+    repo_root: &Path,
+    commit_sha: &str,
+    review_instructions: Option<&str>,
+) -> Result<(ReviewResult, String)> {
+    let diff = queued_commit_patch(repo_root, commit_sha)?;
+    let review = with_temp_worktree_for_commit(repo_root, commit_sha, |worktree| {
+        let parent = git_capture_in(worktree, &["rev-parse", "HEAD^"])
+            .context("queued root commit review is not supported yet")?;
+        git_run_in(worktree, &["reset", "--mixed", parent.trim()])?;
+        run_codex_review(
+            &diff,
+            None,
+            review_instructions,
+            worktree,
+            CodexModel::High,
+        )
+    })?;
+    Ok((review, diff))
+}
+
+fn append_unique_ids(dest: &mut Vec<String>, ids: Vec<String>) {
+    let mut seen: HashSet<String> = dest.iter().cloned().collect();
+    for id in ids {
+        if seen.insert(id.clone()) {
+            dest.push(id);
+        }
+    }
+}
+
+fn review_queue_entry_with_codex(
+    repo_root: &Path,
+    entry: &mut CommitQueueEntry,
+    review_instructions: Option<&str>,
+) -> Result<()> {
+    let (review, diff) =
+        run_codex_review_for_queued_commit(repo_root, &entry.commit_sha, review_instructions)?;
+
+    let model_label = CodexModel::High.as_codex_arg();
+    let reviewer_label = "codex";
+
+    let mut review_todo_ids = entry.review_todo_ids.clone();
+    if !env_flag("FLOW_REVIEW_ISSUES_TODOS_DISABLE") {
+        if review.issues_found && !review.issues.is_empty() {
+            let ids = todo::record_review_issues_as_todos(
+                repo_root,
+                &entry.commit_sha,
+                &review.issues,
+                review.summary.as_deref(),
+                model_label,
+            )?;
+            append_unique_ids(&mut review_todo_ids, ids);
+        }
+        if review.timed_out {
+            let issue = format!(
+                "Re-run review: review timed out for commit {}",
+                short_sha(&entry.commit_sha)
+            );
+            let ids = todo::record_review_issues_as_todos(
+                repo_root,
+                &entry.commit_sha,
+                &vec![issue],
+                review.summary.as_deref(),
+                model_label,
+            )?;
+            append_unique_ids(&mut review_todo_ids, ids);
+        } else {
+            let _ = todo::complete_review_timeout_todos(repo_root, &review_todo_ids);
+        }
+    }
+
+    let review_run_id = flow_review_run_id(repo_root, &diff, model_label, reviewer_label);
+    record_review_outputs_to_beads_rust(
+        repo_root,
+        &review,
+        reviewer_label,
+        model_label,
+        Some(&entry.commit_sha),
+        &review_run_id,
+    );
+
+    entry.review_completed = true;
+    entry.review_issues_found = review.issues_found;
+    entry.review_timed_out = review.timed_out;
+    entry.review_model = Some(model_label.to_string());
+    entry.review_reviewer = Some(reviewer_label.to_string());
+    entry.review_todo_ids = review_todo_ids;
+    entry.review = format_review_body(&review);
+    entry.summary = review.summary.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    let path = write_commit_queue_entry(repo_root, entry)?;
+    entry.record_path = Some(path);
+    let _ = write_rise_review_session(repo_root, entry);
+    Ok(())
 }
 
 fn queue_flag_for_command(queue: CommitQueueMode) -> String {
@@ -6300,6 +6600,121 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 }
             }
         }
+        CommitQueueAction::Review { hashes, all } => {
+            let mut entries = load_commit_queue_entries(&repo_root)?;
+            if entries.is_empty() {
+                println!("No queued commits.");
+                return Ok(());
+            }
+            for entry in &mut entries {
+                let _ = refresh_queue_entry_commit(&repo_root, entry);
+            }
+
+            let mut targets: Vec<CommitQueueEntry> = Vec::new();
+            if !hashes.is_empty() {
+                for hash in hashes {
+                    let matches: Vec<CommitQueueEntry> = entries
+                        .iter()
+                        .filter(|entry| commit_queue_entry_matches(entry, &hash))
+                        .cloned()
+                        .collect();
+                    match matches.len() {
+                        0 => bail!("No queued commit matches {}", hash),
+                        1 => targets.push(matches[0].clone()),
+                        _ => bail!(
+                            "Multiple queued commits match {}. Use a longer hash.",
+                            hash
+                        ),
+                    }
+                }
+            } else if all {
+                targets = entries;
+            } else {
+                let current_branch =
+                    git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+                        .unwrap_or_else(|_| "unknown".to_string());
+                targets = entries
+                    .into_iter()
+                    .filter(|entry| entry.branch.trim() == current_branch.trim())
+                    .collect();
+            }
+
+            if targets.is_empty() {
+                println!("No queued commits selected for review.");
+                return Ok(());
+            }
+
+            let review_instructions = get_review_instructions(&repo_root);
+            let mut clean = 0usize;
+            let mut with_issues = 0usize;
+            let mut timed_out = 0usize;
+            let mut failed = 0usize;
+
+            for mut entry in targets {
+                println!(
+                    "==> Reviewing queued commit {} ({}) with Codex...",
+                    short_sha(&entry.commit_sha),
+                    entry.branch
+                );
+                match review_queue_entry_with_codex(
+                    &repo_root,
+                    &mut entry,
+                    review_instructions.as_deref(),
+                ) {
+                    Ok(()) => {
+                        if entry.review_timed_out {
+                            timed_out += 1;
+                            println!(
+                                "  ⚠ Review timed out again for {}",
+                                short_sha(&entry.commit_sha)
+                            );
+                        } else if entry.review_issues_found {
+                            with_issues += 1;
+                            println!(
+                                "  ⚠ Review found issue(s) for {}",
+                                short_sha(&entry.commit_sha)
+                            );
+                        } else {
+                            clean += 1;
+                            println!("  ✓ Review clean for {}", short_sha(&entry.commit_sha));
+                        }
+                        if !entry.review_todo_ids.is_empty() {
+                            match todo::count_open_todos(&repo_root, &entry.review_todo_ids) {
+                                Ok(open) => {
+                                    if open > 0 {
+                                        println!(
+                                            "  ↳ {} open review todo(s): {}",
+                                            open,
+                                            entry.review_todo_ids.join(", ")
+                                        );
+                                    } else {
+                                        println!("  ↳ review todos accounted for");
+                                    }
+                                }
+                                Err(err) => println!("  ↳ todo status check failed: {}", err),
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        failed += 1;
+                        println!(
+                            "  ✗ Failed to review {}: {}",
+                            short_sha(&entry.commit_sha),
+                            err
+                        );
+                    }
+                }
+            }
+
+            println!(
+                "Review refresh summary: clean={}, issues={}, timed_out={}, failed={}",
+                clean, with_issues, timed_out, failed
+            );
+
+            if failed > 0 {
+                bail!("Some queued commit reviews failed. Resolve errors and re-run.");
+            }
+        }
         CommitQueueAction::Approve {
             hash,
             force,
@@ -6435,6 +6850,13 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                     delete_review_bookmark(&repo_root, bookmark);
                 }
                 remove_commit_queue_entry_by_entry(&repo_root, &entry)?;
+                if let Ok(done) =
+                    todo::complete_review_timeout_todos(&repo_root, &entry.review_todo_ids)
+                {
+                    if done > 0 {
+                        println!("Auto-completed {} review follow-up todo(s).", done);
+                    }
+                }
                 println!("✓ Approved and pushed {}", short_sha(&entry.commit_sha));
             }
         }
@@ -6607,6 +7029,13 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                             delete_review_bookmark(&repo_root, bookmark);
                         }
                         remove_commit_queue_entry_by_entry(&repo_root, entry)?;
+                        if let Ok(done) =
+                            todo::complete_review_timeout_todos(&repo_root, &entry.review_todo_ids)
+                        {
+                            if done > 0 {
+                                println!("Auto-completed {} review follow-up todo(s).", done);
+                            }
+                        }
                         approved += 1;
                     } else {
                         println!(
