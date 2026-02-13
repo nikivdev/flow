@@ -207,7 +207,12 @@ pub struct JjConfig {
     #[serde(default)]
     pub remote: Option<String>,
     /// Auto-track bookmarks on create.
-    #[serde(default, rename = "auto_track", alias = "auto-track", alias = "autoTrack")]
+    #[serde(
+        default,
+        rename = "auto_track",
+        alias = "auto-track",
+        alias = "autoTrack"
+    )]
     pub auto_track: Option<bool>,
     /// Prefix for review bookmarks created by flow (e.g., "review").
     #[serde(
@@ -557,6 +562,15 @@ pub struct OptionsConfig {
     /// Optional token for gitedit sync/publish.
     #[serde(default, rename = "gitedit_token", alias = "gitedit-token")]
     pub gitedit_token: Option<String>,
+    /// Enable mirroring commits to myflow.sh (opt-in per project).
+    #[serde(default, rename = "myflow_mirror", alias = "myflow-mirror")]
+    pub myflow_mirror: Option<bool>,
+    /// Custom myflow API URL (defaults to https://myflow.sh).
+    #[serde(default, rename = "myflow_url", alias = "myflow-url")]
+    pub myflow_url: Option<String>,
+    /// Optional token for myflow sync.
+    #[serde(default, rename = "myflow_token", alias = "myflow-token")]
+    pub myflow_token: Option<String>,
 }
 
 impl OptionsConfig {
@@ -593,6 +607,15 @@ impl OptionsConfig {
         }
         if other.gitedit_token.is_some() {
             self.gitedit_token = other.gitedit_token;
+        }
+        if other.myflow_mirror.is_some() {
+            self.myflow_mirror = other.myflow_mirror;
+        }
+        if other.myflow_url.is_some() {
+            self.myflow_url = other.myflow_url;
+        }
+        if other.myflow_token.is_some() {
+            self.myflow_token = other.myflow_token;
         }
     }
 }

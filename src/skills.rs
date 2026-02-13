@@ -498,10 +498,7 @@ f {}
     )
 }
 
-fn sync_tasks_to_skills(
-    skills_dir: &Path,
-    tasks: &[config::TaskConfig],
-) -> Result<(usize, usize)> {
+fn sync_tasks_to_skills(skills_dir: &Path, tasks: &[config::TaskConfig]) -> Result<(usize, usize)> {
     fs::create_dir_all(skills_dir)?;
 
     let mut created = 0;
@@ -657,7 +654,10 @@ pub fn auto_sync_skills() {
     }
 }
 
-pub fn ensure_project_skills_at(project_root: &Path, cfg: &config::Config) -> Result<SkillsEnforceSummary> {
+pub fn ensure_project_skills_at(
+    project_root: &Path,
+    cfg: &config::Config,
+) -> Result<SkillsEnforceSummary> {
     ensure_default_skills_at(project_root)?;
     enforce_skills_from_config(project_root, cfg)
 }

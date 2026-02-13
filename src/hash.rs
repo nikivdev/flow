@@ -2,7 +2,7 @@ use std::env;
 use std::io::IsTerminal;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::cli::HashOpts;
 use crate::env as flow_env;

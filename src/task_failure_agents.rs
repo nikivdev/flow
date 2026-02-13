@@ -108,7 +108,11 @@ fn run_hive_agent(agent: &str, prompt: &str) -> Result<()> {
         .stderr(Stdio::inherit())
         .status()?;
     if !status.success() {
-        eprintln!("⚠ hive agent '{}' exited with status {:?}", agent, status.code());
+        eprintln!(
+            "⚠ hive agent '{}' exited with status {:?}",
+            agent,
+            status.code()
+        );
     }
     Ok(())
 }
@@ -135,7 +139,10 @@ pub fn maybe_run_task_failure_agents(
         return;
     }
     if settings.tool != "hive" {
-        eprintln!("⚠ task-failure agents: unsupported tool '{}'", settings.tool);
+        eprintln!(
+            "⚠ task-failure agents: unsupported tool '{}'",
+            settings.tool
+        );
         return;
     }
     if !std::io::stdin().is_terminal() {

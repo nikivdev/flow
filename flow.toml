@@ -16,6 +16,8 @@ gitedit_mirror = true
 commit_with_check_gitedit_mirror = true
 gitedit_url = "https://gitedit.dev"
 commit_with_check_review_url = "http://100.114.156.47:3000/review"
+# Enable myflow.sh mirroring for commits
+myflow_mirror = true
 
 [commit]
 queue = true

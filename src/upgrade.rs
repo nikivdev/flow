@@ -576,8 +576,10 @@ pub fn run(opts: UpgradeOpts) -> Result<()> {
     let target = detect_release_target()?;
     let asset_name = format!("flow-{}.tar.gz", target);
     let (legacy_os, legacy_arch) = detect_legacy_platform()?;
-    let legacy_asset_name =
-        format!("flow_{}_{}_{}.tar.gz", release.tag_name, legacy_os, legacy_arch);
+    let legacy_asset_name = format!(
+        "flow_{}_{}_{}.tar.gz",
+        release.tag_name, legacy_os, legacy_arch
+    );
 
     let tarball_asset = release
         .assets

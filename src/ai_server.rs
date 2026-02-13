@@ -111,7 +111,12 @@ pub fn quick_prompt(
     let text = parsed
         .choices
         .first()
-        .and_then(|c| c.message.as_ref().map(|m| m.content.clone()).or(c.text.clone()))
+        .and_then(|c| {
+            c.message
+                .as_ref()
+                .map(|m| m.content.clone())
+                .or(c.text.clone())
+        })
         .map(|t| t.trim().to_string())
         .unwrap_or_default();
 

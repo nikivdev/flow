@@ -2,7 +2,7 @@
 //!
 //! Tracks undoable actions (commit, push, etc.) and provides undo functionality.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -186,8 +186,8 @@ pub fn get_last_action(repo_root: &Path) -> Result<Option<UndoRecord>> {
 
     // Get the last line
     let last_line = lines.last().unwrap();
-    let record: UndoRecord = serde_json::from_str(last_line)
-        .context("failed to parse last undo record")?;
+    let record: UndoRecord =
+        serde_json::from_str(last_line).context("failed to parse last undo record")?;
 
     Ok(Some(record))
 }
@@ -242,8 +242,8 @@ pub struct UndoResult {
 
 /// Undo the last action.
 pub fn undo_last(repo_root: &Path, opts: &UndoOpts) -> Result<UndoResult> {
-    let record = get_last_action(repo_root)?
-        .ok_or_else(|| anyhow::anyhow!("No actions to undo"))?;
+    let record =
+        get_last_action(repo_root)?.ok_or_else(|| anyhow::anyhow!("No actions to undo"))?;
 
     // Check if we're on the same branch
     let current_branch = git_capture(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
@@ -257,7 +257,10 @@ pub fn undo_last(repo_root: &Path, opts: &UndoOpts) -> Result<UndoResult> {
 
     // Check if HEAD matches the after_sha
     let current_sha = git_capture(repo_root, &["rev-parse", "HEAD"])?;
-    if !current_sha.trim().starts_with(&record.after_sha[..7.min(record.after_sha.len())]) {
+    if !current_sha
+        .trim()
+        .starts_with(&record.after_sha[..7.min(record.after_sha.len())])
+    {
         // Try short comparison
         let current_short = &current_sha.trim()[..7.min(current_sha.len())];
         let record_short = &record.after_sha[..7.min(record.after_sha.len())];
@@ -272,7 +275,11 @@ pub fn undo_last(repo_root: &Path, opts: &UndoOpts) -> Result<UndoResult> {
     }
 
     if opts.dry_run {
-        println!("Would undo: {} ({})", record.action, short_sha(&record.after_sha));
+        println!(
+            "Would undo: {} ({})",
+            record.action,
+            short_sha(&record.after_sha)
+        );
         println!("  Reset to: {}", short_sha(&record.before_sha));
         if record.pushed {
             println!("  Would force push to remote");
@@ -292,17 +299,13 @@ pub fn undo_last(repo_root: &Path, opts: &UndoOpts) -> Result<UndoResult> {
         }
         ActionType::Push => {
             if !opts.force {
-                bail!(
-                    "Undoing a push requires --force flag (this will force push to remote)"
-                );
+                bail!("Undoing a push requires --force flag (this will force push to remote)");
             }
             undo_push(repo_root, &record)?;
         }
         ActionType::CommitPush => {
             if record.pushed && !opts.force {
-                bail!(
-                    "This action was pushed to remote. Use --force to undo (will force push)"
-                );
+                bail!("This action was pushed to remote. Use --force to undo (will force push)");
             }
             undo_commit_push(repo_root, &record, opts.force)?;
         }
@@ -311,7 +314,8 @@ pub fn undo_last(repo_root: &Path, opts: &UndoOpts) -> Result<UndoResult> {
     // Remove from undo log after successful undo
     remove_last_action(repo_root)?;
 
-    let force_pushed = record.pushed && (record.action == ActionType::Push || record.action == ActionType::CommitPush);
+    let force_pushed = record.pushed
+        && (record.action == ActionType::Push || record.action == ActionType::CommitPush);
 
     Ok(UndoResult {
         action_type: record.action,
@@ -356,7 +360,12 @@ fn undo_push(repo_root: &Path, record: &UndoRecord) -> Result<()> {
         ],
     )?;
 
-    println!("✓ Force pushed {} to {}/{}", short_sha(&record.before_sha), remote, record.branch);
+    println!(
+        "✓ Force pushed {} to {}/{}",
+        short_sha(&record.before_sha),
+        remote,
+        record.branch
+    );
 
     Ok(())
 }
@@ -392,7 +401,10 @@ pub fn show_last(repo_root: &Path) -> Result<()> {
             println!("  Before: {}", short_sha(&record.before_sha));
             println!("  After: {}", short_sha(&record.after_sha));
             if record.pushed {
-                println!("  Pushed: yes (to {})", record.remote.as_deref().unwrap_or("origin"));
+                println!(
+                    "  Pushed: yes (to {})",
+                    record.remote.as_deref().unwrap_or("origin")
+                );
             }
             if let Some(msg) = &record.message {
                 let short_msg = if msg.len() > 60 {
@@ -431,14 +443,26 @@ pub fn list_actions(repo_root: &Path, limit: usize) -> Result<()> {
     println!("Recent actions (newest first):");
     println!();
 
-    let start = if lines.len() > limit { lines.len() - limit } else { 0 };
+    let start = if lines.len() > limit {
+        lines.len() - limit
+    } else {
+        0
+    };
 
     for (i, line) in lines[start..].iter().rev().enumerate() {
         if let Ok(record) = serde_json::from_str::<UndoRecord>(line) {
             let pushed_indicator = if record.pushed { " [pushed]" } else { "" };
-            let msg_short = record.message.as_ref().map(|m| {
-                if m.len() > 40 { format!("{:.40}...", m) } else { m.clone() }
-            }).unwrap_or_default();
+            let msg_short = record
+                .message
+                .as_ref()
+                .map(|m| {
+                    if m.len() > 40 {
+                        format!("{:.40}...", m)
+                    } else {
+                        m.clone()
+                    }
+                })
+                .unwrap_or_default();
 
             if i == 0 {
                 println!(

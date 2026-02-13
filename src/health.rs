@@ -99,14 +99,8 @@ fn ensure_ai_server() -> Result<()> {
     }
 
     let url = resolved.get("AI_SERVER_URL").cloned().unwrap_or_default();
-    let model = resolved
-        .get("AI_SERVER_MODEL")
-        .cloned()
-        .unwrap_or_default();
-    let token = resolved
-        .get("AI_SERVER_TOKEN")
-        .cloned()
-        .unwrap_or_default();
+    let model = resolved.get("AI_SERVER_MODEL").cloned().unwrap_or_default();
+    let token = resolved.get("AI_SERVER_TOKEN").cloned().unwrap_or_default();
 
     if url.trim().is_empty() {
         println!("⚠️  AI server env not configured (AI_SERVER_URL).");
@@ -144,7 +138,9 @@ fn ensure_ai_server() -> Result<()> {
     }
 
     if model.trim().is_empty() {
-        println!("⚠️  AI_SERVER_MODEL not set. Example: f env set --personal AI_SERVER_MODEL=zai-glm-4.7");
+        println!(
+            "⚠️  AI_SERVER_MODEL not set. Example: f env set --personal AI_SERVER_MODEL=zai-glm-4.7"
+        );
     }
 
     if token.trim().is_empty() {
@@ -201,7 +197,10 @@ fn ensure_rise_health() -> Result<()> {
 
     let rise_root = config::expand_path("~/code/rise");
     if !rise_root.exists() {
-        println!("ℹ️  rise repo not found at {}; skipping.", rise_root.display());
+        println!(
+            "ℹ️  rise repo not found at {}; skipping.",
+            rise_root.display()
+        );
         return Ok(());
     }
 
@@ -231,7 +230,10 @@ fn ensure_rise_health() -> Result<()> {
             println!("✅ rise health ok");
         }
         Ok(status) => {
-            println!("⚠️  rise health failed (exit {}).", status.code().unwrap_or(-1));
+            println!(
+                "⚠️  rise health failed (exit {}).",
+                status.code().unwrap_or(-1)
+            );
         }
         Err(err) => {
             println!("⚠️  failed to run rise health: {}", err);
@@ -251,7 +253,10 @@ fn ensure_linsa_base_health() -> Result<()> {
     if base_root.join("flow.toml").exists() {
         println!("✅ linsa/base found at {}", base_root.display());
     } else {
-        println!("⚠️  linsa/base found but flow.toml missing: {}", base_root.display());
+        println!(
+            "⚠️  linsa/base found but flow.toml missing: {}",
+            base_root.display()
+        );
     }
 
     Ok(())
@@ -267,7 +272,11 @@ fn ensure_zerg_ai_health() -> Result<()> {
     let url = env::var("ZERG_AI_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .or_else(|| env::var("AI_SERVER_URL").ok().filter(|v| !v.trim().is_empty()))
+        .or_else(|| {
+            env::var("AI_SERVER_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
         .unwrap_or_else(|| "http://127.0.0.1:7331".to_string());
 
     let base = base_ai_url(&url);

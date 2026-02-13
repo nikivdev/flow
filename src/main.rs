@@ -10,7 +10,7 @@ use flowd::{
         ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
     },
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fish_install, fish_trace,
-    fix, fixup, git_guard, hash, health, help_search, history, hive, home, hub, info, init,
+    fix, fixup, git_guard, gitignore_policy, hash, health, help_search, history, hive, home, hub, info, init,
     init_tracing, install, jj, latest, log_server, macos, notify, otp, palette, parallel,
     processes, projects, proxy, publish, push, registry, release, repos, services, setup, skills,
     ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade,
@@ -203,7 +203,7 @@ fn main() -> Result<()> {
                 .with_open_review(open_review);
             let push = !opts.no_push;
             if let Some(message) = opts.fast.as_deref() {
-                commit::run_fast(message, push, queue, opts.hashed)?;
+                commit::run_fast(message, push, queue, opts.hashed, &opts.paths)?;
                 return Ok(());
             }
             let review_selection =
@@ -221,6 +221,7 @@ fn main() -> Result<()> {
                     true,
                     queue,
                     opts.hashed,
+                    &opts.paths,
                 )?;
             } else {
                 commit::run_with_check_with_gitedit(
@@ -231,11 +232,18 @@ fn main() -> Result<()> {
                     opts.tokens,
                     queue,
                     opts.hashed,
+                    &opts.paths,
                 )?;
             }
         }
         Some(Commands::CommitQueue(cmd)) => {
             commit::run_commit_queue(cmd)?;
+        }
+        Some(Commands::Pr(opts)) => {
+            commit::run_pr(opts)?;
+        }
+        Some(Commands::Gitignore(cmd)) => {
+            gitignore_policy::run(cmd)?;
         }
         Some(Commands::Review(cmd)) => match cmd.action {
             Some(ReviewAction::Latest) | None => {
@@ -269,7 +277,7 @@ fn main() -> Result<()> {
             let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
                 .with_open_review(open_review);
             let push = !opts.no_push;
-            commit::run_sync(push, queue, opts.hashed)?;
+            commit::run_sync(push, queue, opts.hashed, &opts.paths)?;
         }
         Some(Commands::CommitWithCheck(opts)) => {
             // Review but no gitedit sync
@@ -306,6 +314,7 @@ fn main() -> Result<()> {
                     false,
                     queue,
                     opts.hashed,
+                    &opts.paths,
                 )?;
             } else {
                 commit::run_with_check(
@@ -316,6 +325,7 @@ fn main() -> Result<()> {
                     opts.tokens,
                     queue,
                     opts.hashed,
+                    &opts.paths,
                 )?;
             }
         }
@@ -405,6 +415,12 @@ fn main() -> Result<()> {
         }
         Some(Commands::Sync(cmd)) => {
             sync::run(cmd)?;
+        }
+        Some(Commands::Checkout(cmd)) => {
+            sync::run_checkout(cmd)?;
+        }
+        Some(Commands::Switch(cmd)) => {
+            sync::run_switch(cmd)?;
         }
         Some(Commands::Push(cmd)) => {
             push::run(cmd)?;

@@ -7,11 +7,18 @@ use std::{
 };
 
 use crate::{
-    cli::{ReleaseSigningAction, ReleaseSigningCommand, ReleaseSigningStoreOpts, ReleaseSigningSyncOpts},
+    cli::{
+        ReleaseSigningAction, ReleaseSigningCommand, ReleaseSigningStoreOpts,
+        ReleaseSigningSyncOpts,
+    },
     env,
 };
 
-const SIGNING_KEYS: [&str; 3] = ["MACOS_SIGN_P12_B64", "MACOS_SIGN_P12_PASSWORD", "MACOS_SIGN_IDENTITY"];
+const SIGNING_KEYS: [&str; 3] = [
+    "MACOS_SIGN_P12_B64",
+    "MACOS_SIGN_P12_PASSWORD",
+    "MACOS_SIGN_IDENTITY",
+];
 
 pub fn run(cmd: ReleaseSigningCommand) -> Result<()> {
     match cmd.action {
@@ -44,12 +51,16 @@ fn status() -> Result<()> {
             }
         } else if !apple_dev.is_empty() {
             println!("Keychain: no Developer ID Application identity found.");
-            println!("Keychain: Apple Development identity found (not recommended for public distribution):");
+            println!(
+                "Keychain: Apple Development identity found (not recommended for public distribution):"
+            );
             for name in apple_dev {
                 println!("  - {}", name);
             }
             println!();
-            println!("Next: create/download a Developer ID Application certificate (Apple Developer) and export it as .p12.");
+            println!(
+                "Next: create/download a Developer ID Application certificate (Apple Developer) and export it as .p12."
+            );
         } else {
             println!("Keychain: no code signing identities found.");
         }
@@ -60,7 +71,12 @@ fn status() -> Result<()> {
     println!();
 
     // This may prompt for Touch ID if using cloud env store.
-    match env::fetch_personal_env_vars(&SIGNING_KEYS.iter().map(|s| s.to_string()).collect::<Vec<_>>()) {
+    match env::fetch_personal_env_vars(
+        &SIGNING_KEYS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+    ) {
         Ok(vars) => {
             for key in SIGNING_KEYS {
                 if let Some(value) = vars.get(key) {
@@ -78,7 +94,9 @@ fn status() -> Result<()> {
     }
 
     println!();
-    println!("GitHub: `f release signing sync` will copy env store values into GitHub Actions secrets via `gh`.");
+    println!(
+        "GitHub: `f release signing sync` will copy env store values into GitHub Actions secrets via `gh`."
+    );
     Ok(())
 }
 
@@ -95,7 +113,9 @@ fn list_codesign_identities() -> Result<Vec<String>> {
     for line in text.lines() {
         // Example:
         //  1) <hash> "Developer ID Application: Name (TEAMID)"
-        let Some(quoted) = line.split('"').nth(1) else { continue };
+        let Some(quoted) = line.split('"').nth(1) else {
+            continue;
+        };
         let name = quoted.trim();
         if !name.is_empty() {
             out.push(name.to_string());
@@ -222,7 +242,10 @@ fn gh_secret_set(repo: Option<&str>, name: &str, value: &str) -> Result<()> {
         .with_context(|| format!("failed to spawn `gh secret set {}`", name))?;
 
     {
-        let stdin = child.stdin.as_mut().context("failed to open stdin for gh")?;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("failed to open stdin for gh")?;
         stdin.write_all(value.as_bytes())?;
     }
 

@@ -58,12 +58,8 @@ fn run_with_tasks(opts: AskOpts, tasks: Vec<DiscoveredTask>) -> Result<()> {
     let valid_subcommands = valid_subcommand_set(&commands);
     let prompt = build_prompt(&query_display, &tasks, &commands);
 
-    let response = ai_server::quick_prompt(
-        &prompt,
-        opts.model.as_deref(),
-        opts.url.as_deref(),
-        None,
-    )?;
+    let response =
+        ai_server::quick_prompt(&prompt, opts.model.as_deref(), opts.url.as_deref(), None)?;
 
     let selection = parse_ask_response(&response, &tasks, &valid_subcommands)?;
 
@@ -115,9 +111,16 @@ fn flow_command_candidates() -> Vec<FlowCommand> {
     let cmd = Cli::command();
     for sub in cmd.get_subcommands() {
         let name = sub.get_name().to_string();
-        let about = sub.get_about().map(|s| s.to_string()).filter(|s| !s.is_empty());
+        let about = sub
+            .get_about()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
         let aliases = sub.get_all_aliases().map(|a| a.to_string()).collect();
-        commands.push(FlowCommand { name, aliases, about });
+        commands.push(FlowCommand {
+            name,
+            aliases,
+            about,
+        });
     }
 
     commands.push(FlowCommand {
@@ -247,9 +250,8 @@ fn normalize_command(raw: &str, valid_subcommands: &HashSet<String>) -> Result<S
         cmd = format!("f {}", cmd);
     }
 
-    let tokens = shell_words::split(&cmd).unwrap_or_else(|_| {
-        cmd.split_whitespace().map(|s| s.to_string()).collect()
-    });
+    let tokens = shell_words::split(&cmd)
+        .unwrap_or_else(|_| cmd.split_whitespace().map(|s| s.to_string()).collect());
     if tokens.len() < 2 {
         bail!("Command '{}' is incomplete.", cmd);
     }
@@ -432,10 +434,7 @@ fn extract_task_name(response: &str, tasks: &[DiscoveredTask]) -> Result<String>
         }
     }
 
-    bail!(
-        "Could not parse task name from AI response: '{}'",
-        response
-    )
+    bail!("Could not parse task name from AI response: '{}'", response)
 }
 
 #[cfg(test)]

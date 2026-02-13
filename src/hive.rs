@@ -159,7 +159,9 @@ fn find_agent_spec(name: &str) -> Option<(PathBuf, AgentSource)> {
 
     // 2. Global flow: ~/.config/flow/agents/<name>.md
     if let Some(home) = dirs::home_dir() {
-        let global_flow = home.join(".config/flow/agents").join(format!("{}.md", name));
+        let global_flow = home
+            .join(".config/flow/agents")
+            .join(format!("{}.md", name));
         if global_flow.exists() {
             return Some((global_flow, AgentSource::GlobalFlow));
         }
@@ -202,7 +204,10 @@ pub fn discover_agents(project_agents: &[AgentConfig]) -> Vec<Agent> {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().map_or(false, |e| e == "md") {
-                let stem = path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string());
                 if let Some(name) = stem {
                     if seen.insert(name.clone()) {
                         agents.push(Agent {
@@ -227,7 +232,10 @@ pub fn discover_agents(project_agents: &[AgentConfig]) -> Vec<Agent> {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.extension().map_or(false, |e| e == "md") {
-                    let stem = path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string());
                     if let Some(name) = stem {
                         if seen.insert(name.clone()) {
                             agents.push(Agent {
@@ -311,7 +319,11 @@ pub fn run_agent(agent: &str, prompt: &str) -> Result<()> {
         .context("Failed to run hive")?;
 
     if !status.success() {
-        anyhow::bail!("hive agent '{}' exited with status {:?}", agent, status.code());
+        anyhow::bail!(
+            "hive agent '{}' exited with status {:?}",
+            agent,
+            status.code()
+        );
     }
 
     Ok(())
@@ -333,7 +345,11 @@ pub fn run_agent_interactive(agent: &str) -> Result<()> {
         .context("Failed to run hive")?;
 
     if !status.success() {
-        anyhow::bail!("hive agent '{}' exited with status {:?}", agent, status.code());
+        anyhow::bail!(
+            "hive agent '{}' exited with status {:?}",
+            agent,
+            status.code()
+        );
     }
 
     Ok(())
@@ -376,8 +392,8 @@ pub fn create_agent(name: &str, global: bool) -> Result<PathBuf> {
 
 /// Edit an agent spec file
 pub fn edit_agent(name: &str) -> Result<()> {
-    let (path, _source) = find_agent_spec(name)
-        .ok_or_else(|| anyhow::anyhow!("Agent '{}' not found", name))?;
+    let (path, _source) =
+        find_agent_spec(name).ok_or_else(|| anyhow::anyhow!("Agent '{}' not found", name))?;
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
     let status = Command::new(&editor)

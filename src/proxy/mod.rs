@@ -141,10 +141,7 @@ pub fn parse_duration(s: &str) -> Duration {
 }
 
 /// Start the proxy server with the given configuration
-pub async fn start(
-    config: ProxyConfig,
-    targets: Vec<ProxyTargetConfig>,
-) -> Result<()> {
+pub async fn start(config: ProxyConfig, targets: Vec<ProxyTargetConfig>) -> Result<()> {
     // Parse listen address
     let listen_addr: SocketAddr = if config.listen.starts_with(':') {
         format!("127.0.0.1{}", config.listen).parse()
@@ -162,8 +159,8 @@ pub async fn start(
 
     let trace_size = parse_size(&config.trace_size);
 
-    let trace_buffer = TraceBuffer::init(&trace_dir, trace_size)
-        .context("Failed to initialize trace buffer")?;
+    let trace_buffer =
+        TraceBuffer::init(&trace_dir, trace_size).context("Failed to initialize trace buffer")?;
     let trace_buffer = Arc::new(trace_buffer);
 
     // Build backends
@@ -200,7 +197,11 @@ pub async fn start(
     let summary_state = Arc::new(SummaryState::new(target_names, config.slow_threshold_ms));
 
     // Create server
-    let server = Arc::new(ProxyServer::new(router, trace_buffer.clone(), summary_state.clone()));
+    let server = Arc::new(ProxyServer::new(
+        router,
+        trace_buffer.clone(),
+        summary_state.clone(),
+    ));
 
     // Start summary writer if enabled
     if config.trace_summary {

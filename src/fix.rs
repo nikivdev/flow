@@ -1,7 +1,7 @@
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::cli::FixOpts;
 use crate::opentui_prompt;
@@ -51,7 +51,8 @@ fn try_run_commit_repair(repo_root: &std::path::Path, message: &str) -> Result<b
     let status = git_output(repo_root, &["status", "--porcelain"])?;
     if !status.trim().is_empty() {
         let lines = vec![
-            "Working tree has uncommitted changes that will be included in the new commit.".to_string(),
+            "Working tree has uncommitted changes that will be included in the new commit."
+                .to_string(),
         ];
         if !confirm_with_tui("Re-commit", &lines, "Continue with re-commit? [Y/n]: ")? {
             bail!("Aborted.");
@@ -120,10 +121,7 @@ fn confirm_default_yes(prompt: &str) -> Result<bool> {
         if trimmed.is_empty() {
             return Ok(true);
         }
-        return Ok(matches!(
-            trimmed.to_ascii_lowercase().as_str(),
-            "y" | "yes"
-        ));
+        return Ok(matches!(trimmed.to_ascii_lowercase().as_str(), "y" | "yes"));
     }
 
     let mut input = String::new();
@@ -132,10 +130,7 @@ fn confirm_default_yes(prompt: &str) -> Result<bool> {
     if trimmed.is_empty() {
         return Ok(true);
     }
-    Ok(matches!(
-        trimmed.to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    ))
+    Ok(matches!(trimmed.to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 fn run_fix_agent(repo_root: &std::path::Path, agent: &str, message: &str) -> Result<()> {
@@ -180,7 +175,11 @@ fn git_top_level() -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(root))
 }
 
-fn ensure_clean_or_stash(repo_root: &std::path::Path, allow_stash: bool, stashed: &mut bool) -> Result<()> {
+fn ensure_clean_or_stash(
+    repo_root: &std::path::Path,
+    allow_stash: bool,
+    stashed: &mut bool,
+) -> Result<()> {
     let status = git_output(repo_root, &["status", "--porcelain"])?;
     if status.trim().is_empty() {
         return Ok(());
@@ -191,7 +190,10 @@ fn ensure_clean_or_stash(repo_root: &std::path::Path, allow_stash: bool, stashed
     }
 
     println!("Stashing local changes...");
-    git_status(repo_root, &["stash", "push", "-u", "-m", "f fix auto-stash"])?;
+    git_status(
+        repo_root,
+        &["stash", "push", "-u", "-m", "f fix auto-stash"],
+    )?;
     *stashed = true;
     Ok(())
 }

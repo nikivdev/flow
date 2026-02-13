@@ -155,7 +155,10 @@ pub fn compute_summary(buffer: &TraceBuffer, state: &SummaryState) -> TraceSumma
     let total_requests = buffer.write_index();
     let total_errors = records.iter().filter(|r| r.is_error()).count() as u64;
     let error_rate = if total_requests > 0 {
-        format!("{:.1}%", (total_errors as f64 / records.len() as f64) * 100.0)
+        format!(
+            "{:.1}%",
+            (total_errors as f64 / records.len() as f64) * 100.0
+        )
     } else {
         "0%".to_string()
     };
@@ -171,7 +174,10 @@ pub fn compute_summary(buffer: &TraceBuffer, state: &SummaryState) -> TraceSumma
         let mut sorted = latencies.clone();
         sorted.sort();
         let p99_idx = (sorted.len() as f64 * 0.99) as usize;
-        sorted.get(p99_idx.min(sorted.len() - 1)).copied().unwrap_or(0)
+        sorted
+            .get(p99_idx.min(sorted.len() - 1))
+            .copied()
+            .unwrap_or(0)
     } else {
         0
     };
@@ -290,14 +296,14 @@ pub fn compute_summary(buffer: &TraceBuffer, state: &SummaryState) -> TraceSumma
             if let Some(latencies) = target_latencies.get(&idx) {
                 if !latencies.is_empty() {
                     health.avg_latency_ms = (latencies.iter().map(|&l| l as u64).sum::<u64>()
-                        / latencies.len() as u64) as u32;
+                        / latencies.len() as u64)
+                        as u32;
                 }
             }
 
             if let Some((error_count, last_error)) = target_errors.get(&idx) {
                 health.error_count = *error_count;
-                health.error_rate =
-                    format!("{:.1}%", (*error_count as f64 / count as f64) * 100.0);
+                health.error_rate = format!("{:.1}%", (*error_count as f64 / count as f64) * 100.0);
                 health.healthy = (*error_count as f64 / count as f64) < 0.1; // < 10% errors
 
                 if let Some((err, ts)) = last_error {

@@ -8,8 +8,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::ptr::{null_mut, write_unaligned};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use libc::{CLOCK_MONOTONIC, MAP_SHARED, PROT_READ, PROT_WRITE};
@@ -110,10 +110,8 @@ impl TraceRecord {
 
     #[inline]
     pub fn set_latency_status(&mut self, latency_us: u32, status: u16, method: Method, flags: u8) {
-        self.words[IDX_LATENCY_STATUS] = (latency_us as u64) << 32
-            | (status as u64) << 16
-            | (method as u64) << 8
-            | flags as u64;
+        self.words[IDX_LATENCY_STATUS] =
+            (latency_us as u64) << 32 | (status as u64) << 16 | (method as u64) << 8 | flags as u64;
     }
 
     #[inline]
@@ -125,8 +123,9 @@ impl TraceRecord {
     pub fn set_target_and_trace_id(&mut self, target_idx: u8, path_len: u8, trace_id: u128) {
         let trace_id_high = (trace_id >> 64) as u64;
         let trace_id_low = trace_id as u64;
-        self.words[IDX_TARGET_PATH_LEN] =
-            (target_idx as u64) << 56 | (path_len as u64) << 48 | (trace_id_high & 0xFFFF_FFFF_FFFF);
+        self.words[IDX_TARGET_PATH_LEN] = (target_idx as u64) << 56
+            | (path_len as u64) << 48
+            | (trace_id_high & 0xFFFF_FFFF_FFFF);
         self.words[IDX_TRACE_ID_LOW] = trace_id_low;
     }
 

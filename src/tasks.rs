@@ -34,8 +34,7 @@ use crate::{
     history::{self, InvocationRecord},
     hub, init, jazz_state, projects,
     running::{self, RunningProcess},
-    task_match,
-    task_failure_agents,
+    task_failure_agents, task_match,
 };
 
 /// Global state for cancel cleanup handler.
@@ -1130,13 +1129,7 @@ fn execute_task(
             &output,
             status.code(),
         );
-        maybe_run_task_failure_hook(
-            &task.name,
-            command,
-            workdir,
-            &output,
-            status.code(),
-        );
+        maybe_run_task_failure_hook(&task.name, command, workdir, &output, status.code());
         bail!(
             "task '{}' exited with status {}",
             task.name,
@@ -1419,10 +1412,7 @@ fn maybe_run_task_failure_hook(
     match cmd.status() {
         Ok(status) if status.success() => {}
         Ok(status) => {
-            eprintln!(
-                "⚠ task failure hook exited with status {:?}",
-                status.code()
-            );
+            eprintln!("⚠ task failure hook exited with status {:?}", status.code());
         }
         Err(err) => {
             eprintln!("⚠ failed to run task failure hook: {}", err);
@@ -1760,7 +1750,10 @@ fn run_flox_interactive_command(
     Ok((status, String::new()))
 }
 
-fn run_command_with_tee(mut cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitStatus, String)> {
+fn run_command_with_tee(
+    mut cmd: Command,
+    ctx: Option<TaskContext>,
+) -> Result<(ExitStatus, String)> {
     inject_global_env(&mut cmd);
     // Only use `script` for tasks explicitly marked as interactive
     // This avoids issues with non-interactive tasks hanging

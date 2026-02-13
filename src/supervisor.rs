@@ -419,14 +419,15 @@ fn launch_agent_label() -> &'static str {
 #[cfg(target_os = "macos")]
 fn launch_agent_plist_path() -> Result<PathBuf> {
     let dir = config::expand_path("~/Library/LaunchAgents");
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     Ok(dir.join(format!("{}.plist", launch_agent_label())))
 }
 
 #[cfg(target_os = "macos")]
 fn launch_agent_installed() -> bool {
-    launch_agent_plist_path().map(|p| p.exists()).unwrap_or(false)
+    launch_agent_plist_path()
+        .map(|p| p.exists())
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -457,11 +458,7 @@ fn launch_agent_program_args(socket_path: &Path, boot: bool) -> Result<Vec<Strin
 }
 
 #[cfg(target_os = "macos")]
-fn launch_agent_plist(
-    socket_path: &Path,
-    boot: bool,
-    log_path: Option<&Path>,
-) -> Result<String> {
+fn launch_agent_plist(socket_path: &Path, boot: bool, log_path: Option<&Path>) -> Result<String> {
     let args = launch_agent_program_args(socket_path, boot)?;
     let mut buf = String::new();
     buf.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -470,10 +467,7 @@ fn launch_agent_plist(
     );
     buf.push_str("<plist version=\"1.0\">\n<dict>\n");
     buf.push_str("  <key>Label</key>\n");
-    buf.push_str(&format!(
-        "  <string>{}</string>\n",
-        launch_agent_label()
-    ));
+    buf.push_str(&format!("  <string>{}</string>\n", launch_agent_label()));
     buf.push_str("  <key>ProgramArguments</key>\n  <array>\n");
     for arg in args {
         buf.push_str(&format!("    <string>{}</string>\n", xml_escape(&arg)));
@@ -526,9 +520,7 @@ fn install_launch_agent(socket_path: &Path, boot: bool) -> Result<()> {
         );
     }
 
-    let _ = Command::new("launchctl")
-        .args(["enable", &target])
-        .output();
+    let _ = Command::new("launchctl").args(["enable", &target]).output();
 
     let output = Command::new("launchctl")
         .args(["kickstart", "-k", &target])
@@ -815,14 +807,7 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
 
         let mut to_restart: Vec<(String, Option<PathBuf>)> = Vec::new();
         let mut to_stop: Vec<(String, Option<PathBuf>)> = Vec::new();
-        let mut updates: Vec<(
-            String,
-            Option<u32>,
-            bool,
-            u32,
-            u32,
-            Option<Instant>,
-        )> = Vec::new();
+        let mut updates: Vec<(String, Option<u32>, bool, u32, u32, Option<Instant>)> = Vec::new();
 
         for entry in entries {
             if entry.disabled {
@@ -881,8 +866,9 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
                             continue;
                         }
 
-                        let delay_secs =
-                            2u64.saturating_pow(entry.restart_attempts.saturating_add(1)).min(60);
+                        let delay_secs = 2u64
+                            .saturating_pow(entry.restart_attempts.saturating_add(1))
+                            .min(60);
                         let next_restart_at = Some(now + Duration::from_secs(delay_secs));
                         updates.push((
                             key,
@@ -956,7 +942,15 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
 
         if !updates.is_empty() {
             let mut state = state.lock().expect("supervisor state lock");
-            for (key, retry_remaining, disabled, health_failures, restart_attempts, next_restart_at) in updates {
+            for (
+                key,
+                retry_remaining,
+                disabled,
+                health_failures,
+                restart_attempts,
+                next_restart_at,
+            ) in updates
+            {
                 if let Some(entry) = state.managed.get_mut(&key) {
                     entry.retry_remaining = retry_remaining;
                     entry.disabled = disabled;

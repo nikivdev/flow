@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use axum::{
     Router,
-    extract::Query,
+    extract::{Query, State},
     http::{Method, StatusCode},
     response::{
         IntoResponse, Json,
@@ -25,6 +25,13 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::cli::{ServerAction, ServerOpts};
 use crate::log_store::{self, LogEntry, LogQuery};
+use crate::pr_edit::PrEditService;
+
+#[derive(Clone)]
+struct AppState {
+    pr_edit: Arc<tokio::sync::RwLock<Option<Arc<PrEditService>>>>,
+    pr_edit_error: Arc<tokio::sync::RwLock<Option<String>>>,
+}
 
 /// Run the flow HTTP server for log ingestion.
 pub fn run(opts: ServerOpts) -> Result<()> {
@@ -103,12 +110,40 @@ fn run_foreground(host: &str, port: u16) -> Result<()> {
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_headers(Any);
 
+        // Start PR edit watcher in the background so it can never block the server startup.
+        let pr_edit = Arc::new(tokio::sync::RwLock::new(None));
+        let pr_edit_error = Arc::new(tokio::sync::RwLock::new(None));
+        {
+            let pr_edit = Arc::clone(&pr_edit);
+            let pr_edit_error = Arc::clone(&pr_edit_error);
+            tokio::spawn(async move {
+                match PrEditService::start().await {
+                    Ok(svc) => {
+                        *pr_edit.write().await = Some(svc);
+                        *pr_edit_error.write().await = None;
+                        tracing::info!("pr-edit watcher started");
+                    }
+                    Err(err) => {
+                        *pr_edit_error.write().await = Some(format!("{err:#}"));
+                        tracing::warn!(?err, "failed to start pr-edit watcher");
+                    }
+                }
+            });
+        }
+        let state = AppState {
+            pr_edit,
+            pr_edit_error,
+        };
+
         let router = Router::new()
             .route("/health", get(health))
             .route("/logs/ingest", post(logs_ingest))
             .route("/logs/query", get(logs_query))
             .route("/logs/errors/stream", get(logs_errors_stream))
-            .layer(cors);
+            .route("/pr-edit/status", get(pr_edit_status))
+            .route("/pr-edit/rescan", post(pr_edit_rescan))
+            .layer(cors)
+            .with_state(state);
 
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -201,6 +236,43 @@ fn terminate_process(pid: u32) -> Result<()> {
 
 async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
+}
+
+async fn pr_edit_status(State(state): State<AppState>) -> impl IntoResponse {
+    let guard = state.pr_edit.read().await;
+    match guard.as_ref() {
+        Some(svc) => (StatusCode::OK, Json(svc.status_snapshot().await)).into_response(),
+        None => {
+            let err = state.pr_edit_error.read().await.clone();
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "pr-edit watcher not running", "detail": err })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn pr_edit_rescan(State(state): State<AppState>) -> impl IntoResponse {
+    let guard = state.pr_edit.read().await;
+    match guard.as_ref() {
+        Some(svc) => match svc.rescan().await {
+            Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            )
+                .into_response(),
+        },
+        None => {
+            let err = state.pr_edit_error.read().await.clone();
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "pr-edit watcher not running", "detail": err })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

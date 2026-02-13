@@ -4,20 +4,20 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, Response, StatusCode};
 use axum::routing::any;
-use axum::Router;
 use tokio::sync::RwLock;
 
 use super::summary::SummaryState;
-use super::trace::{hash_path, now_ns, TraceBuffer, TraceRecord};
+use super::trace::{TraceBuffer, TraceRecord, hash_path, now_ns};
 
 /// A backend target
 #[derive(Debug, Clone)]
