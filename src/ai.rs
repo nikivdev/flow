@@ -218,11 +218,19 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Import => import_sessions()?,
         AiAction::Copy { session } => copy_session(session, Provider::All)?,
         AiAction::CopyClaude { search } => {
-            let query = if search.is_empty() { None } else { Some(search.join(" ")) };
+            let query = if search.is_empty() {
+                None
+            } else {
+                Some(search.join(" "))
+            };
             copy_last_session(Provider::Claude, query)?
         }
         AiAction::CopyCodex { search } => {
-            let query = if search.is_empty() { None } else { Some(search.join(" ")) };
+            let query = if search.is_empty() {
+                None
+            } else {
+                Some(search.join(" "))
+            };
             copy_last_session(Provider::Codex, query)?
         }
         AiAction::Context {
@@ -2370,7 +2378,9 @@ fn copy_session_by_search(provider: Provider, query: &str) -> Result<()> {
                             if let Some(project_path) = cwd {
                                 println!(
                                     "Copied session {} from {} ({} lines) to clipboard",
-                                    id_short, project_path.display(), line_count
+                                    id_short,
+                                    project_path.display(),
+                                    line_count
                                 );
                                 return Ok(());
                             }

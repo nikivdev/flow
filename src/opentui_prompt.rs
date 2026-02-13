@@ -3,7 +3,7 @@ use std::io::{self, IsTerminal};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
-use opentui_lite::{Color, OpenTui, ATTR_BOLD, BORDER_SIMPLE};
+use opentui_lite::{ATTR_BOLD, BORDER_SIMPLE, Color, OpenTui};
 
 pub fn confirm(title: &str, lines: &[String], default_yes: bool) -> Option<bool> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -12,7 +12,9 @@ pub fn confirm(title: &str, lines: &[String], default_yes: bool) -> Option<bool>
 
     let (width, height) = crossterm::terminal::size().ok()?;
     let opentui = OpenTui::load().ok()?;
-    let renderer = opentui.create_renderer(width as u32, height as u32, false).ok()?;
+    let renderer = opentui
+        .create_renderer(width as u32, height as u32, false)
+        .ok()?;
 
     renderer.setup_terminal(true);
 
@@ -65,9 +67,20 @@ pub fn confirm(title: &str, lines: &[String], default_yes: bool) -> Option<bool>
     let hint_y = height.saturating_sub(2) as u32;
     buffer.draw_text(&hint_line, 3, hint_y, muted, None, 0);
 
-    let action = if default_yes { "[Y] Confirm" } else { "[N] Cancel" };
+    let action = if default_yes {
+        "[Y] Confirm"
+    } else {
+        "[N] Cancel"
+    };
     let action_line = truncate_width(action, max_width);
-    buffer.draw_text(&action_line, 3, hint_y.saturating_sub(1), accent, None, ATTR_BOLD);
+    buffer.draw_text(
+        &action_line,
+        3,
+        hint_y.saturating_sub(1),
+        accent,
+        None,
+        ATTR_BOLD,
+    );
 
     renderer.render(true);
 

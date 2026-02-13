@@ -159,10 +159,7 @@ fn ensure_zerobrew_available_interactive() -> Result<bool> {
         return Ok(false);
     }
 
-    let install = prompt_yes(
-        "zerobrew (zb) not found. Install it now? [y/N]: ",
-        false,
-    );
+    let install = prompt_yes("zerobrew (zb) not found. Install it now? [y/N]: ", false);
 
     if !install {
         return Ok(false);

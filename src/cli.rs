@@ -185,7 +185,7 @@ pub enum Commands {
     Active(ActiveOpts),
     #[command(
         about = "Start the flow HTTP server for log ingestion and queries.",
-        long_about = "Runs an HTTP server with endpoints for log ingestion (/logs/ingest) and queries (/logs/query)."
+        long_about = "Runs an HTTP server with endpoints for log ingestion (/logs/ingest) and queries (/logs/query).\n\nAlso provides a lightweight PR edit watcher for ~/.flow/pr-edit:\n  GET /pr-edit/status\n  POST /pr-edit/rescan"
     )]
     Server(ServerOpts),
     #[command(
@@ -207,7 +207,7 @@ pub enum Commands {
     Ask(AskOpts),
     #[command(
         about = "AI-powered commit with code review and optional GitEdit sync.",
-        long_about = "Stages all changes, runs code review for bugs/security, generates commit message, commits, pushes (unless commit queue is enabled), and syncs AI sessions to gitedit.dev when enabled in global config.",
+        long_about = "Stages all changes (or only paths passed via --path), runs code review for bugs/security, generates commit message, commits, pushes (unless commit queue is enabled), and syncs AI sessions to gitedit.dev when enabled in global config.",
         alias = "c"
     )]
     Commit(CommitOpts),
@@ -218,6 +218,16 @@ pub enum Commands {
     )]
     CommitQueue(CommitQueueCommand),
     #[command(
+        about = "Create a GitHub PR from current changes or a queued commit.",
+        long_about = "By default, stages and commits current changes (or only paths passed via --path) into the queue, then creates/updates a GitHub PR for the latest queued commit. Use --no-commit to skip committing and create a PR from an existing queued commit.\n\nSpecial:\n  `f pr open` opens the PR for the current branch (or falls back to the queued commit).\n  `f pr open edit` opens a local markdown editor file and syncs PR title/body on save."
+    )]
+    Pr(PrOpts),
+    #[command(
+        about = "Manage personal tooling ignore policy across repos.",
+        long_about = "Audit and clean personal tooling ignore patterns from project .gitignore files. This helps keep external repositories free of local-only patterns like .beads/ and .rise/."
+    )]
+    Gitignore(GitignoreCommand),
+    #[command(
         about = "Open queued commits for review in Rise.",
         long_about = "Open the latest queued commit (or a specific one in the future) in Rise's review UI.",
         alias = "rv"
@@ -225,7 +235,7 @@ pub enum Commands {
     Review(ReviewCommand),
     #[command(
         about = "Simple AI commit without code review.",
-        long_about = "Stages all changes, uses OpenAI to generate a commit message from the diff, commits, and pushes. No code review.",
+        long_about = "Stages all changes (or only paths passed via --path), uses OpenAI to generate a commit message from the diff, commits, and pushes. No code review.",
         visible_alias = "commitSimple",
         hide = true
     )]
@@ -385,10 +395,20 @@ pub enum Commands {
     )]
     Hive(HiveCommand),
     #[command(
-        about = "Sync git repo: pull, upstream merge, push.",
-        long_about = "Comprehensive git sync: pulls from origin, merges upstream changes if configured, and pushes. One command to keep your fork in sync."
+        about = "Sync git repo: pull + upstream merge (push optional).",
+        long_about = "Comprehensive git sync: pulls from origin and merges/rebases upstream changes when configured. Use --push to push to origin."
     )]
     Sync(SyncCommand),
+    #[command(
+        about = "Checkout a GitHub PR safely.",
+        long_about = "Checks out a pull request by URL/number/branch via GitHub CLI. By default, auto-stashes local changes before checkout and restores them after. Also imports git refs into jj when available."
+    )]
+    Checkout(CheckoutCommand),
+    #[command(
+        about = "Switch to a branch and align upstream tracking.",
+        long_about = "Switches to a target branch (creating it from upstream/origin when needed), updates flow upstream tracking for that branch, and imports git changes into jj when present."
+    )]
+    Switch(SwitchCommand),
     #[command(
         about = "Push current branch to a configured private mirror remote.",
         long_about = "Pushes the current branch to a private mirror remote (typically on GitHub). When the repo is a read-only clone (origin == upstream), Flow can repoint origin to your mirror based on FLOW_PUSH_OWNER (or --owner) and push there."
@@ -1310,6 +1330,9 @@ pub struct CommitOpts {
     /// Fast commit with optional message (defaults to ".").
     #[arg(long, value_name = "MESSAGE", num_args = 0..=1, default_missing_value = ".")]
     pub fast: Option<String>,
+    /// Stage and commit only these paths (repeatable).
+    #[arg(long = "path", value_name = "PATH")]
+    pub paths: Vec<String>,
     /// Message to append after the AI-generated subject/body.
     #[arg(value_name = "MESSAGE", allow_hyphen_values = true)]
     pub message_arg: Option<String>,
@@ -1318,6 +1341,72 @@ pub struct CommitOpts {
     pub tokens: usize,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct PrOpts {
+    /// Optional message to append to the AI-generated commit message, or subcommands like:
+    ///   f pr open
+    ///   f pr open edit
+    #[arg(value_name = "ARGS", allow_hyphen_values = true)]
+    pub args: Vec<String>,
+    /// Base branch for the PR (default: main).
+    #[arg(long, default_value = "main")]
+    pub base: String,
+    /// Create as a draft PR.
+    #[arg(long)]
+    pub draft: bool,
+    /// Do not open the PR in browser after creating/finding it.
+    #[arg(long)]
+    pub no_open: bool,
+    /// Skip creating a new commit; use an existing queued commit.
+    #[arg(long)]
+    pub no_commit: bool,
+    /// Specific queued commit hash to use (short or full).
+    #[arg(long)]
+    pub hash: Option<String>,
+    /// Stage and commit only these paths before creating PR (repeatable).
+    #[arg(long = "path", value_name = "PATH")]
+    pub paths: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GitignoreCommand {
+    #[command(subcommand)]
+    pub action: Option<GitignoreAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum GitignoreAction {
+    /// Audit .gitignore files for blocked personal-tooling patterns.
+    Audit(GitignoreScanOpts),
+    /// Remove blocked personal-tooling patterns from .gitignore files.
+    Fix(GitignoreScanOpts),
+    /// Create ~/.config/flow/gitignore-policy.toml with defaults.
+    PolicyInit(GitignorePolicyInitOpts),
+    /// Configure a global git excludes file with blocked personal-tooling patterns.
+    SetupGlobal {
+        /// Print target path/entries without writing changes.
+        #[arg(long)]
+        print_only: bool,
+    },
+    /// Print the active policy file path.
+    PolicyPath,
+}
+#[derive(Args, Debug, Clone)]
+pub struct GitignoreScanOpts {
+    /// Root directory to scan for repositories (defaults to policy repos_roots, then ~/repos).
+    #[arg(long)]
+    pub root: Option<String>,
+    /// Include repos owned by allowed owners.
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GitignorePolicyInitOpts {
+    /// Overwrite an existing policy file.
+    #[arg(long)]
+    pub force: bool,
+}
 #[derive(Args, Debug, Clone)]
 pub struct CommitQueueCommand {
     #[command(subcommand)]
@@ -1338,6 +1427,10 @@ pub struct GitRepairOpts {
     /// Dry run - show what would be repaired.
     #[arg(long, short = 'n')]
     pub dry_run: bool,
+    /// After repair, switch to target branch and cherry-pick current HEAD onto it.
+    /// If conflicts occur, flow auto-aborts and returns to the source branch.
+    #[arg(long)]
+    pub land_main: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -2655,8 +2748,11 @@ pub struct SyncCommand {
     /// Use rebase instead of merge when pulling.
     #[arg(long, short)]
     pub rebase: bool,
-    /// Skip pushing to origin.
+    /// Push to origin after sync (default: false).
     #[arg(long)]
+    pub push: bool,
+    /// Skip pushing to origin (legacy; default is already no push).
+    #[arg(long, overrides_with = "push")]
     pub no_push: bool,
     /// Auto-stash uncommitted changes (default: true).
     #[arg(long, short, default_value = "true")]
@@ -2679,6 +2775,39 @@ pub struct SyncCommand {
     /// Maximum fix attempts before giving up.
     #[arg(long, default_value = "3")]
     pub max_fix_attempts: u32,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SwitchCommand {
+    /// Branch name to switch to (for example: v31).
+    pub branch: String,
+    /// Preferred remote to track from (default: upstream, then origin).
+    #[arg(long)]
+    pub remote: Option<String>,
+    /// Auto-stash uncommitted changes before switching (default: true).
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub stash: bool,
+    /// Disable auto-stash (same as --stash=false).
+    #[arg(long, overrides_with = "stash")]
+    pub no_stash: bool,
+    /// Run sync after switching (uses --no-push).
+    #[arg(long)]
+    pub sync: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CheckoutCommand {
+    /// PR URL, PR number, or branch accepted by `gh pr checkout`.
+    pub target: String,
+    /// Preferred remote to use when checking out a PR branch.
+    #[arg(long)]
+    pub remote: Option<String>,
+    /// Auto-stash uncommitted changes before checkout (default: true).
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub stash: bool,
+    /// Disable auto-stash (same as --stash=false).
+    #[arg(long, overrides_with = "stash")]
+    pub no_stash: bool,
 }
 
 #[derive(Args, Debug, Clone)]

@@ -4,8 +4,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use sha1::{Digest, Sha1};
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use uuid::Uuid;
 
 use crate::ai;
@@ -326,7 +326,11 @@ pub fn record_review_issues_as_todos(
     let (path, mut items) = load_items_at_root(repo_root)?;
     let mut existing_refs = std::collections::HashSet::new();
     for item in &items {
-        if let Some(r) = item.external_ref.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty())
+        if let Some(r) = item
+            .external_ref
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
         {
             existing_refs.insert(r.to_string());
         }

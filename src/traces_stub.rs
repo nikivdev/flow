@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
-use crate::cli::{TraceSessionOpts, TraceSource, TracesOpts};
 use crate::base_tool;
+use crate::cli::{TraceSessionOpts, TraceSource, TracesOpts};
 
 pub fn run(opts: TracesOpts) -> Result<()> {
     let Some(bin) = base_tool::resolve_bin() else {
@@ -12,20 +12,32 @@ pub fn run(opts: TracesOpts) -> Result<()> {
         );
     };
 
-    let mut args: Vec<String> = vec!["trace".to_string(), "--limit".to_string(), opts.limit.to_string()];
+    let mut args: Vec<String> = vec![
+        "trace".to_string(),
+        "--limit".to_string(),
+        opts.limit.to_string(),
+    ];
     if opts.follow {
         args.push("--follow".to_string());
     }
-    if let Some(project) = opts.project.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(project) = opts
+        .project
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         args.push("--project".to_string());
         args.push(project.to_string());
     }
     args.push("--source".to_string());
-    args.push(match opts.source {
-        TraceSource::All => "all",
-        TraceSource::Tasks => "tasks",
-        TraceSource::Ai => "ai",
-    }.to_string());
+    args.push(
+        match opts.source {
+            TraceSource::All => "all",
+            TraceSource::Tasks => "tasks",
+            TraceSource::Ai => "ai",
+        }
+        .to_string(),
+    );
 
     base_tool::run_inherit_stdio(&bin, &args)
 }

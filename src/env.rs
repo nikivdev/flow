@@ -705,6 +705,13 @@ pub fn load_ai_api_url() -> Result<String> {
     Ok(get_ai_api_url(&auth))
 }
 
+/// Load the base URL for the cloud env API (defaults to https://myflow.sh).
+/// This is used for host deploy integrations where the remote host needs to fetch envs.
+pub fn load_env_api_url() -> Result<String> {
+    let auth = load_auth_config_raw()?;
+    Ok(get_api_url(&auth))
+}
+
 pub fn save_ai_auth_token(token: String, api_url: Option<String>) -> Result<()> {
     let mut auth = load_auth_config_raw()?;
     if let Some(api_url) = api_url {
@@ -1250,8 +1257,8 @@ fn login() -> Result<()> {
         bail!("Token cannot be empty");
     }
 
-    if !token.starts_with("cloud_") {
-        println!("Warning: Token doesn't start with 'cloud_' - are you sure this is correct?");
+    if !token.starts_with("cloud_") && !token.starts_with("flow_") {
+        println!("Warning: Token doesn't start with 'cloud_' or 'flow_' - are you sure this is correct?");
     }
 
     store_auth_token(&mut auth, token)?;

@@ -58,7 +58,7 @@ fn run_builtin(name: &str, execute: bool) -> Result<()> {
             if execute {
                 let queue = crate::commit::resolve_commit_queue_mode(false, false);
                 let push = true;
-                crate::commit::run(push, queue, false)?;
+                crate::commit::run(push, queue, false, &[])?;
             }
         }
         _ => bail!("Unknown built-in: {}", name),

@@ -5,6 +5,181 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::GitRepairOpts;
 
+/// Returns true when the repo has a `.jj` directory (jj colocated mode).
+fn is_jj_colocated(repo_root: &Path) -> bool {
+    repo_root.join(".jj").is_dir()
+}
+
+fn git_capture_in(repo_root: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .current_dir(repo_root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn has_working_tree_changes(repo_root: &Path) -> bool {
+    match git_capture_in(repo_root, &["status", "--porcelain"]) {
+        Some(s) => !s.trim().is_empty(),
+        None => false,
+    }
+}
+
+fn short_sha(sha: &str) -> &str {
+    if sha.len() <= 7 { sha } else { &sha[..7] }
+}
+
+fn attach_detached_head_to_keep_branch(repo_root: &Path) -> Result<bool> {
+    if !is_jj_colocated(repo_root) {
+        return Ok(false);
+    }
+    let Some(head) = git_capture_in(repo_root, &["rev-parse", "HEAD"]) else {
+        return Ok(false);
+    };
+    if head.trim().is_empty() {
+        return Ok(false);
+    }
+    let branch = format!("jj/keep/{}", head.trim());
+
+    // If it already exists, just check it out.
+    if git_ref_exists(repo_root, &branch) {
+        let status = Command::new("git")
+            .current_dir(repo_root)
+            .args(["checkout", &branch])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        return Ok(matches!(status, Ok(s) if s.success()));
+    }
+
+    // Create and check out (at HEAD) without touching the working tree.
+    let status = Command::new("git")
+        .current_dir(repo_root)
+        .args(["checkout", "-b", &branch, head.trim()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(matches!(status, Ok(s) if s.success()))
+}
+
+/// In a jj-colocated repo, detached HEAD is common. For git-based workflows,
+/// we need to ensure HEAD is attached to a local branch.
+///
+/// Strategy:
+/// - If main/master exists AND points at the current HEAD commit, attach to it
+///   (no working tree changes).
+/// - Otherwise, attach HEAD to a synthetic `jj/keep/<sha>` branch at the current commit.
+fn jj_auto_checkout(repo_root: &Path) -> Result<bool> {
+    if !is_jj_colocated(repo_root) {
+        return Ok(false);
+    }
+
+    let Some(head) = git_capture_in(repo_root, &["rev-parse", "HEAD"]) else {
+        return Ok(false);
+    };
+    for target in ["main", "master"] {
+        if !git_ref_exists(repo_root, target) {
+            continue;
+        }
+        let Some(target_sha) = git_capture_in(repo_root, &["rev-parse", target]) else {
+            continue;
+        };
+        if target_sha == head {
+            let status = Command::new("git")
+                .current_dir(repo_root)
+                .args(["checkout", target])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if matches!(status, Ok(s) if s.success()) {
+                return Ok(true);
+            }
+        }
+    }
+
+    attach_detached_head_to_keep_branch(repo_root)
+}
+
+fn resolve_land_target_branch(repo_root: &Path, requested: &str) -> Result<String> {
+    if git_ref_exists(repo_root, requested) {
+        return Ok(requested.to_string());
+    }
+    if requested == "main" && git_ref_exists(repo_root, "master") {
+        return Ok("master".to_string());
+    }
+    bail!(
+        "Target branch '{}' not found (and fallback branch unavailable).",
+        requested
+    );
+}
+
+fn ensure_clean_working_tree_for_land(repo_root: &Path) -> Result<()> {
+    let status = git_capture_in(repo_root, &["status", "--porcelain"]).unwrap_or_default();
+    if !status.trim().is_empty() {
+        bail!("Cannot land onto main with uncommitted changes. Commit or stash first.");
+    }
+    Ok(())
+}
+
+fn land_head_to_branch(repo_root: &Path, requested_target: &str) -> Result<()> {
+    ensure_clean_working_tree_for_land(repo_root)?;
+
+    let current = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|| "HEAD".to_string());
+    if current.trim() == "HEAD" {
+        bail!("HEAD is detached. Run `f git-repair` first.");
+    }
+    let current = current.trim().to_string();
+    let target = resolve_land_target_branch(repo_root, requested_target)?;
+    if current == target {
+        println!("Already on {}", target);
+        return Ok(());
+    }
+
+    let head_sha = git_capture_in(repo_root, &["rev-parse", "HEAD"])
+        .ok_or_else(|| anyhow::anyhow!("failed to resolve HEAD commit"))?;
+
+    git_run_in(repo_root, &["checkout", &target])?;
+    match git_run_in(repo_root, &["cherry-pick", head_sha.trim()]) {
+        Ok(_) => {
+            println!(
+                "✓ Landed commit {} from {} onto {}",
+                short_sha(head_sha.trim()),
+                current,
+                target
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let conflicts = git_unmerged_files(repo_root);
+            let _ = git_run_in(repo_root, &["cherry-pick", "--abort"]);
+            let _ = git_run_in(repo_root, &["checkout", &current]);
+
+            eprintln!(
+                "Landing failed: commit {} conflicts with {}. Flow aborted cherry-pick and returned to {}.",
+                short_sha(head_sha.trim()),
+                target,
+                current
+            );
+            if !conflicts.is_empty() {
+                eprintln!("Conflicting files:");
+                for file in conflicts {
+                    eprintln!("  - {}", file);
+                }
+            }
+            eprintln!(
+                "No data was lost. You can rebase {} onto {} and retry.",
+                current, target
+            );
+            Err(err).context("failed to land commit onto target branch")
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GitState {
     rebase: bool,
@@ -50,7 +225,10 @@ fn ensure_clean_state(repo_root: &Path, action: &str) -> Result<()> {
         ));
     }
     if state.detached {
-        issues.push("detached HEAD".to_string());
+        // In jj-colocated repos, detached HEAD is normal — auto-fix it.
+        if !jj_auto_checkout(repo_root)? {
+            issues.push("detached HEAD".to_string());
+        }
     }
 
     if !issues.is_empty() {
@@ -72,7 +250,7 @@ pub fn run_git_repair(opts: GitRepairOpts) -> Result<()> {
     let state = detect_git_state(&repo_root)?;
 
     if opts.dry_run {
-        print_state(&state, branch);
+        print_state(&state, branch, opts.land_main);
         return Ok(());
     }
 
@@ -99,17 +277,36 @@ pub fn run_git_repair(opts: GitRepairOpts) -> Result<()> {
     }
 
     if state.detached {
-        let target = if git_ref_exists(&repo_root, branch) {
-            branch.to_string()
-        } else if git_ref_exists(&repo_root, "master") {
-            "master".to_string()
+        // In jj-colocated repos, prefer attaching HEAD to a safe local branch.
+        // If there are working copy changes, do NOT try to checkout main/master (it can overwrite).
+        if is_jj_colocated(&repo_root) && has_working_tree_changes(&repo_root) {
+            if attach_detached_head_to_keep_branch(&repo_root)? {
+                did_work = true;
+            } else {
+                bail!(
+                    "Detached HEAD in jj-colocated repo with local changes, but failed to attach to a keep branch."
+                );
+            }
+        } else if jj_auto_checkout(&repo_root)? {
+            did_work = true;
         } else {
-            bail!(
-                "Detached HEAD and branch '{}' not found. Checkout a branch manually.",
-                branch
-            );
-        };
-        git_run_in(&repo_root, &["checkout", &target])?;
+            let target = if git_ref_exists(&repo_root, branch) {
+                branch.to_string()
+            } else if git_ref_exists(&repo_root, "master") {
+                "master".to_string()
+            } else {
+                bail!(
+                    "Detached HEAD and branch '{}' not found. Checkout a branch manually.",
+                    branch
+                );
+            };
+            git_run_in(&repo_root, &["checkout", &target])?;
+            did_work = true;
+        }
+    }
+
+    if opts.land_main {
+        land_head_to_branch(&repo_root, branch)?;
         did_work = true;
     }
 
@@ -208,7 +405,7 @@ fn git_ref_exists(repo_root: &Path, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn print_state(state: &GitState, branch: &str) {
+fn print_state(state: &GitState, branch: &str, land_main: bool) {
     println!("Git repair dry-run:");
     println!("  rebase: {}", state.rebase);
     println!("  merge: {}", state.merge);
@@ -220,6 +417,7 @@ fn print_state(state: &GitState, branch: &str) {
         println!("  unmerged files: {}", state.unmerged_files.join(", "));
     }
     println!("  target branch: {}", branch);
+    println!("  land main: {}", land_main);
 }
 
 fn find_repo_root(start: &Path) -> Result<PathBuf> {
