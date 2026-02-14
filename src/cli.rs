@@ -1496,6 +1496,9 @@ pub enum CommitQueueAction {
     },
     /// Approve a queued commit and push it.
     Approve {
+        /// Approve all queued commits on the current branch (push once).
+        #[arg(long)]
+        all: bool,
         /// Commit hash (short or full). Defaults to HEAD when omitted.
         hash: Option<String>,
         /// If hash is not queued but exists in git history, queue it first.

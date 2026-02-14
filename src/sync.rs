@@ -1375,13 +1375,17 @@ fn run_jj_sync(
     }
 
     // Check for jj conflicts left after rebase
-    let has_conflicts = jj_capture_in(repo_root, &["log", "-r", "conflicts()", "--no-graph", "-T", "commit_id"])
-        .map(|out| !out.trim().is_empty())
-        .unwrap_or(false);
+    let has_conflicts = jj_capture_in(
+        repo_root,
+        &["log", "-r", "conflicts()", "--no-graph", "-T", "commit_id"],
+    )
+    .map(|out| !out.trim().is_empty())
+    .unwrap_or(false);
 
     if has_conflicts {
-        let conflict_details = jj_capture_in(repo_root, &["log", "-r", "conflicts()", "--no-graph"])
-            .unwrap_or_default();
+        let conflict_details =
+            jj_capture_in(repo_root, &["log", "-r", "conflicts()", "--no-graph"])
+                .unwrap_or_default();
         println!("\n⚠ Sync complete (jj) but conflicts remain:");
         for line in conflict_details.lines().filter(|l| !l.trim().is_empty()) {
             println!("  {}", line.trim());
@@ -1411,7 +1415,9 @@ fn sync_upstream_internal(
     if !fetch.status.success() {
         let stderr = String::from_utf8_lossy(&fetch.stderr);
         if stderr.contains("case-insensitive filesystem") {
-            eprintln!("  Warning: upstream has refs that differ only in case; fetch continued anyway");
+            eprintln!(
+                "  Warning: upstream has refs that differ only in case; fetch continued anyway"
+            );
         } else {
             bail!("git fetch upstream --prune failed: {}", stderr.trim());
         }

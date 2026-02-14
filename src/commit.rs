@@ -2870,13 +2870,21 @@ fn run_pre_commit_test_gate(
     println!("Command: bun {}", args.join(" "));
 
     let started_at = Instant::now();
-    let status = Command::new("bun")
+    let status = match Command::new("bun")
         .args(args.iter().map(|s| s.as_str()))
         .current_dir(repo_root)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .context("failed to execute bun test gate")?;
+    {
+        Ok(status) => status,
+        Err(err) => {
+            return apply_testing_gate_failure(
+                &policy.mode,
+                &format!("failed to execute bun test gate: {}", err),
+            );
+        }
+    };
     let elapsed = started_at.elapsed();
 
     if elapsed > Duration::from_secs(policy.max_local_gate_seconds) {
@@ -3881,27 +3889,63 @@ fn codex_write_msg(writer: &mut dyn Write, msg: &serde_json::Value) -> Result<()
     Ok(())
 }
 
+enum CodexAppServerEvent {
+    Line(String),
+    ReadError(String),
+    Closed,
+}
+
+enum CodexReadOutcome {
+    Message(serde_json::Value),
+    TimedOut,
+}
+
+fn codex_read_next_message(
+    rx: &std::sync::mpsc::Receiver<CodexAppServerEvent>,
+    deadline: std::time::Instant,
+) -> Result<CodexReadOutcome> {
+    use std::cmp;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Instant;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(CodexReadOutcome::TimedOut);
+        }
+
+        let wait = cmp::min(
+            Duration::from_millis(250),
+            deadline.saturating_duration_since(now),
+        );
+        match rx.recv_timeout(wait) {
+            Ok(CodexAppServerEvent::Line(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let msg: serde_json::Value = serde_json::from_str(&line)
+                    .with_context(|| format!("invalid JSON from codex: {}", line))?;
+                return Ok(CodexReadOutcome::Message(msg));
+            }
+            Ok(CodexAppServerEvent::ReadError(err)) => bail!("failed to read from codex: {}", err),
+            Ok(CodexAppServerEvent::Closed) => bail!("codex app-server closed stdout unexpectedly"),
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => bail!("codex app-server reader disconnected"),
+        }
+    }
+}
+
 /// Read lines until a JSON-RPC response with the expected id arrives.
 fn codex_read_response(
-    lines: &mut std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
+    rx: &std::sync::mpsc::Receiver<CodexAppServerEvent>,
     expected_id: u64,
     deadline: std::time::Instant,
 ) -> Result<serde_json::Value> {
-    use std::time::Instant;
     loop {
-        if Instant::now() >= deadline {
-            bail!("codex app-server response timed out");
-        }
-        let line = match lines.next() {
-            Some(Ok(line)) => line,
-            Some(Err(e)) => bail!("failed to read from codex: {}", e),
-            None => bail!("codex app-server closed stdout unexpectedly"),
+        let msg = match codex_read_next_message(rx, deadline)? {
+            CodexReadOutcome::Message(msg) => msg,
+            CodexReadOutcome::TimedOut => bail!("codex app-server response timed out"),
         };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let msg: serde_json::Value = serde_json::from_str(&line)
-            .with_context(|| format!("invalid JSON from codex: {}", line))?;
         if msg.get("id").and_then(|id| id.as_u64()) == Some(expected_id) {
             if let Some(err) = msg.get("error") {
                 bail!(
@@ -3917,7 +3961,7 @@ fn codex_read_response(
 }
 
 fn codex_read_response_with_notifications<F>(
-    lines: &mut std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
+    rx: &std::sync::mpsc::Receiver<CodexAppServerEvent>,
     expected_id: u64,
     deadline: std::time::Instant,
     mut on_notification: F,
@@ -3925,21 +3969,11 @@ fn codex_read_response_with_notifications<F>(
 where
     F: FnMut(&serde_json::Value),
 {
-    use std::time::Instant;
     loop {
-        if Instant::now() >= deadline {
-            bail!("codex app-server response timed out");
-        }
-        let line = match lines.next() {
-            Some(Ok(line)) => line,
-            Some(Err(e)) => bail!("failed to read from codex: {}", e),
-            None => bail!("codex app-server closed stdout unexpectedly"),
+        let msg = match codex_read_next_message(rx, deadline)? {
+            CodexReadOutcome::Message(msg) => msg,
+            CodexReadOutcome::TimedOut => bail!("codex app-server response timed out"),
         };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let msg: serde_json::Value = serde_json::from_str(&line)
-            .with_context(|| format!("invalid JSON from codex: {}", line))?;
 
         if msg.get("method").is_some() && msg.get("id").is_none() {
             on_notification(&msg);
@@ -4230,6 +4264,7 @@ fn run_codex_review_once(
     model: CodexModel,
 ) -> Result<ReviewResult> {
     use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
     use std::time::Instant;
 
     let timeout = Duration::from_secs(commit_with_check_timeout_secs());
@@ -4268,7 +4303,24 @@ fn run_codex_review_once(
 
     let mut stdin = child.stdin.take().context("missing stdin")?;
     let stdout = child.stdout.take().context("missing stdout")?;
-    let mut lines = BufReader::new(stdout).lines();
+    let (line_tx, line_rx) = mpsc::channel::<CodexAppServerEvent>();
+    let reader_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if line_tx.send(CodexAppServerEvent::Line(line)).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = line_tx.send(CodexAppServerEvent::ReadError(err.to_string()));
+                    return;
+                }
+            }
+        }
+        let _ = line_tx.send(CodexAppServerEvent::Closed);
+    });
     let handshake_deadline = Instant::now() + Duration::from_secs(15);
 
     // Step 1: Initialize handshake
@@ -4283,7 +4335,7 @@ fn run_codex_review_once(
             }
         }),
     )?;
-    let _init_resp = codex_read_response(&mut lines, 1, handshake_deadline)
+    let _init_resp = codex_read_response(&line_rx, 1, handshake_deadline)
         .context("codex app-server did not respond to initialize")?;
 
     // Step 2: Send initialized notification
@@ -4305,7 +4357,7 @@ fn run_codex_review_once(
             }
         }),
     )?;
-    let thread_resp = codex_read_response(&mut lines, 2, op_deadline)?;
+    let thread_resp = codex_read_response(&line_rx, 2, op_deadline)?;
     let thread_id = thread_resp
         .pointer("/result/threadId")
         .or_else(|| thread_resp.pointer("/result/thread/id"))
@@ -4328,29 +4380,26 @@ fn run_codex_review_once(
             }
         }),
     )?;
-    let _review_resp = codex_read_response(&mut lines, 3, op_deadline)?;
+    let _review_resp = codex_read_response(&line_rx, 3, op_deadline)?;
 
     // Step 5: Collect streaming events until we see the ExitedReviewMode item.
     let mut review_text: Option<String> = None;
     let mut timed_out = false;
+    let review_start = Instant::now();
+    let hard_cap = Duration::from_secs(commit_with_check_timeout_secs().saturating_mul(3));
+    let hard_deadline = review_start + hard_cap;
+    let mut idle_deadline = review_start + timeout;
 
     loop {
-        if Instant::now() >= op_deadline {
-            timed_out = true;
-            break;
-        }
-        let line = match lines.next() {
-            Some(Ok(line)) => line,
-            Some(Err(_)) => break,
-            None => break,
+        let next_deadline = std::cmp::min(idle_deadline, hard_deadline);
+        let msg = match codex_read_next_message(&line_rx, next_deadline)? {
+            CodexReadOutcome::Message(msg) => msg,
+            CodexReadOutcome::TimedOut => {
+                timed_out = true;
+                break;
+            }
         };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let msg: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+        idle_deadline = Instant::now() + timeout;
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
         match method {
             "item/completed" => {
@@ -4365,6 +4414,20 @@ fn run_codex_review_once(
                         review_text = Some(text.to_string());
                         break;
                     }
+                }
+            }
+            "review/completed" => {
+                let thread_id_msg = msg.pointer("/params/threadId").and_then(|v| v.as_str());
+                if thread_id_msg != Some(thread_id.as_str()) {
+                    continue;
+                }
+                if let Some(text) = msg
+                    .pointer("/params/review")
+                    .or_else(|| msg.pointer("/params/item/review"))
+                    .and_then(|v| v.as_str())
+                {
+                    review_text = Some(text.to_string());
+                    break;
                 }
             }
             _ => {}
@@ -4386,13 +4449,14 @@ fn run_codex_review_once(
         drop(stdin);
         let _ = child.kill();
         let _ = child.wait();
+        let _ = reader_handle.join();
 
         return Ok(ReviewResult {
             issues_found: false,
             issues: Vec::new(),
             summary: Some(format!(
                 "Codex review timed out after {}s",
-                timeout.as_secs()
+                review_start.elapsed().as_secs()
             )),
             future_tasks: Vec::new(),
             timed_out: true,
@@ -4435,7 +4499,7 @@ Review:\n{}",
         }),
     )?;
     let _turn_resp =
-        codex_read_response_with_notifications(&mut lines, 5, conversion_deadline, |msg| {
+        codex_read_response_with_notifications(&line_rx, 5, conversion_deadline, |msg| {
             let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
             if method != "item/agentMessage/delta" {
                 return;
@@ -4451,20 +4515,9 @@ Review:\n{}",
 
     // Now stream until turn/completed for this thread, collecting agent deltas.
     loop {
-        if Instant::now() >= conversion_deadline {
-            break;
-        }
-        let line = match lines.next() {
-            Some(Ok(line)) => line,
-            Some(Err(_)) => break,
-            None => break,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let msg: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let msg = match codex_read_next_message(&line_rx, conversion_deadline)? {
+            CodexReadOutcome::Message(msg) => msg,
+            CodexReadOutcome::TimedOut => break,
         };
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
         match method {
@@ -4526,6 +4579,7 @@ Review:\n{}",
     drop(stdin);
     let _ = child.kill();
     let _ = child.wait();
+    let _ = reader_handle.join();
 
     Ok(ReviewResult {
         issues_found,
@@ -6448,6 +6502,214 @@ fn print_queue_instructions(commit_sha: &str) {
     println!("  f commit-queue list");
     println!("  f commit-queue show {}", short_sha(commit_sha));
     println!("  f commit-queue approve {}", short_sha(commit_sha));
+    println!("  f commit-queue approve --all");
+}
+
+fn approve_all_queued_commits(
+    repo_root: &Path,
+    force: bool,
+    allow_issues: bool,
+    allow_unreviewed: bool,
+) -> Result<()> {
+    git_guard::ensure_clean_for_push(repo_root)?;
+    let mut entries = load_commit_queue_entries(repo_root)?;
+    if entries.is_empty() {
+        println!("No queued commits.");
+        return Ok(());
+    }
+
+    for entry in &mut entries {
+        let _ = refresh_queue_entry_commit(repo_root, entry);
+    }
+
+    let current_branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".to_string());
+    let current_branch = current_branch.trim().to_string();
+
+    let mut candidates = Vec::new();
+    let mut skipped_branch = Vec::new();
+    for entry in entries {
+        if !force && entry.branch.trim() != current_branch {
+            skipped_branch.push(entry);
+        } else {
+            candidates.push(entry);
+        }
+    }
+
+    if candidates.is_empty() {
+        if skipped_branch.is_empty() {
+            println!("No queued commits to approve.");
+        } else {
+            println!(
+                "No queued commits on branch {}. {} queued commit(s) are on other branches.",
+                current_branch,
+                skipped_branch.len()
+            );
+        }
+        return Ok(());
+    }
+
+    if !force {
+        let mut bad_issues: Vec<String> = Vec::new();
+        let mut bad_unreviewed: Vec<String> = Vec::new();
+        for entry in &candidates {
+            let issues_present = entry.review_issues_found
+                || entry
+                    .review
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+            let unreviewed =
+                (entry.version >= 2 && !entry.review_completed) || entry.review_timed_out;
+            if issues_present && !allow_issues {
+                bad_issues.push(short_sha(&entry.commit_sha).to_string());
+            }
+            if unreviewed && !allow_unreviewed {
+                bad_unreviewed.push(short_sha(&entry.commit_sha).to_string());
+            }
+        }
+
+        if !bad_unreviewed.is_empty() {
+            bail!(
+                "Some queued commits do not have a clean review (timed out/missing): {}. Re-run review or use --allow-unreviewed.",
+                bad_unreviewed.join(", ")
+            );
+        }
+        if !bad_issues.is_empty() {
+            bail!(
+                "Some queued commits have review issues: {}. Fix them or use --allow-issues.",
+                bad_issues.join(", ")
+            );
+        }
+    }
+
+    let head_sha = git_capture_in(repo_root, &["rev-parse", "HEAD"])?;
+    let head_sha = head_sha.trim().to_string();
+    ensure_safe_upstream_for_commit_queue_push(repo_root, &head_sha, force)?;
+
+    if git_try_in(repo_root, &["fetch", "--quiet"]).is_ok() {
+        if let Ok(counts) = git_capture_in(
+            repo_root,
+            &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+        ) {
+            let parts: Vec<&str> = counts.split_whitespace().collect();
+            if parts.len() == 2 {
+                let behind = parts[0].parse::<u64>().unwrap_or(0);
+                if behind > 0 && !force {
+                    bail!(
+                        "Remote is ahead by {} commit(s). Run `f sync` or rebase, then re-approve.",
+                        behind
+                    );
+                }
+            }
+        }
+    }
+
+    let before_sha = git_capture_in(repo_root, &["rev-parse", "@{u}"]).ok();
+
+    print!("Pushing... ");
+    io::stdout().flush()?;
+    let mut pushed = false;
+    match git_push_try_in(repo_root) {
+        PushResult::Success => {
+            println!("done");
+            pushed = true;
+        }
+        PushResult::NoRemoteRepo => {
+            println!("skipped (no remote repo)");
+        }
+        PushResult::RemoteAhead => {
+            println!("failed (remote ahead)");
+            print!("Pulling with rebase... ");
+            io::stdout().flush()?;
+            match git_try_in(repo_root, &["pull", "--rebase"]) {
+                Ok(_) => {
+                    println!("done");
+                    print!("Pushing... ");
+                    io::stdout().flush()?;
+                    git_run_in(repo_root, &["push"])?;
+                    println!("done");
+                    pushed = true;
+                }
+                Err(_) => {
+                    println!("conflict!");
+                    println!();
+                    println!("Rebase conflict detected. Resolve manually:");
+                    println!("  1. Fix conflicts in the listed files");
+                    println!("  2. git add <files>");
+                    println!("  3. git rebase --continue");
+                    println!("  4. git push");
+                    println!();
+                    println!("Or abort with: git rebase --abort");
+                    bail!("Rebase conflict - manual resolution required");
+                }
+            }
+        }
+    }
+
+    if pushed {
+        if let (Some(before_sha), Ok(after_sha)) = (
+            before_sha,
+            git_capture_in(repo_root, &["rev-parse", "HEAD"]),
+        ) {
+            let branch = current_branch.as_str();
+            let before_sha = before_sha.trim();
+            let after_sha = after_sha.trim();
+            let _ = undo::record_action(
+                repo_root,
+                undo::ActionType::Push,
+                before_sha,
+                after_sha,
+                branch,
+                true,
+                Some("origin"),
+                None,
+            );
+        }
+
+        let head_sha = git_capture_in(repo_root, &["rev-parse", "HEAD"]).unwrap_or_default();
+        let head_sha = head_sha.trim();
+        let mut approved = 0;
+        let mut skipped = 0;
+
+        for entry in &candidates {
+            if git_is_ancestor(repo_root, &entry.commit_sha, head_sha) {
+                if let Some(bookmark) = entry.review_bookmark.as_ref() {
+                    delete_review_bookmark(repo_root, bookmark);
+                }
+                remove_commit_queue_entry_by_entry(repo_root, entry)?;
+                if let Ok(done) =
+                    todo::complete_review_timeout_todos(repo_root, &entry.review_todo_ids)
+                {
+                    if done > 0 {
+                        println!("Auto-completed {} review follow-up todo(s).", done);
+                    }
+                }
+                approved += 1;
+            } else {
+                println!(
+                    "Skipped queued commit {} (not reachable from HEAD)",
+                    short_sha(&entry.commit_sha)
+                );
+                skipped += 1;
+            }
+        }
+
+        if !skipped_branch.is_empty() {
+            println!(
+                "Skipped {} queued commit(s) on other branches.",
+                skipped_branch.len()
+            );
+        }
+
+        println!(
+            "✓ Approved and pushed {} queued commit(s){}",
+            approved,
+            if skipped > 0 { " (some skipped)" } else { "" }
+        );
+    }
+
+    Ok(())
 }
 
 fn commit_queue_entry_matches(entry: &CommitQueueEntry, hash: &str) -> bool {
@@ -7640,6 +7902,7 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
         }
         CommitQueueAction::Approve {
+            all,
             hash,
             queue_if_missing,
             mark_reviewed,
@@ -7647,6 +7910,26 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             allow_issues,
             allow_unreviewed,
         } => {
+            if all {
+                if hash.is_some() {
+                    bail!(
+                        "--all cannot be combined with HASH. Use `f commit-queue approve --all`."
+                    );
+                }
+                if queue_if_missing {
+                    eprintln!("note: --queue-if-missing is ignored when using --all");
+                }
+                if mark_reviewed {
+                    eprintln!("note: --mark-reviewed is ignored when using --all");
+                }
+                return approve_all_queued_commits(
+                    &repo_root,
+                    force,
+                    allow_issues,
+                    allow_unreviewed,
+                );
+            }
+
             git_guard::ensure_clean_for_push(&repo_root)?;
             let auto_mode = hash.is_none();
             let target_hash = match hash {
@@ -7835,206 +8118,7 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             force,
             allow_issues,
             allow_unreviewed,
-        } => {
-            git_guard::ensure_clean_for_push(&repo_root)?;
-            let mut entries = load_commit_queue_entries(&repo_root)?;
-            if entries.is_empty() {
-                println!("No queued commits.");
-                return Ok(());
-            }
-
-            for entry in &mut entries {
-                let _ = refresh_queue_entry_commit(&repo_root, entry);
-            }
-
-            let current_branch = git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
-                .unwrap_or_else(|_| "unknown".to_string());
-            let current_branch = current_branch.trim().to_string();
-
-            let mut candidates = Vec::new();
-            let mut skipped_branch = Vec::new();
-            for entry in entries {
-                if !force && entry.branch.trim() != current_branch {
-                    skipped_branch.push(entry);
-                } else {
-                    candidates.push(entry);
-                }
-            }
-
-            if candidates.is_empty() {
-                if skipped_branch.is_empty() {
-                    println!("No queued commits to approve.");
-                } else {
-                    println!(
-                        "No queued commits on branch {}. {} queued commit(s) are on other branches.",
-                        current_branch,
-                        skipped_branch.len()
-                    );
-                }
-                return Ok(());
-            }
-
-            if !force {
-                let mut bad_issues: Vec<String> = Vec::new();
-                let mut bad_unreviewed: Vec<String> = Vec::new();
-                for entry in &candidates {
-                    let issues_present = entry.review_issues_found
-                        || entry
-                            .review
-                            .as_deref()
-                            .map(|s| !s.trim().is_empty())
-                            .unwrap_or(false);
-                    let unreviewed =
-                        (entry.version >= 2 && !entry.review_completed) || entry.review_timed_out;
-                    if issues_present && !allow_issues {
-                        bad_issues.push(short_sha(&entry.commit_sha).to_string());
-                    }
-                    if unreviewed && !allow_unreviewed {
-                        bad_unreviewed.push(short_sha(&entry.commit_sha).to_string());
-                    }
-                }
-
-                if !bad_unreviewed.is_empty() {
-                    bail!(
-                        "Some queued commits do not have a clean review (timed out/missing): {}. Re-run review or use --allow-unreviewed.",
-                        bad_unreviewed.join(", ")
-                    );
-                }
-                if !bad_issues.is_empty() {
-                    bail!(
-                        "Some queued commits have review issues: {}. Fix them or use --allow-issues.",
-                        bad_issues.join(", ")
-                    );
-                }
-            }
-
-            let head_sha = git_capture_in(&repo_root, &["rev-parse", "HEAD"])?;
-            let head_sha = head_sha.trim().to_string();
-            ensure_safe_upstream_for_commit_queue_push(&repo_root, &head_sha, force)?;
-
-            if git_try_in(&repo_root, &["fetch", "--quiet"]).is_ok() {
-                if let Ok(counts) = git_capture_in(
-                    &repo_root,
-                    &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
-                ) {
-                    let parts: Vec<&str> = counts.split_whitespace().collect();
-                    if parts.len() == 2 {
-                        let behind = parts[0].parse::<u64>().unwrap_or(0);
-                        if behind > 0 && !force {
-                            bail!(
-                                "Remote is ahead by {} commit(s). Run `f sync` or rebase, then re-approve.",
-                                behind
-                            );
-                        }
-                    }
-                }
-            }
-
-            let before_sha = git_capture_in(&repo_root, &["rev-parse", "@{u}"]).ok();
-
-            print!("Pushing... ");
-            io::stdout().flush()?;
-            let mut pushed = false;
-            match git_push_try_in(&repo_root) {
-                PushResult::Success => {
-                    println!("done");
-                    pushed = true;
-                }
-                PushResult::NoRemoteRepo => {
-                    println!("skipped (no remote repo)");
-                }
-                PushResult::RemoteAhead => {
-                    println!("failed (remote ahead)");
-                    print!("Pulling with rebase... ");
-                    io::stdout().flush()?;
-                    match git_try_in(&repo_root, &["pull", "--rebase"]) {
-                        Ok(_) => {
-                            println!("done");
-                            print!("Pushing... ");
-                            io::stdout().flush()?;
-                            git_run_in(&repo_root, &["push"])?;
-                            println!("done");
-                            pushed = true;
-                        }
-                        Err(_) => {
-                            println!("conflict!");
-                            println!();
-                            println!("Rebase conflict detected. Resolve manually:");
-                            println!("  1. Fix conflicts in the listed files");
-                            println!("  2. git add <files>");
-                            println!("  3. git rebase --continue");
-                            println!("  4. git push");
-                            println!();
-                            println!("Or abort with: git rebase --abort");
-                            bail!("Rebase conflict - manual resolution required");
-                        }
-                    }
-                }
-            }
-
-            if pushed {
-                if let (Some(before_sha), Ok(after_sha)) = (
-                    before_sha,
-                    git_capture_in(&repo_root, &["rev-parse", "HEAD"]),
-                ) {
-                    let branch = current_branch.as_str();
-                    let before_sha = before_sha.trim();
-                    let after_sha = after_sha.trim();
-                    let _ = undo::record_action(
-                        &repo_root,
-                        undo::ActionType::Push,
-                        before_sha,
-                        after_sha,
-                        branch,
-                        true,
-                        Some("origin"),
-                        None,
-                    );
-                }
-
-                let head_sha =
-                    git_capture_in(&repo_root, &["rev-parse", "HEAD"]).unwrap_or_default();
-                let head_sha = head_sha.trim();
-                let mut approved = 0;
-                let mut skipped = 0;
-
-                for entry in &candidates {
-                    if git_is_ancestor(&repo_root, &entry.commit_sha, head_sha) {
-                        if let Some(bookmark) = entry.review_bookmark.as_ref() {
-                            delete_review_bookmark(&repo_root, bookmark);
-                        }
-                        remove_commit_queue_entry_by_entry(&repo_root, entry)?;
-                        if let Ok(done) =
-                            todo::complete_review_timeout_todos(&repo_root, &entry.review_todo_ids)
-                        {
-                            if done > 0 {
-                                println!("Auto-completed {} review follow-up todo(s).", done);
-                            }
-                        }
-                        approved += 1;
-                    } else {
-                        println!(
-                            "Skipped queued commit {} (not reachable from HEAD)",
-                            short_sha(&entry.commit_sha)
-                        );
-                        skipped += 1;
-                    }
-                }
-
-                if !skipped_branch.is_empty() {
-                    println!(
-                        "Skipped {} queued commit(s) on other branches.",
-                        skipped_branch.len()
-                    );
-                }
-
-                println!(
-                    "✓ Approved and pushed {} queued commit(s){}",
-                    approved,
-                    if skipped > 0 { " (some skipped)" } else { "" }
-                );
-            }
-        }
+        } => approve_all_queued_commits(&repo_root, force, allow_issues, allow_unreviewed)?,
         CommitQueueAction::Drop { hash } => {
             let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
             let _ = refresh_queue_entry_commit(&repo_root, &mut entry);

@@ -550,7 +550,8 @@ fn append_event_to_queue(event: &Value) -> Result<()> {
 }
 
 fn enforce_queue_limit(path: &PathBuf) -> Result<()> {
-    let metadata = fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
     if metadata.len() as usize <= MAX_QUEUE_BYTES {
         return Ok(());
     }
@@ -693,7 +694,12 @@ mod tests {
 
     #[test]
     fn unknown_commands_map_to_task_shortcut() {
-        let args = vec!["f".to_string(), "dev".to_string(), "--port".to_string(), "3000".to_string()];
+        let args = vec![
+            "f".to_string(),
+            "dev".to_string(),
+            "--port".to_string(),
+            "3000".to_string(),
+        ];
         assert_eq!(command_path(&args), "task-shortcut");
     }
 }

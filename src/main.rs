@@ -1,20 +1,21 @@
 use std::net::IpAddr;
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    agents, ai, archive, auth, changes,
+    agents, ai, analytics, archive, auth, changes,
     cli::{
         Cli, Commands, InstallAction, ProxyAction, ProxyCommand, RerunOpts, ReviewAction,
         ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
     },
-    analytics, code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fish_install,
-    fish_trace, fix, fixup, git_guard, gitignore_policy, hash, health, help_search, history, hive,
-    home, hub, info, init, init_tracing, install, jj, latest, log_server, macos, notify, otp,
-    palette, parallel, processes, projects, proxy, publish, push, registry, release, repos,
-    services, setup, skills, ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools,
-    traces, undo, upgrade, upstream, web,
+    code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fish_install, fish_trace,
+    fix, fixup, git_guard, gitignore_policy, hash, health, help_search, history, hive, home, hub,
+    info, init, init_tracing, install, jj, latest, log_server, macos, notify, otp, palette,
+    parallel, processes, projects, proxy, publish, push, registry, release, repos, services, setup,
+    skills, ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo,
+    upgrade, upstream, usage, web,
 };
 
 fn main() -> Result<()> {
@@ -22,501 +23,510 @@ fn main() -> Result<()> {
     flowd::config::load_global_secrets();
 
     let raw_args: Vec<String> = std::env::args().collect();
+    let analytics_capture = usage::command_capture(&raw_args);
+    let is_analytics_command = usage::is_analytics_command(&raw_args);
+    let started_at = Instant::now();
 
-    // Handle `f ?` for fuzzy help search before clap parsing
-    if raw_args.get(1).map(|s| s.as_str()) == Some("?") {
-        return help_search::run();
-    }
+    let result = (|| -> Result<()> {
+        // Handle `f ?` for fuzzy help search before clap parsing
+        if raw_args.get(1).map(|s| s.as_str()) == Some("?") {
+            return help_search::run();
+        }
 
-    // Handle --help-full early for instant output
-    if raw_args.iter().any(|s| s == "--help-full") {
-        return help_search::print_full_json();
-    }
+        // Handle --help-full early for instant output
+        if raw_args.iter().any(|s| s == "--help-full") {
+            return help_search::print_full_json();
+        }
 
-    let cli = match Cli::try_parse_from(&raw_args) {
-        Ok(cli) => cli,
-        Err(err) => {
-            if matches!(
-                err.kind(),
-                ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
-            ) {
-                // Fallback: treat first positional as task name and rest as args.
-                let mut iter = raw_args.into_iter();
-                let _bin = iter.next();
-                if let Some(task_name) = iter.next() {
-                    let args: Vec<String> = iter.collect();
-                    return tasks::run_with_discovery(&task_name, args);
+        let cli = match Cli::try_parse_from(&raw_args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                if matches!(
+                    err.kind(),
+                    ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
+                ) {
+                    // Fallback: treat first positional as task name and rest as args.
+                    let mut iter = raw_args.into_iter();
+                    let _bin = iter.next();
+                    if let Some(task_name) = iter.next() {
+                        let args: Vec<String> = iter.collect();
+                        return tasks::run_with_discovery(&task_name, args);
+                    }
+                }
+                err.exit()
+            }
+        };
+
+        // Keep default skills in sync for Flow projects (minimal cost).
+        skills::auto_sync_skills();
+
+        match cli.command {
+            Some(Commands::Hub(cmd)) => {
+                hub::run(cmd)?;
+            }
+            Some(Commands::Init(opts)) => {
+                init::run(opts)?;
+            }
+            Some(Commands::ShellInit(opts)) => {
+                shell_init(&opts.shell);
+            }
+            Some(Commands::Shell(cmd)) => {
+                shell_command(cmd);
+            }
+            Some(Commands::New(opts)) => {
+                code::new_from_template(opts)?;
+            }
+            Some(Commands::Home(cmd)) => {
+                home::run(cmd)?;
+            }
+            Some(Commands::Archive(opts)) => {
+                archive::run(opts)?;
+            }
+            Some(Commands::Doctor(opts)) => {
+                doctor::run(opts)?;
+            }
+            Some(Commands::Health(opts)) => {
+                health::run(opts)?;
+            }
+            Some(Commands::Tasks(cmd)) => {
+                tasks::run_tasks_command(cmd)?;
+            }
+            Some(Commands::Global(cmd)) => {
+                tasks::run_global(cmd)?;
+            }
+            Some(Commands::Run(opts)) => {
+                tasks::run(opts)?;
+            }
+            Some(Commands::Search) => {
+                palette::run_global()?;
+            }
+            Some(Commands::LastCmd) => {
+                // Prefer fish shell traces if available, fall back to flow history
+                if fish_trace::load_last_record()?.is_some() {
+                    fish_trace::print_last_fish_cmd()?;
+                } else {
+                    history::print_last_record()?;
                 }
             }
-            err.exit()
-        }
-    };
-
-    // Keep default skills in sync for Flow projects (minimal cost).
-    skills::auto_sync_skills();
-
-    match cli.command {
-        Some(Commands::Hub(cmd)) => {
-            hub::run(cmd)?;
-        }
-        Some(Commands::Init(opts)) => {
-            init::run(opts)?;
-        }
-        Some(Commands::ShellInit(opts)) => {
-            shell_init(&opts.shell);
-        }
-        Some(Commands::Shell(cmd)) => {
-            shell_command(cmd);
-        }
-        Some(Commands::New(opts)) => {
-            code::new_from_template(opts)?;
-        }
-        Some(Commands::Home(cmd)) => {
-            home::run(cmd)?;
-        }
-        Some(Commands::Archive(opts)) => {
-            archive::run(opts)?;
-        }
-        Some(Commands::Doctor(opts)) => {
-            doctor::run(opts)?;
-        }
-        Some(Commands::Health(opts)) => {
-            health::run(opts)?;
-        }
-        Some(Commands::Tasks(cmd)) => {
-            tasks::run_tasks_command(cmd)?;
-        }
-        Some(Commands::Global(cmd)) => {
-            tasks::run_global(cmd)?;
-        }
-        Some(Commands::Run(opts)) => {
-            tasks::run(opts)?;
-        }
-        Some(Commands::Search) => {
-            palette::run_global()?;
-        }
-        Some(Commands::LastCmd) => {
-            // Prefer fish shell traces if available, fall back to flow history
-            if fish_trace::load_last_record()?.is_some() {
+            Some(Commands::LastCmdFull) => {
+                // Prefer fish shell traces if available, fall back to flow history
+                if fish_trace::load_last_record()?.is_some() {
+                    fish_trace::print_last_fish_cmd_full()?;
+                } else {
+                    history::print_last_record_full()?;
+                }
+            }
+            Some(Commands::FishLast) => {
                 fish_trace::print_last_fish_cmd()?;
-            } else {
-                history::print_last_record()?;
             }
-        }
-        Some(Commands::LastCmdFull) => {
-            // Prefer fish shell traces if available, fall back to flow history
-            if fish_trace::load_last_record()?.is_some() {
+            Some(Commands::FishLastFull) => {
                 fish_trace::print_last_fish_cmd_full()?;
-            } else {
-                history::print_last_record_full()?;
             }
-        }
-        Some(Commands::FishLast) => {
-            fish_trace::print_last_fish_cmd()?;
-        }
-        Some(Commands::FishLastFull) => {
-            fish_trace::print_last_fish_cmd_full()?;
-        }
-        Some(Commands::FishInstall(opts)) => {
-            fish_install::run(opts)?;
-        }
-        Some(Commands::Rerun(opts)) => {
-            rerun(opts)?;
-        }
-        Some(Commands::Ps(opts)) => {
-            processes::show_project_processes(opts)?;
-        }
-        Some(Commands::Kill(opts)) => {
-            processes::kill_processes(opts)?;
-        }
-        Some(Commands::Logs(opts)) => {
-            processes::show_task_logs(opts)?;
-        }
-        Some(Commands::Trace(cmd)) => {
-            if let Some(action) = cmd.action {
-                match action {
-                    TraceAction::Session(opts) => {
-                        traces::run_session(opts)?;
-                    }
-                }
-            } else {
-                traces::run(cmd.events)?;
+            Some(Commands::FishInstall(opts)) => {
+                fish_install::run(opts)?;
             }
-        }
-        Some(Commands::Projects) => {
-            projects::show_projects()?;
-        }
-        Some(Commands::Sessions(opts)) => {
-            ai::run_sessions(&opts)?;
-        }
-        Some(Commands::Active(opts)) => {
-            projects::handle_active(opts)?;
-        }
-        Some(Commands::Server(opts)) => {
-            log_server::run(opts)?;
-        }
-        Some(Commands::Web(opts)) => {
-            web::run(opts)?;
-        }
-        Some(Commands::Match(opts)) => {
-            task_match::run(task_match::MatchOpts {
-                args: opts.query,
-                model: opts.model,
-                port: Some(opts.port),
-                execute: !opts.dry_run,
-            })?;
-        }
-        Some(Commands::Ask(opts)) => {
-            flowd::ask::run(flowd::ask::AskOpts {
-                args: opts.query,
-                model: opts.model,
-                url: opts.url,
-            })?;
-        }
-        Some(Commands::Commit(opts)) => {
-            // Default: Claude review, no context, gitedit sync
-            let mut force = opts.force || opts.approved;
-            let mut message_arg = opts.message_arg.as_deref();
-            let mut open_review = opts.review;
-            if !force {
-                if let Some(arg) = message_arg {
-                    if arg == "force"
-                        && opts.message.is_none()
-                        && opts.fast.is_none()
-                        && !opts.queue
-                        && !opts.no_queue
-                    {
-                        force = true;
-                        message_arg = None;
-                    } else if arg == "review"
-                        && opts.message.is_none()
-                        && opts.fast.is_none()
-                        && !opts.queue
-                        && !opts.no_queue
-                    {
-                        open_review = true;
-                        message_arg = None;
+            Some(Commands::Rerun(opts)) => {
+                rerun(opts)?;
+            }
+            Some(Commands::Ps(opts)) => {
+                processes::show_project_processes(opts)?;
+            }
+            Some(Commands::Kill(opts)) => {
+                processes::kill_processes(opts)?;
+            }
+            Some(Commands::Logs(opts)) => {
+                processes::show_task_logs(opts)?;
+            }
+            Some(Commands::Trace(cmd)) => {
+                if let Some(action) = cmd.action {
+                    match action {
+                        TraceAction::Session(opts) => {
+                            traces::run_session(opts)?;
+                        }
                     }
+                } else {
+                    traces::run(cmd.events)?;
                 }
             }
-            let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
-                .with_open_review(open_review);
-            let push = !opts.no_push;
-            if let Some(message) = opts.fast.as_deref() {
-                commit::run_fast(message, push, queue, opts.hashed, &opts.paths)?;
-                return Ok(());
+            Some(Commands::Projects) => {
+                projects::show_projects()?;
             }
-            let review_selection =
-                commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
-            let author_message = opts.message.as_deref().or(message_arg);
-            if opts.dry {
-                commit::dry_run_context()?;
-            } else if opts.sync {
-                commit::run_with_check_sync(
-                    push,
-                    opts.context,
-                    review_selection,
-                    author_message,
-                    opts.tokens,
-                    true,
-                    queue,
-                    opts.hashed,
-                    &opts.paths,
-                    commit::CommitGateOverrides {
-                        skip_quality: opts.skip_quality,
-                        skip_docs: opts.skip_docs,
-                        skip_tests: opts.skip_tests,
-                    },
-                )?;
-            } else {
-                commit::run_with_check_with_gitedit(
-                    push,
-                    opts.context,
-                    review_selection,
-                    author_message,
-                    opts.tokens,
-                    queue,
-                    opts.hashed,
-                    &opts.paths,
-                    commit::CommitGateOverrides {
-                        skip_quality: opts.skip_quality,
-                        skip_docs: opts.skip_docs,
-                        skip_tests: opts.skip_tests,
-                    },
-                )?;
+            Some(Commands::Sessions(opts)) => {
+                ai::run_sessions(&opts)?;
             }
-        }
-        Some(Commands::CommitQueue(cmd)) => {
-            commit::run_commit_queue(cmd)?;
-        }
-        Some(Commands::Pr(opts)) => {
-            commit::run_pr(opts)?;
-        }
-        Some(Commands::Gitignore(cmd)) => {
-            gitignore_policy::run(cmd)?;
-        }
-        Some(Commands::Review(cmd)) => match cmd.action {
-            Some(ReviewAction::Latest) | None => {
-                commit::open_latest_queue_review()?;
+            Some(Commands::Active(opts)) => {
+                projects::handle_active(opts)?;
             }
-        },
-        Some(Commands::GitRepair(opts)) => {
-            git_guard::run_git_repair(opts)?;
-        }
-        Some(Commands::Jj(cmd)) => {
-            jj::run(cmd)?;
-        }
-        Some(Commands::CommitSimple(opts)) => {
-            // Simple commit without review - always sync (fast, no hub)
-            let mut force = opts.force || opts.approved;
-            let mut open_review = opts.review;
-            if !force {
-                if let Some(arg) = opts.message_arg.as_deref() {
-                    if arg == "force" && opts.message.is_none() && opts.fast.is_none() {
-                        force = true;
-                    } else if arg == "review"
-                        && opts.message.is_none()
-                        && opts.fast.is_none()
-                        && !opts.queue
-                        && !opts.no_queue
-                    {
-                        open_review = true;
+            Some(Commands::Server(opts)) => {
+                log_server::run(opts)?;
+            }
+            Some(Commands::Web(opts)) => {
+                web::run(opts)?;
+            }
+            Some(Commands::Match(opts)) => {
+                task_match::run(task_match::MatchOpts {
+                    args: opts.query,
+                    model: opts.model,
+                    port: Some(opts.port),
+                    execute: !opts.dry_run,
+                })?;
+            }
+            Some(Commands::Ask(opts)) => {
+                flowd::ask::run(flowd::ask::AskOpts {
+                    args: opts.query,
+                    model: opts.model,
+                    url: opts.url,
+                })?;
+            }
+            Some(Commands::Commit(opts)) => {
+                // Default: Claude review, no context, gitedit sync
+                let mut force = opts.force || opts.approved;
+                let mut message_arg = opts.message_arg.as_deref();
+                let mut open_review = opts.review;
+                if !force {
+                    if let Some(arg) = message_arg {
+                        if arg == "force"
+                            && opts.message.is_none()
+                            && opts.fast.is_none()
+                            && !opts.queue
+                            && !opts.no_queue
+                        {
+                            force = true;
+                            message_arg = None;
+                        } else if arg == "review"
+                            && opts.message.is_none()
+                            && opts.fast.is_none()
+                            && !opts.queue
+                            && !opts.no_queue
+                        {
+                            open_review = true;
+                            message_arg = None;
+                        }
                     }
                 }
-            }
-            let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
-                .with_open_review(open_review);
-            let push = !opts.no_push;
-            commit::run_sync(push, queue, opts.hashed, &opts.paths)?;
-        }
-        Some(Commands::CommitWithCheck(opts)) => {
-            // Review but no gitedit sync
-            let mut force = opts.force || opts.approved;
-            let mut open_review = opts.review;
-            if !force {
-                if let Some(arg) = opts.message_arg.as_deref() {
-                    if arg == "force" && opts.message.is_none() && opts.fast.is_none() {
-                        force = true;
-                    } else if arg == "review"
-                        && opts.message.is_none()
-                        && opts.fast.is_none()
-                        && !opts.queue
-                        && !opts.no_queue
-                    {
-                        open_review = true;
-                    }
+                let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
+                    .with_open_review(open_review);
+                let push = !opts.no_push;
+                if let Some(message) = opts.fast.as_deref() {
+                    commit::run_fast(message, push, queue, opts.hashed, &opts.paths)?;
+                    return Ok(());
+                }
+                let review_selection =
+                    commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
+                let author_message = opts.message.as_deref().or(message_arg);
+                if opts.dry {
+                    commit::dry_run_context()?;
+                } else if opts.sync {
+                    commit::run_with_check_sync(
+                        push,
+                        opts.context,
+                        review_selection,
+                        author_message,
+                        opts.tokens,
+                        true,
+                        queue,
+                        opts.hashed,
+                        &opts.paths,
+                        commit::CommitGateOverrides {
+                            skip_quality: opts.skip_quality,
+                            skip_docs: opts.skip_docs,
+                            skip_tests: opts.skip_tests,
+                        },
+                    )?;
+                } else {
+                    commit::run_with_check_with_gitedit(
+                        push,
+                        opts.context,
+                        review_selection,
+                        author_message,
+                        opts.tokens,
+                        queue,
+                        opts.hashed,
+                        &opts.paths,
+                        commit::CommitGateOverrides {
+                            skip_quality: opts.skip_quality,
+                            skip_docs: opts.skip_docs,
+                            skip_tests: opts.skip_tests,
+                        },
+                    )?;
                 }
             }
-            let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
-                .with_open_review(open_review);
-            let push = !opts.no_push;
-            let review_selection =
-                commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
-            if opts.dry {
-                commit::dry_run_context()?;
-            } else if opts.sync {
-                commit::run_with_check_sync(
-                    push,
-                    opts.context,
-                    review_selection,
-                    opts.message.as_deref(),
-                    opts.tokens,
-                    false,
-                    queue,
-                    opts.hashed,
-                    &opts.paths,
-                    commit::CommitGateOverrides {
-                        skip_quality: opts.skip_quality,
-                        skip_docs: opts.skip_docs,
-                        skip_tests: opts.skip_tests,
-                    },
-                )?;
-            } else {
-                commit::run_with_check(
-                    push,
-                    opts.context,
-                    review_selection,
-                    opts.message.as_deref(),
-                    opts.tokens,
-                    queue,
-                    opts.hashed,
-                    &opts.paths,
-                    commit::CommitGateOverrides {
-                        skip_quality: opts.skip_quality,
-                        skip_docs: opts.skip_docs,
-                        skip_tests: opts.skip_tests,
-                    },
-                )?;
+            Some(Commands::CommitQueue(cmd)) => {
+                commit::run_commit_queue(cmd)?;
             }
-        }
-        Some(Commands::Fix(opts)) => {
-            fix::run(opts)?;
-        }
-        Some(Commands::Undo(cmd)) => {
-            undo::run(cmd)?;
-        }
-        Some(Commands::Fixup(opts)) => {
-            fixup::run(opts)?;
-        }
-        Some(Commands::Changes(cmd)) => {
-            changes::run(cmd)?;
-        }
-        Some(Commands::Diff(cmd)) => {
-            changes::run_diff(cmd)?;
-        }
-        Some(Commands::Hash(opts)) => {
-            hash::run(opts)?;
-        }
-        Some(Commands::Daemon(cmd)) => {
-            daemon::run(cmd)?;
-        }
-        Some(Commands::Supervisor(cmd)) => {
-            supervisor::run(cmd)?;
-        }
-        Some(Commands::Ai(cmd)) => {
-            ai::run(cmd.action)?;
-        }
-        Some(Commands::Codex { action }) => {
-            ai::run_provider(ai::Provider::Codex, action)?;
-        }
-        Some(Commands::Claude { action }) => {
-            ai::run_provider(ai::Provider::Claude, action)?;
-        }
-        Some(Commands::Env(cmd)) => {
-            env::run(cmd.action)?;
-        }
-        Some(Commands::Otp(cmd)) => {
-            otp::run(cmd)?;
-        }
-        Some(Commands::Auth(opts)) => {
-            auth::run(opts)?;
-        }
-        Some(Commands::Services(cmd)) => {
-            services::run(cmd)?;
-        }
-        Some(Commands::Macos(cmd)) => {
-            macos::run(cmd)?;
-        }
-        Some(Commands::Ssh(cmd)) => {
-            ssh_keys::run(cmd.action)?;
-        }
-        Some(Commands::Todo(cmd)) => {
-            todo::run(cmd)?;
-        }
-        Some(Commands::Ext(cmd)) => {
-            ext::run(cmd)?;
-        }
-        Some(Commands::Skills(cmd)) => {
-            skills::run(cmd)?;
-        }
-        Some(Commands::Deps(cmd)) => {
-            deps::run(cmd)?;
-        }
-        Some(Commands::Db(cmd)) => {
-            storage::run(cmd)?;
-        }
-        Some(Commands::Tools(cmd)) => {
-            tools::run(cmd)?;
-        }
-        Some(Commands::Notify(cmd)) => {
-            notify::run(cmd)?;
-        }
-        Some(Commands::Commits(cmd)) => {
-            commits::run(cmd)?;
-        }
-        Some(Commands::Setup(opts)) => {
-            setup::run(opts)?;
-        }
-        Some(Commands::Agents(cmd)) => {
-            agents::run(cmd)?;
-        }
-        Some(Commands::Hive(cmd)) => {
-            hive::run_command(cmd)?;
-        }
-        Some(Commands::Sync(cmd)) => {
-            sync::run(cmd)?;
-        }
-        Some(Commands::Checkout(cmd)) => {
-            sync::run_checkout(cmd)?;
-        }
-        Some(Commands::Switch(cmd)) => {
-            sync::run_switch(cmd)?;
-        }
-        Some(Commands::Push(cmd)) => {
-            push::run(cmd)?;
-        }
-        Some(Commands::Info) => {
-            info::run()?;
-        }
-        Some(Commands::Upstream(cmd)) => {
-            upstream::run(cmd)?;
-        }
-        Some(Commands::Deploy(cmd)) => {
-            deploy::run(cmd)?;
-        }
-        Some(Commands::Prod(cmd)) => {
-            deploy::run_prod(cmd)?;
-        }
-        Some(Commands::Publish(cmd)) => {
-            publish::run(cmd)?;
-        }
-        Some(Commands::Repos(cmd)) => {
-            repos::run(cmd)?;
-        }
-        Some(Commands::Code(cmd)) => {
-            code::run(cmd)?;
-        }
-        Some(Commands::Migrate(cmd)) => {
-            code::run_migrate(cmd)?;
-        }
-        Some(Commands::Parallel(cmd)) => {
-            parallel::run(cmd)?;
-        }
-        Some(Commands::Docs(cmd)) => {
-            docs::run(cmd)?;
-        }
-        Some(Commands::Upgrade(opts)) => {
-            upgrade::run(opts)?;
-        }
-        Some(Commands::Latest) => {
-            latest::run()?;
-        }
-        Some(Commands::Release(cmd)) => {
-            release::run(cmd)?;
-        }
-        Some(Commands::Install(cmd)) => {
-            if let Some(InstallAction::Index(opts)) = cmd.action.clone() {
-                install::run_index(opts)?;
-            } else {
-                install::run(cmd.opts)?;
+            Some(Commands::Pr(opts)) => {
+                commit::run_pr(opts)?;
             }
-        }
-        Some(Commands::Registry(cmd)) => {
-            registry::run(cmd)?;
-        }
-        Some(Commands::Analytics(cmd)) => {
-            analytics::run(cmd)?;
-        }
-        Some(Commands::Proxy(cmd)) => {
-            proxy_command(cmd)?;
-        }
-        Some(Commands::TaskShortcut(args)) => {
-            let Some(task_name) = args.first() else {
-                bail!("no task name provided");
-            };
-            if let Err(err) = tasks::run_with_discovery(task_name, args[1..].to_vec()) {
-                if is_task_not_found(&err) {
+            Some(Commands::Gitignore(cmd)) => {
+                gitignore_policy::run(cmd)?;
+            }
+            Some(Commands::Review(cmd)) => match cmd.action {
+                Some(ReviewAction::Latest) | None => {
+                    commit::open_latest_queue_review()?;
+                }
+            },
+            Some(Commands::GitRepair(opts)) => {
+                git_guard::run_git_repair(opts)?;
+            }
+            Some(Commands::Jj(cmd)) => {
+                jj::run(cmd)?;
+            }
+            Some(Commands::CommitSimple(opts)) => {
+                // Simple commit without review - always sync (fast, no hub)
+                let mut force = opts.force || opts.approved;
+                let mut open_review = opts.review;
+                if !force {
+                    if let Some(arg) = opts.message_arg.as_deref() {
+                        if arg == "force" && opts.message.is_none() && opts.fast.is_none() {
+                            force = true;
+                        } else if arg == "review"
+                            && opts.message.is_none()
+                            && opts.fast.is_none()
+                            && !opts.queue
+                            && !opts.no_queue
+                        {
+                            open_review = true;
+                        }
+                    }
+                }
+                let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
+                    .with_open_review(open_review);
+                let push = !opts.no_push;
+                commit::run_sync(push, queue, opts.hashed, &opts.paths)?;
+            }
+            Some(Commands::CommitWithCheck(opts)) => {
+                // Review but no gitedit sync
+                let mut force = opts.force || opts.approved;
+                let mut open_review = opts.review;
+                if !force {
+                    if let Some(arg) = opts.message_arg.as_deref() {
+                        if arg == "force" && opts.message.is_none() && opts.fast.is_none() {
+                            force = true;
+                        } else if arg == "review"
+                            && opts.message.is_none()
+                            && opts.fast.is_none()
+                            && !opts.queue
+                            && !opts.no_queue
+                        {
+                            open_review = true;
+                        }
+                    }
+                }
+                let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
+                    .with_open_review(open_review);
+                let push = !opts.no_push;
+                let review_selection =
+                    commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
+                if opts.dry {
+                    commit::dry_run_context()?;
+                } else if opts.sync {
+                    commit::run_with_check_sync(
+                        push,
+                        opts.context,
+                        review_selection,
+                        opts.message.as_deref(),
+                        opts.tokens,
+                        false,
+                        queue,
+                        opts.hashed,
+                        &opts.paths,
+                        commit::CommitGateOverrides {
+                            skip_quality: opts.skip_quality,
+                            skip_docs: opts.skip_docs,
+                            skip_tests: opts.skip_tests,
+                        },
+                    )?;
+                } else {
+                    commit::run_with_check(
+                        push,
+                        opts.context,
+                        review_selection,
+                        opts.message.as_deref(),
+                        opts.tokens,
+                        queue,
+                        opts.hashed,
+                        &opts.paths,
+                        commit::CommitGateOverrides {
+                            skip_quality: opts.skip_quality,
+                            skip_docs: opts.skip_docs,
+                            skip_tests: opts.skip_tests,
+                        },
+                    )?;
+                }
+            }
+            Some(Commands::Fix(opts)) => {
+                fix::run(opts)?;
+            }
+            Some(Commands::Undo(cmd)) => {
+                undo::run(cmd)?;
+            }
+            Some(Commands::Fixup(opts)) => {
+                fixup::run(opts)?;
+            }
+            Some(Commands::Changes(cmd)) => {
+                changes::run(cmd)?;
+            }
+            Some(Commands::Diff(cmd)) => {
+                changes::run_diff(cmd)?;
+            }
+            Some(Commands::Hash(opts)) => {
+                hash::run(opts)?;
+            }
+            Some(Commands::Daemon(cmd)) => {
+                daemon::run(cmd)?;
+            }
+            Some(Commands::Supervisor(cmd)) => {
+                supervisor::run(cmd)?;
+            }
+            Some(Commands::Ai(cmd)) => {
+                ai::run(cmd.action)?;
+            }
+            Some(Commands::Codex { action }) => {
+                ai::run_provider(ai::Provider::Codex, action)?;
+            }
+            Some(Commands::Claude { action }) => {
+                ai::run_provider(ai::Provider::Claude, action)?;
+            }
+            Some(Commands::Env(cmd)) => {
+                env::run(cmd.action)?;
+            }
+            Some(Commands::Otp(cmd)) => {
+                otp::run(cmd)?;
+            }
+            Some(Commands::Auth(opts)) => {
+                auth::run(opts)?;
+            }
+            Some(Commands::Services(cmd)) => {
+                services::run(cmd)?;
+            }
+            Some(Commands::Macos(cmd)) => {
+                macos::run(cmd)?;
+            }
+            Some(Commands::Ssh(cmd)) => {
+                ssh_keys::run(cmd.action)?;
+            }
+            Some(Commands::Todo(cmd)) => {
+                todo::run(cmd)?;
+            }
+            Some(Commands::Ext(cmd)) => {
+                ext::run(cmd)?;
+            }
+            Some(Commands::Skills(cmd)) => {
+                skills::run(cmd)?;
+            }
+            Some(Commands::Deps(cmd)) => {
+                deps::run(cmd)?;
+            }
+            Some(Commands::Db(cmd)) => {
+                storage::run(cmd)?;
+            }
+            Some(Commands::Tools(cmd)) => {
+                tools::run(cmd)?;
+            }
+            Some(Commands::Notify(cmd)) => {
+                notify::run(cmd)?;
+            }
+            Some(Commands::Commits(cmd)) => {
+                commits::run(cmd)?;
+            }
+            Some(Commands::Setup(opts)) => {
+                setup::run(opts)?;
+            }
+            Some(Commands::Agents(cmd)) => {
+                agents::run(cmd)?;
+            }
+            Some(Commands::Hive(cmd)) => {
+                hive::run_command(cmd)?;
+            }
+            Some(Commands::Sync(cmd)) => {
+                sync::run(cmd)?;
+            }
+            Some(Commands::Checkout(cmd)) => {
+                sync::run_checkout(cmd)?;
+            }
+            Some(Commands::Switch(cmd)) => {
+                sync::run_switch(cmd)?;
+            }
+            Some(Commands::Push(cmd)) => {
+                push::run(cmd)?;
+            }
+            Some(Commands::Info) => {
+                info::run()?;
+            }
+            Some(Commands::Upstream(cmd)) => {
+                upstream::run(cmd)?;
+            }
+            Some(Commands::Deploy(cmd)) => {
+                deploy::run(cmd)?;
+            }
+            Some(Commands::Prod(cmd)) => {
+                deploy::run_prod(cmd)?;
+            }
+            Some(Commands::Publish(cmd)) => {
+                publish::run(cmd)?;
+            }
+            Some(Commands::Repos(cmd)) => {
+                repos::run(cmd)?;
+            }
+            Some(Commands::Code(cmd)) => {
+                code::run(cmd)?;
+            }
+            Some(Commands::Migrate(cmd)) => {
+                code::run_migrate(cmd)?;
+            }
+            Some(Commands::Parallel(cmd)) => {
+                parallel::run(cmd)?;
+            }
+            Some(Commands::Docs(cmd)) => {
+                docs::run(cmd)?;
+            }
+            Some(Commands::Upgrade(opts)) => {
+                upgrade::run(opts)?;
+            }
+            Some(Commands::Latest) => {
+                latest::run()?;
+            }
+            Some(Commands::Release(cmd)) => {
+                release::run(cmd)?;
+            }
+            Some(Commands::Install(cmd)) => {
+                if let Some(InstallAction::Index(opts)) = cmd.action.clone() {
+                    install::run_index(opts)?;
+                } else {
+                    install::run(cmd.opts)?;
+                }
+            }
+            Some(Commands::Registry(cmd)) => {
+                registry::run(cmd)?;
+            }
+            Some(Commands::Analytics(cmd)) => {
+                analytics::run(cmd)?;
+            }
+            Some(Commands::Proxy(cmd)) => {
+                proxy_command(cmd)?;
+            }
+            Some(Commands::TaskShortcut(args)) => {
+                let Some(task_name) = args.first() else {
+                    bail!("no task name provided");
+                };
+                if let Err(err) = tasks::run_with_discovery(task_name, args[1..].to_vec()) {
+                    if is_task_not_found(&err) {
+                        return Err(err);
+                    }
                     return Err(err);
                 }
-                return Err(err);
+            }
+            None => {
+                palette::run(TasksOpts::default())?;
             }
         }
-        None => {
-            palette::run(TasksOpts::default())?;
-        }
-    }
 
-    Ok(())
+        Ok(())
+    })();
+
+    usage::record_command_result(&analytics_capture, started_at.elapsed(), &result);
+    usage::maybe_prompt_for_opt_in(is_analytics_command, result.is_ok());
+    result
 }
 
 fn rerun(opts: RerunOpts) -> Result<()> {
