@@ -1,6 +1,6 @@
 //! AI-powered git commit command using OpenAI.
 
-use std::collections::{HashSet, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -8,7 +8,7 @@ use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
@@ -26,11 +26,13 @@ use crate::cli::{CommitQueueAction, CommitQueueCommand, DaemonAction, PrOpts};
 use crate::config;
 use crate::daemon;
 use crate::env as flow_env;
+use crate::features;
 use crate::git_guard;
 use crate::gitignore_policy;
 use crate::hub;
 use crate::notify;
 use crate::setup;
+use crate::skills;
 use crate::supervisor;
 use crate::todo;
 use crate::undo;
@@ -94,6 +96,40 @@ impl CommitQueueMode {
         self.open_review = open_review;
         self
     }
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub struct CommitGateOverrides {
+    pub skip_quality: bool,
+    pub skip_docs: bool,
+    pub skip_tests: bool,
+}
+
+#[derive(Clone, Debug)]
+struct CommitTestingPolicy {
+    mode: String,
+    runner: String,
+    bun_repo_strict: bool,
+    require_related_tests: bool,
+    max_local_gate_seconds: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CommitSkillGatePolicy {
+    mode: String,
+    required: Vec<String>,
+    min_version: HashMap<String, u32>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SkillGateReport {
+    pass: bool,
+    mode: String,
+    override_flag: Option<String>,
+    required_skills: Vec<String>,
+    missing_skills: Vec<String>,
+    version_failures: Vec<String>,
+    loaded_versions: HashMap<String, u32>,
 }
 
 impl ReviewModelArg {
@@ -1043,6 +1079,8 @@ struct ReviewJson {
     summary: Option<String>,
     #[serde(default)]
     future_tasks: Vec<String>,
+    #[serde(default)]
+    quality: Option<QualityResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1073,6 +1111,39 @@ struct ReviewResult {
     summary: Option<String>,
     future_tasks: Vec<String>,
     timed_out: bool,
+    quality: Option<QualityResult>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct QualityResult {
+    pub(crate) features_touched: Vec<FeatureTouched>,
+    pub(crate) new_features: Vec<NewFeature>,
+    pub(crate) test_coverage: String,
+    pub(crate) doc_coverage: String,
+    pub(crate) gate_pass: bool,
+    pub(crate) gate_failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct FeatureTouched {
+    pub(crate) name: String,
+    pub(crate) action: String,
+    pub(crate) description: String,
+    pub(crate) files_changed: Vec<String>,
+    pub(crate) has_tests: bool,
+    pub(crate) test_files: Vec<String>,
+    pub(crate) doc_current: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct NewFeature {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) files: Vec<String>,
+    pub(crate) doc_content: String,
 }
 
 #[derive(Debug)]
@@ -1734,7 +1805,7 @@ pub fn run_sync(
 
     // Sync to myflow if enabled
     if myflow_mirror_enabled(&repo_root) {
-        sync_to_myflow(&repo_root, "commit", &[], None);
+        sync_to_myflow(&repo_root, "commit", &[], None, None);
     }
 
     Ok(())
@@ -1880,7 +1951,7 @@ pub fn run_fast(
 
     // Sync to myflow if enabled
     if myflow_mirror_enabled(&repo_root) {
-        sync_to_myflow(&repo_root, "commit", &[], None);
+        sync_to_myflow(&repo_root, "commit", &[], None, None);
     }
 
     Ok(())
@@ -1897,6 +1968,7 @@ pub fn run_with_check(
     queue: CommitQueueMode,
     include_unhash: bool,
     stage_paths: &[String],
+    gate_overrides: CommitGateOverrides,
 ) -> Result<()> {
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
         ensure_git_repo()?;
@@ -1914,6 +1986,7 @@ pub fn run_with_check(
                 queue,
                 include_unhash,
                 stage_paths,
+                gate_overrides,
             );
         }
         return delegate_to_hub_with_check(
@@ -1926,6 +1999,7 @@ pub fn run_with_check(
             queue,
             include_unhash,
             stage_paths,
+            gate_overrides,
         );
     }
 
@@ -1939,6 +2013,7 @@ pub fn run_with_check(
         queue,
         include_unhash,
         stage_paths,
+        gate_overrides,
     )
 }
 
@@ -1952,6 +2027,7 @@ pub fn run_with_check_with_gitedit(
     queue: CommitQueueMode,
     include_unhash: bool,
     stage_paths: &[String],
+    gate_overrides: CommitGateOverrides,
 ) -> Result<()> {
     let force_gitedit = gitedit_globally_enabled();
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
@@ -1970,6 +2046,7 @@ pub fn run_with_check_with_gitedit(
                 queue,
                 include_unhash,
                 stage_paths,
+                gate_overrides,
             );
         }
         return delegate_to_hub_with_check(
@@ -1982,6 +2059,7 @@ pub fn run_with_check_with_gitedit(
             queue,
             include_unhash,
             stage_paths,
+            gate_overrides,
         );
     }
 
@@ -1995,6 +2073,7 @@ pub fn run_with_check_with_gitedit(
         queue,
         include_unhash,
         stage_paths,
+        gate_overrides,
     )
 }
 
@@ -2335,6 +2414,504 @@ fn prompt_yes_no_default_yes(message: &str) -> Result<bool> {
     Ok(answer == "y" || answer == "yes")
 }
 
+fn resolve_commit_testing_policy(repo_root: &Path) -> CommitTestingPolicy {
+    let cfg = config::load_or_default(repo_root.join("flow.toml"));
+    let maybe_testing = cfg.commit.and_then(|commit| commit.testing);
+    let Some(testing) = maybe_testing else {
+        if is_bun_repo_layout(repo_root) {
+            return CommitTestingPolicy {
+                mode: "warn".to_string(),
+                runner: "bun".to_string(),
+                bun_repo_strict: true,
+                require_related_tests: true,
+                max_local_gate_seconds: 15,
+            };
+        }
+        return CommitTestingPolicy {
+            mode: "off".to_string(),
+            runner: "bun".to_string(),
+            bun_repo_strict: true,
+            require_related_tests: true,
+            max_local_gate_seconds: 15,
+        };
+    };
+
+    let mode = testing
+        .mode
+        .unwrap_or_else(|| "warn".to_string())
+        .to_ascii_lowercase();
+    let mode = match mode.as_str() {
+        "warn" | "block" | "off" => mode,
+        _ => "warn".to_string(),
+    };
+
+    CommitTestingPolicy {
+        mode,
+        runner: testing
+            .runner
+            .unwrap_or_else(|| "bun".to_string())
+            .to_ascii_lowercase(),
+        bun_repo_strict: testing.bun_repo_strict.unwrap_or(true),
+        require_related_tests: testing.require_related_tests.unwrap_or(true),
+        max_local_gate_seconds: testing.max_local_gate_seconds.unwrap_or(15),
+    }
+}
+
+fn resolve_commit_skill_gate_policy(repo_root: &Path) -> CommitSkillGatePolicy {
+    let cfg = config::load_or_default(repo_root.join("flow.toml"));
+    let Some(skill_gate) = cfg.commit.and_then(|commit| commit.skill_gate) else {
+        return CommitSkillGatePolicy {
+            mode: "off".to_string(),
+            required: Vec::new(),
+            min_version: HashMap::new(),
+        };
+    };
+
+    let mut required = skill_gate.required;
+    required.retain(|name| !name.trim().is_empty());
+    required.sort();
+    required.dedup();
+
+    let default_mode = if required.is_empty() { "off" } else { "warn" };
+    let mode = skill_gate
+        .mode
+        .unwrap_or_else(|| default_mode.to_string())
+        .to_ascii_lowercase();
+    let mode = match mode.as_str() {
+        "warn" | "block" | "off" => mode,
+        _ => default_mode.to_string(),
+    };
+
+    CommitSkillGatePolicy {
+        mode,
+        required,
+        min_version: skill_gate.min_version.unwrap_or_default(),
+    }
+}
+
+fn run_required_skill_gate(
+    repo_root: &Path,
+    gate_overrides: CommitGateOverrides,
+) -> Result<SkillGateReport> {
+    if gate_overrides.skip_quality {
+        return Ok(SkillGateReport {
+            pass: true,
+            mode: "off".to_string(),
+            override_flag: Some("skip-quality".to_string()),
+            ..SkillGateReport::default()
+        });
+    }
+
+    let policy = resolve_commit_skill_gate_policy(repo_root);
+    if policy.mode == "off" || policy.required.is_empty() {
+        return Ok(SkillGateReport {
+            pass: true,
+            mode: policy.mode,
+            required_skills: policy.required,
+            ..SkillGateReport::default()
+        });
+    }
+
+    let mut report = SkillGateReport {
+        pass: true,
+        mode: policy.mode.clone(),
+        override_flag: None,
+        required_skills: policy.required.clone(),
+        missing_skills: Vec::new(),
+        version_failures: Vec::new(),
+        loaded_versions: HashMap::new(),
+    };
+
+    for skill_name in &policy.required {
+        let skill_content = skills::read_skill_content_at(repo_root, skill_name)?;
+        if skill_content.is_none() {
+            report.missing_skills.push(skill_name.clone());
+            continue;
+        }
+
+        if let Some(required_version) = policy.min_version.get(skill_name) {
+            let local_version = skills::read_skill_version_at(repo_root, skill_name)?;
+            match local_version {
+                Some(version) => {
+                    report.loaded_versions.insert(skill_name.clone(), version);
+                    if version < *required_version {
+                        report.version_failures.push(format!(
+                            "{} has version {}, requires >= {}",
+                            skill_name, version, required_version
+                        ));
+                    }
+                }
+                None => {
+                    report.version_failures.push(format!(
+                        "{} is missing frontmatter version (requires >= {})",
+                        skill_name, required_version
+                    ));
+                }
+            }
+        } else if let Some(version) = skills::read_skill_version_at(repo_root, skill_name)? {
+            report.loaded_versions.insert(skill_name.clone(), version);
+        }
+    }
+
+    report.pass = report.missing_skills.is_empty() && report.version_failures.is_empty();
+    if !report.pass {
+        for missing in &report.missing_skills {
+            eprintln!(
+                "  skills: required skill '{}' is missing in .ai/skills/",
+                missing
+            );
+        }
+        for failure in &report.version_failures {
+            eprintln!("  skills: {}", failure);
+        }
+        if policy.mode == "block" {
+            bail!("Commit blocked by required skill gate");
+        }
+        eprintln!("  skills: warning only (mode=warn)");
+    }
+
+    Ok(report)
+}
+
+fn build_required_skills_prompt_context(
+    repo_root: &Path,
+    skill_report: &SkillGateReport,
+) -> String {
+    if skill_report.required_skills.is_empty() {
+        return String::new();
+    }
+
+    let mut sections = Vec::new();
+    for skill_name in &skill_report.required_skills {
+        if let Ok(Some(content)) = skills::read_skill_content_at(repo_root, skill_name) {
+            sections.push(format!("## Skill: {}\n{}", skill_name, content));
+        }
+    }
+    if sections.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nRequired workflow skills for this repo. Follow these constraints while reviewing and generating output:\n\n{}\n",
+        sections.join("\n\n")
+    )
+}
+
+fn combine_review_instructions(
+    custom: Option<&str>,
+    required_skill_context: &str,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(custom) = custom {
+        if !custom.trim().is_empty() {
+            parts.push(custom.trim().to_string());
+        }
+    }
+    if !required_skill_context.trim().is_empty() {
+        parts.push(required_skill_context.trim().to_string());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+fn is_bun_repo_layout(repo_root: &Path) -> bool {
+    if repo_root.join("build.zig").exists() && repo_root.join("src/bun.js").exists() {
+        return true;
+    }
+    let agents_file = repo_root.join("AGENTS.md");
+    if let Ok(contents) = fs::read_to_string(agents_file) {
+        return contents.contains("This is the Bun repository");
+    }
+    false
+}
+
+fn looks_like_source_file_for_test_gate(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let ext = Path::new(&normalized)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "rs"
+    )
+}
+
+fn is_test_file_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    normalized.contains("/__tests__/")
+        || normalized.ends_with(".test.js")
+        || normalized.ends_with(".test.jsx")
+        || normalized.ends_with(".test.ts")
+        || normalized.ends_with(".test.tsx")
+        || normalized.ends_with(".spec.js")
+        || normalized.ends_with(".spec.jsx")
+        || normalized.ends_with(".spec.ts")
+        || normalized.ends_with(".spec.tsx")
+        || normalized.ends_with("_test.rs")
+}
+
+fn normalize_rel_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn collect_candidate_js_test_paths(rel_path: &Path) -> Vec<PathBuf> {
+    const JS_EXTS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
+    let mut out = Vec::new();
+    let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = rel_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if stem.is_empty() {
+        return out;
+    }
+
+    let base_no_ext = parent.join(stem);
+    for ext in JS_EXTS {
+        let mut same_dir_test = base_no_ext.clone();
+        same_dir_test.set_extension(format!("test.{}", ext));
+        out.push(same_dir_test);
+
+        let mut same_dir_spec = base_no_ext.clone();
+        same_dir_spec.set_extension(format!("spec.{}", ext));
+        out.push(same_dir_spec);
+
+        let mut in_test_dir = PathBuf::from("test").join(&base_no_ext);
+        in_test_dir.set_extension(format!("test.{}", ext));
+        out.push(in_test_dir);
+
+        let mut in_tests_dir = PathBuf::from("tests").join(&base_no_ext);
+        in_tests_dir.set_extension(format!("test.{}", ext));
+        out.push(in_tests_dir);
+    }
+
+    let tests_dir = parent.join("__tests__");
+    if let Some(file_name) = rel_path.file_name() {
+        out.push(tests_dir.join(file_name));
+    }
+
+    out
+}
+
+fn collect_candidate_rust_test_paths(rel_path: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = rel_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if stem.is_empty() {
+        return out;
+    }
+
+    out.push(parent.join(format!("{}_test.rs", stem)));
+    out.push(PathBuf::from("tests").join(format!("{}.rs", stem)));
+    out.push(PathBuf::from("tests").join(format!("{}_test.rs", stem)));
+
+    let mut tests_rel = PathBuf::from("tests").join(rel_path);
+    tests_rel.set_extension("rs");
+    out.push(tests_rel);
+
+    out
+}
+
+fn find_related_tests(repo_root: &Path, changed_files: &[String]) -> Vec<String> {
+    let mut tests = HashSet::new();
+    for changed in changed_files {
+        let normalized = changed.replace('\\', "/");
+        if is_test_file_path(&normalized) {
+            tests.insert(normalized);
+            continue;
+        }
+        if !looks_like_source_file_for_test_gate(&normalized) {
+            continue;
+        }
+
+        let rel = Path::new(&normalized);
+        let ext = rel
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let candidates = if ext == "rs" {
+            collect_candidate_rust_test_paths(rel)
+        } else {
+            collect_candidate_js_test_paths(rel)
+        };
+
+        for candidate in candidates {
+            if repo_root.join(&candidate).is_file() {
+                tests.insert(normalize_rel_path(&candidate));
+            }
+        }
+    }
+
+    let mut out: Vec<String> = tests.into_iter().collect();
+    out.sort();
+    out
+}
+
+fn find_non_bun_test_tasks(repo_root: &Path, strict_bun_repo: bool) -> Vec<String> {
+    let config_path = repo_root.join("flow.toml");
+    if !config_path.exists() {
+        return Vec::new();
+    }
+    let cfg = match config::load(&config_path) {
+        Ok(cfg) => cfg,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut violations = Vec::new();
+    for task in cfg.tasks {
+        let name = task.name.to_ascii_lowercase();
+        let cmd = task.command.to_ascii_lowercase();
+        let looks_like_test_task = name.contains("test")
+            || cmd.starts_with("test ")
+            || cmd.contains(" test ")
+            || cmd.contains("bun test")
+            || cmd.contains("bun bd test");
+        if !looks_like_test_task {
+            continue;
+        }
+
+        if !cmd.contains("bun ") {
+            violations.push(format!(
+                "task '{}' must use bun: {}",
+                task.name, task.command
+            ));
+            continue;
+        }
+
+        if strict_bun_repo && !cmd.contains("bun bd test") {
+            violations.push(format!(
+                "task '{}' must use `bun bd test` in Bun repo: {}",
+                task.name, task.command
+            ));
+        }
+    }
+
+    violations
+}
+
+fn apply_testing_gate_failure(mode: &str, message: &str) -> Result<()> {
+    eprintln!("  testing: {}", message);
+    if mode == "block" {
+        bail!("Commit blocked by testing gate");
+    }
+    eprintln!("  testing: warning only (mode=warn)");
+    Ok(())
+}
+
+fn run_pre_commit_test_gate(
+    repo_root: &Path,
+    changed_files: &[String],
+    gate_overrides: CommitGateOverrides,
+) -> Result<()> {
+    if gate_overrides.skip_quality || gate_overrides.skip_tests {
+        if gate_overrides.skip_tests {
+            println!("Skipping test gate due to --skip-tests");
+        }
+        return Ok(());
+    }
+
+    let policy = resolve_commit_testing_policy(repo_root);
+    if policy.mode == "off" {
+        return Ok(());
+    }
+    if policy.runner != "bun" {
+        return apply_testing_gate_failure(
+            &policy.mode,
+            &format!(
+                "unsupported test runner '{}'; only bun is currently supported",
+                policy.runner
+            ),
+        );
+    }
+
+    let strict_bun_repo = policy.bun_repo_strict && is_bun_repo_layout(repo_root);
+    let task_violations = find_non_bun_test_tasks(repo_root, strict_bun_repo);
+    if !task_violations.is_empty() {
+        return apply_testing_gate_failure(
+            &policy.mode,
+            &format!(
+                "flow.toml test tasks are not Bun-compliant:\n    {}",
+                task_violations.join("\n    ")
+            ),
+        );
+    }
+
+    let has_source_changes = changed_files
+        .iter()
+        .any(|p| looks_like_source_file_for_test_gate(p) && !is_test_file_path(p));
+    if !has_source_changes {
+        return Ok(());
+    }
+
+    let related_tests = find_related_tests(repo_root, changed_files);
+    if related_tests.is_empty() {
+        if policy.require_related_tests {
+            return apply_testing_gate_failure(
+                &policy.mode,
+                "no related test files detected for staged source changes",
+            );
+        }
+        return Ok(());
+    }
+
+    let mut args: Vec<String> = Vec::new();
+    if strict_bun_repo {
+        args.push("bd".to_string());
+        args.push("test".to_string());
+    } else {
+        args.push("test".to_string());
+    }
+    args.extend(related_tests.iter().cloned());
+
+    println!();
+    println!("Running local test gate (bun)...");
+    println!("Command: bun {}", args.join(" "));
+
+    let started_at = Instant::now();
+    let status = Command::new("bun")
+        .args(args.iter().map(|s| s.as_str()))
+        .current_dir(repo_root)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to execute bun test gate")?;
+    let elapsed = started_at.elapsed();
+
+    if elapsed > Duration::from_secs(policy.max_local_gate_seconds) {
+        eprintln!(
+            "  testing: local gate exceeded target budget ({}s > {}s)",
+            elapsed.as_secs(),
+            policy.max_local_gate_seconds
+        );
+    }
+
+    if !status.success() {
+        return apply_testing_gate_failure(
+            &policy.mode,
+            &format!("bun tests failed (exit status: {})", status),
+        );
+    }
+
+    println!(
+        "✓ Test gate passed ({} related test file{})",
+        related_tests.len(),
+        if related_tests.len() == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+fn is_doc_gate_failure(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("doc") || m.contains("documentation")
+}
+
+fn is_test_gate_failure(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("test") || m.contains("coverage")
+}
+
 /// Run commit with code review synchronously (called directly or by hub).
 /// If `include_context` is true, AI session context is passed for better understanding.
 /// `review_selection` determines whether Claude or Codex runs and which model is used.
@@ -2349,6 +2926,7 @@ pub fn run_with_check_sync(
     queue: CommitQueueMode,
     include_unhash: bool,
     stage_paths: &[String],
+    gate_overrides: CommitGateOverrides,
 ) -> Result<()> {
     let push_requested = push;
     let mut queue_enabled = queue.enabled;
@@ -2408,6 +2986,13 @@ pub fn run_with_check_sync(
         println!("\nnotify: No staged changes to commit");
         bail!("No staged changes to commit");
     }
+    let changed_files = changed_files_from_diff(&diff);
+
+    // Enforce required workflow skills before review.
+    let skill_gate_report = run_required_skill_gate(&repo_root, gate_overrides)?;
+
+    // Fast feedback loop: run impacted tests with Bun before AI review.
+    run_pre_commit_test_gate(&repo_root, &changed_files, gate_overrides)?;
 
     // Get AI session context since last checkpoint (if enabled)
     let session_context = if include_context {
@@ -2432,8 +3017,14 @@ pub fn run_with_check_sync(
         }
     }
 
-    // Get custom review instructions from [commit] config
-    let review_instructions = get_review_instructions(&repo_root);
+    // Merge [commit] review instructions with required skill instructions.
+    let custom_review_instructions = get_review_instructions(&repo_root);
+    let required_skill_context =
+        build_required_skills_prompt_context(&repo_root, &skill_gate_report);
+    let review_instructions = combine_review_instructions(
+        custom_review_instructions.as_deref(),
+        &required_skill_context,
+    );
 
     // Run code review
     if prefer_codex_over_openrouter {
@@ -2458,7 +3049,7 @@ pub fn run_with_check_sync(
     if session_context.is_some() {
         println!("(with AI session context)");
     }
-    if review_instructions.is_some() {
+    if custom_review_instructions.is_some() || !required_skill_context.is_empty() {
         println!("(with custom review instructions)");
     }
     println!("────────────────────────────────────────");
@@ -2655,6 +3246,68 @@ pub fn run_with_check_sync(
             }
         }
         println!("✓ Review passed");
+    }
+
+    // ── Quality gate check ─────────────────────────────────────────
+    if gate_overrides.skip_quality {
+        println!("Skipping quality gates due to --skip-quality");
+    } else if let Some(ref quality) = review.quality {
+        let quality_config = config::load_or_default(repo_root.join("flow.toml"))
+            .commit
+            .and_then(|c| c.quality)
+            .unwrap_or_default();
+        let mode = quality_config.mode.as_deref().unwrap_or("warn");
+
+        let mut gate_failures: Vec<String> = quality.gate_failures.clone();
+        if gate_overrides.skip_docs {
+            gate_failures.retain(|failure| !is_doc_gate_failure(failure));
+        }
+        if gate_overrides.skip_tests {
+            gate_failures.retain(|failure| !is_test_gate_failure(failure));
+        }
+
+        if !gate_failures.is_empty() && mode != "off" {
+            println!();
+            for failure in &gate_failures {
+                eprintln!("  quality: {}", failure);
+            }
+
+            if mode == "block" {
+                eprintln!("\nCommit blocked by quality gates.");
+                eprintln!("Fix the issues above, or override with: f commit --skip-quality");
+                restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
+                bail!("Quality gate blocked commit");
+            } else {
+                eprintln!("\nQuality warnings above. Proceeding with commit.");
+            }
+        }
+
+        // Auto-generate/update feature docs if enabled
+        let auto_docs = quality_config.auto_generate_docs.unwrap_or(true);
+        if auto_docs && mode != "off" && !gate_overrides.skip_docs {
+            let commit_sha_preview = git_capture_in(&repo_root, &["rev-parse", "--short", "HEAD"])
+                .unwrap_or_else(|_| "unknown".to_string())
+                .trim()
+                .to_string();
+
+            match features::apply_quality_results(&repo_root, quality, &commit_sha_preview) {
+                Ok(actions) => {
+                    for action in &actions {
+                        println!("  feature docs: {}", action);
+                    }
+                    // Stage .ai/features/ changes
+                    if !actions.is_empty() {
+                        let _ = std::process::Command::new("git")
+                            .args(["add", ".ai/features/"])
+                            .current_dir(&repo_root)
+                            .output();
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  warning: failed to update feature docs: {}", e);
+                }
+            }
+        }
     }
 
     if queue_enabled && queue.override_flag.is_none() && commit_queue_on_issues_enabled(&repo_root)
@@ -3185,6 +3838,7 @@ pub fn run_with_check_sync(
                 "commit_with_check",
                 &gitedit_sessions,
                 Some(&review_data),
+                Some(&skill_gate_report),
             );
         }
     } else if myflow_mirror_enabled(&repo_root) {
@@ -3206,6 +3860,7 @@ pub fn run_with_check_sync(
             "commit_with_check",
             &myflow_sessions,
             Some(&review_data),
+            Some(&skill_gate_report),
         );
     }
 
@@ -3563,6 +4218,7 @@ fn run_codex_review(
         )),
         future_tasks: Vec::new(),
         timed_out: true,
+        quality: None,
     })
 }
 
@@ -3740,6 +4396,7 @@ fn run_codex_review_once(
             )),
             future_tasks: Vec::new(),
             timed_out: true,
+            quality: None,
         });
     }
 
@@ -3831,12 +4488,13 @@ Review:\n{}",
     }
 
     let json_output = json_output.trim().to_string();
-    let review_json = parse_review_json(&json_output);
+    let mut review_json = parse_review_json(&json_output);
     let future_tasks = review_json
         .as_ref()
         .map(|parsed| normalize_future_tasks(&parsed.future_tasks))
         .unwrap_or_default();
     let summary = review_json.as_ref().and_then(|r| r.summary.clone());
+    let quality = review_json.as_mut().and_then(|r| r.quality.take());
     let (issues_found, issues) = if let Some(ref parsed) = review_json {
         (parsed.issues_found, parsed.issues.clone())
     } else if result.is_empty() {
@@ -3875,6 +4533,7 @@ Review:\n{}",
         summary,
         future_tasks,
         timed_out: false,
+        quality,
     })
 }
 
@@ -3939,12 +4598,13 @@ fn run_remote_claude_review(
     }
 
     let result = payload.output;
-    let review_json = parse_review_json(&result);
+    let mut review_json = parse_review_json(&result);
     let future_tasks = review_json
         .as_ref()
         .map(|parsed| normalize_future_tasks(&parsed.future_tasks))
         .unwrap_or_default();
     let summary = review_json.as_ref().and_then(|r| r.summary.clone());
+    let quality = review_json.as_mut().and_then(|r| r.quality.take());
     let (issues_found, issues) = if let Some(ref parsed) = review_json {
         if let Some(summary) = parsed.summary.as_ref() {
             debug!(summary = summary.as_str(), "remote claude review summary");
@@ -3974,6 +4634,7 @@ fn run_remote_claude_review(
         summary,
         future_tasks,
         timed_out: false,
+        quality,
     })
 }
 
@@ -4006,6 +4667,31 @@ fn run_claude_review(
         let mut prompt = String::from(
             "Review diff for bugs, security, perf issues. Return JSON: {\"issues_found\":bool,\"issues\":[\"...\"],\"summary\":\"...\",\"future_tasks\":[\"...\"]}. future_tasks are optional follow-up improvements or optimizations (max 3), actionable, and not duplicates of issues; use [] if none.\n",
         );
+
+        // Add quality assessment instructions if quality gates are enabled
+        let quality_config = config::load_or_default(workdir.join("flow.toml"))
+            .commit
+            .and_then(|c| c.quality)
+            .unwrap_or_default();
+        let quality_mode = quality_config.mode.as_deref().unwrap_or("warn");
+        if quality_mode != "off" {
+            prompt.push_str(
+                "\nAdditionally, analyze the diff for quality assessment. Add a \"quality\" object to your JSON response:\n\
+                 {\"quality\":{\"features_touched\":[{\"name\":\"kebab-name\",\"action\":\"added|modified|fixed\",\"description\":\"one sentence\",\"files_changed\":[\"...\"],\"has_tests\":bool,\"test_files\":[\"...\"],\"doc_current\":bool}],\
+                 \"new_features\":[{\"name\":\"kebab-name\",\"description\":\"one sentence\",\"files\":[\"...\"],\"doc_content\":\"# Title\\n\\nDescription...\"}],\
+                 \"test_coverage\":\"full|partial|none\",\"doc_coverage\":\"full|partial|none\",\"gate_pass\":bool,\"gate_failures\":[\"...\"]}}\n\
+                 A \"feature\" = a user-visible capability, API endpoint, or CLI command. Name features in kebab-case. \
+                 gate_pass is false if new features lack tests or docs. gate_failures lists specific reasons.\n",
+            );
+            // Add features context (existing documented features) if available
+            let features_ctx = crate::features::features_context_for_review(
+                workdir,
+                &changed_files_from_diff(diff),
+            );
+            if !features_ctx.is_empty() {
+                prompt.push_str(&features_ctx);
+            }
+        }
 
         // Add custom review instructions if provided
         if let Some(instructions) = review_instructions {
@@ -4135,6 +4821,7 @@ fn run_claude_review(
                 )),
                 future_tasks: Vec::new(),
                 timed_out: true,
+                quality: None,
             });
         }
 
@@ -4148,12 +4835,13 @@ fn run_claude_review(
 
         let result = output_lines.join("\n");
 
-        let review_json = parse_review_json(&result);
+        let mut review_json = parse_review_json(&result);
         let future_tasks = review_json
             .as_ref()
             .map(|parsed| normalize_future_tasks(&parsed.future_tasks))
             .unwrap_or_default();
         let summary = review_json.as_ref().and_then(|r| r.summary.clone());
+        let quality = review_json.as_mut().and_then(|r| r.quality.take());
         let (issues_found, issues) = if let Some(ref parsed) = review_json {
             if let Some(summary) = parsed.summary.as_ref() {
                 debug!(summary = summary.as_str(), "claude review summary");
@@ -4180,6 +4868,7 @@ fn run_claude_review(
             summary,
             future_tasks,
             timed_out: false,
+            quality,
         })
     })();
 
@@ -4194,6 +4883,7 @@ fn run_claude_review(
                 summary: Some(format!("Claude review failed: {}", err)),
                 future_tasks: Vec::new(),
                 timed_out: false,
+                quality: None,
             })
         }
     }
@@ -4279,12 +4969,13 @@ fn run_opencode_review(
     let output = output_lines.join("\n");
 
     // Try to parse JSON from output
-    let review_json = parse_review_json(&output);
+    let mut review_json = parse_review_json(&output);
     let future_tasks = review_json
         .as_ref()
         .map(|json| normalize_future_tasks(&json.future_tasks))
         .unwrap_or_default();
     let summary = review_json.as_ref().and_then(|r| r.summary.clone());
+    let quality = review_json.as_mut().and_then(|r| r.quality.take());
     let (issues_found, issues) = if let Some(ref json) = review_json {
         (json.issues_found, json.issues.clone())
     } else {
@@ -4310,6 +5001,7 @@ fn run_opencode_review(
         summary,
         future_tasks,
         timed_out: false,
+        quality,
     })
 }
 
@@ -4479,12 +5171,13 @@ fn run_kimi_review(
     }
 
     // Try to parse JSON from output
-    let review_json = parse_review_json(&result);
+    let mut review_json = parse_review_json(&result);
     let future_tasks = review_json
         .as_ref()
         .map(|json| normalize_future_tasks(&json.future_tasks))
         .unwrap_or_default();
     let mut summary = review_json.as_ref().and_then(|r| r.summary.clone());
+    let quality = review_json.as_mut().and_then(|r| r.quality.take());
     let (mut issues_found, mut issues) = if let Some(ref json) = review_json {
         (json.issues_found, json.issues.clone())
     } else {
@@ -4521,6 +5214,7 @@ fn run_kimi_review(
                 summary: Some(summary),
                 future_tasks,
                 timed_out: false,
+                quality: quality.clone(),
             });
         }
     }
@@ -4535,6 +5229,7 @@ fn run_kimi_review(
         summary,
         future_tasks,
         timed_out: false,
+        quality,
     })
 }
 
@@ -4623,12 +5318,13 @@ fn run_openrouter_review(
 
     println!("{}", output);
 
-    let review_json = parse_review_json(&output);
+    let mut review_json = parse_review_json(&output);
     let future_tasks = review_json
         .as_ref()
         .map(|json| normalize_future_tasks(&json.future_tasks))
         .unwrap_or_default();
     let mut summary = review_json.as_ref().and_then(|r| r.summary.clone());
+    let quality = review_json.as_mut().and_then(|r| r.quality.take());
     let (mut issues_found, mut issues) = if let Some(ref json) = review_json {
         (json.issues_found, json.issues.clone())
     } else {
@@ -4665,6 +5361,7 @@ fn run_openrouter_review(
                 summary: Some(summary),
                 future_tasks,
                 timed_out: false,
+                quality: quality.clone(),
             });
         }
     }
@@ -4679,6 +5376,7 @@ fn run_openrouter_review(
         summary,
         future_tasks,
         timed_out: false,
+        quality,
     })
 }
 
@@ -4913,12 +5611,13 @@ fn run_rise_review(
     println!("{}", output);
 
     // Try to parse JSON from output
-    let review_json = parse_review_json(&output);
+    let mut review_json = parse_review_json(&output);
     let future_tasks = review_json
         .as_ref()
         .map(|json| normalize_future_tasks(&json.future_tasks))
         .unwrap_or_default();
     let summary = review_json.as_ref().and_then(|r| r.summary.clone());
+    let quality = review_json.as_mut().and_then(|r| r.quality.take());
     let (issues_found, issues) = if let Some(ref json) = review_json {
         (json.issues_found, json.issues.clone())
     } else {
@@ -4941,6 +5640,7 @@ fn run_rise_review(
         summary,
         future_tasks,
         timed_out: false,
+        quality,
     })
 }
 
@@ -6994,8 +7694,7 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                     .as_deref()
                     .map(|s| !s.trim().is_empty())
                     .unwrap_or(false);
-            let unreviewed =
-                (entry.version >= 2 && !entry.review_completed) || entry.review_timed_out;
+            let unreviewed = entry.version >= 2 && !entry.review_completed;
 
             if issues_present && !allow_issues && !force {
                 bail!(
@@ -7005,7 +7704,14 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
             if unreviewed && !effective_allow_unreviewed && !force {
                 bail!(
-                    "Queued commit {} does not have a clean review (timed out/missing). Re-run review, or re-run with --allow-unreviewed.",
+                    "Queued commit {} does not have a clean review (missing). Re-run review, or re-run with --allow-unreviewed.",
+                    short_sha(&entry.commit_sha)
+                );
+            }
+            if entry.review_timed_out && !force {
+                eprintln!(
+                    "note: review timed out for {}; approving anyway (re-run `f commit-queue review {}` if you want a full review)",
+                    short_sha(&entry.commit_sha),
                     short_sha(&entry.commit_sha)
                 );
             }
@@ -7485,6 +8191,7 @@ pub fn run_pr(opts: PrOpts) -> Result<()> {
             queue,
             false,
             &opts.paths,
+            CommitGateOverrides::default(),
         )?;
     }
 
@@ -9960,6 +10667,7 @@ fn sync_to_myflow(
     event: &str,
     ai_sessions: &[ai::GitEditSessionData],
     review_data: Option<&GitEditReviewData>,
+    skill_gate: Option<&SkillGateReport>,
 ) {
     // Get remote origin URL to extract owner/repo
     let remote_url = match git_capture_in(repo_root, &["remote", "get-url", "origin"]) {
@@ -10042,6 +10750,36 @@ fn sync_to_myflow(
         })
     });
 
+    // Build features data from .ai/features/ if present
+    let features_json: Vec<serde_json::Value> = features::load_all_features(repo_root)
+        .unwrap_or_default()
+        .iter()
+        .map(|f| {
+            json!({
+                "name": f.name,
+                "title": f.content.lines().next().unwrap_or(&f.name).trim_start_matches('#').trim(),
+                "status": f.status,
+                "description": f.description,
+                "files": f.files,
+                "tests": f.tests,
+                "coverage": f.coverage,
+                "last_verified_sha": f.last_verified,
+            })
+        })
+        .collect();
+
+    let skill_gate_json = skill_gate.map(|gate| {
+        json!({
+            "pass": gate.pass,
+            "mode": gate.mode,
+            "override": gate.override_flag,
+            "required_skills": gate.required_skills,
+            "missing_skills": gate.missing_skills,
+            "version_failures": gate.version_failures,
+            "loaded_versions": gate.loaded_versions,
+        })
+    });
+
     let payload = json!({
         "owner": owner,
         "repo": repo,
@@ -10054,6 +10792,8 @@ fn sync_to_myflow(
         "author_email": author_email,
         "ai_sessions": ai_sessions_json,
         "review": review_json,
+        "features": if features_json.is_empty() { None } else { Some(features_json) },
+        "skill_gate": skill_gate_json,
     });
 
     let client = match Client::builder().timeout(Duration::from_secs(10)).build() {
@@ -10886,6 +11626,7 @@ fn delegate_to_hub_with_check(
     queue: CommitQueueMode,
     include_unhash: bool,
     stage_paths: &[String],
+    gate_overrides: CommitGateOverrides,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     let repo_root = resolve_commit_with_check_root()?;
@@ -10911,13 +11652,28 @@ fn delegate_to_hub_with_check(
         .map(|arg| format!(" --review-model {}", arg.as_arg()))
         .unwrap_or_default();
     let hashed_flag = if include_unhash { " --hashed" } else { "" };
+    let skip_quality_flag = if gate_overrides.skip_quality {
+        " --skip-quality"
+    } else {
+        ""
+    };
+    let skip_docs_flag = if gate_overrides.skip_docs {
+        " --skip-docs"
+    } else {
+        ""
+    };
+    let skip_tests_flag = if gate_overrides.skip_tests {
+        " --skip-tests"
+    } else {
+        ""
+    };
     let path_flags = stage_paths_cli_flags(stage_paths);
     let flow_bin = std::env::current_exe()
         .ok()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "flow".to_string());
     let command = format!(
-        "{} {} --sync{}{}{}{}{}{}{}{}{} --tokens {}",
+        "{} {} --sync{}{}{}{}{}{}{}{}{}{}{}{} --tokens {}",
         flow_bin,
         command_name,
         push_flag,
@@ -10928,6 +11684,9 @@ fn delegate_to_hub_with_check(
         queue_flag,
         review_flag,
         hashed_flag,
+        skip_quality_flag,
+        skip_docs_flag,
+        skip_tests_flag,
         path_flags,
         max_tokens
     );
@@ -11066,6 +11825,7 @@ fn run_fixer(repo_root: &Path, fixer: &str) -> Result<bool> {
         "mdx-comments" => fix_mdx_comments(repo_root),
         "trailing-whitespace" => fix_trailing_whitespace(repo_root),
         "end-of-file" => fix_end_of_file(repo_root),
+        "lowercase-filenames" => fix_lowercase_filenames(repo_root),
         _ => {
             debug!("Unknown fixer and no .ai/actions/{} script found", fixer);
             Ok(false)
@@ -11287,6 +12047,57 @@ fn fix_end_of_file(repo_root: &Path) -> Result<bool> {
 
     if fixed_any {
         println!("✓ Fixed end of file newlines");
+    }
+
+    Ok(fixed_any)
+}
+
+/// Rename staged files with uppercase basenames to lowercase.
+fn fix_lowercase_filenames(repo_root: &Path) -> Result<bool> {
+    // Get staged new/renamed files
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--name-only", "--diff-filter=ACR"])
+        .current_dir(repo_root)
+        .output()?;
+
+    let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+
+    let mut fixed_any = false;
+
+    for file in &files {
+        let path = Path::new(file);
+        let basename = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        if !basename.chars().any(|c| c.is_ascii_uppercase()) {
+            continue;
+        }
+
+        let lower = basename.to_ascii_lowercase();
+        let new_path = match path.parent() {
+            Some(p) if p != Path::new("") => p.join(&lower),
+            _ => PathBuf::from(&lower),
+        };
+
+        let status = Command::new("git")
+            .args(["mv", file, new_path.to_str().unwrap_or(&lower)])
+            .current_dir(repo_root)
+            .output()?;
+
+        if status.status.success() {
+            println!("  Renamed: {} → {}", file, new_path.display());
+            fixed_any = true;
+        }
+    }
+
+    if fixed_any {
+        println!("✓ Fixed uppercase filenames");
     }
 
     Ok(fixed_any)

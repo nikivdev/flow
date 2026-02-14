@@ -3,6 +3,15 @@
 .ai/internal/
 .ai/web/
 .ai/skills/
+# keep generated skills ignored by default, but track curated flow-default skills
+!.ai/skills/
+.ai/skills/*
+!.ai/skills/env/
+.ai/skills/env/*
+!.ai/skills/env/skill.md
+!.ai/skills/quality-bun-feature-delivery/
+.ai/skills/quality-bun-feature-delivery/*
+!.ai/skills/quality-bun-feature-delivery/skill.md
 .ai/todos/*.bike
 .claude/
 .codex/

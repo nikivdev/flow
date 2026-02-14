@@ -264,6 +264,29 @@ queue_on_issues = true
 
 `--queue` / `--no-queue` still override this behavior.
 
+### Commit Quality Gates (Testing + Required Skills)
+
+Use local gates to block commits that skip tests or required workflow skills:
+
+```toml
+[commit.testing]
+mode = "block"
+runner = "bun"
+bun_repo_strict = true
+require_related_tests = true
+max_local_gate_seconds = 20
+
+[commit.skill_gate]
+mode = "block"
+required = ["quality-bun-feature-delivery"]
+
+[commit.skill_gate.min_version]
+quality-bun-feature-delivery = 2
+```
+
+When `mode = "block"`, `f commit` fails until the test/skill requirements are satisfied.  
+For Bun repos, run checks with `bun bd test ...` for debug-build validation.
+
 ### AI Session Context
 
 When `--context` is enabled, includes recent Claude Code session context:

@@ -3,16 +3,21 @@
 //! Skills are stored in .ai/skills/<name>/skill.md (gitignored by default).
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use serde_json::json;
 
 use crate::cli::{SkillsAction, SkillsCommand, SkillsFetchAction, SkillsFetchCommand};
 use crate::config;
 use crate::start;
 
 const DEFAULT_ENV_SKILL: &str = include_str!("../.ai/skills/env/skill.md");
+const DEFAULT_QUALITY_BUN_FEATURE_DELIVERY_SKILL: &str =
+    include_str!("../.ai/skills/quality-bun-feature-delivery/skill.md");
 
 #[derive(Debug, Default)]
 pub struct SkillsEnforceSummary {
@@ -29,6 +34,21 @@ impl SkillsEnforceSummary {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SkillSyncOptions {
+    generate_openai_yaml: bool,
+    task_skill_allow_implicit_invocation: bool,
+}
+
+impl Default for SkillSyncOptions {
+    fn default() -> Self {
+        Self {
+            generate_openai_yaml: true,
+            task_skill_allow_implicit_invocation: false,
+        }
+    }
+}
+
 /// Run the skills subcommand.
 pub fn run(cmd: SkillsCommand) -> Result<()> {
     let action = cmd.action.unwrap_or(SkillsAction::List);
@@ -40,8 +60,10 @@ pub fn run(cmd: SkillsCommand) -> Result<()> {
         SkillsAction::Edit { name } => edit_skill(&name)?,
         SkillsAction::Remove { name } => remove_skill(&name)?,
         SkillsAction::Install { name } => install_skill(&name)?,
+        SkillsAction::Publish { name } => publish_skill(&name)?,
         SkillsAction::Search { query } => list_remote_skills(query.as_deref())?,
         SkillsAction::Sync => sync_skills()?,
+        SkillsAction::Reload => reload_skills()?,
         SkillsAction::Fetch(fetch) => fetch_skills(&fetch)?,
     }
 
@@ -56,6 +78,41 @@ fn get_skills_dir() -> Result<PathBuf> {
 
 fn get_skills_dir_at(project_root: &Path) -> PathBuf {
     project_root.join(".ai").join("skills")
+}
+
+pub fn read_skill_content_at(project_root: &Path, name: &str) -> Result<Option<String>> {
+    let skill_dir = get_skills_dir_at(project_root).join(name);
+    let Some(skill_file) = find_skill_file(&skill_dir) else {
+        return Ok(None);
+    };
+    let content = fs::read_to_string(&skill_file)
+        .with_context(|| format!("failed to read {}", skill_file.display()))?;
+    Ok(Some(content))
+}
+
+pub fn read_skill_frontmatter_field_at(
+    project_root: &Path,
+    name: &str,
+    field: &str,
+) -> Result<Option<String>> {
+    let Some(content) = read_skill_content_at(project_root, name)? else {
+        return Ok(None);
+    };
+    Ok(parse_frontmatter_field(&content, field))
+}
+
+pub fn read_skill_version_at(project_root: &Path, name: &str) -> Result<Option<u32>> {
+    let Some(raw) = read_skill_frontmatter_field_at(project_root, name, "version")? else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed.parse::<u32>() {
+        Ok(version) => Ok(Some(version)),
+        Err(_) => Ok(None),
+    }
 }
 
 fn skill_file_lower(skill_dir: &Path) -> PathBuf {
@@ -243,6 +300,119 @@ fn parse_skill_description(path: &Path) -> Option<String> {
     None
 }
 
+fn resolve_skill_sync_options(skills_cfg: Option<&config::SkillsConfig>) -> SkillSyncOptions {
+    let mut options = SkillSyncOptions::default();
+    if let Some(codex_cfg) = skills_cfg.and_then(|cfg| cfg.codex.as_ref()) {
+        if let Some(value) = codex_cfg.generate_openai_yaml {
+            options.generate_openai_yaml = value;
+        }
+        if let Some(value) = codex_cfg.task_skill_allow_implicit_invocation {
+            options.task_skill_allow_implicit_invocation = value;
+        }
+    }
+    options
+}
+
+fn should_force_reload_after_sync(skills_cfg: Option<&config::SkillsConfig>) -> bool {
+    skills_cfg
+        .and_then(|cfg| cfg.codex.as_ref())
+        .and_then(|cfg| cfg.force_reload_after_sync)
+        .unwrap_or(true)
+}
+
+fn task_name_to_display_name(task_name: &str) -> String {
+    task_name
+        .split(['-', '_', ' '])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            let Some(first) = chars.next() else {
+                return String::new();
+            };
+            format!(
+                "{}{}",
+                first.to_ascii_uppercase(),
+                chars.as_str().to_ascii_lowercase()
+            )
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut out = String::new();
+    for (idx, ch) in value.chars().enumerate() {
+        if idx >= max_chars.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+fn yaml_quote(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', " ")
+    )
+}
+
+fn render_task_skill_openai_yaml(
+    task: &config::TaskConfig,
+    allow_implicit_invocation: bool,
+) -> String {
+    let desc = task.description.as_deref().unwrap_or("Flow task");
+    let display_name = task_name_to_display_name(&task.name);
+    let short_description = truncate_chars(desc, 64);
+    let default_prompt = format!("Use ${} to {}.", task.name, desc.trim_end_matches('.'));
+
+    format!(
+        "interface:\n  display_name: {}\n  short_description: {}\n  default_prompt: {}\n\npolicy:\n  allow_implicit_invocation: {}\n",
+        yaml_quote(&display_name),
+        yaml_quote(&short_description),
+        yaml_quote(&default_prompt),
+        if allow_implicit_invocation {
+            "true"
+        } else {
+            "false"
+        }
+    )
+}
+
+fn write_task_skill_metadata(
+    skill_dir: &Path,
+    task: &config::TaskConfig,
+    options: SkillSyncOptions,
+) -> Result<()> {
+    if !options.generate_openai_yaml {
+        return Ok(());
+    }
+
+    let agents_dir = skill_dir.join("agents");
+    let metadata_path = agents_dir.join("openai.yaml");
+    let content = render_task_skill_openai_yaml(task, options.task_skill_allow_implicit_invocation);
+
+    let should_write = match fs::read_to_string(&metadata_path) {
+        Ok(existing) => existing != content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+        Err(err) => return Err(err.into()),
+    };
+    if should_write {
+        fs::create_dir_all(&agents_dir)?;
+        fs::write(&metadata_path, content)?;
+    }
+
+    Ok(())
+}
+
 /// Create a new skill.
 fn new_skill(name: &str, description: Option<&str>) -> Result<()> {
     let skills_dir = get_skills_dir()?;
@@ -345,6 +515,123 @@ fn remove_skill(name: &str) -> Result<()> {
     println!("Removed skill: {}", name);
 
     Ok(())
+}
+
+/// Publish a local skill to the shared registry.
+fn publish_skill(name: &str) -> Result<()> {
+    let skills_dir = get_skills_dir()?;
+    let skill_dir = skills_dir.join(name);
+    let Some(skill_file) = find_skill_file(&skill_dir) else {
+        bail!(
+            "Skill '{}' not found locally. Create it first with: f skills new {}",
+            name,
+            name
+        );
+    };
+
+    let content = fs::read_to_string(&skill_file).context("failed to read skill.md")?;
+
+    // Parse description from YAML frontmatter
+    let description = parse_frontmatter_field(&content, "description")
+        .unwrap_or_else(|| format!("{} skill", name));
+
+    // Get auth token
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let token = myflow_token(&cwd).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No myflow token found. Set MYFLOW_TOKEN env var, add myflow_token to flow.toml, or run `f auth login`"
+        )
+    })?;
+
+    println!("Publishing skill '{}'...", name);
+
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .put(SKILLS_API_URL)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "name": name,
+            "description": description,
+            "content": content,
+            "source": "flow-cli",
+        }))
+        .send()
+        .context("failed to publish skill to registry")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        bail!("Failed to publish skill: HTTP {} — {}", status, body);
+    }
+
+    println!("Published skill '{}' to registry.", name);
+    println!("Others can install it with: f skills install {}", name);
+
+    Ok(())
+}
+
+/// Parse a field value from YAML frontmatter (between --- delimiters).
+fn parse_frontmatter_field(content: &str, field: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let after_start = &trimmed[3..];
+    let end = after_start.find("\n---")?;
+    let frontmatter = &after_start[..end];
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(&format!("{}:", field)) {
+            let value = rest.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Get myflow auth token from env, flow.toml, or auth.toml.
+fn myflow_token(repo_root: &Path) -> Option<String> {
+    // 1. Check env var
+    if let Ok(value) = std::env::var("MYFLOW_TOKEN") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    // 2. Check flow.toml
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            if let Some(token) = cfg.options.myflow_token {
+                let trimmed = token.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+    }
+
+    // 3. Fall back to ~/.config/flow/auth.toml token
+    let config_dir = dirs::config_dir()?.join("flow");
+    let auth_path = config_dir.join("auth.toml");
+    if auth_path.exists() {
+        if let Ok(content) = fs::read_to_string(&auth_path) {
+            if let Ok(auth) = toml::from_str::<toml::Value>(&content) {
+                if let Some(token) = auth.get("token").and_then(|v| v.as_str()) {
+                    let trimmed = token.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 const SKILLS_API_URL: &str = "https://myflow.sh/api/skills";
@@ -590,7 +877,16 @@ fn fetch_skills(fetch: &SkillsFetchCommand) -> Result<()> {
 /// Install a skill from the global skills registry.
 fn install_skill(name: &str) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    install_skill_inner(&cwd, name, false, false)?;
+    let installed = install_skill_inner(&cwd, name, false, false)?;
+    if installed {
+        let flow_toml = cwd.join("flow.toml");
+        let cfg = if flow_toml.exists() {
+            config::load_or_default(&flow_toml)
+        } else {
+            config::Config::default()
+        };
+        maybe_reload_codex_skills(&cwd, cfg.skills.as_ref(), "skills install");
+    }
     Ok(())
 }
 
@@ -726,6 +1022,160 @@ struct SkillListItem {
     source: Option<String>,
 }
 
+fn codex_write_msg(writer: &mut dyn Write, msg: &serde_json::Value) -> Result<()> {
+    let mut line = serde_json::to_string(msg)?;
+    line.push('\n');
+    writer.write_all(line.as_bytes())?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn codex_read_response(
+    lines: &mut std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
+    expected_id: u64,
+    deadline: Instant,
+) -> Result<serde_json::Value> {
+    loop {
+        if Instant::now() >= deadline {
+            bail!("codex app-server response timed out");
+        }
+        let line = match lines.next() {
+            Some(Ok(line)) => line,
+            Some(Err(err)) => bail!("failed to read from codex app-server: {}", err),
+            None => bail!("codex app-server closed stdout unexpectedly"),
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: serde_json::Value = serde_json::from_str(&line)
+            .with_context(|| format!("invalid JSON from codex app-server: {}", line))?;
+        if msg.get("id").and_then(|v| v.as_u64()) == Some(expected_id) {
+            if let Some(err) = msg.get("error") {
+                let message = err
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown codex app-server error");
+                bail!("codex app-server error: {}", message);
+            }
+            return Ok(msg);
+        }
+    }
+}
+
+fn reload_codex_skills_for_cwd(cwd: &Path) -> Result<usize> {
+    let codex_bin = std::env::var("CODEX_BIN")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "codex".to_string());
+
+    let mut child = Command::new(&codex_bin)
+        .arg("app-server")
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to run codex app-server")?;
+
+    let mut stdin = child.stdin.take().context("missing codex stdin")?;
+    let stdout = child.stdout.take().context("missing codex stdout")?;
+    let mut lines = BufReader::new(stdout).lines();
+    let handshake_deadline = Instant::now() + Duration::from_secs(15);
+
+    codex_write_msg(
+        &mut stdin,
+        &json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": { "name": "flow", "title": "Flow CLI", "version": "0.1.0" },
+                "capabilities": { "experimentalApi": true }
+            }
+        }),
+    )?;
+    let _ = codex_read_response(&mut lines, 1, handshake_deadline)
+        .context("codex app-server did not respond to initialize")?;
+    codex_write_msg(&mut stdin, &json!({ "method": "initialized" }))?;
+
+    let op_deadline = Instant::now() + Duration::from_secs(20);
+    codex_write_msg(
+        &mut stdin,
+        &json!({
+            "id": 2,
+            "method": "skills/list",
+            "params": {
+                "cwds": [cwd.to_string_lossy().to_string()],
+                "forceReload": true
+            }
+        }),
+    )?;
+    let response = codex_read_response(&mut lines, 2, op_deadline)?;
+
+    let skill_count = response
+        .pointer("/result/data/0/skills")
+        .and_then(|v| v.as_array())
+        .map(|skills| skills.len())
+        .unwrap_or(0);
+    let error_count = response
+        .pointer("/result/data/0/errors")
+        .and_then(|v| v.as_array())
+        .map(|errors| errors.len())
+        .unwrap_or(0);
+
+    let _ = codex_write_msg(
+        &mut stdin,
+        &json!({
+            "id": 3,
+            "method": "shutdown"
+        }),
+    );
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    if error_count > 0 {
+        eprintln!(
+            "warning: Codex reported {} skill loader error(s) while reloading",
+            error_count
+        );
+    }
+
+    Ok(skill_count)
+}
+
+pub(crate) fn maybe_reload_codex_skills(
+    project_root: &Path,
+    skills_cfg: Option<&config::SkillsConfig>,
+    reason: &str,
+) {
+    if !should_force_reload_after_sync(skills_cfg) {
+        return;
+    }
+
+    match reload_codex_skills_for_cwd(project_root) {
+        Ok(skill_count) => {
+            println!(
+                "Codex skills reloaded ({} skills) after {}",
+                skill_count, reason
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "warning: failed to force-reload Codex skills after {}: {}",
+                reason, err
+            );
+        }
+    }
+}
+
+fn reload_skills() -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let skill_count = reload_codex_skills_for_cwd(&cwd)?;
+    println!("Codex skills reloaded ({} skills)", skill_count);
+    Ok(())
+}
+
 fn render_task_skill(task: &config::TaskConfig) -> String {
     let desc = task.description.as_deref().unwrap_or("Flow task");
     let command = task.command.lines().collect::<Vec<_>>().join("\n");
@@ -758,7 +1208,11 @@ f {}
     )
 }
 
-fn sync_tasks_to_skills(skills_dir: &Path, tasks: &[config::TaskConfig]) -> Result<(usize, usize)> {
+fn sync_tasks_to_skills(
+    skills_dir: &Path,
+    tasks: &[config::TaskConfig],
+    options: SkillSyncOptions,
+) -> Result<(usize, usize)> {
     fs::create_dir_all(skills_dir)?;
 
     let mut created = 0;
@@ -784,6 +1238,8 @@ fn sync_tasks_to_skills(skills_dir: &Path, tasks: &[config::TaskConfig]) -> Resu
                 created += 1;
             }
         }
+
+        write_task_skill_metadata(&skill_dir, task, options)?;
     }
 
     Ok((created, updated))
@@ -802,7 +1258,8 @@ fn sync_skills() -> Result<()> {
     let cfg = config::load(&flow_toml)?;
 
     let skills_dir = get_skills_dir()?;
-    let (created, updated) = sync_tasks_to_skills(&skills_dir, &cfg.tasks)?;
+    let options = resolve_skill_sync_options(cfg.skills.as_ref());
+    let (created, updated) = sync_tasks_to_skills(&skills_dir, &cfg.tasks, options)?;
 
     // Ensure symlinks exist for Claude Code and Codex
     ensure_symlinks()?;
@@ -815,6 +1272,7 @@ fn sync_skills() -> Result<()> {
         println!("  Updated: {}", updated);
     }
     println!("\nSymlinked to .claude/skills/ and .codex/skills/");
+    maybe_reload_codex_skills(&cwd, cfg.skills.as_ref(), "skills sync");
 
     Ok(())
 }
@@ -831,7 +1289,8 @@ pub(crate) fn enforce_skills_from_config(
     let mut summary = SkillsEnforceSummary::default();
 
     if skills_cfg.sync_tasks {
-        let (created, updated) = sync_tasks_to_skills(&skills_dir, &cfg.tasks)?;
+        let options = resolve_skill_sync_options(Some(skills_cfg));
+        let (created, updated) = sync_tasks_to_skills(&skills_dir, &cfg.tasks, options)?;
         summary.task_skills_created = created;
         summary.task_skills_updated = updated;
         ensure_symlinks_at(project_root)?;
@@ -865,6 +1324,19 @@ pub fn ensure_default_skills_at(project_root: &Path) -> Result<()> {
     if should_write {
         fs::create_dir_all(&env_dir)?;
         fs::write(&env_file, DEFAULT_ENV_SKILL)?;
+    }
+
+    let quality_dir = skills_dir.join("quality-bun-feature-delivery");
+    let quality_file = quality_dir.join("skill.md");
+    let should_write_quality = if quality_file.exists() {
+        let content = fs::read_to_string(&quality_file).unwrap_or_default();
+        content.contains("source: flow-default")
+    } else {
+        true
+    };
+    if should_write_quality {
+        fs::create_dir_all(&quality_dir)?;
+        fs::write(&quality_file, DEFAULT_QUALITY_BUN_FEATURE_DELIVERY_SKILL)?;
     }
 
     ensure_symlinks_at(project_root)?;
@@ -920,4 +1392,63 @@ pub fn ensure_project_skills_at(
 ) -> Result<SkillsEnforceSummary> {
     ensure_default_skills_at(project_root)?;
     enforce_skills_from_config(project_root, cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn sample_task(name: &str, description: Option<&str>) -> config::TaskConfig {
+        config::TaskConfig {
+            name: name.to_string(),
+            command: "echo hi".to_string(),
+            delegate_to_hub: false,
+            activate_on_cd_to_root: false,
+            dependencies: Vec::new(),
+            description: description.map(|v| v.to_string()),
+            shortcuts: Vec::new(),
+            interactive: false,
+            confirm_on_match: false,
+            on_cancel: None,
+            output_file: None,
+        }
+    }
+
+    #[test]
+    fn task_openai_yaml_defaults_to_no_implicit_invocation() {
+        let task = sample_task("deploy-all", Some("Deploy all services safely"));
+        let yaml = render_task_skill_openai_yaml(&task, false);
+        assert!(yaml.contains("display_name: \"Deploy All\""));
+        assert!(yaml.contains("allow_implicit_invocation: false"));
+        assert!(
+            yaml.contains("default_prompt: \"Use $deploy-all to Deploy all services safely.\"")
+        );
+    }
+
+    #[test]
+    fn task_openai_yaml_can_enable_implicit_invocation() {
+        let task = sample_task("build-web", Some("Build web assets"));
+        let yaml = render_task_skill_openai_yaml(&task, true);
+        assert!(yaml.contains("allow_implicit_invocation: true"));
+    }
+
+    #[test]
+    fn ensure_default_skills_writes_quality_bun_skill() {
+        let dir = tempdir().expect("tempdir");
+        ensure_default_skills_at(dir.path()).expect("default skills should be written");
+
+        let env = dir.path().join(".ai/skills/env/skill.md");
+        let quality = dir
+            .path()
+            .join(".ai/skills/quality-bun-feature-delivery/skill.md");
+
+        assert!(env.exists(), "env default skill should exist");
+        assert!(quality.exists(), "quality skill should exist");
+
+        let quality_content = fs::read_to_string(&quality).expect("quality skill readable");
+        assert!(quality_content.contains("name: quality-bun-feature-delivery"));
+        assert!(quality_content.contains("version: 2"));
+        assert!(quality_content.contains("source: flow-default"));
+    }
 }

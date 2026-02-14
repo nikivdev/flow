@@ -22,6 +22,8 @@ f setup --config ./flow.toml
 
 - If the project is not bootstrapped, it runs the bootstrap flow (`.ai/`, `.gitignore`).
 - If `flow.toml` is missing, it prompts to generate `setup` + `dev` tasks (AI via `gen` if available, otherwise manual prompts).
+- If `flow.toml` already exists, Flow non-destructively appends missing Codex baseline sections (`[skills]`, `[skills.codex]`, commit skill gate, and Bun testing gate in Bun contexts).
+- After baseline upgrades, Flow triggers a Codex skills reload (respecting `[skills.codex].force_reload_after_sync`) so open sessions pick up changes immediately.
 - If `flow.toml` defines a `setup` task, `f setup` runs that task.
 - Otherwise, it prints shell aliases from `[alias]` in `flow.toml`.
 - After successful completion, Flow writes a setup checkpoint to `.rise/setup.json` in the repo root.

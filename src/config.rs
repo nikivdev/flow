@@ -50,6 +50,9 @@ pub struct Config {
     /// Skills enforcement configuration (auto-sync/install).
     #[serde(default)]
     pub skills: Option<SkillsConfig>,
+    /// Anonymous usage analytics settings.
+    #[serde(default)]
+    pub analytics: Option<AnalyticsConfig>,
     /// Hive agents defined for this project (array format: [[agent]]).
     #[serde(default, rename = "agent")]
     pub agents: Vec<crate::hive::AgentConfig>,
@@ -190,6 +193,80 @@ pub struct CommitConfig {
         alias = "queueOnIssues"
     )]
     pub queue_on_issues: Option<bool>,
+    /// Quality gate configuration for commit-time feature doc/test enforcement.
+    #[serde(default)]
+    pub quality: Option<QualityConfig>,
+    /// Test-runner enforcement and pre-commit test gate settings.
+    #[serde(default)]
+    pub testing: Option<TestingConfig>,
+    /// Required workflow skills gate for commit-time enforcement.
+    #[serde(
+        default,
+        rename = "skill_gate",
+        alias = "skill-gate",
+        alias = "skillGate"
+    )]
+    pub skill_gate: Option<SkillGateConfig>,
+}
+
+/// Quality gate configuration: enforce documentation and test requirements at commit time.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct QualityConfig {
+    /// Gate mode: "warn" (default) | "block" | "off"
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Require feature docs for touched features (default: true)
+    #[serde(default)]
+    pub require_docs: Option<bool>,
+    /// Require test files for changed source code (default: true)
+    #[serde(default)]
+    pub require_tests: Option<bool>,
+    /// Auto-generate/update feature docs at commit time (default: true)
+    #[serde(default)]
+    pub auto_generate_docs: Option<bool>,
+    /// Doc detail level: "basic" | "detailed" (default: "basic")
+    #[serde(default)]
+    pub doc_level: Option<String>,
+    /// Glob patterns exempt from quality checks
+    #[serde(default)]
+    pub exempt_paths: Option<Vec<String>>,
+    /// Days before a feature doc is flagged stale (default: 30)
+    #[serde(default)]
+    pub stale_days: Option<u32>,
+}
+
+/// Testing gate configuration: enforce Bun test runner usage and quick local checks.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TestingConfig {
+    /// Gate mode: "warn" (default) | "block" | "off"
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Required runner (currently "bun" only). Default: "bun".
+    #[serde(default)]
+    pub runner: Option<String>,
+    /// In Bun repo layout, require `bun bd test` instead of `bun test`. Default: true.
+    #[serde(default)]
+    pub bun_repo_strict: Option<bool>,
+    /// Require at least one related test for staged source changes. Default: true.
+    #[serde(default)]
+    pub require_related_tests: Option<bool>,
+    /// Soft budget in seconds for the local test gate; emits warning if exceeded. Default: 15.
+    #[serde(default)]
+    pub max_local_gate_seconds: Option<u64>,
+}
+
+/// Skill gate configuration: require specific workflow skills before commit.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SkillGateConfig {
+    /// Gate mode: "warn" | "block" | "off"
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Required skill names (must exist in .ai/skills).
+    #[serde(default)]
+    pub required: Vec<String>,
+    /// Optional per-skill minimum version (from skill frontmatter "version").
+    #[serde(default, rename = "min_version", alias = "min-version")]
+    pub min_version: Option<HashMap<String, u32>>,
 }
 
 /// Jujutsu (jj) workflow config.
@@ -375,6 +452,7 @@ impl Default for Config {
             remote_servers: Vec::new(),
             tasks: Vec::new(),
             skills: None,
+            analytics: None,
             agents: Vec::new(),
             agents_registry: HashMap::new(),
             dependencies: HashMap::new(),
@@ -431,9 +509,55 @@ pub struct SkillsConfig {
     /// Skills to install from the registry when missing.
     #[serde(default)]
     pub install: Vec<String>,
+    /// Codex-specific skills behavior.
+    #[serde(default)]
+    pub codex: Option<SkillsCodexConfig>,
     /// Optional seq scraper integration for dependency skill generation.
     #[serde(default)]
     pub seq: Option<SkillsSeqConfig>,
+}
+
+/// Anonymous usage analytics settings.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AnalyticsConfig {
+    /// Force analytics enabled/disabled regardless of local prompt state.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Ingest endpoint for analytics events.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Client-side sampling rate (0.0..1.0, default 1.0).
+    #[serde(default)]
+    pub sample_rate: Option<f32>,
+}
+
+/// Codex-focused skills settings.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SkillsCodexConfig {
+    /// Generate `agents/openai.yaml` metadata for task-synced skills.
+    #[serde(
+        default,
+        rename = "generate_openai_yaml",
+        alias = "generate-openai-yaml",
+        alias = "generateOpenaiYaml"
+    )]
+    pub generate_openai_yaml: Option<bool>,
+    /// After sync/install, force Codex app-server to reload skills for this cwd.
+    #[serde(
+        default,
+        rename = "force_reload_after_sync",
+        alias = "force-reload-after-sync",
+        alias = "forceReloadAfterSync"
+    )]
+    pub force_reload_after_sync: Option<bool>,
+    /// Default implicit invocation policy for task-synced skills metadata.
+    #[serde(
+        default,
+        rename = "task_skill_allow_implicit_invocation",
+        alias = "task-skill-allow-implicit-invocation",
+        alias = "taskSkillAllowImplicitInvocation"
+    )]
+    pub task_skill_allow_implicit_invocation: Option<bool>,
 }
 
 /// Seq-backed skills fetch configuration.
@@ -710,6 +834,33 @@ pub struct ServerConfig {
     pub env: HashMap<String, String>,
     /// Whether this server should be started automatically with the daemon.
     pub autostart: bool,
+}
+
+impl ServerConfig {
+    pub fn to_daemon_config(&self) -> DaemonConfig {
+        DaemonConfig {
+            name: self.name.clone(),
+            binary: self.command.clone(),
+            command: None,
+            args: self.args.clone(),
+            working_dir: self
+                .working_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            port: self.port,
+            env: self.env.clone(),
+            autostart: self.autostart,
+            restart: Some(DaemonRestartPolicy::OnFailure),
+            description: Some(format!("Dev server: {}", self.name)),
+            health_url: None,
+            host: None,
+            boot: false,
+            autostop: false,
+            retry: Some(3),
+            ready_delay: None,
+            ready_output: None,
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for ServerConfig {
@@ -1601,6 +1752,9 @@ fn merge_config(base: &mut Config, other: Config) {
             }
         }
     }
+    if base.analytics.is_none() {
+        base.analytics = other.analytics;
+    }
     if base.jj.is_none() {
         base.jj = other.jj;
     }
@@ -2016,7 +2170,6 @@ trace_terminal_io = true
     }
 
     #[test]
-    #[test]
     fn options_commit_with_check_timeout_parses() {
         let toml = r#"
 [options]
@@ -2054,5 +2207,90 @@ commit_with_check_gitedit_mirror = true
 "#;
         let cfg: Config = toml::from_str(toml).expect("options table should parse");
         assert_eq!(cfg.options.commit_with_check_gitedit_mirror, Some(true));
+    }
+
+    #[test]
+    fn commit_testing_config_parses() {
+        let toml = r#"
+[commit.testing]
+mode = "block"
+runner = "bun"
+bun_repo_strict = true
+require_related_tests = true
+max_local_gate_seconds = 20
+"#;
+        let cfg: Config = toml::from_str(toml).expect("commit.testing should parse");
+        let commit = cfg.commit.expect("commit config expected");
+        let testing = commit.testing.expect("testing config expected");
+        assert_eq!(testing.mode.as_deref(), Some("block"));
+        assert_eq!(testing.runner.as_deref(), Some("bun"));
+        assert_eq!(testing.bun_repo_strict, Some(true));
+        assert_eq!(testing.require_related_tests, Some(true));
+        assert_eq!(testing.max_local_gate_seconds, Some(20));
+    }
+
+    #[test]
+    fn commit_skill_gate_config_parses() {
+        let toml = r#"
+[commit.skill_gate]
+mode = "block"
+required = ["quality-bun-feature-delivery"]
+
+[commit.skill_gate.min_version]
+quality-bun-feature-delivery = 2
+"#;
+        let cfg: Config = toml::from_str(toml).expect("commit.skill_gate should parse");
+        let commit = cfg.commit.expect("commit config expected");
+        let skill_gate = commit.skill_gate.expect("skill gate config expected");
+        assert_eq!(skill_gate.mode.as_deref(), Some("block"));
+        assert_eq!(
+            skill_gate.required,
+            vec!["quality-bun-feature-delivery".to_string()]
+        );
+        let min_version = skill_gate.min_version.expect("min_version map expected");
+        assert_eq!(min_version.get("quality-bun-feature-delivery"), Some(&2));
+    }
+
+    #[test]
+    fn skills_codex_config_parses() {
+        let toml = r#"
+[skills]
+sync_tasks = true
+install = ["quality-bun-feature-delivery"]
+
+[skills.codex]
+generate_openai_yaml = true
+force_reload_after_sync = true
+task_skill_allow_implicit_invocation = false
+"#;
+        let cfg: Config = toml::from_str(toml).expect("skills.codex should parse");
+        let skills = cfg.skills.expect("skills config expected");
+        assert!(skills.sync_tasks);
+        assert_eq!(
+            skills.install,
+            vec!["quality-bun-feature-delivery".to_string()]
+        );
+        let codex = skills.codex.expect("skills.codex expected");
+        assert_eq!(codex.generate_openai_yaml, Some(true));
+        assert_eq!(codex.force_reload_after_sync, Some(true));
+        assert_eq!(codex.task_skill_allow_implicit_invocation, Some(false));
+    }
+
+    #[test]
+    fn analytics_config_parses() {
+        let toml = r#"
+[analytics]
+enabled = true
+endpoint = "http://127.0.0.1:7331/v1/trace"
+sample_rate = 0.5
+"#;
+        let cfg: Config = toml::from_str(toml).expect("analytics config should parse");
+        let analytics = cfg.analytics.expect("analytics config expected");
+        assert_eq!(analytics.enabled, Some(true));
+        assert_eq!(
+            analytics.endpoint.as_deref(),
+            Some("http://127.0.0.1:7331/v1/trace")
+        );
+        assert_eq!(analytics.sample_rate, Some(0.5));
     }
 }

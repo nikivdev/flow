@@ -168,6 +168,11 @@ pub enum Commands {
     )]
     Trace(TraceCommand),
     #[command(
+        about = "Manage anonymous usage analytics preferences and local queue.",
+        long_about = "Inspect, enable/disable, export, or purge local anonymous usage analytics events."
+    )]
+    Analytics(AnalyticsCommand),
+    #[command(
         about = "List registered projects.",
         long_about = "Shows all projects that have been registered (projects with a 'name' field in flow.toml)."
     )]
@@ -538,6 +543,26 @@ pub struct TraceCommand {
     pub action: Option<TraceAction>,
     #[command(flatten)]
     pub events: TracesOpts,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AnalyticsCommand {
+    #[command(subcommand)]
+    pub action: Option<AnalyticsAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AnalyticsAction {
+    /// Show analytics status and queue metadata.
+    Status,
+    /// Enable anonymous usage analytics.
+    Enable,
+    /// Disable anonymous usage analytics.
+    Disable,
+    /// Print queued analytics events.
+    Export,
+    /// Delete all queued analytics events.
+    Purge,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -1339,6 +1364,15 @@ pub struct CommitOpts {
     /// Max tokens for AI session context (default: 1000).
     #[arg(long, short = 't', default_value = "1000")]
     pub tokens: usize,
+    /// Skip all quality gates for this commit.
+    #[arg(long)]
+    pub skip_quality: bool,
+    /// Skip documentation requirements only.
+    #[arg(long)]
+    pub skip_docs: bool,
+    /// Skip test requirements only.
+    #[arg(long)]
+    pub skip_tests: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2422,6 +2456,11 @@ pub enum SkillsAction {
         /// Skill name to install.
         name: String,
     },
+    /// Publish a local skill to the shared registry.
+    Publish {
+        /// Skill name to publish.
+        name: String,
+    },
     /// Search for skills in the remote registry.
     Search {
         /// Search query (optional).
@@ -2429,6 +2468,8 @@ pub enum SkillsAction {
     },
     /// Sync flow.toml tasks as skills.
     Sync,
+    /// Force Codex app-server to rescan skills from disk for this cwd.
+    Reload,
     /// Fetch dependency skills via seq scraper integration.
     Fetch(SkillsFetchCommand),
 }

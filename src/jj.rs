@@ -102,6 +102,20 @@ fn run_sync(opts: JjSyncOpts) -> Result<()> {
     let target = resolve_rebase_target(&repo_root, &dest, &remote);
     jj_run_in(&repo_root, &["rebase", "-d", &target])?;
 
+    // Check for conflicts after rebase
+    let has_conflicts = jj_capture_in(&repo_root, &["log", "-r", "conflicts()", "--no-graph", "-T", "commit_id"])
+        .map(|out| !out.trim().is_empty())
+        .unwrap_or(false);
+    if has_conflicts {
+        let details = jj_capture_in(&repo_root, &["log", "-r", "conflicts()", "--no-graph"])
+            .unwrap_or_default();
+        eprintln!("\n⚠ Rebase produced conflicts:");
+        for line in details.lines().filter(|l| !l.trim().is_empty()) {
+            eprintln!("  {}", line.trim());
+        }
+        eprintln!("\nResolve with: jj resolve");
+    }
+
     if opts.no_push {
         return Ok(());
     }

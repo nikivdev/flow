@@ -32,11 +32,28 @@ shortcuts = ["s"]                 # optional aliases for task lookup
 [skills]              # optional: skill enforcement (gitignored by default)
 sync_tasks = true     # optional: generate skills for tasks
 install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/skills preferred, else registry)
+[skills.codex]        # optional: Codex-specific skill metadata/reload behavior
+# generate_openai_yaml = true
+# force_reload_after_sync = true
+# task_skill_allow_implicit_invocation = false
 [skills.seq]          # optional: seq-backed dependency skill fetching defaults
 # seq_repo = "~/code/seq"
 # out_dir = ".ai/skills"
 # scraper_base_url = "http://127.0.0.1:7444"
 # allow_direct_fallback = true
+
+[commit.testing]      # optional: local commit-time test gate
+# mode = "warn"       # "warn" | "block" | "off"
+# runner = "bun"      # currently optimized for bun in Bun repos
+# bun_repo_strict = true
+# require_related_tests = true
+# max_local_gate_seconds = 20
+
+[commit.skill_gate]   # optional: require specific local skills before commit
+# mode = "warn"       # "warn" | "block" | "off"
+# required = ["quality-bun-feature-delivery"]
+[commit.skill_gate.min_version]
+# quality-bun-feature-delivery = 2
 
 [[alias]]             # optional shell aliases (or use [aliases] table)
 fr = "f run"          # key/value pairs of alias -> command
@@ -60,10 +77,42 @@ fr = "f run"
 - `shortcuts`: case-insensitive aliases and abbreviations (auto-generated from task names) resolve tasks.
 - `alias`/`aliases`: emitted by `f setup` as shell `alias` lines.
 - `[skills]`: optional skill enforcement; `sync_tasks` generates `.ai/skills` from tasks and `install` ensures registry skills are present (skills are gitignored by default).
+- `[skills.codex]`: optional Codex tuning; task skill `agents/openai.yaml` generation, post-sync force reload, and implicit invocation policy defaults.
 - `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
+- `[commit.testing]`: optional local testing gate evaluated during `f commit`; supports Bun-first strict mode for Bun repos.
+- `[commit.skill_gate]`: optional required-skill policy for `f commit`; can enforce presence and minimum skill versions.
 
 ## Notes
 
 - Unsupported keys are ignored or will error; keep to this schema.
 - Managed env tooling currently assumes `flox` is installed.
 - Paths in commands are executed via `/bin/sh -c` in the config’s directory unless overridden.
+
+## Codex-First Baseline
+
+Use this baseline when optimizing for Codex/Claude sessions and tight feedback loops:
+
+```toml
+[skills]
+sync_tasks = true
+install = ["quality-bun-feature-delivery"]
+
+[skills.codex]
+generate_openai_yaml = true
+force_reload_after_sync = true
+task_skill_allow_implicit_invocation = false
+
+[commit.testing]
+mode = "block"
+runner = "bun"
+bun_repo_strict = true
+require_related_tests = true
+max_local_gate_seconds = 20
+
+[commit.skill_gate]
+mode = "block"
+required = ["quality-bun-feature-delivery"]
+
+[commit.skill_gate.min_version]
+quality-bun-feature-delivery = 2
+```

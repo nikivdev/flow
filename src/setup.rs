@@ -21,6 +21,7 @@ use crate::{
 pub fn run(opts: SetupOpts) -> Result<()> {
     let (project_root, config_path) = resolve_project_root(&opts.config)?;
     let mut created_flow_toml = false;
+    let mut upgraded_flow_toml = false;
 
     if !start::is_bootstrapped(&project_root) || !config_path.exists() {
         start::run_at(&project_root)?;
@@ -43,6 +44,18 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         create_flow_toml_auto(&project_root, &config_path)?;
         created_flow_toml = true;
     }
+    if !created_flow_toml {
+        match maybe_upgrade_existing_flow_toml(&project_root, &config_path) {
+            Ok(true) => {
+                upgraded_flow_toml = true;
+                println!("Updated flow.toml with Codex-first baseline sections.");
+            }
+            Ok(false) => {}
+            Err(err) => {
+                eprintln!("⚠ failed to update flow.toml baseline: {err}");
+            }
+        }
+    }
 
     let (config_path, cfg) = load_project_config(config_path)?;
 
@@ -62,6 +75,14 @@ pub fn run(opts: SetupOpts) -> Result<()> {
                 skills_summary.installed_skills.join(", ")
             );
         }
+    }
+
+    if upgraded_flow_toml {
+        skills::maybe_reload_codex_skills(
+            &project_root,
+            cfg.skills.as_ref(),
+            "setup baseline upgrade",
+        );
     }
 
     ensure_bike_gitignore(&project_root)?;
@@ -853,8 +874,10 @@ fn create_flow_toml_interactive(project_root: &Path, config_path: &Path) -> Resu
         println!("Using detected defaults. Edit flow.toml if needed.");
     }
 
-    let content =
+    let mut content =
         ensure_trailing_newline(content.unwrap_or_else(|| default_flow_template(project_root)));
+    let enable_bun_testing_gate = detect_bun_context(project_root, &content);
+    content = ensure_codex_flow_baseline(&content, enable_bun_testing_gate);
 
     if !used_ai_content || !streamed_ai_output {
         println!("\nProposed flow.toml:\n");
@@ -867,11 +890,31 @@ fn create_flow_toml_interactive(project_root: &Path, config_path: &Path) -> Resu
 
 fn create_flow_toml_auto(project_root: &Path, config_path: &Path) -> Result<()> {
     println!("No flow.toml found. Creating with detected defaults.\n");
-    let content = ensure_trailing_newline(default_flow_template(project_root));
+    let mut content = ensure_trailing_newline(default_flow_template(project_root));
+    let enable_bun_testing_gate = detect_bun_context(project_root, &content);
+    content = ensure_codex_flow_baseline(&content, enable_bun_testing_gate);
     println!("{}", content);
     write_flow_toml(config_path, &content)?;
     println!("Created flow.toml");
     Ok(())
+}
+
+fn maybe_upgrade_existing_flow_toml(project_root: &Path, config_path: &Path) -> Result<bool> {
+    if !config_path.exists() {
+        return Ok(false);
+    }
+
+    let current = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let current = ensure_trailing_newline(current);
+    let enable_bun_testing_gate = detect_bun_context(project_root, &current);
+    let updated = ensure_codex_flow_baseline(&current, enable_bun_testing_gate);
+    if updated == current {
+        return Ok(false);
+    }
+
+    write_flow_toml(config_path, &updated)?;
+    Ok(true)
 }
 
 fn repair_existing_host_config(
@@ -1624,6 +1667,7 @@ fn generate_flow_toml_with_agent(project_root: &Path, hint: Option<&str>) -> Res
     prompt.push_str("- Add descriptions and shortcuts for setup (s) and dev (d).\n");
     prompt.push_str("- Use [deps] for required binaries.\n");
     prompt.push_str("- If a task prompts for input, set interactive = true.\n");
+    prompt.push_str("- Include Codex baseline sections: [skills], [skills.codex], [commit.skill_gate], and [commit.skill_gate.min_version].\n");
     prompt.push_str(
         "- Output ONLY the flow.toml content in a ```toml code block, no other commentary.\n\n",
     );
@@ -1727,6 +1771,7 @@ fn generate_flow_toml_with_agent_streaming(
     prompt.push_str("- Add descriptions and shortcuts for setup (s) and dev (d).\n");
     prompt.push_str("- Use [deps] for required binaries.\n");
     prompt.push_str("- If a task prompts for input, set interactive = true.\n");
+    prompt.push_str("- Include Codex baseline sections: [skills], [skills.codex], [commit.skill_gate], and [commit.skill_gate.min_version].\n");
     prompt.push_str(
         "- Output ONLY the flow.toml content in a ```toml code block, no other commentary.\n\n",
     );
@@ -2852,6 +2897,7 @@ fn render_flow_toml(setup_cmd: &str, dev_cmd: &str, deps: Vec<DepSpec>) -> Strin
         "Run development server"
     };
 
+    let enable_bun_testing_gate = template_uses_bun(setup_cmd, dev_cmd, &deps);
     let mut out = String::from("version = 1\n\n");
     out.push_str("[[tasks]]\n");
     out.push_str("name = \"setup\"\n");
@@ -2903,7 +2949,105 @@ fn render_flow_toml(setup_cmd: &str, dev_cmd: &str, deps: Vec<DepSpec>) -> Strin
         }
     }
 
-    out
+    ensure_codex_flow_baseline(&out, enable_bun_testing_gate)
+}
+
+fn contains_toml_section(content: &str, section_header: &str) -> bool {
+    content.lines().any(|line| line.trim() == section_header)
+}
+
+fn append_toml_section_if_missing(out: &mut String, section_header: &str, section_body: &str) {
+    if contains_toml_section(out, section_header) {
+        return;
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    out.push_str(section_body.trim_end());
+    out.push('\n');
+}
+
+fn ensure_codex_flow_baseline(content: &str, enable_bun_testing_gate: bool) -> String {
+    let mut out = ensure_trailing_newline(content.to_string());
+
+    append_toml_section_if_missing(
+        &mut out,
+        "[skills]",
+        r#"[skills]
+sync_tasks = true
+install = ["quality-bun-feature-delivery"]"#,
+    );
+
+    append_toml_section_if_missing(
+        &mut out,
+        "[skills.codex]",
+        r#"[skills.codex]
+generate_openai_yaml = true
+force_reload_after_sync = true
+task_skill_allow_implicit_invocation = false"#,
+    );
+
+    append_toml_section_if_missing(
+        &mut out,
+        "[commit.skill_gate]",
+        r#"[commit.skill_gate]
+mode = "block"
+required = ["quality-bun-feature-delivery"]"#,
+    );
+
+    append_toml_section_if_missing(
+        &mut out,
+        "[commit.skill_gate.min_version]",
+        r#"[commit.skill_gate.min_version]
+quality-bun-feature-delivery = 2"#,
+    );
+
+    if enable_bun_testing_gate {
+        append_toml_section_if_missing(
+            &mut out,
+            "[commit.testing]",
+            r#"[commit.testing]
+mode = "block"
+runner = "bun"
+bun_repo_strict = true
+require_related_tests = true
+max_local_gate_seconds = 20"#,
+        );
+    }
+
+    ensure_trailing_newline(out)
+}
+
+fn template_uses_bun(setup_cmd: &str, dev_cmd: &str, deps: &[DepSpec]) -> bool {
+    if command_mentions_tool(setup_cmd, "bun") || command_mentions_tool(dev_cmd, "bun") {
+        return true;
+    }
+    deps.iter().any(|dep| match dep {
+        DepSpec::Single(name, cmd) => {
+            name.eq_ignore_ascii_case("bun") || cmd.eq_ignore_ascii_case("bun")
+        }
+        DepSpec::Multiple(name, cmds) => {
+            name.eq_ignore_ascii_case("bun")
+                || cmds.iter().any(|cmd| cmd.eq_ignore_ascii_case("bun"))
+        }
+    })
+}
+
+fn detect_bun_context(project_root: &Path, content: &str) -> bool {
+    if project_root.join("bun.lock").exists() || project_root.join("bun.lockb").exists() {
+        return true;
+    }
+    if project_root.join("build.zig").exists() && project_root.join("src/bun.js").exists() {
+        return true;
+    }
+    let lowered = content.to_ascii_lowercase();
+    lowered.contains("bun install")
+        || lowered.contains("bun run")
+        || lowered.contains("bun dev")
+        || lowered.contains("bun test")
 }
 
 fn command_needs_interactive(command: &str) -> bool {
@@ -3053,6 +3197,7 @@ fn escape_single_quotes(value: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use tempfile::tempdir;
 
     #[test]
     fn formats_alias_lines_in_order() {
@@ -3074,5 +3219,79 @@ mod tests {
     fn escapes_single_quotes_in_commands() {
         let cmd = "echo 'hello'";
         assert_eq!(escape_single_quotes(cmd), "echo '\\''hello'\\''");
+    }
+
+    #[test]
+    fn render_flow_toml_includes_codex_skill_baseline() {
+        let toml = render_flow_toml("cargo build --locked", "cargo run", vec![]);
+        assert!(toml.contains("[skills]"));
+        assert!(toml.contains("[skills.codex]"));
+        assert!(toml.contains("[commit.skill_gate]"));
+        assert!(toml.contains("[commit.skill_gate.min_version]"));
+        assert!(!toml.contains("[commit.testing]"));
+    }
+
+    #[test]
+    fn render_flow_toml_enables_bun_testing_gate_for_bun_templates() {
+        let toml = render_flow_toml(
+            "bun install",
+            "bun run dev",
+            vec![DepSpec::Single("bun", "bun")],
+        );
+        assert!(toml.contains("[commit.testing]"));
+        assert!(toml.contains("runner = \"bun\""));
+        assert!(toml.contains("mode = \"block\""));
+    }
+
+    #[test]
+    fn upgrade_existing_flow_toml_adds_codex_baseline() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("flow.toml");
+        fs::write(
+            &config_path,
+            r#"version = 1
+
+[[tasks]]
+name = "setup"
+command = "echo setup"
+"#,
+        )
+        .expect("write flow.toml");
+
+        let changed = maybe_upgrade_existing_flow_toml(dir.path(), &config_path)
+            .expect("upgrade should succeed");
+        assert!(changed, "existing file should be upgraded");
+
+        let updated = fs::read_to_string(&config_path).expect("read updated flow.toml");
+        assert!(updated.contains("[skills]"));
+        assert!(updated.contains("[skills.codex]"));
+        assert!(updated.contains("[commit.skill_gate]"));
+        assert!(updated.contains("[commit.skill_gate.min_version]"));
+        assert!(!updated.contains("[commit.testing]"));
+    }
+
+    #[test]
+    fn upgrade_existing_flow_toml_adds_bun_testing_gate_in_bun_context() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("flow.toml");
+        fs::write(
+            &config_path,
+            r#"version = 1
+
+[[tasks]]
+name = "setup"
+command = "bun install"
+"#,
+        )
+        .expect("write flow.toml");
+        fs::write(dir.path().join("bun.lock"), "").expect("write bun.lock");
+
+        let changed = maybe_upgrade_existing_flow_toml(dir.path(), &config_path)
+            .expect("upgrade should succeed");
+        assert!(changed, "existing file should be upgraded");
+
+        let updated = fs::read_to_string(&config_path).expect("read updated flow.toml");
+        assert!(updated.contains("[commit.testing]"));
+        assert!(updated.contains("runner = \"bun\""));
     }
 }

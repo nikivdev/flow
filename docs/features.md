@@ -311,6 +311,9 @@ f skills install github-pr
 ```bash
 # Generate skills from flow.toml tasks
 f skills sync
+
+# Force Codex to rescan skills for the current cwd
+f skills reload
 ```
 
 This creates a skill for each task in `flow.toml`, so Codex automatically knows about your project's workflows.
@@ -320,7 +323,32 @@ To auto-sync tasks or auto-install curated skills on demand, add a `[skills]` se
 ```toml
 [skills]
 sync_tasks = true
-install = ["linear", "github-pr"]
+install = ["quality-bun-feature-delivery"]
+
+[skills.codex]
+generate_openai_yaml = true
+force_reload_after_sync = true
+task_skill_allow_implicit_invocation = false
+```
+
+`[skills.codex]` keeps agent context tight by generating `agents/openai.yaml` for task skills and automatically refreshing Codex’s skill cache after sync/install.
+
+For strict local quality enforcement on commit:
+
+```toml
+[commit.testing]
+mode = "block"
+runner = "bun"
+bun_repo_strict = true
+require_related_tests = true
+max_local_gate_seconds = 20
+
+[commit.skill_gate]
+mode = "block"
+required = ["quality-bun-feature-delivery"]
+
+[commit.skill_gate.min_version]
+quality-bun-feature-delivery = 2
 ```
 
 ### Fetching Dependency Skills via seq
@@ -415,6 +443,8 @@ f init
 # Fix common TOML syntax errors
 f fixup
 ```
+
+`f init` now seeds a Codex-first baseline (`[skills]`, `[skills.codex]`, and commit skill-gate sections) so task sync + skill enforcement are enabled from day one.
 
 ### Health Check
 
