@@ -61,8 +61,7 @@ pub fn run(cmd: GitignoreCommand) -> Result<()> {
         .unwrap_or(GitignoreAction::Audit(GitignoreScanOpts {
             root: None,
             all: false,
-        }))
-    {
+        })) {
         GitignoreAction::Audit(opts) => run_scan(opts, false),
         GitignoreAction::Fix(opts) => run_scan(opts, true),
         GitignoreAction::PolicyInit(opts) => init_policy_file(opts),
@@ -266,8 +265,7 @@ fn init_policy_file(opts: GitignorePolicyInitOpts) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid policy path {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
 
     if path.exists() && !opts.force {
         bail!(
@@ -389,7 +387,10 @@ fn git_capture_global_config(key: &str) -> Result<Option<String>> {
     }
 }
 
-fn staged_gitignore_violations(repo_root: &Path, policy: &GitignorePolicy) -> Result<Vec<Violation>> {
+fn staged_gitignore_violations(
+    repo_root: &Path,
+    policy: &GitignorePolicy,
+) -> Result<Vec<Violation>> {
     let staged_files = staged_gitignore_files(repo_root)?;
     if staged_files.is_empty() {
         return Ok(Vec::new());
@@ -750,7 +751,10 @@ mod tests {
     #[test]
     fn normalize_entry_ignores_comments_and_slashes() {
         assert_eq!(normalize_entry("/.beads/"), Some(".beads/".to_string()));
-        assert_eq!(normalize_entry(".rise/ # local"), Some(".rise/".to_string()));
+        assert_eq!(
+            normalize_entry(".rise/ # local"),
+            Some(".rise/".to_string())
+        );
         assert_eq!(normalize_entry("# note"), None);
     }
 

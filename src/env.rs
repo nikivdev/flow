@@ -1258,7 +1258,9 @@ fn login() -> Result<()> {
     }
 
     if !token.starts_with("cloud_") && !token.starts_with("flow_") {
-        println!("Warning: Token doesn't start with 'cloud_' or 'flow_' - are you sure this is correct?");
+        println!(
+            "Warning: Token doesn't start with 'cloud_' or 'flow_' - are you sure this is correct?"
+        );
     }
 
     store_auth_token(&mut auth, token)?;

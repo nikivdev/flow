@@ -323,6 +323,31 @@ sync_tasks = true
 install = ["linear", "github-pr"]
 ```
 
+### Fetching Dependency Skills via seq
+
+```bash
+# Fetch by dependency name
+f skills fetch dep react
+
+# Auto-discover dependencies and fetch top N per ecosystem
+f skills fetch auto --top 3
+
+# Fetch from URLs
+f skills fetch url https://docs.python.org/3/library/asyncio.html --name asyncio
+```
+
+Optional defaults in `flow.toml`:
+
+```toml
+[skills.seq]
+seq_repo = "~/code/seq"
+out_dir = ".ai/skills"
+scraper_base_url = "http://127.0.0.1:7444"
+allow_direct_fallback = true
+top = 3
+ecosystems = "npm,pypi,cargo,swift"
+```
+
 ### Skill Structure
 
 `.ai/skills/` is generated locally and should not be committed.

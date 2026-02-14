@@ -10,11 +10,11 @@ use flowd::{
         ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
     },
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fish_install, fish_trace,
-    fix, fixup, git_guard, gitignore_policy, hash, health, help_search, history, hive, home, hub, info, init,
-    init_tracing, install, jj, latest, log_server, macos, notify, otp, palette, parallel,
-    processes, projects, proxy, publish, push, registry, release, repos, services, setup, skills,
-    ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade,
-    upstream, web,
+    fix, fixup, git_guard, gitignore_policy, hash, health, help_search, history, hive, home, hub,
+    info, init, init_tracing, install, jj, latest, log_server, macos, notify, otp, palette,
+    parallel, processes, projects, proxy, publish, push, registry, release, repos, services, setup,
+    skills, ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo,
+    upgrade, upstream, web,
 };
 
 fn main() -> Result<()> {

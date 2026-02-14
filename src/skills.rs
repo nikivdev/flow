@@ -8,7 +8,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{SkillsAction, SkillsCommand};
+use crate::cli::{SkillsAction, SkillsCommand, SkillsFetchAction, SkillsFetchCommand};
 use crate::config;
 use crate::start;
 
@@ -42,6 +42,7 @@ pub fn run(cmd: SkillsCommand) -> Result<()> {
         SkillsAction::Install { name } => install_skill(&name)?,
         SkillsAction::Search { query } => list_remote_skills(query.as_deref())?,
         SkillsAction::Sync => sync_skills()?,
+        SkillsAction::Fetch(fetch) => fetch_skills(&fetch)?,
     }
 
     Ok(())
@@ -55,6 +56,54 @@ fn get_skills_dir() -> Result<PathBuf> {
 
 fn get_skills_dir_at(project_root: &Path) -> PathBuf {
     project_root.join(".ai").join("skills")
+}
+
+fn skill_file_lower(skill_dir: &Path) -> PathBuf {
+    skill_dir.join("skill.md")
+}
+
+fn skill_file_upper(skill_dir: &Path) -> PathBuf {
+    skill_dir.join("SKILL.md")
+}
+
+fn find_skill_file(skill_dir: &Path) -> Option<PathBuf> {
+    let lower = skill_file_lower(skill_dir);
+    if lower.exists() {
+        return Some(lower);
+    }
+    let upper = skill_file_upper(skill_dir);
+    if upper.exists() {
+        return Some(upper);
+    }
+    None
+}
+
+fn normalize_single_skill_file(skill_dir: &Path) -> Result<bool> {
+    let lower = skill_file_lower(skill_dir);
+    if lower.exists() {
+        return Ok(false);
+    }
+    let upper = skill_file_upper(skill_dir);
+    if !upper.exists() {
+        return Ok(false);
+    }
+    fs::rename(&upper, &lower)?;
+    Ok(true)
+}
+
+fn normalize_skill_files(skills_dir: &Path) -> Result<usize> {
+    if !skills_dir.exists() {
+        return Ok(0);
+    }
+    let mut renamed = 0usize;
+    for entry in fs::read_dir(skills_dir).context("failed to read skills directory")? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() && normalize_single_skill_file(&path)? {
+            renamed += 1;
+        }
+    }
+    Ok(renamed)
 }
 
 /// Ensure symlinks exist from .claude/skills and .codex/skills to .ai/skills
@@ -148,12 +197,8 @@ fn list_skills() -> Result<()> {
                 .unwrap_or("")
                 .to_string();
 
-            let skill_file = path.join("skill.md");
-            let description = if skill_file.exists() {
-                parse_skill_description(&skill_file)
-            } else {
-                None
-            };
+            let description =
+                find_skill_file(&path).and_then(|skill_file| parse_skill_description(&skill_file));
 
             skills.push((name, description));
         }
@@ -179,7 +224,7 @@ fn list_skills() -> Result<()> {
 }
 
 /// Parse the description from a skill.md file.
-fn parse_skill_description(path: &PathBuf) -> Option<String> {
+fn parse_skill_description(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
 
     // Look for description in YAML frontmatter
@@ -248,11 +293,10 @@ TODO: Add instructions for this skill.
 /// Show skill details.
 fn show_skill(name: &str) -> Result<()> {
     let skills_dir = get_skills_dir()?;
-    let skill_file = skills_dir.join(name).join("skill.md");
-
-    if !skill_file.exists() {
+    let skill_dir = skills_dir.join(name);
+    let Some(skill_file) = find_skill_file(&skill_dir) else {
         bail!("Skill '{}' not found", name);
-    }
+    };
 
     let content = fs::read_to_string(&skill_file).context("failed to read skill.md")?;
 
@@ -264,15 +308,18 @@ fn show_skill(name: &str) -> Result<()> {
 /// Edit a skill in the user's editor.
 fn edit_skill(name: &str) -> Result<()> {
     let skills_dir = get_skills_dir()?;
-    let skill_file = skills_dir.join(name).join("skill.md");
-
-    if !skill_file.exists() {
+    let skill_dir = skills_dir.join(name);
+    let skill_file = if normalize_single_skill_file(&skill_dir)? {
+        skill_file_lower(&skill_dir)
+    } else if let Some(path) = find_skill_file(&skill_dir) {
+        path
+    } else {
         bail!(
             "Skill '{}' not found. Create it with: f skills new {}",
             name,
             name
         );
-    }
+    };
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
 
@@ -325,6 +372,219 @@ fn read_local_skill_content(name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn load_seq_config(project_root: &Path) -> Result<Option<config::SkillsSeqConfig>> {
+    let flow_toml = project_root.join("flow.toml");
+    if !flow_toml.exists() {
+        return Ok(None);
+    }
+    let cfg = config::load(&flow_toml)?;
+    Ok(cfg.skills.and_then(|skills| skills.seq))
+}
+
+fn default_seq_repo() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        return home.join("code").join("seq");
+    }
+    PathBuf::from("/Users/nikiv/code/seq")
+}
+
+fn resolve_path_arg(raw: &str, base: &Path) -> PathBuf {
+    let expanded = config::expand_path(raw);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        base.join(expanded)
+    }
+}
+
+fn resolve_seq_script_path(
+    project_root: &Path,
+    fetch: &SkillsFetchCommand,
+    seq_cfg: Option<&config::SkillsSeqConfig>,
+) -> PathBuf {
+    if let Some(raw) = fetch
+        .script_path
+        .as_deref()
+        .or_else(|| seq_cfg.and_then(|cfg| cfg.script_path.as_deref()))
+    {
+        return resolve_path_arg(raw, project_root);
+    }
+
+    let repo = if let Some(raw) = fetch
+        .seq_repo
+        .as_deref()
+        .or_else(|| seq_cfg.and_then(|cfg| cfg.seq_repo.as_deref()))
+    {
+        resolve_path_arg(raw, project_root)
+    } else {
+        default_seq_repo()
+    };
+    repo.join("tools").join("teach_deps.py")
+}
+
+fn fetch_skills(fetch: &SkillsFetchCommand) -> Result<()> {
+    let project_root = std::env::current_dir().context("failed to get current directory")?;
+    let seq_cfg = load_seq_config(&project_root)?;
+    let seq_cfg_ref = seq_cfg.as_ref();
+
+    if let Some(mode) = seq_cfg_ref.and_then(|cfg| cfg.mode.as_deref()) {
+        if mode != "local-cli" {
+            println!(
+                "warning: [skills.seq] mode='{}' is not implemented yet; using local-cli",
+                mode
+            );
+        }
+    }
+
+    let script_path = resolve_seq_script_path(&project_root, fetch, seq_cfg_ref);
+    if !script_path.exists() {
+        bail!(
+            "seq teach script not found at {} (set [skills.seq].script_path or --script-path)",
+            script_path.display()
+        );
+    }
+
+    let out_dir = fetch
+        .out_dir
+        .clone()
+        .or_else(|| seq_cfg_ref.and_then(|cfg| cfg.out_dir.clone()))
+        .unwrap_or_else(|| ".ai/skills".to_string());
+
+    let scraper_base_url = fetch
+        .scraper_base_url
+        .clone()
+        .or_else(|| seq_cfg_ref.and_then(|cfg| cfg.scraper_base_url.clone()));
+    let scraper_api_key = fetch
+        .scraper_api_key
+        .clone()
+        .or_else(|| seq_cfg_ref.and_then(|cfg| cfg.scraper_api_key.clone()));
+    let cache_ttl_hours = fetch
+        .cache_ttl_hours
+        .or_else(|| seq_cfg_ref.and_then(|cfg| cfg.cache_ttl_hours));
+    let allow_direct_fallback = fetch.allow_direct_fallback
+        || seq_cfg_ref
+            .and_then(|cfg| cfg.allow_direct_fallback)
+            .unwrap_or(false);
+    let mem_events_path = fetch
+        .mem_events_path
+        .clone()
+        .or_else(|| seq_cfg_ref.and_then(|cfg| cfg.mem_events_path.clone()));
+
+    let mut args: Vec<String> = Vec::new();
+    let force = match &fetch.action {
+        SkillsFetchAction::Dep {
+            deps,
+            ecosystem,
+            force,
+        } => {
+            if deps.is_empty() {
+                bail!("skills fetch dep requires at least one dependency");
+            }
+            args.push("dep".to_string());
+            args.extend(deps.iter().cloned());
+            if let Some(eco) = ecosystem {
+                args.push("--ecosystem".to_string());
+                args.push(eco.clone());
+            }
+            *force
+        }
+        SkillsFetchAction::Auto {
+            top,
+            ecosystems,
+            force,
+        } => {
+            args.push("auto".to_string());
+            let resolved_top = top.or_else(|| seq_cfg_ref.and_then(|cfg| cfg.top));
+            if let Some(value) = resolved_top {
+                args.push("--top".to_string());
+                args.push(value.to_string());
+            }
+            let resolved_ecosystems = ecosystems
+                .clone()
+                .or_else(|| seq_cfg_ref.and_then(|cfg| cfg.ecosystems.clone()));
+            if let Some(value) = resolved_ecosystems {
+                args.push("--ecosystems".to_string());
+                args.push(value);
+            }
+            *force
+        }
+        SkillsFetchAction::Url { urls, name, force } => {
+            if urls.is_empty() {
+                bail!("skills fetch url requires at least one URL");
+            }
+            args.push("url".to_string());
+            args.extend(urls.iter().cloned());
+            if let Some(value) = name {
+                args.push("--name".to_string());
+                args.push(value.clone());
+            }
+            *force
+        }
+    };
+
+    args.push("--repo".to_string());
+    args.push(project_root.display().to_string());
+    args.push("--out-dir".to_string());
+    args.push(out_dir.clone());
+
+    if force {
+        args.push("--force".to_string());
+    }
+    if let Some(value) = scraper_base_url {
+        args.push("--scraper-base-url".to_string());
+        args.push(value);
+    }
+    if let Some(value) = cache_ttl_hours {
+        args.push("--cache-ttl-hours".to_string());
+        args.push(value.to_string());
+    }
+    if allow_direct_fallback {
+        args.push("--allow-direct-fallback".to_string());
+    }
+    if fetch.no_mem_events {
+        args.push("--no-mem-events".to_string());
+    }
+    if let Some(value) = mem_events_path {
+        args.push("--mem-events-path".to_string());
+        args.push(value);
+    }
+
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script_path);
+    cmd.args(&args);
+    cmd.current_dir(&project_root);
+    if let Some(api_key) = scraper_api_key {
+        cmd.env("SEQ_SCRAPER_API_KEY", api_key);
+    }
+
+    let status = cmd.status().context("failed to run seq teach script")?;
+    if !status.success() {
+        if let Some(code) = status.code() {
+            bail!("skills fetch failed with exit code {}", code);
+        }
+        bail!("skills fetch failed: process terminated by signal");
+    }
+
+    let out_path = {
+        let parsed = PathBuf::from(&out_dir);
+        if parsed.is_absolute() {
+            parsed
+        } else {
+            project_root.join(parsed)
+        }
+    };
+    let renamed = normalize_skill_files(&out_path)?;
+    ensure_symlinks_at(&project_root)?;
+
+    println!("Fetched skills via seq into {}", out_path.display());
+    if renamed > 0 {
+        println!("Normalized {} SKILL.md file(s) to skill.md", renamed);
+    }
+    println!("Symlinked to .claude/skills/ and .codex/skills/");
+
+    Ok(())
 }
 
 /// Install a skill from the global skills registry.
