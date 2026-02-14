@@ -1462,8 +1462,14 @@ pub enum CommitQueueAction {
     },
     /// Approve a queued commit and push it.
     Approve {
-        /// Commit hash (short or full).
-        hash: String,
+        /// Commit hash (short or full). Defaults to HEAD when omitted.
+        hash: Option<String>,
+        /// If hash is not queued but exists in git history, queue it first.
+        #[arg(long)]
+        queue_if_missing: bool,
+        /// Mark an auto-queued commit as manually reviewed.
+        #[arg(long)]
+        mark_reviewed: bool,
         /// Push even if the commit is not at HEAD.
         #[arg(long, short = 'f')]
         force: bool,
@@ -2423,6 +2429,79 @@ pub enum SkillsAction {
     },
     /// Sync flow.toml tasks as skills.
     Sync,
+    /// Fetch dependency skills via seq scraper integration.
+    Fetch(SkillsFetchCommand),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SkillsFetchCommand {
+    #[command(subcommand)]
+    pub action: SkillsFetchAction,
+    /// Path to seq repo (default: ~/code/seq).
+    #[arg(long)]
+    pub seq_repo: Option<String>,
+    /// Path to seq teach script (overrides --seq-repo).
+    #[arg(long)]
+    pub script_path: Option<String>,
+    /// Scraper daemon/API base URL.
+    #[arg(long)]
+    pub scraper_base_url: Option<String>,
+    /// Scraper API token.
+    #[arg(long)]
+    pub scraper_api_key: Option<String>,
+    /// Output directory for generated skills (relative to repo root).
+    #[arg(long)]
+    pub out_dir: Option<String>,
+    /// Cache TTL in hours for scraper responses.
+    #[arg(long)]
+    pub cache_ttl_hours: Option<f64>,
+    /// Allow direct fetch fallback when scraper queue/api is unavailable.
+    #[arg(long)]
+    pub allow_direct_fallback: bool,
+    /// Disable seq.mem JSON event emission.
+    #[arg(long)]
+    pub no_mem_events: bool,
+    /// Override seq.mem JSONEachRow path.
+    #[arg(long)]
+    pub mem_events_path: Option<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SkillsFetchAction {
+    /// Generate skills for one or more dependencies.
+    Dep {
+        /// Dependency names.
+        deps: Vec<String>,
+        /// Force ecosystem for all deps.
+        #[arg(long)]
+        ecosystem: Option<String>,
+        /// Bypass cache and scrape fresh.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Auto-discover dependencies from manifests and generate skills.
+    Auto {
+        /// Max dependencies per ecosystem.
+        #[arg(long)]
+        top: Option<usize>,
+        /// Comma-separated ecosystem list (npm,pypi,cargo,swift).
+        #[arg(long)]
+        ecosystems: Option<String>,
+        /// Bypass cache and scrape fresh.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Generate skills from one or more URLs.
+    Url {
+        /// URLs to scrape.
+        urls: Vec<String>,
+        /// Skill name override.
+        #[arg(long)]
+        name: Option<String>,
+        /// Bypass cache and scrape fresh.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Args, Debug, Clone)]

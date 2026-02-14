@@ -5,12 +5,12 @@
 //! - Sync upstream if configured (fetch, merge)
 //! - Push to origin
 
+use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
-use std::env;
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -421,10 +421,10 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
                     if !pull.status.success() {
                         let pull_stdout = String::from_utf8_lossy(&pull.stdout);
                         let pull_stderr = String::from_utf8_lossy(&pull.stderr);
-                        let pull_text =
-                            format!("{}\n{}", pull_stdout, pull_stderr).to_lowercase();
+                        let pull_text = format!("{}\n{}", pull_stdout, pull_stderr).to_lowercase();
                         if pull_text.contains("cannot rebase: you have unstaged changes")
-                            || pull_text.contains("cannot pull with rebase: you have unstaged changes")
+                            || pull_text
+                                .contains("cannot pull with rebase: you have unstaged changes")
                         {
                             let _ = Command::new("git")
                                 .current_dir(repo_root_path)
@@ -515,14 +515,14 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
         if has_upstream {
             println!("==> Syncing upstream...");
             recorder.record("upstream", "syncing upstream");
-            if let Err(e) =
-                sync_upstream_internal(repo_root_path, current, auto_fix, &mut recorder)
+            if let Err(e) = sync_upstream_internal(repo_root_path, current, auto_fix, &mut recorder)
             {
                 restore_stash(repo_root_path, stashed);
                 return Err(e);
             }
         } else if has_origin && origin_reachable {
-            if let Some(default_branch) = origin_default_branch_for_feature_sync(repo_root_path, current)
+            if let Some(default_branch) =
+                origin_default_branch_for_feature_sync(repo_root_path, current)
             {
                 println!("==> Syncing origin/{} into {}...", default_branch, current);
                 recorder.record(
@@ -1158,7 +1158,8 @@ fn run_jj_sync(
         }
     }
 
-    let origin_url = git_capture_in(repo_root, &["remote", "get-url", "origin"]).unwrap_or_default();
+    let origin_url =
+        git_capture_in(repo_root, &["remote", "get-url", "origin"]).unwrap_or_default();
     let upstream_url =
         git_capture_in(repo_root, &["remote", "get-url", "upstream"]).unwrap_or_default();
     let is_read_only =
@@ -1231,15 +1232,23 @@ fn run_jj_sync(
                     did_rebase = true;
                     needs_git_export = true;
                 } else {
-                    println!("==> Fast-forwarding {} to {}...", current_branch, dest);
                     recorder.record(
                         "jj",
                         format!("jj bookmark set {} -r {}", current_branch, dest),
                     );
-                    jj_run_in(
+                    let ff_output = jj_capture_in(
                         repo_root,
                         &["bookmark", "set", &current_branch, "-r", &dest],
                     )?;
+                    let ff_trimmed = ff_output.trim();
+                    if ff_trimmed.is_empty()
+                        || ff_trimmed.contains("Nothing changed")
+                        || ff_trimmed.contains("nothing changed")
+                    {
+                        println!("  {} already up to date with {}", current_branch, dest);
+                    } else {
+                        println!("==> Fast-forwarded {} to {}", current_branch, dest);
+                    }
                     needs_git_export = true;
                 }
 
@@ -1286,6 +1295,36 @@ fn run_jj_sync(
         if needs_git_export {
             recorder.record("jj", "jj git export");
             jj_run_in(repo_root, &["--quiet", "git", "export"])?;
+
+            // After jj git export, git HEAD may be detached (or on a jj/keep/ ref)
+            // because the jj working copy commit isn't on any bookmark. Re-attach
+            // HEAD to the current branch so the user's shell prompt stays sane.
+            let git_head = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap_or_default();
+            let git_head = git_head.trim();
+            if git_head == "HEAD" || git_head.starts_with("jj/keep/") {
+                if git_ref_exists_in(repo_root, &format!("refs/heads/{}", current_branch)) {
+                    let branch_sha = git_capture_in(
+                        repo_root,
+                        &["rev-parse", &format!("refs/heads/{}", current_branch)],
+                    )
+                    .unwrap_or_default();
+                    let branch_sha = branch_sha.trim();
+                    if !branch_sha.is_empty() {
+                        // Point HEAD at the branch symbolically, then reset to its tip.
+                        let _ = git_run_in(
+                            repo_root,
+                            &[
+                                "symbolic-ref",
+                                "HEAD",
+                                &format!("refs/heads/{}", current_branch),
+                            ],
+                        );
+                        let _ = git_run_in(repo_root, &["reset", "--mixed", branch_sha]);
+                        recorder.record("jj", format!("re-attached HEAD to {}", current_branch));
+                    }
+                }
+            }
         }
     } else {
         println!("==> No remotes configured, skipping rebase");
@@ -1391,10 +1430,7 @@ fn sync_origin_default_internal(
         "+refs/heads/{}:refs/remotes/origin/{}",
         origin_default_branch, origin_default_branch
     );
-    git_run_in(
-        repo_root,
-        &["fetch", "origin", "--prune", &refspec],
-    )?;
+    git_run_in(repo_root, &["fetch", "origin", "--prune", &refspec])?;
     recorder.record(
         "upstream",
         format!("fetched origin {}", origin_default_branch),
@@ -1493,7 +1529,10 @@ fn merge_remote_branch_into_current(
     );
 }
 
-fn origin_default_branch_for_feature_sync(repo_root: &Path, current_branch: &str) -> Option<String> {
+fn origin_default_branch_for_feature_sync(
+    repo_root: &Path,
+    current_branch: &str,
+) -> Option<String> {
     let current = current_branch.trim();
     if current.is_empty() || current == "HEAD" {
         return None;

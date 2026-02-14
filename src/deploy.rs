@@ -856,15 +856,20 @@ fn deploy_host(
     let use_flow = is_flow_source(host_cfg.env_source.as_deref());
     let has_service_token = host_cfg.service_token.is_some();
 
-    let use_cloud_token_mode =
-        use_cloud || host_cfg.env_source.as_deref().map(|s| s.eq_ignore_ascii_case("flow")).unwrap_or(false);
+    let use_cloud_token_mode = use_cloud
+        || host_cfg
+            .env_source
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("flow"))
+            .unwrap_or(false);
 
     if use_cloud_token_mode && has_service_token {
         // Service token mode: install fetch script, host fetches env vars on startup
         let service_token = host_cfg.service_token.as_ref().unwrap();
         let env_name = host_cfg.environment.as_deref().unwrap_or("production");
         let project_name = project_root.file_name().unwrap().to_str().unwrap();
-        let api_base = crate::env::load_env_api_url().unwrap_or_else(|_| "https://myflow.sh".to_string());
+        let api_base =
+            crate::env::load_env_api_url().unwrap_or_else(|_| "https://myflow.sh".to_string());
 
         println!("==> Installing env-fetch script (host will fetch on startup)...");
         install_env_fetch_script(

@@ -431,6 +431,72 @@ pub struct SkillsConfig {
     /// Skills to install from the registry when missing.
     #[serde(default)]
     pub install: Vec<String>,
+    /// Optional seq scraper integration for dependency skill generation.
+    #[serde(default)]
+    pub seq: Option<SkillsSeqConfig>,
+}
+
+/// Seq-backed skills fetch configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SkillsSeqConfig {
+    /// Fetch mode ("local-cli" today; "remote-api" reserved).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Path to seq repo (used to resolve tools/teach_deps.py).
+    #[serde(default, rename = "seq_repo", alias = "seq-repo")]
+    pub seq_repo: Option<String>,
+    /// Full path to teach_deps.py (overrides seq_repo).
+    #[serde(default, rename = "script_path", alias = "script-path")]
+    pub script_path: Option<String>,
+    /// Scraper daemon/API base URL.
+    #[serde(
+        default,
+        rename = "scraper_base_url",
+        alias = "scraper-base-url",
+        alias = "scraperBaseUrl"
+    )]
+    pub scraper_base_url: Option<String>,
+    /// Scraper bearer token.
+    #[serde(
+        default,
+        rename = "scraper_api_key",
+        alias = "scraper-api-key",
+        alias = "scraperApiKey"
+    )]
+    pub scraper_api_key: Option<String>,
+    /// Output directory for generated skills.
+    #[serde(default, rename = "out_dir", alias = "out-dir")]
+    pub out_dir: Option<String>,
+    /// Cache TTL in hours.
+    #[serde(
+        default,
+        rename = "cache_ttl_hours",
+        alias = "cache-ttl-hours",
+        alias = "cacheTtlHours"
+    )]
+    pub cache_ttl_hours: Option<f64>,
+    /// Direct fetch fallback when scraper queue is unavailable.
+    #[serde(
+        default,
+        rename = "allow_direct_fallback",
+        alias = "allow-direct-fallback",
+        alias = "allowDirectFallback"
+    )]
+    pub allow_direct_fallback: Option<bool>,
+    /// Optional seq.mem JSONEachRow destination path.
+    #[serde(
+        default,
+        rename = "mem_events_path",
+        alias = "mem-events-path",
+        alias = "memEventsPath"
+    )]
+    pub mem_events_path: Option<String>,
+    /// Default per-ecosystem dependency count for auto mode.
+    #[serde(default)]
+    pub top: Option<usize>,
+    /// Default ecosystems for auto mode.
+    #[serde(default)]
+    pub ecosystems: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -525,6 +591,13 @@ pub struct OptionsConfig {
         alias = "commit-with-check-timeout-secs"
     )]
     pub commit_with_check_timeout_secs: Option<u64>,
+    /// Number of retries when review times out (default 1).
+    #[serde(
+        default,
+        rename = "commit_with_check_review_retries",
+        alias = "commit-with-check-review-retries"
+    )]
+    pub commit_with_check_review_retries: Option<u32>,
     /// Remote Claude review URL for commitWithCheck.
     #[serde(
         default,

@@ -49,10 +49,7 @@ impl LogIngester {
         let project = project.to_string();
         let service = service.to_string();
         thread::spawn(move || {
-            let client = match Client::builder()
-                .timeout(Duration::from_secs(2))
-                .build()
-            {
+            let client = match Client::builder().timeout(Duration::from_secs(2)).build() {
                 Ok(c) => c,
                 Err(_) => return,
             };

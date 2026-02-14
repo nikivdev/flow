@@ -32,6 +32,11 @@ shortcuts = ["s"]                 # optional aliases for task lookup
 [skills]              # optional: skill enforcement (gitignored by default)
 sync_tasks = true     # optional: generate skills for tasks
 install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/skills preferred, else registry)
+[skills.seq]          # optional: seq-backed dependency skill fetching defaults
+# seq_repo = "~/code/seq"
+# out_dir = ".ai/skills"
+# scraper_base_url = "http://127.0.0.1:7444"
+# allow_direct_fallback = true
 
 [[alias]]             # optional shell aliases (or use [aliases] table)
 fr = "f run"          # key/value pairs of alias -> command
@@ -55,6 +60,7 @@ fr = "f run"
 - `shortcuts`: case-insensitive aliases and abbreviations (auto-generated from task names) resolve tasks.
 - `alias`/`aliases`: emitted by `f setup` as shell `alias` lines.
 - `[skills]`: optional skill enforcement; `sync_tasks` generates `.ai/skills` from tasks and `install` ensures registry skills are present (skills are gitignored by default).
+- `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
 
 ## Notes
 

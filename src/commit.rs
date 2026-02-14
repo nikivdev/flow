@@ -2100,6 +2100,29 @@ fn commit_with_check_timeout_secs() -> u64 {
     120
 }
 
+fn commit_with_check_review_retries() -> u32 {
+    let cwd = std::env::current_dir().ok();
+
+    if let Some(cwd) = cwd {
+        let local_config = cwd.join("flow.toml");
+        if local_config.exists() {
+            if let Ok(cfg) = config::load(&local_config) {
+                return cfg.options.commit_with_check_review_retries.unwrap_or(1);
+            }
+            return 1;
+        }
+    }
+
+    let global_config = config::default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = config::load(&global_config) {
+            return cfg.options.commit_with_check_review_retries.unwrap_or(1);
+        }
+    }
+
+    1
+}
+
 fn commit_with_check_review_url() -> Option<String> {
     if let Ok(url) = env::var("FLOW_REVIEW_URL") {
         let trimmed = url.trim();
@@ -3507,6 +3530,43 @@ fn write_beads_commit_review_record(
 /// creates a thread, and uses the built-in `review/start` method which is
 /// optimized for code review (structured findings, confidence scores, etc.).
 fn run_codex_review(
+    _diff: &str,
+    session_context: Option<&str>,
+    review_instructions: Option<&str>,
+    workdir: &std::path::Path,
+    model: CodexModel,
+) -> Result<ReviewResult> {
+    let max_attempts = commit_with_check_review_retries() + 1; // retries + initial attempt
+    let mut last_timeout_secs = 0u64;
+
+    for attempt in 1..=max_attempts {
+        match run_codex_review_once(_diff, session_context, review_instructions, workdir, model) {
+            Ok(result) if result.timed_out && attempt < max_attempts => {
+                last_timeout_secs = commit_with_check_timeout_secs();
+                println!(
+                    "⚠ Review timed out after {}s, retrying ({}/{})...",
+                    last_timeout_secs, attempt, max_attempts
+                );
+                continue;
+            }
+            other => return other,
+        }
+    }
+
+    // Should not reach here, but just in case
+    Ok(ReviewResult {
+        issues_found: false,
+        issues: Vec::new(),
+        summary: Some(format!(
+            "Codex review timed out after {}s (exhausted {} attempts)",
+            last_timeout_secs, max_attempts
+        )),
+        future_tasks: Vec::new(),
+        timed_out: true,
+    })
+}
+
+fn run_codex_review_once(
     _diff: &str,
     session_context: Option<&str>,
     review_instructions: Option<&str>,
@@ -5444,6 +5504,77 @@ fn resolve_commit_queue_entry(repo_root: &Path, hash: &str) -> Result<CommitQueu
     }
 }
 
+fn resolve_git_commit_sha(repo_root: &Path, hash: &str) -> Result<String> {
+    let rev = format!("{hash}^{{commit}}");
+    let sha = git_capture_in(repo_root, &["rev-parse", "--verify", &rev])
+        .with_context(|| format!("{hash} is not a valid git commit"))?;
+    let trimmed = sha.trim();
+    if trimmed.is_empty() {
+        bail!("{hash} is not a valid git commit");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn queue_existing_commit_for_approval(
+    repo_root: &Path,
+    hash: &str,
+    mark_reviewed: bool,
+) -> Result<CommitQueueEntry> {
+    let commit_sha = resolve_git_commit_sha(repo_root, hash)?;
+    let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".to_string())
+        .trim()
+        .to_string();
+    let message = git_capture_in(repo_root, &["log", "-1", "--format=%s", &commit_sha])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let review_bookmark = create_review_bookmark(repo_root, &commit_sha, &branch).ok();
+
+    let mut entry = CommitQueueEntry {
+        version: 2,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        repo_root: repo_root.display().to_string(),
+        branch,
+        commit_sha: commit_sha.clone(),
+        message,
+        review_bookmark,
+        review_completed: mark_reviewed,
+        review_issues_found: false,
+        review_timed_out: !mark_reviewed,
+        review_model: if mark_reviewed {
+            Some("manual-codex".to_string())
+        } else {
+            None
+        },
+        review_reviewer: if mark_reviewed {
+            Some("codex".to_string())
+        } else {
+            None
+        },
+        review_todo_ids: Vec::new(),
+        pr_url: None,
+        pr_number: None,
+        pr_head: None,
+        pr_base: None,
+        analysis: None,
+        review: None,
+        summary: if mark_reviewed {
+            Some("Manually reviewed with Codex; approved for push.".to_string())
+        } else {
+            Some("Queued from git history without review metadata.".to_string())
+        },
+        record_path: None,
+    };
+
+    let path = write_commit_queue_entry(repo_root, &entry)?;
+    entry.record_path = Some(path);
+    if let Err(err) = write_rise_review_session(repo_root, &entry) {
+        debug!("failed to write rise review session: {}", err);
+    }
+    Ok(entry)
+}
+
 fn remove_commit_queue_entry_by_entry(repo_root: &Path, entry: &CommitQueueEntry) -> Result<()> {
     if let Some(path) = entry.record_path.as_ref() {
         if path.exists() {
@@ -5672,6 +5803,99 @@ fn refresh_queue_entry_commit(repo_root: &Path, entry: &mut CommitQueueEntry) ->
     Ok(true)
 }
 
+fn current_upstream_ref(repo_root: &Path) -> Option<String> {
+    git_capture_in(
+        repo_root,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+}
+
+fn is_ephemeral_upstream_ref(upstream: &str) -> bool {
+    upstream.starts_with("origin/jj/keep/")
+        || upstream.starts_with("origin/review/")
+        || upstream.contains("/jj/keep/")
+        || upstream.contains("/review/")
+}
+
+fn find_best_pr_upstream_candidate(repo_root: &Path, head_sha: &str) -> Option<String> {
+    let refs = git_capture_in(
+        repo_root,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/remotes/origin/pr/",
+        ],
+    )
+    .ok()?;
+
+    let mut best: Option<(u64, String)> = None;
+    for candidate in refs.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        if !git_is_ancestor(repo_root, candidate, head_sha) {
+            continue;
+        }
+        let distance = git_capture_in(
+            repo_root,
+            &["rev-list", "--count", &format!("{candidate}..{head_sha}")],
+        )
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+        match &best {
+            Some((best_distance, _)) if *best_distance <= distance => {}
+            _ => best = Some((distance, candidate.to_string())),
+        }
+    }
+    best.map(|(_, candidate)| candidate)
+}
+
+fn ensure_safe_upstream_for_commit_queue_push(
+    repo_root: &Path,
+    head_sha: &str,
+    force: bool,
+) -> Result<()> {
+    let upstream = current_upstream_ref(repo_root);
+
+    if let Some(upstream) = upstream {
+        if is_ephemeral_upstream_ref(&upstream) && !force {
+            if let Some(candidate) = find_best_pr_upstream_candidate(repo_root, head_sha) {
+                if candidate != upstream {
+                    println!(
+                        "Upstream {} looks ephemeral. Retargeting push upstream to {}.",
+                        upstream, candidate
+                    );
+                    git_run_in(repo_root, &["branch", "--set-upstream-to", &candidate])?;
+                }
+            } else {
+                bail!(
+                    "Current upstream {} looks ephemeral and no origin/pr/* candidate was found. Set upstream explicitly to your PR branch, or re-run with --force.",
+                    upstream
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    if force {
+        return Ok(());
+    }
+
+    if let Some(candidate) = find_best_pr_upstream_candidate(repo_root, head_sha) {
+        println!(
+            "No upstream configured. Using {} as push upstream.",
+            candidate
+        );
+        git_run_in(repo_root, &["branch", "--set-upstream-to", &candidate])?;
+        return Ok(());
+    }
+
+    bail!(
+        "No upstream configured and no origin/pr/* candidate found. Set upstream to your PR branch first, then re-run."
+    );
+}
+
 pub fn commit_queue_has_entries(repo_root: &Path) -> bool {
     let dir = commit_queue_dir(repo_root);
     if !dir.exists() {
@@ -5740,7 +5964,10 @@ where
     let worktree_path = tmp.path().join("repo");
     let worktree_str = worktree_path.to_string_lossy().to_string();
 
-    git_run_in(repo_root, &["worktree", "add", "--detach", &worktree_str, commit_sha])?;
+    git_run_in(
+        repo_root,
+        &["worktree", "add", "--detach", &worktree_str, commit_sha],
+    )?;
 
     let result = f(&worktree_path);
 
@@ -5765,13 +5992,7 @@ fn run_codex_review_for_queued_commit(
         let parent = git_capture_in(worktree, &["rev-parse", "HEAD^"])
             .context("queued root commit review is not supported yet")?;
         git_run_in(worktree, &["reset", "--mixed", parent.trim()])?;
-        run_codex_review(
-            &diff,
-            None,
-            review_instructions,
-            worktree,
-            CodexModel::High,
-        )
+        run_codex_review(&diff, None, review_instructions, worktree, CodexModel::High)
     })?;
     Ok((review, diff))
 }
@@ -6235,8 +6456,12 @@ fn ensure_pr_head_pushed(repo_root: &Path, head: &str, commit_sha: &str) -> Resu
             return Ok(pr_head_selector_for_remote(repo_root, &remote, head));
         }
 
-        let push_stderr = String::from_utf8_lossy(&push_output.stderr).trim().to_string();
-        let push_stdout = String::from_utf8_lossy(&push_output.stdout).trim().to_string();
+        let push_stderr = String::from_utf8_lossy(&push_output.stderr)
+            .trim()
+            .to_string();
+        let push_stdout = String::from_utf8_lossy(&push_output.stdout)
+            .trim()
+            .to_string();
 
         // Branch exists/diverged: retry safely with force-with-lease on the same remote.
         let force_output = Command::new("git")
@@ -6248,7 +6473,9 @@ fn ensure_pr_head_pushed(repo_root: &Path, head: &str, commit_sha: &str) -> Resu
             return Ok(pr_head_selector_for_remote(repo_root, &remote, head));
         }
 
-        let force_stderr = String::from_utf8_lossy(&force_output.stderr).trim().to_string();
+        let force_stderr = String::from_utf8_lossy(&force_output.stderr)
+            .trim()
+            .to_string();
         failures.push(format!(
             "{remote}: push='{}' force='{}'{}",
             push_stderr,
@@ -6621,10 +6848,7 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                     match matches.len() {
                         0 => bail!("No queued commit matches {}", hash),
                         1 => targets.push(matches[0].clone()),
-                        _ => bail!(
-                            "Multiple queued commits match {}. Use a longer hash.",
-                            hash
-                        ),
+                        _ => bail!("Multiple queued commits match {}. Use a longer hash.", hash),
                     }
                 }
             } else if all {
@@ -6717,12 +6941,51 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
         }
         CommitQueueAction::Approve {
             hash,
+            queue_if_missing,
+            mark_reviewed,
             force,
             allow_issues,
             allow_unreviewed,
         } => {
             git_guard::ensure_clean_for_push(&repo_root)?;
-            let mut entry = resolve_commit_queue_entry(&repo_root, &hash)?;
+            let auto_mode = hash.is_none();
+            let target_hash = match hash {
+                Some(value) => value,
+                None => git_capture_in(&repo_root, &["rev-parse", "--verify", "HEAD"])?
+                    .trim()
+                    .to_string(),
+            };
+            let effective_queue_if_missing = queue_if_missing || auto_mode;
+            let effective_mark_reviewed = mark_reviewed || auto_mode;
+            let effective_allow_unreviewed = allow_unreviewed || auto_mode;
+
+            let mut entry = match resolve_commit_queue_entry(&repo_root, &target_hash) {
+                Ok(entry) => entry,
+                Err(err) => {
+                    let no_match = err
+                        .to_string()
+                        .starts_with(&format!("No queued commit matches {}", target_hash));
+                    if effective_queue_if_missing && no_match {
+                        let entry = queue_existing_commit_for_approval(
+                            &repo_root,
+                            &target_hash,
+                            effective_mark_reviewed,
+                        )?;
+                        println!(
+                            "Queued {} from git history for approval{}.",
+                            short_sha(&entry.commit_sha),
+                            if effective_mark_reviewed {
+                                " (marked manually reviewed)"
+                            } else {
+                                ""
+                            }
+                        );
+                        entry
+                    } else {
+                        return Err(err);
+                    }
+                }
+            };
             let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
 
             let issues_present = entry.review_issues_found
@@ -6740,7 +7003,7 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                     short_sha(&entry.commit_sha)
                 );
             }
-            if unreviewed && !allow_unreviewed && !force {
+            if unreviewed && !effective_allow_unreviewed && !force {
                 bail!(
                     "Queued commit {} does not have a clean review (timed out/missing). Re-run review, or re-run with --allow-unreviewed.",
                     short_sha(&entry.commit_sha)
@@ -6766,6 +7029,8 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                     current_branch.trim()
                 );
             }
+
+            ensure_safe_upstream_for_commit_queue_push(&repo_root, head_sha, force)?;
 
             if git_try_in(&repo_root, &["fetch", "--quiet"]).is_ok() {
                 if let Ok(counts) = git_capture_in(
@@ -6937,6 +7202,10 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 }
             }
 
+            let head_sha = git_capture_in(&repo_root, &["rev-parse", "HEAD"])?;
+            let head_sha = head_sha.trim().to_string();
+            ensure_safe_upstream_for_commit_queue_push(&repo_root, &head_sha, force)?;
+
             if git_try_in(&repo_root, &["fetch", "--quiet"]).is_ok() {
                 if let Ok(counts) = git_capture_in(
                     &repo_root,
@@ -7104,7 +7373,15 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                         body.push_str(summary);
                         body.push('\n');
                     }
-                    gh_create_pr(&repo_root, &repo, &gh_head, &base, &title, body.trim(), draft)?
+                    gh_create_pr(
+                        &repo_root,
+                        &repo,
+                        &gh_head,
+                        &base,
+                        &title,
+                        body.trim(),
+                        draft,
+                    )?
                 };
 
             entry.pr_number = Some(number);
@@ -7139,21 +7416,20 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                 // Create it if missing (as draft).
                 let gh_head = ensure_pr_head_pushed(&repo_root, &head, &entry.commit_sha)?;
                 let (title, body_rest) = commit_message_title_body(&entry.message);
-                let (number, url) = if let Some(found) =
-                    gh_find_open_pr_by_head(&repo_root, &repo, &gh_head)?
-                {
-                    found
-                } else {
-                    gh_create_pr(
-                        &repo_root,
-                        &repo,
-                        &gh_head,
-                        &base,
-                        &title,
-                        body_rest.trim(),
-                        true,
-                    )?
-                };
+                let (number, url) =
+                    if let Some(found) = gh_find_open_pr_by_head(&repo_root, &repo, &gh_head)? {
+                        found
+                    } else {
+                        gh_create_pr(
+                            &repo_root,
+                            &repo,
+                            &gh_head,
+                            &base,
+                            &title,
+                            body_rest.trim(),
+                            true,
+                        )?
+                    };
                 entry.pr_number = Some(number);
                 entry.pr_url = Some(url.clone());
                 entry.pr_head = Some(head.clone());
@@ -10496,7 +10772,11 @@ fn stage_changes_for_commit(workdir: &Path, stage_paths: &[String]) -> Result<()
         bail!("git add -- <paths> failed with status {}", status);
     }
 
-    println!("done ({} path{})", stage_paths.len(), if stage_paths.len() == 1 { "" } else { "s" });
+    println!(
+        "done ({} path{})",
+        stage_paths.len(),
+        if stage_paths.len() == 1 { "" } else { "s" }
+    );
 
     Ok(())
 }
