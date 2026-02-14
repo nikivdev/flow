@@ -103,9 +103,12 @@ fn run_sync(opts: JjSyncOpts) -> Result<()> {
     jj_run_in(&repo_root, &["rebase", "-d", &target])?;
 
     // Check for conflicts after rebase
-    let has_conflicts = jj_capture_in(&repo_root, &["log", "-r", "conflicts()", "--no-graph", "-T", "commit_id"])
-        .map(|out| !out.trim().is_empty())
-        .unwrap_or(false);
+    let has_conflicts = jj_capture_in(
+        &repo_root,
+        &["log", "-r", "conflicts()", "--no-graph", "-T", "commit_id"],
+    )
+    .map(|out| !out.trim().is_empty())
+    .unwrap_or(false);
     if has_conflicts {
         let details = jj_capture_in(&repo_root, &["log", "-r", "conflicts()", "--no-graph"])
             .unwrap_or_default();

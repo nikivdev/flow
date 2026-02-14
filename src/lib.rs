@@ -1,9 +1,9 @@
 pub mod agent_setup;
 pub mod agents;
-pub mod analytics;
 pub mod ai;
 pub mod ai_context;
 pub mod ai_server;
+pub mod analytics;
 pub mod archive;
 pub mod ask;
 pub mod auth;
