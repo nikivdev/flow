@@ -592,6 +592,11 @@ fn read_local_env_vars(target: &EnvTarget, environment: &str) -> Result<HashMap<
     Ok(parse_env_file(&content))
 }
 
+/// Returns true if the user has a cloud auth token configured.
+pub fn has_cloud_auth_token() -> bool {
+    load_auth_config().ok().and_then(|a| a.token).is_some()
+}
+
 /// Read keys from the local personal env store without cloud access.
 pub fn fetch_local_personal_env_vars(keys: &[String]) -> Result<HashMap<String, String>> {
     let target = resolve_personal_target()?;

@@ -77,6 +77,15 @@ fn start_daemon_inner(daemon: &DaemonConfig) -> Result<()> {
         remove_daemon_pid(&daemon.name).ok();
     }
 
+    // Evict any foreign process squatting on this daemon's port
+    if let Some(port) = daemon.port {
+        kill_process_on_port(port).ok();
+    } else if let Some(url) = daemon.effective_health_url() {
+        if let Some(port) = extract_port_from_url(&url) {
+            kill_process_on_port(port).ok();
+        }
+    }
+
     // Find the binary
     let binary = find_binary(&daemon.binary)?;
 
@@ -458,6 +467,9 @@ pub fn load_merged_config_with_path(config_path: Option<&Path>) -> Result<config
     if global_path.exists() {
         if let Ok(global_cfg) = config::load(&global_path) {
             merged.daemons.extend(global_cfg.daemons);
+            for server in &global_cfg.servers {
+                merged.daemons.push(server.to_daemon_config());
+            }
         }
     }
 
@@ -466,6 +478,9 @@ pub fn load_merged_config_with_path(config_path: Option<&Path>) -> Result<config
         if local_path.exists() {
             if let Ok(local_cfg) = config::load(local_path) {
                 merged.daemons.extend(local_cfg.daemons);
+                for server in &local_cfg.servers {
+                    merged.daemons.push(server.to_daemon_config());
+                }
             }
         }
     }
@@ -646,7 +661,7 @@ fn terminate_process(pid: u32) -> Result<()> {
 }
 
 /// Extract port number from a URL like "http://127.0.0.1:7201/health"
-fn extract_port_from_url(url: &str) -> Option<u16> {
+pub fn extract_port_from_url(url: &str) -> Option<u16> {
     // Simple extraction: find the port after the last colon before any path
     let url = url
         .strip_prefix("http://")
@@ -658,7 +673,7 @@ fn extract_port_from_url(url: &str) -> Option<u16> {
 
 /// Kill any process listening on the given port.
 #[cfg(unix)]
-fn kill_process_on_port(port: u16) -> Result<()> {
+pub fn kill_process_on_port(port: u16) -> Result<()> {
     // Use lsof to find the process
     let output = Command::new("lsof")
         .args(["-ti", &format!(":{}", port)])
@@ -680,7 +695,7 @@ fn kill_process_on_port(port: u16) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn kill_process_on_port(port: u16) -> Result<()> {
+pub fn kill_process_on_port(port: u16) -> Result<()> {
     // Use netstat to find the process
     let output = Command::new("netstat")
         .args(["-ano"])

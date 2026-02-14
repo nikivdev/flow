@@ -721,14 +721,22 @@ fn bootstrap_daemons(
     let global_path = config::default_config_path();
     if global_path.exists() {
         if let Ok(cfg) = config::load(&global_path) {
-            start_daemon_set(state, cfg.daemons, None, boot, &mut seen)?;
+            let mut all_daemons = cfg.daemons;
+            for server in &cfg.servers {
+                all_daemons.push(server.to_daemon_config());
+            }
+            start_daemon_set(state, all_daemons, None, boot, &mut seen)?;
         }
     }
 
     if let Some(path) = active_config_path {
         if path.exists() {
             if let Ok(cfg) = config::load(path) {
-                start_daemon_set(state, cfg.daemons, Some(path), boot, &mut seen)?;
+                let mut all_daemons = cfg.daemons;
+                for server in &cfg.servers {
+                    all_daemons.push(server.to_daemon_config());
+                }
+                start_daemon_set(state, all_daemons, Some(path), boot, &mut seen)?;
             }
         }
     }
@@ -783,10 +791,58 @@ fn should_restart(entry: &ManagedDaemon) -> bool {
     }
 }
 
+fn reconcile_removed(state: &SharedState, active_config_path: &Option<PathBuf>) {
+    // Collect all expected daemon names from current config
+    let mut expected: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let global_path = config::default_config_path();
+    if global_path.exists() {
+        if let Ok(cfg) = config::load(&global_path) {
+            for d in &cfg.daemons {
+                expected.insert(d.name.clone());
+            }
+            for s in &cfg.servers {
+                expected.insert(s.name.clone());
+            }
+        }
+    }
+    if let Some(path) = active_config_path {
+        if path.exists() {
+            if let Ok(cfg) = config::load(path) {
+                for d in &cfg.daemons {
+                    expected.insert(d.name.clone());
+                }
+                for s in &cfg.servers {
+                    expected.insert(s.name.clone());
+                }
+            }
+        }
+    }
+
+    // Find managed entries not in expected set and stop them
+    let managed: Vec<ManagedDaemon> = {
+        let st = state.lock().expect("lock");
+        st.managed.values().cloned().collect()
+    };
+
+    for entry in managed {
+        if !expected.contains(&entry.name) {
+            daemon::stop_daemon(&entry.name).ok();
+            let mut st = state.lock().expect("lock");
+            st.managed.remove(&entry.name);
+        }
+    }
+}
+
 fn monitor_daemons(state: SharedState) -> Result<()> {
     let mut last_active = resolve_active_project_config_path()
         .as_deref()
         .map(normalize_path);
+
+    let global_path = config::default_config_path();
+    let mut last_global_mtime = std::fs::metadata(&global_path)
+        .ok()
+        .and_then(|m| m.modified().ok());
 
     loop {
         std::thread::sleep(Duration::from_secs(2));
@@ -795,8 +851,20 @@ fn monitor_daemons(state: SharedState) -> Result<()> {
         let active_path = resolve_active_project_config_path()
             .as_deref()
             .map(normalize_path);
+
+        // Check if global config changed
+        let current_global_mtime = std::fs::metadata(&global_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        if current_global_mtime != last_global_mtime {
+            last_global_mtime = current_global_mtime;
+            bootstrap_daemons(&state, active_path.as_deref(), false).ok();
+            reconcile_removed(&state, &active_path);
+        }
+
         if active_path != last_active {
             bootstrap_daemons(&state, active_path.as_deref(), false).ok();
+            reconcile_removed(&state, &active_path);
             last_active = active_path.clone();
         }
 

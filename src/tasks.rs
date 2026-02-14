@@ -1386,8 +1386,13 @@ fn maybe_warn_non_fishx() {
     if FISHX_WARNED.swap(true, Ordering::Relaxed) {
         return;
     }
+    // Only warn if fishx is installed but not active — contributors who
+    // never installed fishx shouldn't see a confusing warning.
+    if which::which("fishx").is_err() {
+        return;
+    }
     eprintln!(
-        "⚠️  fishx not detected. Flow runs best under fishx for error capture and AI hints.\n\
+        "⚠️  fishx is installed but not active. Flow runs best under fishx for error capture and AI hints.\n\
    Tip: run `f deploy-login` in the fishx repo or set FLOW_ALLOW_NON_FISHX=1 to hide this warning."
     );
 }
@@ -1850,6 +1855,25 @@ fn inject_global_env(cmd: &mut Command) {
         .collect();
 
     if missing.is_empty() {
+        return;
+    }
+
+    // If not logged in to cloud, silently try local env store and skip.
+    // This avoids prompting "Not logged in to cloud..." for contributors
+    // who don't need cloud env vars (e.g. web-only dev).
+    if !crate::env::has_cloud_auth_token() {
+        match crate::env::fetch_local_personal_env_vars(&missing) {
+            Ok(vars) => {
+                for (key, value) in vars {
+                    if !value.is_empty() {
+                        cmd.env(key, value);
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::debug!(?err, "failed to read local env vars");
+            }
+        }
         return;
     }
 

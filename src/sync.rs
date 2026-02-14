@@ -1374,8 +1374,24 @@ fn run_jj_sync(
         recorder.record("push", "skipped (no origin)");
     }
 
-    println!("\n✓ Sync complete (jj)!");
-    recorder.record("complete", "sync complete (jj)");
+    // Check for jj conflicts left after rebase
+    let has_conflicts = jj_capture_in(repo_root, &["log", "-r", "conflicts()", "--no-graph", "-T", "commit_id"])
+        .map(|out| !out.trim().is_empty())
+        .unwrap_or(false);
+
+    if has_conflicts {
+        let conflict_details = jj_capture_in(repo_root, &["log", "-r", "conflicts()", "--no-graph"])
+            .unwrap_or_default();
+        println!("\n⚠ Sync complete (jj) but conflicts remain:");
+        for line in conflict_details.lines().filter(|l| !l.trim().is_empty()) {
+            println!("  {}", line.trim());
+        }
+        println!("\nResolve with: jj resolve");
+        recorder.record("complete", "sync complete (jj) with conflicts");
+    } else {
+        println!("\n✓ Sync complete (jj)!");
+        recorder.record("complete", "sync complete (jj)");
+    }
     Ok(())
 }
 
@@ -1386,8 +1402,20 @@ fn sync_upstream_internal(
     auto_fix: bool,
     recorder: &mut SyncRecorder,
 ) -> Result<()> {
-    // Fetch upstream
-    git_run_in(repo_root, &["fetch", "upstream", "--prune"])?;
+    // Fetch upstream — tolerate case-insensitive ref collisions (macOS)
+    let fetch = Command::new("git")
+        .current_dir(repo_root)
+        .args(["fetch", "upstream", "--prune"])
+        .output()
+        .context("failed to run git fetch upstream")?;
+    if !fetch.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch.stderr);
+        if stderr.contains("case-insensitive filesystem") {
+            eprintln!("  Warning: upstream has refs that differ only in case; fetch continued anyway");
+        } else {
+            bail!("git fetch upstream --prune failed: {}", stderr.trim());
+        }
+    }
     recorder.record("upstream", "fetched upstream");
 
     // Determine upstream branch
