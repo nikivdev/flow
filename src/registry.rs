@@ -283,9 +283,7 @@ fn resolve_registry_url(
         .map(|s| s.to_string())
         .or_else(|| cfg.and_then(|cfg| cfg.url.clone()))
         .or_else(|| env::var("FLOW_REGISTRY_URL").ok())
-        .ok_or_else(|| {
-            anyhow::anyhow!("Registry URL not set. Use --registry or set FLOW_REGISTRY_URL.")
-        })?;
+        .unwrap_or_else(|| "https://myflow.sh".to_string());
     Ok(url.trim_end_matches('/').to_string())
 }
 
