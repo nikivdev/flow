@@ -369,12 +369,16 @@ install_flow() {
 
 configure_shell() {
   install_dir="$(dirname "${FLOW_INSTALL_PATH:-$HOME/.flow/bin/f}")"
+  registry_url="${FLOW_REGISTRY_URL:-https://myflow.sh}"
 
   # Fish
   if [ -f "$HOME/.config/fish/config.fish" ]; then
     if ! grep -q ".flow/bin" "$HOME/.config/fish/config.fish" 2>/dev/null; then
       echo "fish_add_path $install_dir" >> "$HOME/.config/fish/config.fish"
       info "flow: added to ~/.config/fish/config.fish"
+    fi
+    if ! grep -q "FLOW_REGISTRY_URL" "$HOME/.config/fish/config.fish" 2>/dev/null; then
+      echo "set -gx FLOW_REGISTRY_URL \"$registry_url\"" >> "$HOME/.config/fish/config.fish"
     fi
   fi
 
@@ -384,6 +388,9 @@ configure_shell() {
       echo "export PATH=\"$install_dir:\$PATH\"" >> "$HOME/.zshrc"
       info "flow: added to ~/.zshrc"
     fi
+    if ! grep -q "FLOW_REGISTRY_URL" "$HOME/.zshrc" 2>/dev/null; then
+      echo "export FLOW_REGISTRY_URL=\"$registry_url\"" >> "$HOME/.zshrc"
+    fi
   fi
 
   # Bash
@@ -392,6 +399,9 @@ configure_shell() {
       if ! grep -q ".flow/bin" "$rc" 2>/dev/null; then
         echo "export PATH=\"$install_dir:\$PATH\"" >> "$rc"
         info "flow: added to $rc"
+      fi
+      if ! grep -q "FLOW_REGISTRY_URL" "$rc" 2>/dev/null; then
+        echo "export FLOW_REGISTRY_URL=\"$registry_url\"" >> "$rc"
       fi
       break
     fi
