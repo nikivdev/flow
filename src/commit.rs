@@ -7268,6 +7268,7 @@ fn build_review_prompt_payload(
     )
     .unwrap_or((0, 0, "unknown".to_string()));
     let mut out = String::new();
+    out.push_str("here is commit i want you to address fully\n\n");
     out.push_str(&format!(
         "Repo: {}\nBranch: {}\nQueued commit: {}",
         repo_root.display(),
@@ -7298,6 +7299,44 @@ fn build_review_prompt_payload(
         out.push_str(&format!("Run: f fix {}\n", path.display()));
     }
 
+    out.push_str("\nCommit message:\n");
+    out.push_str("────────────────────────────────────────\n");
+    out.push_str(entry.message.trim_end());
+    out.push_str("\n────────────────────────────────────────\n");
+
+    if let Some(summary) = entry
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str("\nReview summary:\n");
+        out.push_str(summary);
+        out.push('\n');
+    }
+
+    if let Some(review) = entry
+        .review
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str("\nReview findings:\n");
+        out.push_str(review);
+        out.push('\n');
+    }
+
+    if let Some(path) = report_path {
+        if let Ok(markdown) = fs::read_to_string(path) {
+            let trimmed = markdown.trim();
+            if !trimmed.is_empty() {
+                out.push_str("\nReview report markdown:\n");
+                out.push_str(trimmed);
+                out.push('\n');
+            }
+        }
+    }
+
     if total_other == 0 {
         out.push_str("\nOther queued commits pending review: 0\n");
     } else {
@@ -7307,7 +7346,7 @@ fn build_review_prompt_payload(
         ));
     }
 
-    out.push_str("\nreview this and address everything, then we approve and push\n");
+    out.push_str("\naddress this so we can push\n");
     out
 }
 
@@ -8511,9 +8550,20 @@ fn gh_create_pr(
     body: &str,
     draft: bool,
 ) -> Result<(u64, String)> {
+    let normalized_body = normalize_markdown_linebreaks(body);
     let mut args: Vec<&str> = vec![
-        "pr", "create", "--repo", repo, "--head", head, "--base", base, "--title", title, "--body",
-        body,
+        "pr",
+        "create",
+        "--repo",
+        repo,
+        "--head",
+        head,
+        "--base",
+        base,
+        "--title",
+        title,
+        "--body",
+        &normalized_body,
     ];
     if draft {
         args.push("--draft");
@@ -8586,6 +8636,16 @@ fn commit_message_title_body(message: &str) -> (String, String) {
     let title = lines.next().unwrap_or("no title").trim().to_string();
     let rest = lines.collect::<Vec<_>>().join("\n").trim().to_string();
     (title, rest)
+}
+
+fn normalize_markdown_linebreaks(text: &str) -> String {
+    let trimmed = text.trim();
+    // Guardrail: if body has escaped line breaks but no real newlines, decode it.
+    // This prevents malformed PR bodies like "Summary\\n- item" on GitHub.
+    if !trimmed.contains('\n') && trimmed.contains("\\n") {
+        return trimmed.replace("\\r\\n", "\n").replace("\\n", "\n");
+    }
+    trimmed.to_string()
 }
 
 pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
@@ -9489,9 +9549,10 @@ fn gh_pr_edit(repo_root: &Path, repo: &str, number: u64, title: &str, body: &str
     let tmp_dir = std::env::temp_dir().join("flow-pr-edit");
     let _ = fs::create_dir_all(&tmp_dir);
     let patch_path = tmp_dir.join(format!("pr-{number}.patch.json"));
+    let normalized_body = normalize_markdown_linebreaks(body);
     let payload = serde_json::json!({
         "title": title,
-        "body": body,
+        "body": normalized_body,
     });
     fs::write(&patch_path, serde_json::to_string(&payload)?)?;
 
@@ -13425,5 +13486,20 @@ mod tests {
             }
             _ => panic!("expected glm5 to map to rise commit message selection"),
         }
+    }
+
+    #[test]
+    fn normalize_markdown_linebreaks_decodes_literal_newlines() {
+        let input = "## Summary\\n- one\\n- two\\n\\n## Why\\n- because";
+        let out = normalize_markdown_linebreaks(input);
+        assert!(out.contains("## Summary\n- one\n- two"));
+        assert!(out.contains("\n\n## Why\n- because"));
+    }
+
+    #[test]
+    fn normalize_markdown_linebreaks_preserves_existing_multiline_text() {
+        let input = "## Summary\n- already\n- multiline";
+        let out = normalize_markdown_linebreaks(input);
+        assert_eq!(out, input);
     }
 }
