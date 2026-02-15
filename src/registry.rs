@@ -641,10 +641,15 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 }
 
 fn default_bin_dir() -> PathBuf {
-    env::var_os("HOME")
+    let home = env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("bin"))
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| PathBuf::from("."));
+    // Prefer ~/.flow/bin (already on PATH from install.sh)
+    let flow_bin = home.join(".flow").join("bin");
+    if flow_bin.exists() {
+        return flow_bin;
+    }
+    home.join("bin")
 }
 
 fn persist_with_permissions(temp: NamedTempFile, dest: &Path) -> Result<()> {
