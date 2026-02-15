@@ -79,11 +79,9 @@ pub fn run_index(opts: InstallIndexOpts) -> Result<()> {
     Ok(())
 }
 
-fn registry_configured(opts: &InstallOpts) -> bool {
-    if opts.registry.is_some() {
-        return true;
-    }
-    env::var("FLOW_REGISTRY_URL").is_ok()
+fn registry_configured(_opts: &InstallOpts) -> bool {
+    // Registry is always available — defaults to https://myflow.sh
+    true
 }
 
 fn install_with_flox(opts: &InstallOpts) -> Result<()> {
