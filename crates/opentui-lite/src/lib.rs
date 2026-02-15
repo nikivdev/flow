@@ -56,17 +56,8 @@ pub const ATTR_HIDDEN: u32 = 1 << 6;
 pub const ATTR_STRIKETHROUGH: u32 = 1 << 7;
 
 pub const BORDER_SIMPLE: [u32; 11] = [
-    '+' as u32,
-    '+' as u32,
-    '+' as u32,
-    '+' as u32,
-    '-' as u32,
-    '|' as u32,
-    '+' as u32,
-    '+' as u32,
-    '+' as u32,
-    '+' as u32,
-    '+' as u32,
+    '+' as u32, '+' as u32, '+' as u32, '+' as u32, '-' as u32, '|' as u32, '+' as u32, '+' as u32,
+    '+' as u32, '+' as u32, '+' as u32,
 ];
 
 type RendererPtr = *mut std::ffi::c_void;

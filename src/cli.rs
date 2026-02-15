@@ -128,6 +128,11 @@ pub enum Commands {
         long_about = "Search through previously run tasks (most recent first) or list tasks from flow.toml."
     )]
     Tasks(TasksCommand),
+    #[command(
+        about = "Create a local AI scratch test file under .ai/test.",
+        long_about = "Creates a gitignored test scaffold under .ai/test for fast AI-generated validation tests. Intended for local iteration without polluting tracked test suites."
+    )]
+    AiTestNew(AiTestNewOpts),
     /// Execute a specific project task (hidden; used by the palette and task shortcuts).
     #[command(hide = true)]
     Run(TaskRunOpts),
@@ -210,6 +215,12 @@ pub enum Commands {
         alias = "a"
     )]
     Ask(AskOpts),
+    #[command(
+        about = "List and search git branches quickly.",
+        long_about = "Fast branch discovery for local + remote branches. Supports lexical search and AI-assisted natural-language matching via the local AI server (zerg/ai).",
+        alias = "br"
+    )]
+    Branches(BranchesCommand),
     #[command(
         about = "AI-powered commit with code review and optional GitEdit sync.",
         long_about = "Stages all changes (or only paths passed via --path), runs code review for bugs/security, generates commit message, commits, pushes (unless commit queue is enabled), and syncs AI sessions to gitedit.dev when enabled in global config.",
@@ -795,6 +806,24 @@ impl Default for TasksOpts {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct AiTestNewOpts {
+    /// Name or relative path for the scratch test (e.g. auth-login, chat/loading-state).
+    pub name: String,
+
+    /// Base scratch test directory, relative to project root.
+    #[arg(long, default_value = ".ai/test")]
+    pub dir: String,
+
+    /// Use `.spec.ts` instead of `.test.ts`.
+    #[arg(long, default_value_t = false)]
+    pub spec: bool,
+
+    /// Overwrite existing file if present.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct GlobalCommand {
     #[command(subcommand)]
     pub action: Option<GlobalAction>,
@@ -1312,6 +1341,70 @@ pub struct AskOpts {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct BranchesCommand {
+    #[command(subcommand)]
+    pub action: Option<BranchesAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum BranchesAction {
+    /// List recent branches.
+    List(BranchListOpts),
+    /// Find branches by substring or token query.
+    Find(BranchFindOpts),
+    /// Use AI to map a natural language query to the best branch.
+    Ai(BranchAiOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct BranchListOpts {
+    /// Include remote branches.
+    #[arg(long)]
+    pub remote: bool,
+    /// Maximum number of branches to show.
+    #[arg(long, default_value_t = 40)]
+    pub limit: usize,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct BranchFindOpts {
+    /// Query text used to filter branch names and commit subjects.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+    /// Include remote branches.
+    #[arg(long)]
+    pub remote: bool,
+    /// Maximum number of matches to show.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+    /// Switch to the top match automatically.
+    #[arg(long)]
+    pub switch: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct BranchAiOpts {
+    /// Natural language query describing the branch you want.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+    /// Include remote branches.
+    #[arg(long)]
+    pub remote: bool,
+    /// Maximum candidate branches to send to AI.
+    #[arg(long, default_value_t = 80)]
+    pub limit: usize,
+    /// AI server model to use (defaults to AI_SERVER_MODEL).
+    #[arg(long)]
+    pub model: Option<String>,
+    /// AI server URL (defaults to AI_SERVER_URL or http://127.0.0.1:7331).
+    #[arg(long)]
+    pub url: Option<String>,
+    /// Switch to the selected branch automatically.
+    #[arg(long)]
+    pub switch: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct CommitOpts {
     /// Skip pushing after commit.
     #[arg(long, short = 'n')]
@@ -1562,6 +1655,11 @@ pub enum CommitQueueAction {
 pub enum ReviewAction {
     /// Open the latest queued commit in Rise.
     Latest,
+    /// Copy a ready-to-send review prompt for a queued commit to clipboard.
+    Copy {
+        /// Commit hash (short or full). Defaults to latest queued commit.
+        hash: Option<String>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2915,6 +3013,12 @@ pub struct SwitchCommand {
     /// Preferred remote to track from (default: upstream, then origin).
     #[arg(long)]
     pub remote: Option<String>,
+    /// Auto-preserve a safety snapshot branch/bookmark before switching (default: true).
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub preserve: bool,
+    /// Disable safety snapshot preservation (same as --preserve=false).
+    #[arg(long, overrides_with = "preserve")]
+    pub no_preserve: bool,
     /// Auto-stash uncommitted changes before switching (default: true).
     #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     pub stash: bool,

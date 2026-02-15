@@ -230,15 +230,17 @@ f commit
 f commit --sync
 ```
 
-### Commit Message Tool (Kimi CLI)
+### Commit Message Tool
 
-Use Kimi Code CLI in headless mode for commit messages:
+Optionally force a specific commit-message generator:
 
 ```toml
 [commit]
-message_tool = "kimi"
-message_model = "kimi-k2-thinking-turbo" # optional; uses Kimi default if omitted
+message_tool = "kimi" # also supports: claude, rise, glm5, opencode, openrouter, remote, openai
+message_model = "kimi-k2-thinking-turbo" # optional, tool-specific
 ```
+
+If the forced tool fails, `f commit` now falls back through the configured/default chain.
 
 ### Review Tool (Kimi CLI)
 
@@ -251,6 +253,41 @@ model = "kimi-k2-thinking-turbo" # optional; uses Kimi default if omitted
 ```
 
 This uses `kimi --quiet` (print mode) with your existing Kimi CLI auth/config.
+
+### Robust Fallbacks
+
+`f commit` now uses multi-attempt fallback chains for both review and commit-message generation.
+
+Default behavior:
+- Review: primary selection, then `openrouter`, `claude`, `codex-high`
+- Message: review-aligned/override tool, then `remote` (myflow), `openai`, `openrouter`
+- If all message attempts fail and fail-open is enabled, Flow uses a deterministic local fallback message.
+
+Configuration:
+
+```toml
+[commit]
+review_fail_open = true
+message_fail_open = true
+review_fallbacks = ["openrouter", "claude", "codex-high"]
+message_fallbacks = ["remote", "openai", "openrouter"]
+```
+
+Environment overrides:
+- `FLOW_COMMIT_REVIEW_FAIL_OPEN=0|1`
+- `FLOW_COMMIT_MESSAGE_FAIL_OPEN=0|1`
+- `FLOW_COMMIT_REVIEW_FALLBACKS="openrouter,claude,codex-high"`
+- `FLOW_COMMIT_MESSAGE_FALLBACKS="remote,openai,openrouter"`
+
+Codex -> GLM5 fallback example:
+
+```toml
+[commit]
+review_fallbacks = ["glm5", "openrouter", "claude"]
+message_fallbacks = ["glm5", "remote", "openai"]
+```
+
+`glm5` maps to the Rise/internal route with model `zai:glm-5`.
 
 ### Queue Policy
 
@@ -274,6 +311,9 @@ mode = "block"
 runner = "bun"
 bun_repo_strict = true
 require_related_tests = true
+ai_scratch_test_dir = ".ai/test"
+run_ai_scratch_tests = true
+allow_ai_scratch_to_satisfy_gate = false
 max_local_gate_seconds = 20
 
 [commit.skill_gate]
@@ -285,7 +325,7 @@ quality-bun-feature-delivery = 2
 ```
 
 When `mode = "block"`, `f commit` fails until the test/skill requirements are satisfied.  
-For Bun repos, run checks with `bun bd test ...` for debug-build validation.
+For Bun repos, run checks with `bun bd test ...` for debug-build validation. If no related tracked tests are found, Flow can run tests under `ai_scratch_test_dir` (default `.ai/test`) as a fallback signal.
 
 ### AI Session Context
 

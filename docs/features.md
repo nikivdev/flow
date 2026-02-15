@@ -180,7 +180,13 @@ f cc
 # [options]
 # commit_with_check_async = false  # force local sync execution
 # commit_with_check_use_repo_root = false  # only stage/commit from current subdir
-# commit_with_check_timeout_secs = 120  # abort review if it hangs
+# commit_with_check_timeout_secs = 300  # abort review if it hangs (default 300)
+# commit_with_check_review_retries = 2  # retry timed-out review runs (default 2)
+#
+# Optional env overrides:
+# FLOW_COMMIT_WITH_CHECK_TIMEOUT_SECS=600
+# FLOW_COMMIT_WITH_CHECK_REVIEW_RETRIES=3
+# FLOW_COMMIT_WITH_CHECK_RETRY_BACKOFF_SECS=5
 
 # If issues found, prompts for confirmation before proceeding
 ```
@@ -341,6 +347,9 @@ mode = "block"
 runner = "bun"
 bun_repo_strict = true
 require_related_tests = true
+ai_scratch_test_dir = ".ai/test"
+run_ai_scratch_tests = true
+allow_ai_scratch_to_satisfy_gate = false
 max_local_gate_seconds = 20
 
 [commit.skill_gate]

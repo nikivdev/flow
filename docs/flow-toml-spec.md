@@ -47,6 +47,9 @@ install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/sk
 # runner = "bun"      # currently optimized for bun in Bun repos
 # bun_repo_strict = true
 # require_related_tests = true
+# ai_scratch_test_dir = ".ai/test"
+# run_ai_scratch_tests = true
+# allow_ai_scratch_to_satisfy_gate = false
 # max_local_gate_seconds = 20
 
 [commit.skill_gate]   # optional: require specific local skills before commit
@@ -79,7 +82,7 @@ fr = "f run"
 - `[skills]`: optional skill enforcement; `sync_tasks` generates `.ai/skills` from tasks and `install` ensures registry skills are present (skills are gitignored by default).
 - `[skills.codex]`: optional Codex tuning; task skill `agents/openai.yaml` generation, post-sync force reload, and implicit invocation policy defaults.
 - `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
-- `[commit.testing]`: optional local testing gate evaluated during `f commit`; supports Bun-first strict mode for Bun repos.
+- `[commit.testing]`: optional local testing gate evaluated during `f commit`; supports Bun-first strict mode plus optional AI scratch-test fallback (`.ai/test` by default).
 - `[commit.skill_gate]`: optional required-skill policy for `f commit`; can enforce presence and minimum skill versions.
 
 ## Notes
@@ -107,6 +110,9 @@ mode = "block"
 runner = "bun"
 bun_repo_strict = true
 require_related_tests = true
+ai_scratch_test_dir = ".ai/test"
+run_ai_scratch_tests = true
+allow_ai_scratch_to_satisfy_gate = false
 max_local_gate_seconds = 20
 
 [commit.skill_gate]

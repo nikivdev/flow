@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use clap::{Parser, error::ErrorKind};
 use flowd::{
-    agents, ai, analytics, archive, auth, changes,
+    agents, ai, ai_test, analytics, archive, auth, branches, changes,
     cli::{
         Cli, Commands, InstallAction, ProxyAction, ProxyCommand, RerunOpts, ReviewAction,
         ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
@@ -90,6 +90,9 @@ fn main() -> Result<()> {
             }
             Some(Commands::Tasks(cmd)) => {
                 tasks::run_tasks_command(cmd)?;
+            }
+            Some(Commands::AiTestNew(opts)) => {
+                ai_test::run(opts)?;
             }
             Some(Commands::Global(cmd)) => {
                 tasks::run_global(cmd)?;
@@ -178,6 +181,9 @@ fn main() -> Result<()> {
                     url: opts.url,
                 })?;
             }
+            Some(Commands::Branches(cmd)) => {
+                branches::run(cmd)?;
+            }
             Some(Commands::Commit(opts)) => {
                 // Default: Claude review, no context, gitedit sync
                 let mut force = opts.force || opts.approved;
@@ -263,6 +269,9 @@ fn main() -> Result<()> {
             Some(Commands::Review(cmd)) => match cmd.action {
                 Some(ReviewAction::Latest) | None => {
                     commit::open_latest_queue_review()?;
+                }
+                Some(ReviewAction::Copy { hash }) => {
+                    commit::copy_review_prompt(hash.as_deref())?;
                 }
             },
             Some(Commands::GitRepair(opts)) => {
