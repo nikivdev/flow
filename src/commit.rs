@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use regex::Regex;
 use reqwest::StatusCode;
@@ -42,6 +42,10 @@ const MODEL: &str = "gpt-4.1-nano";
 const MAX_DIFF_CHARS: usize = 12_000;
 const HUB_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 const HUB_PORT: u16 = 9050;
+const DEFAULT_OPENROUTER_REVIEW_MODEL: &str = "arcee-ai/trinity-large-preview:free";
+const DEFAULT_OPENCODE_MODEL: &str = "opencode/minimax-m2.1-free";
+const DEFAULT_RISE_MODEL: &str = "zai:glm-4.7";
+const DEFAULT_GLM5_RISE_MODEL: &str = "zai:glm-5";
 
 /// Patterns for files that likely contain secrets and shouldn't be committed.
 const SENSITIVE_PATTERNS: &[&str] = &[
@@ -111,6 +115,9 @@ struct CommitTestingPolicy {
     runner: String,
     bun_repo_strict: bool,
     require_related_tests: bool,
+    ai_scratch_test_dir: String,
+    run_ai_scratch_tests: bool,
+    allow_ai_scratch_to_satisfy_gate: bool,
     max_local_gate_seconds: u64,
 }
 
@@ -183,20 +190,8 @@ pub enum ReviewSelection {
 }
 
 impl ReviewSelection {
-    fn is_claude(&self) -> bool {
-        matches!(self, ReviewSelection::Claude(_))
-    }
-
     fn is_codex(&self) -> bool {
         matches!(self, ReviewSelection::Codex(_))
-    }
-
-    fn is_opencode(&self) -> bool {
-        matches!(self, ReviewSelection::Opencode { .. })
-    }
-
-    fn is_rise(&self) -> bool {
-        matches!(self, ReviewSelection::Rise { .. })
     }
 
     fn is_openrouter(&self) -> bool {
@@ -228,6 +223,17 @@ impl ReviewSelection {
             },
             ReviewSelection::OpenRouter { model } => openrouter_model_label(model),
         }
+    }
+}
+
+fn review_tool_label(selection: &ReviewSelection) -> &'static str {
+    match selection {
+        ReviewSelection::Claude(_) => "Claude",
+        ReviewSelection::Codex(_) => "Codex",
+        ReviewSelection::Opencode { .. } => "opencode",
+        ReviewSelection::OpenRouter { .. } => "OpenRouter",
+        ReviewSelection::Rise { .. } => "Rise AI",
+        ReviewSelection::Kimi { .. } => "Kimi",
     }
 }
 
@@ -990,15 +996,19 @@ pub fn resolve_review_selection_from_config() -> Option<ReviewSelection> {
 
     match tool {
         "opencode" => {
-            let model = model.unwrap_or_else(|| "opencode/minimax-m2.1-free".to_string());
+            let model = model.unwrap_or_else(|| DEFAULT_OPENCODE_MODEL.to_string());
             Some(ReviewSelection::Opencode { model })
         }
         "openrouter" => {
-            let model = model.unwrap_or_else(|| "arcee-ai/trinity-large-preview:free".to_string());
+            let model = model.unwrap_or_else(|| DEFAULT_OPENROUTER_REVIEW_MODEL.to_string());
             Some(ReviewSelection::OpenRouter { model })
         }
         "rise" => {
-            let model = model.unwrap_or_else(|| "zai:glm-4.7".to_string());
+            let model = model.unwrap_or_else(|| DEFAULT_RISE_MODEL.to_string());
+            Some(ReviewSelection::Rise { model })
+        }
+        "glm5" | "glm-5" | "glm" => {
+            let model = model.unwrap_or_else(|| DEFAULT_GLM5_RISE_MODEL.to_string());
             Some(ReviewSelection::Rise { model })
         }
         "kimi" => Some(ReviewSelection::Kimi { model }),
@@ -1068,6 +1078,566 @@ pub fn resolve_review_selection_v2(
         // Default: Claude Sonnet
         ReviewSelection::Claude(ClaudeModel::Sonnet)
     }
+}
+
+fn parse_boolish(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn load_ts_commit_config() -> Option<config::TsCommitConfig> {
+    config::load_ts_config()
+        .and_then(|cfg| cfg.flow)
+        .and_then(|flow| flow.commit)
+}
+
+fn load_local_commit_config(repo_root: &Path) -> Option<config::CommitConfig> {
+    let local = repo_root.join("flow.toml");
+    if !local.exists() {
+        return None;
+    }
+    config::load(&local).ok().and_then(|cfg| cfg.commit)
+}
+
+fn load_global_commit_config() -> Option<config::CommitConfig> {
+    let global = config::default_config_path();
+    if !global.exists() {
+        return None;
+    }
+    config::load(&global).ok().and_then(|cfg| cfg.commit)
+}
+
+fn commit_review_fail_open_enabled(repo_root: &Path) -> bool {
+    if let Ok(value) = env::var("FLOW_COMMIT_REVIEW_FAIL_OPEN") {
+        if let Some(parsed) = parse_boolish(&value) {
+            return parsed;
+        }
+    }
+
+    if let Some(ts) = load_ts_commit_config() {
+        if let Some(enabled) = ts.review_fail_open {
+            return enabled;
+        }
+    }
+    if let Some(local) = load_local_commit_config(repo_root) {
+        if let Some(enabled) = local.review_fail_open {
+            return enabled;
+        }
+    }
+    if let Some(global) = load_global_commit_config() {
+        if let Some(enabled) = global.review_fail_open {
+            return enabled;
+        }
+    }
+
+    true
+}
+
+fn commit_message_fail_open_enabled(repo_root: &Path) -> bool {
+    if let Ok(value) = env::var("FLOW_COMMIT_MESSAGE_FAIL_OPEN") {
+        if let Some(parsed) = parse_boolish(&value) {
+            return parsed;
+        }
+    }
+
+    if let Some(ts) = load_ts_commit_config() {
+        if let Some(enabled) = ts.message_fail_open {
+            return enabled;
+        }
+    }
+    if let Some(local) = load_local_commit_config(repo_root) {
+        if let Some(enabled) = local.message_fail_open {
+            return enabled;
+        }
+    }
+    if let Some(global) = load_global_commit_config() {
+        if let Some(enabled) = global.message_fail_open {
+            return enabled;
+        }
+    }
+
+    true
+}
+
+fn parse_review_selection_spec(spec: &str) -> Option<ReviewSelection> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "codex" || lower == "codex-high" {
+        return Some(ReviewSelection::Codex(CodexModel::High));
+    }
+    if lower == "codex-mini" || lower == "codex:mini" || lower == "codex-mini-review" {
+        return Some(ReviewSelection::Codex(CodexModel::Mini));
+    }
+    if lower == "claude" || lower == "claude-sonnet" {
+        return Some(ReviewSelection::Claude(ClaudeModel::Sonnet));
+    }
+    if lower == "claude-opus" || lower == "claude:opus" {
+        return Some(ReviewSelection::Claude(ClaudeModel::Opus));
+    }
+    if lower == "kimi" {
+        return Some(ReviewSelection::Kimi { model: None });
+    }
+    if let Some(model) = trimmed
+        .strip_prefix("openrouter:")
+        .or_else(|| trimmed.strip_prefix("openrouter/"))
+    {
+        let model = if model.trim().is_empty() {
+            DEFAULT_OPENROUTER_REVIEW_MODEL.to_string()
+        } else {
+            model.trim().to_string()
+        };
+        return Some(ReviewSelection::OpenRouter { model });
+    }
+    if lower == "openrouter" {
+        return Some(ReviewSelection::OpenRouter {
+            model: DEFAULT_OPENROUTER_REVIEW_MODEL.to_string(),
+        });
+    }
+    if let Some(model) = trimmed
+        .strip_prefix("rise:")
+        .or_else(|| trimmed.strip_prefix("rise/"))
+    {
+        let model = if model.trim().is_empty() {
+            DEFAULT_RISE_MODEL.to_string()
+        } else {
+            model.trim().to_string()
+        };
+        return Some(ReviewSelection::Rise { model });
+    }
+    if lower == "rise" {
+        return Some(ReviewSelection::Rise {
+            model: DEFAULT_RISE_MODEL.to_string(),
+        });
+    }
+    if lower == "glm5" || lower == "glm-5" || lower == "glm" {
+        return Some(ReviewSelection::Rise {
+            model: DEFAULT_GLM5_RISE_MODEL.to_string(),
+        });
+    }
+    if let Some(model) = trimmed
+        .strip_prefix("glm5:")
+        .or_else(|| trimmed.strip_prefix("glm5/"))
+        .or_else(|| trimmed.strip_prefix("glm-5:"))
+        .or_else(|| trimmed.strip_prefix("glm-5/"))
+    {
+        let model = if model.trim().is_empty() {
+            DEFAULT_GLM5_RISE_MODEL.to_string()
+        } else {
+            model.trim().to_string()
+        };
+        return Some(ReviewSelection::Rise { model });
+    }
+    if let Some(model) = trimmed
+        .strip_prefix("opencode:")
+        .or_else(|| trimmed.strip_prefix("opencode/"))
+    {
+        let model = if model.trim().is_empty() {
+            DEFAULT_OPENCODE_MODEL.to_string()
+        } else {
+            model.trim().to_string()
+        };
+        return Some(ReviewSelection::Opencode { model });
+    }
+    if lower == "opencode" {
+        return Some(ReviewSelection::Opencode {
+            model: DEFAULT_OPENCODE_MODEL.to_string(),
+        });
+    }
+    None
+}
+
+fn commit_review_fallback_specs(repo_root: &Path) -> Vec<String> {
+    if let Ok(raw) = env::var("FLOW_COMMIT_REVIEW_FALLBACKS") {
+        let parsed = raw
+            .split([',', '\n'])
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>();
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+
+    if let Some(ts) = load_ts_commit_config() {
+        if let Some(v) = ts.review_fallbacks {
+            let parsed = v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    if let Some(local) = load_local_commit_config(repo_root) {
+        if let Some(v) = local.review_fallbacks {
+            let parsed = v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    if let Some(global) = load_global_commit_config() {
+        if let Some(v) = global.review_fallbacks {
+            let parsed = v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+
+    vec![
+        "openrouter".to_string(),
+        "claude".to_string(),
+        "codex-high".to_string(),
+    ]
+}
+
+fn review_attempts_for_selection(
+    repo_root: &Path,
+    primary: &ReviewSelection,
+    prefer_codex_over_openrouter: bool,
+) -> Vec<ReviewSelection> {
+    let mut attempts: Vec<ReviewSelection> = Vec::new();
+    if prefer_codex_over_openrouter {
+        attempts.push(ReviewSelection::Codex(CodexModel::High));
+    }
+    attempts.push(primary.clone());
+
+    for spec in commit_review_fallback_specs(repo_root) {
+        if let Some(selection) = parse_review_selection_spec(&spec) {
+            attempts.push(selection);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for attempt in attempts {
+        let key = attempt.model_label();
+        if seen.insert(key) {
+            deduped.push(attempt);
+        }
+    }
+    deduped
+}
+
+#[derive(Debug, Clone)]
+enum CommitMessageSelection {
+    Kimi { model: Option<String> },
+    Claude,
+    Opencode { model: String },
+    OpenRouter { model: String },
+    Rise { model: String },
+    Remote,
+    OpenAi,
+    Heuristic,
+}
+
+impl CommitMessageSelection {
+    fn key(&self) -> String {
+        match self {
+            CommitMessageSelection::Kimi { model } => match model.as_deref() {
+                Some(model) if !model.trim().is_empty() => format!("kimi:{}", model.trim()),
+                _ => "kimi".to_string(),
+            },
+            CommitMessageSelection::Claude => "claude".to_string(),
+            CommitMessageSelection::Opencode { model } => format!("opencode:{}", model.trim()),
+            CommitMessageSelection::OpenRouter { model } => {
+                format!("openrouter:{}", openrouter_model_id(model))
+            }
+            CommitMessageSelection::Rise { model } => format!("rise:{}", model.trim()),
+            CommitMessageSelection::Remote => "remote".to_string(),
+            CommitMessageSelection::OpenAi => "openai".to_string(),
+            CommitMessageSelection::Heuristic => "heuristic".to_string(),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            CommitMessageSelection::Kimi { .. } => "Kimi".to_string(),
+            CommitMessageSelection::Claude => "Claude".to_string(),
+            CommitMessageSelection::Opencode { .. } => "opencode".to_string(),
+            CommitMessageSelection::OpenRouter { .. } => "OpenRouter".to_string(),
+            CommitMessageSelection::Rise { .. } => "Rise".to_string(),
+            CommitMessageSelection::Remote => "myflow".to_string(),
+            CommitMessageSelection::OpenAi => "OpenAI".to_string(),
+            CommitMessageSelection::Heuristic => "deterministic fallback".to_string(),
+        }
+    }
+}
+
+fn parse_commit_message_selection_spec(spec: &str) -> Option<CommitMessageSelection> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "remote" || lower == "myflow" || lower == "flow" {
+        return Some(CommitMessageSelection::Remote);
+    }
+    if lower == "openai" {
+        return Some(CommitMessageSelection::OpenAi);
+    }
+    if lower == "heuristic" || lower == "fallback" || lower == "local" {
+        return Some(CommitMessageSelection::Heuristic);
+    }
+    if lower == "claude" {
+        return Some(CommitMessageSelection::Claude);
+    }
+    if lower == "kimi" {
+        return Some(CommitMessageSelection::Kimi { model: None });
+    }
+
+    if let Some(model) = trimmed
+        .strip_prefix("kimi:")
+        .or_else(|| trimmed.strip_prefix("kimi/"))
+    {
+        let model = model.trim();
+        return Some(CommitMessageSelection::Kimi {
+            model: if model.is_empty() {
+                None
+            } else {
+                Some(model.to_string())
+            },
+        });
+    }
+
+    if let Some(model) = trimmed
+        .strip_prefix("openrouter:")
+        .or_else(|| trimmed.strip_prefix("openrouter/"))
+    {
+        let model = if model.trim().is_empty() {
+            DEFAULT_OPENROUTER_REVIEW_MODEL.to_string()
+        } else {
+            model.trim().to_string()
+        };
+        return Some(CommitMessageSelection::OpenRouter { model });
+    }
+    if lower == "openrouter" {
+        return Some(CommitMessageSelection::OpenRouter {
+            model: DEFAULT_OPENROUTER_REVIEW_MODEL.to_string(),
+        });
+    }
+
+    if let Some(model) = trimmed
+        .strip_prefix("opencode:")
+        .or_else(|| trimmed.strip_prefix("opencode/"))
+    {
+        let model = if model.trim().is_empty() {
+            DEFAULT_OPENCODE_MODEL.to_string()
+        } else {
+            model.trim().to_string()
+        };
+        return Some(CommitMessageSelection::Opencode { model });
+    }
+    if lower == "opencode" {
+        return Some(CommitMessageSelection::Opencode {
+            model: DEFAULT_OPENCODE_MODEL.to_string(),
+        });
+    }
+
+    if let Some(model) = trimmed
+        .strip_prefix("rise:")
+        .or_else(|| trimmed.strip_prefix("rise/"))
+    {
+        let model = if model.trim().is_empty() {
+            DEFAULT_RISE_MODEL.to_string()
+        } else {
+            model.trim().to_string()
+        };
+        return Some(CommitMessageSelection::Rise { model });
+    }
+    if lower == "rise" {
+        return Some(CommitMessageSelection::Rise {
+            model: DEFAULT_RISE_MODEL.to_string(),
+        });
+    }
+    if lower == "glm5" || lower == "glm-5" || lower == "glm" {
+        return Some(CommitMessageSelection::Rise {
+            model: DEFAULT_GLM5_RISE_MODEL.to_string(),
+        });
+    }
+    if let Some(model) = trimmed
+        .strip_prefix("glm5:")
+        .or_else(|| trimmed.strip_prefix("glm5/"))
+        .or_else(|| trimmed.strip_prefix("glm-5:"))
+        .or_else(|| trimmed.strip_prefix("glm-5/"))
+    {
+        let model = if model.trim().is_empty() {
+            DEFAULT_GLM5_RISE_MODEL.to_string()
+        } else {
+            model.trim().to_string()
+        };
+        return Some(CommitMessageSelection::Rise { model });
+    }
+
+    None
+}
+
+fn parse_commit_message_selection_with_model(
+    tool: &str,
+    model: Option<String>,
+) -> Option<CommitMessageSelection> {
+    let tool_trimmed = tool.trim();
+    if tool_trimmed.is_empty() {
+        return None;
+    }
+    let model_trimmed = model.and_then(|m| {
+        let trimmed = m.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    match tool_trimmed.to_ascii_lowercase().as_str() {
+        "kimi" => Some(CommitMessageSelection::Kimi {
+            model: model_trimmed,
+        }),
+        "claude" => Some(CommitMessageSelection::Claude),
+        "openrouter" => Some(CommitMessageSelection::OpenRouter {
+            model: model_trimmed.unwrap_or_else(|| DEFAULT_OPENROUTER_REVIEW_MODEL.to_string()),
+        }),
+        "opencode" => Some(CommitMessageSelection::Opencode {
+            model: model_trimmed.unwrap_or_else(|| DEFAULT_OPENCODE_MODEL.to_string()),
+        }),
+        "rise" => Some(CommitMessageSelection::Rise {
+            model: model_trimmed.unwrap_or_else(|| DEFAULT_RISE_MODEL.to_string()),
+        }),
+        "glm5" | "glm-5" | "glm" => Some(CommitMessageSelection::Rise {
+            model: model_trimmed.unwrap_or_else(|| DEFAULT_GLM5_RISE_MODEL.to_string()),
+        }),
+        "remote" | "myflow" | "flow" => Some(CommitMessageSelection::Remote),
+        "openai" => Some(CommitMessageSelection::OpenAi),
+        "heuristic" | "fallback" | "local" => Some(CommitMessageSelection::Heuristic),
+        _ => parse_commit_message_selection_spec(tool_trimmed),
+    }
+}
+
+fn commit_message_fallback_specs(repo_root: &Path) -> Vec<String> {
+    if let Ok(raw) = env::var("FLOW_COMMIT_MESSAGE_FALLBACKS") {
+        let parsed = raw
+            .split([',', '\n'])
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>();
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+
+    if let Some(ts) = load_ts_commit_config() {
+        if let Some(v) = ts.message_fallbacks {
+            let parsed = v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    if let Some(local) = load_local_commit_config(repo_root) {
+        if let Some(v) = local.message_fallbacks {
+            let parsed = v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    if let Some(global) = load_global_commit_config() {
+        if let Some(v) = global.message_fallbacks {
+            let parsed = v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+
+    vec![
+        "remote".to_string(),
+        "openai".to_string(),
+        "openrouter".to_string(),
+    ]
+}
+
+fn review_selection_to_message_selection(
+    review_selection: &ReviewSelection,
+) -> Option<CommitMessageSelection> {
+    match review_selection {
+        ReviewSelection::Claude(_) => Some(CommitMessageSelection::Claude),
+        ReviewSelection::Opencode { model } => Some(CommitMessageSelection::Opencode {
+            model: model.clone(),
+        }),
+        ReviewSelection::OpenRouter { model } => Some(CommitMessageSelection::OpenRouter {
+            model: model.clone(),
+        }),
+        ReviewSelection::Rise { model } => Some(CommitMessageSelection::Rise {
+            model: model.clone(),
+        }),
+        ReviewSelection::Kimi { model } => Some(CommitMessageSelection::Kimi {
+            model: model.clone(),
+        }),
+        ReviewSelection::Codex(_) => None,
+    }
+}
+
+fn commit_message_attempts(
+    repo_root: &Path,
+    review_selection: Option<&ReviewSelection>,
+    override_selection: Option<&CommitMessageSelection>,
+) -> Vec<CommitMessageSelection> {
+    let mut attempts: Vec<CommitMessageSelection> = Vec::new();
+
+    if let Some(selection) = override_selection {
+        attempts.push(selection.clone());
+    } else if let Some(review_selection) = review_selection {
+        if let Some(selection) = review_selection_to_message_selection(review_selection) {
+            attempts.push(selection);
+        }
+    }
+
+    for spec in commit_message_fallback_specs(repo_root) {
+        if let Some(selection) = parse_commit_message_selection_spec(&spec) {
+            attempts.push(selection);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for attempt in attempts {
+        let key = attempt.key();
+        if seen.insert(key) {
+            deduped.push(attempt);
+        }
+    }
+    deduped
 }
 
 #[derive(Debug, Deserialize)]
@@ -1622,15 +2192,11 @@ pub fn run_sync(
     ensure_git_repo()?;
     debug!("verified git repository");
     let repo_root = git_root_or_cwd();
+    warn_if_commit_invoked_from_subdir(&repo_root);
     ensure_commit_setup(&repo_root)?;
     git_guard::ensure_clean_for_commit(&repo_root)?;
 
     let commit_message_override = resolve_commit_message_override(&repo_root);
-    let commit_provider = if commit_message_override.is_none() {
-        Some(resolve_commit_message_provider()?)
-    } else {
-        None
-    };
     debug!(
         has_override = commit_message_override.is_some(),
         "resolved commit message override"
@@ -1643,27 +2209,28 @@ pub fn run_sync(
     gitignore_policy::enforce_staged_policy(&repo_root)?;
 
     // Check for sensitive files before proceeding
-    let cwd = std::env::current_dir()?;
-    let sensitive_files = check_sensitive_files(&cwd);
+    let sensitive_files = check_sensitive_files(&repo_root);
     warn_sensitive_files(&sensitive_files)?;
 
     // Scan diff content for hardcoded secrets
-    let secret_findings = scan_diff_for_secrets(&cwd);
+    let secret_findings = scan_diff_for_secrets(&repo_root);
     warn_secrets_in_diff(&repo_root, &secret_findings)?;
 
     // Check for files with large diffs
-    let large_diffs = check_large_diffs(&cwd);
+    let large_diffs = check_large_diffs(&repo_root);
     warn_large_diffs(&large_diffs)?;
 
     // Get diff
-    let diff = git_capture(&["diff", "--cached"])?;
+    let diff = git_capture_in(&repo_root, &["diff", "--cached"])?;
     if diff.trim().is_empty() {
+        println!("\nnotify: No staged changes to commit");
+        print_pending_queue_review_hint(&repo_root);
         bail!("No staged changes to commit");
     }
     debug!(diff_len = diff.len(), "got cached diff");
 
     // Get status
-    let status = git_capture(&["status", "--short"]).unwrap_or_default();
+    let status = git_capture_in(&repo_root, &["status", "--short"]).unwrap_or_default();
     debug!(status_lines = status.lines().count(), "got git status");
 
     // Truncate diff if needed
@@ -1677,16 +2244,14 @@ pub fn run_sync(
     // Generate commit message
     print!("Generating commit message... ");
     io::stdout().flush()?;
-    let mut message = match commit_message_override {
-        Some(CommitMessageOverride::Kimi { model }) => {
-            generate_commit_message_kimi(&diff_for_prompt, &status, truncated, model.as_deref())?
-        }
-        None => {
-            let commit_provider = commit_provider.as_ref().expect("commit provider missing");
-            info!(model = MODEL, "calling OpenAI API");
-            commit_message_from_provider(commit_provider, &diff_for_prompt, &status, truncated)?
-        }
-    };
+    let mut message = generate_commit_message_with_fallbacks(
+        &repo_root,
+        None,
+        commit_message_override.as_ref(),
+        &diff_for_prompt,
+        &status,
+        truncated,
+    )?;
     println!("done\n");
     debug!(message_len = message.len(), "got commit message");
 
@@ -1736,7 +2301,7 @@ pub fn run_sync(
     if queue_enabled {
         match queue_commit_for_review(&repo_root, &message, None, None, None, Vec::new()) {
             Ok(sha) => {
-                print_queue_instructions(&sha);
+                print_queue_instructions(&repo_root, &sha);
                 if queue.open_review {
                     open_review_in_rise(&repo_root, &sha);
                 }
@@ -1823,6 +2388,7 @@ pub fn run_fast(
     let push = push && !queue_enabled;
     ensure_git_repo()?;
     let repo_root = git_root_or_cwd();
+    warn_if_commit_invoked_from_subdir(&repo_root);
     ensure_commit_setup(&repo_root)?;
     git_guard::ensure_clean_for_commit(&repo_root)?;
 
@@ -1850,6 +2416,8 @@ pub fn run_fast(
     // Ensure we actually have changes
     let diff = git_capture(&["diff", "--cached"])?;
     if diff.trim().is_empty() {
+        println!("\nnotify: No staged changes to commit");
+        print_pending_queue_review_hint(&repo_root);
         bail!("No staged changes to commit");
     }
 
@@ -1888,7 +2456,7 @@ pub fn run_fast(
     if queue_enabled {
         match queue_commit_for_review(&repo_root, &full_message, None, None, None, Vec::new()) {
             Ok(sha) => {
-                print_queue_instructions(&sha);
+                print_queue_instructions(&repo_root, &sha);
                 if queue.open_review {
                     open_review_in_rise(&repo_root, &sha);
                 }
@@ -2089,16 +2657,13 @@ fn commit_with_check_async_enabled() -> bool {
         }
     }
 
-    let cwd = std::env::current_dir().ok();
-
-    if let Some(cwd) = cwd {
-        let local_config = cwd.join("flow.toml");
-        if local_config.exists() {
-            if let Ok(cfg) = config::load(&local_config) {
-                return cfg.options.commit_with_check_async.unwrap_or(true);
-            }
-            return true;
+    let repo_root = git_root_or_cwd();
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            return cfg.options.commit_with_check_async.unwrap_or(true);
         }
+        return true;
     }
 
     let global_config = config::default_config_path();
@@ -2112,16 +2677,13 @@ fn commit_with_check_async_enabled() -> bool {
 }
 
 fn commit_with_check_use_repo_root() -> bool {
-    let cwd = std::env::current_dir().ok();
-
-    if let Some(cwd) = cwd {
-        let local_config = cwd.join("flow.toml");
-        if local_config.exists() {
-            if let Ok(cfg) = config::load(&local_config) {
-                return cfg.options.commit_with_check_use_repo_root.unwrap_or(true);
-            }
-            return true;
+    let repo_root = git_root_or_cwd();
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            return cfg.options.commit_with_check_use_repo_root.unwrap_or(true);
         }
+        return true;
     }
 
     let global_config = config::default_config_path();
@@ -2156,50 +2718,109 @@ fn resolve_commit_with_check_root() -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(root))
 }
 
-fn commit_with_check_timeout_secs() -> u64 {
-    let cwd = std::env::current_dir().ok();
+const DEFAULT_COMMIT_WITH_CHECK_TIMEOUT_SECS: u64 = 300;
+const MAX_COMMIT_WITH_CHECK_TIMEOUT_SECS: u64 = 3600;
+const DEFAULT_COMMIT_WITH_CHECK_REVIEW_RETRIES: u32 = 2;
+const MAX_COMMIT_WITH_CHECK_REVIEW_RETRIES: u32 = 5;
+const DEFAULT_COMMIT_WITH_CHECK_RETRY_BACKOFF_SECS: u64 = 3;
 
-    if let Some(cwd) = cwd {
-        let local_config = cwd.join("flow.toml");
-        if local_config.exists() {
-            if let Ok(cfg) = config::load(&local_config) {
-                return cfg.options.commit_with_check_timeout_secs.unwrap_or(120);
+fn commit_with_check_timeout_from_env() -> Option<u64> {
+    for key in [
+        "FLOW_COMMIT_WITH_CHECK_TIMEOUT_SECS",
+        "FLOW_COMMIT_TIMEOUT_SECS",
+    ] {
+        if let Ok(value) = env::var(key) {
+            if let Ok(parsed) = value.trim().parse::<u64>() {
+                if parsed > 0 {
+                    return Some(parsed.min(MAX_COMMIT_WITH_CHECK_TIMEOUT_SECS));
+                }
             }
-            return 120;
         }
+    }
+    None
+}
+
+fn commit_with_check_timeout_secs() -> u64 {
+    if let Some(timeout) = commit_with_check_timeout_from_env() {
+        return timeout;
+    }
+
+    let repo_root = git_root_or_cwd();
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            return cfg
+                .options
+                .commit_with_check_timeout_secs
+                .unwrap_or(DEFAULT_COMMIT_WITH_CHECK_TIMEOUT_SECS)
+                .clamp(1, MAX_COMMIT_WITH_CHECK_TIMEOUT_SECS);
+        }
+        return DEFAULT_COMMIT_WITH_CHECK_TIMEOUT_SECS;
     }
 
     let global_config = config::default_config_path();
     if global_config.exists() {
         if let Ok(cfg) = config::load(&global_config) {
-            return cfg.options.commit_with_check_timeout_secs.unwrap_or(120);
+            return cfg
+                .options
+                .commit_with_check_timeout_secs
+                .unwrap_or(DEFAULT_COMMIT_WITH_CHECK_TIMEOUT_SECS)
+                .clamp(1, MAX_COMMIT_WITH_CHECK_TIMEOUT_SECS);
         }
     }
 
-    120
+    DEFAULT_COMMIT_WITH_CHECK_TIMEOUT_SECS
 }
 
 fn commit_with_check_review_retries() -> u32 {
-    let cwd = std::env::current_dir().ok();
-
-    if let Some(cwd) = cwd {
-        let local_config = cwd.join("flow.toml");
-        if local_config.exists() {
-            if let Ok(cfg) = config::load(&local_config) {
-                return cfg.options.commit_with_check_review_retries.unwrap_or(1);
+    for key in [
+        "FLOW_COMMIT_WITH_CHECK_REVIEW_RETRIES",
+        "FLOW_COMMIT_REVIEW_RETRIES",
+    ] {
+        if let Ok(value) = env::var(key) {
+            if let Ok(parsed) = value.trim().parse::<u32>() {
+                return parsed.min(MAX_COMMIT_WITH_CHECK_REVIEW_RETRIES);
             }
-            return 1;
         }
+    }
+
+    let repo_root = git_root_or_cwd();
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            return cfg
+                .options
+                .commit_with_check_review_retries
+                .unwrap_or(DEFAULT_COMMIT_WITH_CHECK_REVIEW_RETRIES)
+                .min(MAX_COMMIT_WITH_CHECK_REVIEW_RETRIES);
+        }
+        return DEFAULT_COMMIT_WITH_CHECK_REVIEW_RETRIES;
     }
 
     let global_config = config::default_config_path();
     if global_config.exists() {
         if let Ok(cfg) = config::load(&global_config) {
-            return cfg.options.commit_with_check_review_retries.unwrap_or(1);
+            return cfg
+                .options
+                .commit_with_check_review_retries
+                .unwrap_or(DEFAULT_COMMIT_WITH_CHECK_REVIEW_RETRIES)
+                .min(MAX_COMMIT_WITH_CHECK_REVIEW_RETRIES);
         }
     }
 
-    1
+    DEFAULT_COMMIT_WITH_CHECK_REVIEW_RETRIES
+}
+
+fn commit_with_check_retry_backoff_secs(attempt: u32) -> u64 {
+    let mut base = DEFAULT_COMMIT_WITH_CHECK_RETRY_BACKOFF_SECS;
+    if let Ok(value) = env::var("FLOW_COMMIT_WITH_CHECK_RETRY_BACKOFF_SECS") {
+        if let Ok(parsed) = value.trim().parse::<u64>() {
+            if parsed > 0 {
+                base = parsed.min(60);
+            }
+        }
+    }
+    base.saturating_mul(attempt as u64).min(120)
 }
 
 fn commit_with_check_review_url() -> Option<String> {
@@ -2210,16 +2831,14 @@ fn commit_with_check_review_url() -> Option<String> {
         }
     }
 
-    let cwd = std::env::current_dir().ok();
-    if let Some(cwd) = cwd {
-        let local_config = cwd.join("flow.toml");
-        if local_config.exists() {
-            if let Ok(cfg) = config::load(&local_config) {
-                if let Some(url) = cfg.options.commit_with_check_review_url {
-                    let trimmed = url.trim().to_string();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed);
-                    }
+    let repo_root = git_root_or_cwd();
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            if let Some(url) = cfg.options.commit_with_check_review_url {
+                let trimmed = url.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
                 }
             }
         }
@@ -2257,16 +2876,14 @@ fn commit_with_check_review_token() -> Option<String> {
         }
     }
 
-    let cwd = std::env::current_dir().ok();
-    if let Some(cwd) = cwd {
-        let local_config = cwd.join("flow.toml");
-        if local_config.exists() {
-            if let Ok(cfg) = config::load(&local_config) {
-                if let Some(token) = cfg.options.commit_with_check_review_token {
-                    let trimmed = token.trim().to_string();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed);
-                    }
+    let repo_root = git_root_or_cwd();
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            if let Some(token) = cfg.options.commit_with_check_review_token {
+                let trimmed = token.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
                 }
             }
         }
@@ -2424,6 +3041,9 @@ fn resolve_commit_testing_policy(repo_root: &Path) -> CommitTestingPolicy {
                 runner: "bun".to_string(),
                 bun_repo_strict: true,
                 require_related_tests: true,
+                ai_scratch_test_dir: ".ai/test".to_string(),
+                run_ai_scratch_tests: true,
+                allow_ai_scratch_to_satisfy_gate: false,
                 max_local_gate_seconds: 15,
             };
         }
@@ -2432,6 +3052,9 @@ fn resolve_commit_testing_policy(repo_root: &Path) -> CommitTestingPolicy {
             runner: "bun".to_string(),
             bun_repo_strict: true,
             require_related_tests: true,
+            ai_scratch_test_dir: ".ai/test".to_string(),
+            run_ai_scratch_tests: true,
+            allow_ai_scratch_to_satisfy_gate: false,
             max_local_gate_seconds: 15,
         };
     };
@@ -2453,6 +3076,11 @@ fn resolve_commit_testing_policy(repo_root: &Path) -> CommitTestingPolicy {
             .to_ascii_lowercase(),
         bun_repo_strict: testing.bun_repo_strict.unwrap_or(true),
         require_related_tests: testing.require_related_tests.unwrap_or(true),
+        ai_scratch_test_dir: testing
+            .ai_scratch_test_dir
+            .unwrap_or_else(|| ".ai/test".to_string()),
+        run_ai_scratch_tests: testing.run_ai_scratch_tests.unwrap_or(true),
+        allow_ai_scratch_to_satisfy_gate: testing.allow_ai_scratch_to_satisfy_gate.unwrap_or(false),
         max_local_gate_seconds: testing.max_local_gate_seconds.unwrap_or(15),
     }
 }
@@ -2658,6 +3286,64 @@ fn normalize_rel_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn normalize_dir_path(path: &str) -> String {
+    let mut normalized = path.replace('\\', "/");
+    while normalized.starts_with("./") {
+        normalized = normalized.trim_start_matches("./").to_string();
+    }
+    normalized.trim_end_matches('/').to_string()
+}
+
+fn path_is_within_dir(path: &str, dir: &str) -> bool {
+    let normalized_path = normalize_dir_path(path);
+    let normalized_dir = normalize_dir_path(dir);
+    if normalized_dir.is_empty() {
+        return false;
+    }
+    normalized_path == normalized_dir || normalized_path.starts_with(&(normalized_dir + "/"))
+}
+
+fn find_ai_scratch_tests(repo_root: &Path, scratch_dir: &str) -> Vec<String> {
+    let scratch_dir = normalize_dir_path(scratch_dir);
+    if scratch_dir.is_empty() {
+        return Vec::new();
+    }
+
+    let scratch_root = repo_root.join(&scratch_dir);
+    if !scratch_root.is_dir() {
+        return Vec::new();
+    }
+
+    let mut out = HashSet::new();
+    let mut stack = vec![scratch_root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(repo_root) else {
+                continue;
+            };
+            let rel = normalize_rel_path(rel);
+            if is_test_file_path(&rel) {
+                out.insert(rel);
+            }
+        }
+    }
+
+    let mut tests: Vec<String> = out.into_iter().collect();
+    tests.sort();
+    tests
+}
+
 fn collect_candidate_js_test_paths(rel_path: &Path) -> Vec<PathBuf> {
     const JS_EXTS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
     let mut out = Vec::new();
@@ -2713,10 +3399,17 @@ fn collect_candidate_rust_test_paths(rel_path: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn find_related_tests(repo_root: &Path, changed_files: &[String]) -> Vec<String> {
+fn find_related_tests(
+    repo_root: &Path,
+    changed_files: &[String],
+    ai_scratch_test_dir: &str,
+) -> Vec<String> {
     let mut tests = HashSet::new();
     for changed in changed_files {
         let normalized = changed.replace('\\', "/");
+        if path_is_within_dir(&normalized, ai_scratch_test_dir) {
+            continue;
+        }
         if is_test_file_path(&normalized) {
             tests.insert(normalized);
             continue;
@@ -2739,7 +3432,10 @@ fn find_related_tests(repo_root: &Path, changed_files: &[String]) -> Vec<String>
 
         for candidate in candidates {
             if repo_root.join(&candidate).is_file() {
-                tests.insert(normalize_rel_path(&candidate));
+                let candidate = normalize_rel_path(&candidate);
+                if !path_is_within_dir(&candidate, ai_scratch_test_dir) {
+                    tests.insert(candidate);
+                }
             }
         }
     }
@@ -2845,65 +3541,94 @@ fn run_pre_commit_test_gate(
         return Ok(());
     }
 
-    let related_tests = find_related_tests(repo_root, changed_files);
+    let related_tests = find_related_tests(repo_root, changed_files, &policy.ai_scratch_test_dir);
+    let run_bun_tests = |tests: &[String], label: &str| -> Result<()> {
+        let mut args: Vec<String> = Vec::new();
+        if strict_bun_repo {
+            args.push("bd".to_string());
+            args.push("test".to_string());
+        } else {
+            args.push("test".to_string());
+        }
+        args.extend(tests.iter().cloned());
+
+        println!();
+        println!("Running local test gate (bun) for {}...", label);
+        println!("Command: bun {}", args.join(" "));
+
+        let started_at = Instant::now();
+        let status = match Command::new("bun")
+            .args(args.iter().map(|s| s.as_str()))
+            .current_dir(repo_root)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+        {
+            Ok(status) => status,
+            Err(err) => {
+                return apply_testing_gate_failure(
+                    &policy.mode,
+                    &format!("failed to execute bun test gate: {}", err),
+                );
+            }
+        };
+        let elapsed = started_at.elapsed();
+
+        if elapsed > Duration::from_secs(policy.max_local_gate_seconds) {
+            eprintln!(
+                "  testing: local gate exceeded target budget ({}s > {}s)",
+                elapsed.as_secs(),
+                policy.max_local_gate_seconds
+            );
+        }
+
+        if !status.success() {
+            return apply_testing_gate_failure(
+                &policy.mode,
+                &format!("bun tests failed for {} (exit status: {})", label, status),
+            );
+        }
+
+        Ok(())
+    };
+
     if related_tests.is_empty() {
+        if policy.run_ai_scratch_tests {
+            let scratch_tests = find_ai_scratch_tests(repo_root, &policy.ai_scratch_test_dir);
+            if !scratch_tests.is_empty() {
+                run_bun_tests(&scratch_tests, "AI scratch tests")?;
+                println!(
+                    "✓ AI scratch tests passed ({} test file{})",
+                    scratch_tests.len(),
+                    if scratch_tests.len() == 1 { "" } else { "s" }
+                );
+
+                if policy.allow_ai_scratch_to_satisfy_gate {
+                    println!(
+                        "✓ Test gate satisfied by AI scratch tests ({})",
+                        policy.ai_scratch_test_dir
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         if policy.require_related_tests {
             return apply_testing_gate_failure(
                 &policy.mode,
-                "no related test files detected for staged source changes",
+                &format!(
+                    "no related tracked test files detected for staged source changes (AI scratch dir: {}; set commit.testing.allow_ai_scratch_to_satisfy_gate=true to allow scratch-only satisfaction)",
+                    policy.ai_scratch_test_dir
+                ),
             );
         }
         return Ok(());
     }
 
-    let mut args: Vec<String> = Vec::new();
-    if strict_bun_repo {
-        args.push("bd".to_string());
-        args.push("test".to_string());
-    } else {
-        args.push("test".to_string());
-    }
-    args.extend(related_tests.iter().cloned());
-
-    println!();
-    println!("Running local test gate (bun)...");
-    println!("Command: bun {}", args.join(" "));
-
-    let started_at = Instant::now();
-    let status = match Command::new("bun")
-        .args(args.iter().map(|s| s.as_str()))
-        .current_dir(repo_root)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-    {
-        Ok(status) => status,
-        Err(err) => {
-            return apply_testing_gate_failure(
-                &policy.mode,
-                &format!("failed to execute bun test gate: {}", err),
-            );
-        }
-    };
-    let elapsed = started_at.elapsed();
-
-    if elapsed > Duration::from_secs(policy.max_local_gate_seconds) {
-        eprintln!(
-            "  testing: local gate exceeded target budget ({}s > {}s)",
-            elapsed.as_secs(),
-            policy.max_local_gate_seconds
-        );
-    }
-
-    if !status.success() {
-        return apply_testing_gate_failure(
-            &policy.mode,
-            &format!("bun tests failed (exit status: {})", status),
-        );
-    }
+    run_bun_tests(&related_tests, "related tracked tests")?;
 
     println!(
-        "✓ Test gate passed ({} related test file{})",
+        "✓ Test gate passed ({} related tracked test file{})",
         related_tests.len(),
         if related_tests.len() == 1 { "" } else { "s" }
     );
@@ -2918,6 +3643,68 @@ fn is_doc_gate_failure(message: &str) -> bool {
 fn is_test_gate_failure(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     m.contains("test") || m.contains("coverage")
+}
+
+fn run_review_attempt(
+    selection: &ReviewSelection,
+    diff: &str,
+    session_context: Option<&str>,
+    review_instructions: Option<&str>,
+    repo_root: &Path,
+) -> Result<(ReviewResult, &'static str, String)> {
+    match selection {
+        ReviewSelection::Claude(model) => Ok((
+            run_claude_review(
+                diff,
+                session_context,
+                review_instructions,
+                repo_root,
+                *model,
+            )?,
+            "claude",
+            model.as_claude_arg().to_string(),
+        )),
+        ReviewSelection::Codex(model) => Ok((
+            run_codex_review(
+                diff,
+                session_context,
+                review_instructions,
+                repo_root,
+                *model,
+            )?,
+            "codex",
+            model.as_codex_arg().to_string(),
+        )),
+        ReviewSelection::Opencode { model } => Ok((
+            run_opencode_review(diff, session_context, review_instructions, repo_root, model)?,
+            "opencode",
+            model.clone(),
+        )),
+        ReviewSelection::OpenRouter { model } => Ok((
+            run_openrouter_review(diff, session_context, review_instructions, repo_root, model)?,
+            "openrouter",
+            openrouter_model_label(model),
+        )),
+        ReviewSelection::Rise { model } => Ok((
+            run_rise_review(diff, session_context, review_instructions, repo_root, model)?,
+            "rise",
+            format!("rise:{}", model),
+        )),
+        ReviewSelection::Kimi { model } => Ok((
+            run_kimi_review(
+                diff,
+                session_context,
+                review_instructions,
+                repo_root,
+                model.as_deref(),
+            )?,
+            "kimi",
+            match model.as_deref() {
+                Some(model) if !model.trim().is_empty() => format!("kimi:{}", model),
+                _ => "kimi".to_string(),
+            },
+        )),
+    }
 }
 
 /// Run commit with code review synchronously (called directly or by hub).
@@ -2959,6 +3746,7 @@ pub fn run_with_check_sync(
     ensure_git_repo()?;
 
     let repo_root = resolve_commit_with_check_root()?;
+    warn_if_commit_invoked_from_subdir(&repo_root);
     ensure_commit_setup(&repo_root)?;
     git_guard::ensure_clean_for_commit(&repo_root)?;
 
@@ -2992,6 +3780,7 @@ pub fn run_with_check_sync(
     let diff = git_capture_in(&repo_root, &["diff", "--cached"])?;
     if diff.trim().is_empty() {
         println!("\nnotify: No staged changes to commit");
+        print_pending_queue_review_hint(&repo_root);
         bail!("No staged changes to commit");
     }
     let changed_files = changed_files_from_diff(&diff);
@@ -3034,26 +3823,19 @@ pub fn run_with_check_sync(
         &required_skill_context,
     );
 
-    // Run code review
-    if prefer_codex_over_openrouter {
-        println!("\nRunning Codex code review...");
-    } else if review_selection.is_claude() {
-        println!("\nRunning Claude code review...");
-    } else if review_selection.is_opencode() {
-        println!("\nRunning opencode review...");
-    } else if review_selection.is_openrouter() {
-        println!("\nRunning OpenRouter review...");
-    } else if review_selection.is_rise() {
-        println!("\nRunning Rise AI review...");
-    } else {
-        println!("\nRunning Codex code review...");
-    }
-    let model_label_for_print = if prefer_codex_over_openrouter {
-        CodexModel::High.as_codex_arg().to_string()
-    } else {
-        review_selection.model_label()
-    };
-    println!("Model: {}", model_label_for_print);
+    // Run code review with configured fallbacks.
+    let review_attempts =
+        review_attempts_for_selection(&repo_root, &review_selection, prefer_codex_over_openrouter);
+    let primary_review_attempt = review_attempts
+        .first()
+        .cloned()
+        .unwrap_or_else(|| review_selection.clone());
+
+    println!(
+        "\nRunning {} review...",
+        review_tool_label(&primary_review_attempt)
+    );
+    println!("Model: {}", primary_review_attempt.model_label());
     if session_context.is_some() {
         println!("(with AI session context)");
     }
@@ -3063,114 +3845,79 @@ pub fn run_with_check_sync(
     println!("────────────────────────────────────────");
 
     let mut review_reviewer_label = "codex";
-    let mut review_model_label = CodexModel::High.as_codex_arg().to_string();
+    let mut review_model_label = primary_review_attempt.model_label();
+    let mut review_selection_used = primary_review_attempt.clone();
+    let mut review_failures: Vec<String> = Vec::new();
+    let mut review_result: Option<ReviewResult> = None;
 
-    let review = if prefer_codex_over_openrouter {
-        match run_codex_review(
+    for (idx, attempt) in review_attempts.iter().enumerate() {
+        if idx > 0 {
+            println!("────────────────────────────────────────");
+            println!(
+                "Retrying review with fallback: {} ({})",
+                review_tool_label(attempt),
+                attempt.model_label()
+            );
+            println!("────────────────────────────────────────");
+        }
+
+        match run_review_attempt(
+            attempt,
             &diff,
             session_context.as_deref(),
             review_instructions.as_deref(),
             &repo_root,
-            CodexModel::High,
         ) {
-            Ok(review) => Ok(review),
+            Ok((review, reviewer_label, model_label)) => {
+                review_reviewer_label = reviewer_label;
+                review_model_label = model_label;
+                review_selection_used = attempt.clone();
+                review_result = Some(review);
+                break;
+            }
             Err(err) => {
-                println!("⚠ Codex /review failed: {}", err);
-                println!("  Falling back to OpenRouter review...");
-                review_reviewer_label = "openrouter";
-                if let ReviewSelection::OpenRouter { model } = &review_selection {
-                    review_model_label = openrouter_model_label(model);
-                    run_openrouter_review(
-                        &diff,
-                        session_context.as_deref(),
-                        review_instructions.as_deref(),
-                        &repo_root,
-                        model,
-                    )
-                } else {
-                    bail!("expected OpenRouter review selection");
+                let error_message = format!(
+                    "{} ({}) failed: {}",
+                    review_tool_label(attempt),
+                    attempt.model_label(),
+                    err
+                );
+                review_failures.push(error_message.clone());
+                if idx + 1 < review_attempts.len() {
+                    println!("⚠ {}. Trying next fallback...", error_message);
                 }
             }
         }
+    }
+
+    let mut review_failed_open = false;
+    let review = if let Some(review) = review_result {
+        review
+    } else if commit_review_fail_open_enabled(&repo_root) {
+        review_failed_open = true;
+        println!(
+            "⚠ Review failed across all attempts; continuing because commit.review_fail_open = true."
+        );
+        if let Some(last_error) = review_failures.last() {
+            println!("Last review error: {}", last_error);
+        }
+        ReviewResult {
+            issues_found: false,
+            issues: Vec::new(),
+            summary: Some(format!(
+                "Review unavailable; commit proceeded in fail-open mode after {} failed attempt(s).",
+                review_failures.len()
+            )),
+            future_tasks: Vec::new(),
+            timed_out: true,
+            quality: None,
+        }
     } else {
-        match &review_selection {
-            ReviewSelection::Claude(model) => {
-                review_reviewer_label = "claude";
-                review_model_label = model.as_claude_arg().to_string();
-                run_claude_review(
-                    &diff,
-                    session_context.as_deref(),
-                    review_instructions.as_deref(),
-                    &repo_root,
-                    *model,
-                )
-            }
-            ReviewSelection::Codex(model) => {
-                review_reviewer_label = "codex";
-                review_model_label = model.as_codex_arg().to_string();
-                run_codex_review(
-                    &diff,
-                    session_context.as_deref(),
-                    review_instructions.as_deref(),
-                    &repo_root,
-                    *model,
-                )
-            }
-            ReviewSelection::Opencode { model } => {
-                review_reviewer_label = "opencode";
-                review_model_label = model.clone();
-                run_opencode_review(
-                    &diff,
-                    session_context.as_deref(),
-                    review_instructions.as_deref(),
-                    &repo_root,
-                    model,
-                )
-            }
-            ReviewSelection::OpenRouter { model } => {
-                review_reviewer_label = "openrouter";
-                review_model_label = openrouter_model_label(model);
-                run_openrouter_review(
-                    &diff,
-                    session_context.as_deref(),
-                    review_instructions.as_deref(),
-                    &repo_root,
-                    model,
-                )
-            }
-            ReviewSelection::Rise { model } => {
-                review_reviewer_label = "rise";
-                review_model_label = format!("rise:{}", model);
-                run_rise_review(
-                    &diff,
-                    session_context.as_deref(),
-                    review_instructions.as_deref(),
-                    &repo_root,
-                    model,
-                )
-            }
-            ReviewSelection::Kimi { model } => {
-                review_reviewer_label = "kimi";
-                review_model_label = match model.as_deref() {
-                    Some(model) if !model.trim().is_empty() => format!("kimi:{}", model),
-                    _ => "kimi".to_string(),
-                };
-                run_kimi_review(
-                    &diff,
-                    session_context.as_deref(),
-                    review_instructions.as_deref(),
-                    &repo_root,
-                    model.as_deref(),
-                )
-            }
+        restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
+        if review_failures.is_empty() {
+            bail!("review failed: no review attempts were available");
         }
-    };
-    let review = match review {
-        Ok(review) => review,
-        Err(err) => {
-            restore_staged_snapshot_in(&repo_root, &staged_snapshot)?;
-            return Err(err);
-        }
+        bail!("review failed:\n  {}", review_failures.join("\n  "));
     };
 
     println!("────────────────────────────────────────\n");
@@ -3186,10 +3933,14 @@ pub fn run_with_check_sync(
     );
 
     if review.timed_out {
-        println!(
-            "⚠ Review timed out after {}s, proceeding anyway",
-            commit_with_check_timeout_secs()
-        );
+        if review_failed_open {
+            println!("⚠ Review unavailable after fallback attempts, proceeding anyway");
+        } else {
+            println!(
+                "⚠ Review timed out after {}s, proceeding anyway",
+                commit_with_check_timeout_secs()
+            );
+        }
     }
 
     // Show review results (informational only, never blocks)
@@ -3339,11 +4090,6 @@ pub fn run_with_check_sync(
 
     // Continue with normal commit flow
     let commit_message_override = resolve_commit_message_override(&repo_root);
-    let commit_provider = if commit_message_override.is_none() {
-        Some(resolve_commit_message_provider()?)
-    } else {
-        None
-    };
 
     // Get status
     let status = git_capture_in(&repo_root, &["status", "--short"]).unwrap_or_default();
@@ -3354,139 +4100,18 @@ pub fn run_with_check_sync(
     // Generate commit message based on the review tool
     print!("Generating commit message... ");
     io::stdout().flush()?;
-    let message = if let Some(override_tool) = commit_message_override {
-        match override_tool {
-            CommitMessageOverride::Kimi { model } => generate_commit_message_kimi(
-                &diff_for_prompt,
-                &status,
-                truncated,
-                model.as_deref(),
-            )?,
-        }
-    } else {
-        let commit_provider = commit_provider.as_ref().expect("commit provider missing");
-        match &review_selection {
-            ReviewSelection::Opencode { model } => {
-                match generate_commit_message_opencode(&diff_for_prompt, &status, truncated, model)
-                {
-                    Ok(message) => message,
-                    Err(err) => match commit_provider {
-                        CommitMessageProvider::Remote { .. } => {
-                            println!(
-                                "⚠ Opencode commit message failed: {}. Falling back to myflow.",
-                                err
-                            );
-                            commit_message_from_provider(
-                                commit_provider,
-                                &diff_for_prompt,
-                                &status,
-                                truncated,
-                            )?
-                        }
-                        _ => return Err(err),
-                    },
-                }
-            }
-            ReviewSelection::OpenRouter { model } => {
-                match generate_commit_message_openrouter(
-                    &diff_for_prompt,
-                    &status,
-                    truncated,
-                    model,
-                ) {
-                    Ok(message) => message,
-                    Err(err) => match commit_provider {
-                        CommitMessageProvider::Remote { .. } => {
-                            println!(
-                                "⚠ OpenRouter commit message failed: {}. Falling back to myflow.",
-                                err
-                            );
-                            commit_message_from_provider(
-                                commit_provider,
-                                &diff_for_prompt,
-                                &status,
-                                truncated,
-                            )?
-                        }
-                        _ => return Err(err),
-                    },
-                }
-            }
-            ReviewSelection::Rise { model } => {
-                match generate_commit_message_rise(&diff_for_prompt, &status, truncated, model) {
-                    Ok(message) => message,
-                    Err(err) => match commit_provider {
-                        CommitMessageProvider::Remote { .. } => {
-                            println!(
-                                "⚠ Rise commit message failed: {}. Falling back to myflow.",
-                                err
-                            );
-                            commit_message_from_provider(
-                                commit_provider,
-                                &diff_for_prompt,
-                                &status,
-                                truncated,
-                            )?
-                        }
-                        _ => return Err(err),
-                    },
-                }
-            }
-            ReviewSelection::Kimi { model } => {
-                match generate_commit_message_kimi(
-                    &diff_for_prompt,
-                    &status,
-                    truncated,
-                    model.as_deref(),
-                ) {
-                    Ok(message) => message,
-                    Err(err) => match commit_provider {
-                        CommitMessageProvider::Remote { .. } => {
-                            println!(
-                                "⚠ Kimi commit message failed: {}. Falling back to myflow.",
-                                err
-                            );
-                            commit_message_from_provider(
-                                commit_provider,
-                                &diff_for_prompt,
-                                &status,
-                                truncated,
-                            )?
-                        }
-                        _ => return Err(err),
-                    },
-                }
-            }
-            ReviewSelection::Claude(_) => {
-                match generate_commit_message_claude(&diff_for_prompt, &status, truncated) {
-                    Ok(message) => message,
-                    Err(err) => match commit_provider {
-                        CommitMessageProvider::Remote { .. } => {
-                            println!(
-                                "⚠ Claude commit message failed: {}. Falling back to myflow.",
-                                err
-                            );
-                            commit_message_from_provider(
-                                commit_provider,
-                                &diff_for_prompt,
-                                &status,
-                                truncated,
-                            )?
-                        }
-                        _ => return Err(err),
-                    },
-                }
-            }
-            _ => {
-                commit_message_from_provider(commit_provider, &diff_for_prompt, &status, truncated)?
-            }
-        }
-    };
-    let message = sanitize_commit_message(&message);
+    let message = generate_commit_message_with_fallbacks(
+        &repo_root,
+        Some(&review_selection_used),
+        commit_message_override.as_ref(),
+        &diff_for_prompt,
+        &status,
+        truncated,
+    )?;
     println!("done\n");
 
-    // Best-effort: write a private review record into beads_rust history for later triage.
-    // This is written into an ignored directory (`.beads/.br_history`) to avoid accidental pushes.
+    // Best-effort: write a private review record into repo-local beads history for later triage.
+    // This is written into `.beads/.br_history` inside the current repository.
     if let Err(err) = write_beads_commit_review_record(
         &repo_root,
         review_reviewer_label,
@@ -3494,7 +4119,10 @@ pub fn run_with_check_sync(
         &review,
         Some(&message),
     ) {
-        debug!("failed to write beads_rust commit review record: {}", err);
+        debug!(
+            "failed to write commit review record to repo-local beads: {}",
+            err
+        );
     }
 
     let mut gitedit_sessions: Vec<ai::GitEditSessionData> = Vec::new();
@@ -3599,18 +4227,13 @@ pub fn run_with_check_sync(
     if let Ok(commit_sha) = git_capture_in(&repo_root, &["rev-parse", "HEAD"]) {
         let branch = git_capture_in(&repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
             .unwrap_or_else(|_| "unknown".to_string());
-        let reviewer = if review_selection.is_claude() {
-            "claude"
-        } else {
-            "codex"
-        };
         ai::log_commit_review(
             &repo_root,
             commit_sha.trim(),
             branch.trim(),
             &full_message,
-            &review_selection.model_label(),
-            reviewer,
+            &review_model_label,
+            review_reviewer_label,
             review.issues_found,
             &review.issues,
             review.summary.as_deref(),
@@ -3622,12 +4245,8 @@ pub fn run_with_check_sync(
     }
 
     let review_summary = ai::CommitReviewSummary {
-        model: review_selection.model_label(),
-        reviewer: if review_selection.is_claude() {
-            "claude".to_string()
-        } else {
-            "codex".to_string()
-        },
+        model: review_model_label.clone(),
+        reviewer: review_reviewer_label.to_string(),
         issues_found: review.issues_found,
         issues: review.issues.clone(),
         summary: review.summary.clone(),
@@ -3734,7 +4353,7 @@ pub fn run_with_check_sync(
             review_todo_ids,
         ) {
             Ok(sha) => {
-                print_queue_instructions(&sha);
+                print_queue_instructions(&repo_root, &sha);
                 if queue.open_review {
                     open_review_in_rise(&repo_root, &sha);
                 }
@@ -4002,28 +4621,15 @@ fn openrouter_review_should_use_codex() -> bool {
     }
 }
 
-fn beads_rust_history_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let root = match env::var("FLOW_BEADS_RUST_DIR") {
-        Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
-        _ => home.join("repos/Dicklesworthstone/beads_rust"),
-    };
-    let history = root.join(".beads/.br_history/flow_commit_reviews");
-    if root.exists() { Some(history) } else { None }
+fn beads_rust_history_dir(repo_root: &Path) -> PathBuf {
+    repo_root
+        .join(".beads")
+        .join(".br_history")
+        .join("flow_commit_reviews")
 }
 
-fn beads_rust_beads_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let root = match env::var("FLOW_BEADS_RUST_DIR") {
-        Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
-        _ => home.join("repos/Dicklesworthstone/beads_rust"),
-    };
-    let beads_dir = root.join(".beads");
-    if beads_dir.exists() {
-        Some(beads_dir)
-    } else {
-        None
-    }
+fn beads_rust_beads_dir(repo_root: &Path) -> PathBuf {
+    repo_root.join(".beads")
 }
 
 fn flow_commit_reports_dir() -> Option<PathBuf> {
@@ -4165,10 +4771,8 @@ fn write_beads_commit_review_record(
         commit_message: Option<String>,
     }
 
-    let Some(dir) = beads_rust_history_dir() else {
-        return Ok(());
-    };
-    fs::create_dir_all(&dir).ok();
+    let dir = beads_rust_history_dir(repo_root);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
     let repo_name = repo_root
         .file_name()
@@ -4232,10 +4836,12 @@ fn run_codex_review(
         match run_codex_review_once(_diff, session_context, review_instructions, workdir, model) {
             Ok(result) if result.timed_out && attempt < max_attempts => {
                 last_timeout_secs = commit_with_check_timeout_secs();
+                let backoff_secs = commit_with_check_retry_backoff_secs(attempt);
                 println!(
-                    "⚠ Review timed out after {}s, retrying ({}/{})...",
-                    last_timeout_secs, attempt, max_attempts
+                    "⚠ Review timed out after {}s, retrying ({}/{}) in {}s...",
+                    last_timeout_secs, attempt, max_attempts, backoff_secs
                 );
+                std::thread::sleep(Duration::from_secs(backoff_secs));
                 continue;
             }
             other => return other,
@@ -5720,6 +6326,28 @@ fn git_root_or_cwd() -> std::path::PathBuf {
     }
 }
 
+fn warn_if_commit_invoked_from_subdir(repo_root: &Path) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let cwd_norm = cwd.canonicalize().unwrap_or(cwd.clone());
+    let root_norm = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    if cwd_norm == root_norm {
+        return;
+    }
+
+    println!(
+        "warning: commit invoked from subdirectory: {}",
+        cwd.display()
+    );
+    println!(
+        "warning: using git repo root for commit operations: {}",
+        repo_root.display()
+    );
+}
+
 fn ensure_commit_setup(repo_root: &Path) -> Result<()> {
     let ai_internal = repo_root.join(".ai").join("internal");
     fs::create_dir_all(&ai_internal)
@@ -5886,6 +6514,9 @@ fn unwanted_staged_paths(repo_root: &Path) -> Vec<(String, String)> {
 }
 
 fn unwanted_reason(path: &str) -> Option<&'static str> {
+    if path == ".flow/deploy-log.json" || path.ends_with("/.flow/deploy-log.json") {
+        return Some("flow deploy state");
+    }
     if path == ".beads" || path.starts_with(".beads/") || path.contains("/.beads/") {
         return Some("beads metadata");
     }
@@ -6497,11 +7128,305 @@ pub fn open_latest_queue_review() -> Result<()> {
     Ok(())
 }
 
-fn print_queue_instructions(commit_sha: &str) {
+fn latest_review_report_for_commit(repo_root: &Path, commit_sha: &str) -> Option<PathBuf> {
+    let report_dir = flow_commit_reports_dir()?;
+    let sha_short = short_sha(commit_sha);
+    let project_slug = safe_label_value(&flow_project_name(repo_root));
+    let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".to_string())
+        .trim()
+        .to_string();
+    let branch_slug = safe_label_value(&branch);
+    let strict_prefix = format!("{project_slug}-{branch_slug}-{sha_short}-");
+
+    let mut strict_matches: Vec<PathBuf> = Vec::new();
+    let mut fallback_matches: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(&report_dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if file_name.starts_with(&strict_prefix) {
+            strict_matches.push(path);
+        } else if file_name.contains(&format!("-{sha_short}-")) {
+            fallback_matches.push(path);
+        }
+    }
+
+    strict_matches.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    fallback_matches.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+    strict_matches.pop().or_else(|| fallback_matches.pop())
+}
+
+fn queued_review_counts_excluding(
+    repo_root: &Path,
+    excluded_commit_sha: &str,
+) -> Result<(usize, usize, String)> {
+    let entries = load_commit_queue_entries(repo_root)?;
+    let current_branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".to_string())
+        .trim()
+        .to_string();
+
+    let mut total_other = 0usize;
+    let mut branch_other = 0usize;
+    for entry in entries {
+        if entry.commit_sha == excluded_commit_sha {
+            continue;
+        }
+        total_other += 1;
+        if entry.branch.trim() == current_branch {
+            branch_other += 1;
+        }
+    }
+
+    Ok((branch_other, total_other, current_branch))
+}
+
+fn print_other_queued_review_count(repo_root: &Path, commit_sha: &str) {
+    let Ok((branch_other, total_other, current_branch)) =
+        queued_review_counts_excluding(repo_root, commit_sha)
+    else {
+        return;
+    };
+
+    if total_other == 0 {
+        println!("No other queued commits pending review.");
+        return;
+    }
+
+    println!(
+        "{} other queued commit(s) pending review ({} on current branch {}).",
+        total_other, branch_other, current_branch
+    );
+}
+
+fn copy_text_to_clipboard(text: &str) -> Result<bool> {
+    if std::env::var("FLOW_NO_CLIPBOARD").is_ok() || !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("failed to spawn pbcopy")?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(text.as_bytes())?;
+        }
+
+        child.wait()?;
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let result = Command::new("xclip")
+            .arg("-selection")
+            .arg("clipboard")
+            .stdin(Stdio::piped())
+            .spawn();
+
+        let mut child = match result {
+            Ok(c) => c,
+            Err(_) => Command::new("xsel")
+                .arg("--clipboard")
+                .arg("--input")
+                .stdin(Stdio::piped())
+                .spawn()
+                .context("failed to spawn xclip or xsel")?,
+        };
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(text.as_bytes())?;
+        }
+
+        child.wait()?;
+        return Ok(true);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        bail!("clipboard not supported on this platform");
+    }
+}
+
+fn build_review_prompt_payload(
+    repo_root: &Path,
+    entry: &CommitQueueEntry,
+    report_path: Option<&Path>,
+) -> String {
+    let (branch_other, total_other, current_branch) = queued_review_counts_excluding(
+        repo_root,
+        &entry.commit_sha,
+    )
+    .unwrap_or((0, 0, "unknown".to_string()));
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Repo: {}\nBranch: {}\nQueued commit: {}",
+        repo_root.display(),
+        entry.branch.trim(),
+        short_sha(&entry.commit_sha)
+    ));
+    if let Some(bookmark) = entry
+        .review_bookmark
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str(&format!("\nReview bookmark: {}", bookmark));
+    }
+    out.push_str("\n\nCommands:\n");
+    out.push_str(&format!(
+        "f commit-queue show {}\n",
+        short_sha(&entry.commit_sha)
+    ));
+    out.push_str(&format!(
+        "f commit-queue approve {}\n",
+        short_sha(&entry.commit_sha)
+    ));
+    out.push_str("f commit-queue approve --all\n");
+
+    if let Some(path) = report_path {
+        out.push_str(&format!("\nReview report: {}\n", path.display()));
+        out.push_str(&format!("Run: f fix {}\n", path.display()));
+    }
+
+    if total_other == 0 {
+        out.push_str("\nOther queued commits pending review: 0\n");
+    } else {
+        out.push_str(&format!(
+            "\nOther queued commits pending review: {} ({} on current branch {})\n",
+            total_other, branch_other, current_branch
+        ));
+    }
+
+    out.push_str("\nreview this and address everything, then we approve and push\n");
+    out
+}
+
+pub fn copy_review_prompt(hash: Option<&str>) -> Result<()> {
+    ensure_git_repo()?;
+    let repo_root = git_root_or_cwd();
+    let _ = refresh_commit_queue(&repo_root);
+
+    let mut entry = if let Some(hash) = hash {
+        resolve_commit_queue_entry(&repo_root, hash)?
+    } else {
+        let mut entries = load_commit_queue_entries(&repo_root)?;
+        if entries.is_empty() {
+            bail!("Commit queue is empty.");
+        }
+        entries.pop().unwrap()
+    };
+    let _ = refresh_queue_entry_commit(&repo_root, &mut entry);
+
+    let report_path = latest_review_report_for_commit(&repo_root, &entry.commit_sha);
+    let payload = build_review_prompt_payload(&repo_root, &entry, report_path.as_deref());
+
+    match copy_text_to_clipboard(&payload) {
+        Ok(true) => println!(
+            "Copied review prompt for {} to clipboard.",
+            short_sha(&entry.commit_sha)
+        ),
+        Ok(false) => {
+            println!("Clipboard copy skipped (non-interactive shell or FLOW_NO_CLIPBOARD).")
+        }
+        Err(err) => println!("⚠ Failed to copy review prompt to clipboard: {}", err),
+    }
+
+    println!("────────────────────────────────────────");
+    println!("{}", payload.trim_end());
+    println!("────────────────────────────────────────");
+    Ok(())
+}
+
+fn print_queue_instructions(repo_root: &Path, commit_sha: &str) {
     println!("Queued commit {} for review.", short_sha(commit_sha));
     println!("  f commit-queue list");
     println!("  f commit-queue show {}", short_sha(commit_sha));
     println!("  f commit-queue approve {}", short_sha(commit_sha));
+    println!("  f commit-queue approve --all");
+    println!("  f review copy {}", short_sha(commit_sha));
+    print_other_queued_review_count(repo_root, commit_sha);
+}
+
+fn queue_review_status_label(entry: &CommitQueueEntry) -> &'static str {
+    let issues_present = entry.review_issues_found
+        || entry
+            .review
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+    if entry.review_timed_out {
+        "review timed out"
+    } else if issues_present {
+        "review issues"
+    } else if entry.version >= 2 && !entry.review_completed {
+        "review pending"
+    } else {
+        "review clean"
+    }
+}
+
+fn print_pending_queue_review_hint(repo_root: &Path) {
+    let mut entries = match load_commit_queue_entries(repo_root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    if entries.is_empty() {
+        return;
+    }
+
+    for entry in &mut entries {
+        let _ = refresh_queue_entry_commit(repo_root, entry);
+    }
+
+    let current_branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".to_string())
+        .trim()
+        .to_string();
+
+    let mut scoped_entries: Vec<&CommitQueueEntry> = entries
+        .iter()
+        .filter(|entry| entry.branch.trim() == current_branch)
+        .collect();
+    let scoped_to_branch = !scoped_entries.is_empty();
+    if !scoped_to_branch {
+        scoped_entries = entries.iter().collect();
+    }
+
+    println!();
+    if scoped_to_branch {
+        println!(
+            "Queued commits pending review on branch {}:",
+            current_branch
+        );
+    } else {
+        println!("Queued commits pending review (all branches):");
+    }
+
+    let max_display = 5usize;
+    for entry in scoped_entries.iter().take(max_display) {
+        println!(
+            "  - {}  {}  {}",
+            short_sha(&entry.commit_sha),
+            format_queue_created_at(&entry.created_at),
+            queue_review_status_label(entry)
+        );
+    }
+    if scoped_entries.len() > max_display {
+        println!("  ... and {} more", scoped_entries.len() - max_display);
+    }
+
+    println!("Next:");
+    println!("  f commit-queue list");
     println!("  f commit-queue approve --all");
 }
 
@@ -8832,6 +9757,7 @@ fn get_openai_key() -> Result<String> {
     std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY environment variable not set")
 }
 
+#[derive(Debug, Clone)]
 enum CommitMessageProvider {
     OpenAi { api_key: String },
     Remote { api_url: String, token: String },
@@ -8839,17 +9765,14 @@ enum CommitMessageProvider {
 
 #[derive(Debug, Clone)]
 enum CommitMessageOverride {
-    Kimi { model: Option<String> },
+    Selection(CommitMessageSelection),
 }
 
 fn parse_commit_message_override(
     tool: &str,
     model: Option<String>,
 ) -> Option<CommitMessageOverride> {
-    match tool.trim().to_ascii_lowercase().as_str() {
-        "kimi" => Some(CommitMessageOverride::Kimi { model }),
-        _ => None,
-    }
+    parse_commit_message_selection_with_model(tool, model).map(CommitMessageOverride::Selection)
 }
 
 fn resolve_commit_message_override(repo_root: &Path) -> Option<CommitMessageOverride> {
@@ -8891,26 +9814,29 @@ fn resolve_commit_message_override(repo_root: &Path) -> Option<CommitMessageOver
     None
 }
 
-fn resolve_commit_message_provider() -> Result<CommitMessageProvider> {
+fn resolve_commit_message_providers() -> Vec<CommitMessageProvider> {
+    let mut providers = Vec::new();
+
+    if let Ok(Some(token)) = crate::env::load_ai_auth_token() {
+        if let Ok(api_url) = crate::env::load_ai_api_url() {
+            let trimmed_url = api_url.trim().trim_end_matches('/').to_string();
+            if !trimmed_url.is_empty() {
+                providers.push(CommitMessageProvider::Remote {
+                    api_url: trimmed_url,
+                    token,
+                });
+            }
+        }
+    }
+
     if let Ok(api_key) = get_openai_key() {
         let trimmed = api_key.trim().to_string();
         if !trimmed.is_empty() {
-            return Ok(CommitMessageProvider::OpenAi { api_key: trimmed });
+            providers.push(CommitMessageProvider::OpenAi { api_key: trimmed });
         }
     }
 
-    if let Ok(Some(token)) = crate::env::load_ai_auth_token() {
-        let api_url = crate::env::load_ai_api_url()?;
-        let trimmed_url = api_url.trim().trim_end_matches('/').to_string();
-        if !trimmed_url.is_empty() {
-            return Ok(CommitMessageProvider::Remote {
-                api_url: trimmed_url,
-                token,
-            });
-        }
-    }
-
-    bail!("OPENAI_API_KEY not set. Run `f auth` or set OPENAI_API_KEY.")
+    providers
 }
 
 fn commit_message_from_provider(
@@ -8928,6 +9854,153 @@ fn commit_message_from_provider(
         }
     }?;
     Ok(sanitize_commit_message(&message))
+}
+
+fn commit_message_from_selection(
+    selection: &CommitMessageSelection,
+    providers: &[CommitMessageProvider],
+    diff: &str,
+    status: &str,
+    truncated: bool,
+) -> Result<String> {
+    match selection {
+        CommitMessageSelection::Kimi { model } => {
+            generate_commit_message_kimi(diff, status, truncated, model.as_deref())
+        }
+        CommitMessageSelection::Claude => generate_commit_message_claude(diff, status, truncated),
+        CommitMessageSelection::Opencode { model } => {
+            generate_commit_message_opencode(diff, status, truncated, model)
+        }
+        CommitMessageSelection::OpenRouter { model } => {
+            generate_commit_message_openrouter(diff, status, truncated, model)
+        }
+        CommitMessageSelection::Rise { model } => {
+            generate_commit_message_rise(diff, status, truncated, model)
+        }
+        CommitMessageSelection::Remote => {
+            let provider = providers
+                .iter()
+                .find(|provider| matches!(provider, CommitMessageProvider::Remote { .. }))
+                .ok_or_else(|| anyhow!("myflow provider unavailable; run `f auth`"))?;
+            commit_message_from_provider(provider, diff, status, truncated)
+        }
+        CommitMessageSelection::OpenAi => {
+            let provider = providers
+                .iter()
+                .find(|provider| matches!(provider, CommitMessageProvider::OpenAi { .. }))
+                .ok_or_else(|| anyhow!("OPENAI_API_KEY is not configured"))?;
+            commit_message_from_provider(provider, diff, status, truncated)
+        }
+        CommitMessageSelection::Heuristic => Ok(build_deterministic_commit_message(diff)),
+    }
+}
+
+fn truncate_commit_subject(subject: &str) -> String {
+    if subject.chars().count() <= 72 {
+        return subject.to_string();
+    }
+    let mut truncated: String = subject.chars().take(69).collect();
+    while truncated.ends_with(' ') {
+        truncated.pop();
+    }
+    format!("{}...", truncated)
+}
+
+fn build_deterministic_commit_message(diff: &str) -> String {
+    let mut files = changed_files_from_diff(diff);
+    files.sort();
+    files.dedup();
+
+    let subject = if files.is_empty() {
+        "Update project files".to_string()
+    } else if files.len() == 1 {
+        format!("Update {}", files[0])
+    } else {
+        format!("Update {} files", files.len())
+    };
+    let subject = truncate_commit_subject(&subject);
+
+    if files.is_empty() {
+        return subject;
+    }
+
+    let mut lines = Vec::new();
+    for file in files.iter().take(3) {
+        lines.push(format!("- {}", file));
+    }
+    if files.len() > 3 {
+        lines.push(format!("- and {} more files", files.len() - 3));
+    }
+
+    if lines.is_empty() {
+        subject
+    } else {
+        format!("{}\n\n{}", subject, lines.join("\n"))
+    }
+}
+
+fn generate_commit_message_with_fallbacks(
+    repo_root: &Path,
+    review_selection: Option<&ReviewSelection>,
+    commit_message_override: Option<&CommitMessageOverride>,
+    diff: &str,
+    status: &str,
+    truncated: bool,
+) -> Result<String> {
+    let providers = resolve_commit_message_providers();
+    let override_selection = commit_message_override.map(|override_tool| match override_tool {
+        CommitMessageOverride::Selection(selection) => selection,
+    });
+    let attempts = commit_message_attempts(repo_root, review_selection, override_selection);
+
+    let mut errors: Vec<String> = Vec::new();
+    for (idx, selection) in attempts.iter().enumerate() {
+        match commit_message_from_selection(selection, &providers, diff, status, truncated) {
+            Ok(message) => {
+                let sanitized = sanitize_commit_message(&message);
+                if sanitized.trim().is_empty() {
+                    errors.push(format!(
+                        "{} returned an empty commit message",
+                        selection.key()
+                    ));
+                    continue;
+                }
+                if idx > 0 {
+                    println!(
+                        "✓ Commit message fallback succeeded via {}",
+                        selection.label()
+                    );
+                }
+                return Ok(sanitized);
+            }
+            Err(err) => {
+                if idx + 1 < attempts.len() {
+                    println!(
+                        "⚠ {} commit message failed: {}. Trying next fallback...",
+                        selection.label(),
+                        err
+                    );
+                }
+                errors.push(format!("{}: {}", selection.key(), err));
+            }
+        }
+    }
+
+    if commit_message_fail_open_enabled(repo_root) {
+        println!("⚠ Commit message generation failed; using deterministic fallback message.");
+        return Ok(build_deterministic_commit_message(diff));
+    }
+
+    if errors.is_empty() {
+        bail!(
+            "commit message generation failed: no valid tools/providers configured for this repo"
+        );
+    }
+
+    bail!(
+        "commit message generation failed:\n  {}",
+        errors.join("\n  ")
+    )
 }
 
 fn sanitize_commit_message(message: &str) -> String {
@@ -9793,9 +10866,15 @@ fn record_review_outputs_to_beads_rust(
     if env_flag("FLOW_BEADS_RUST_DISABLE") {
         return;
     }
-    let Some(beads_dir) = beads_rust_beads_dir() else {
+    let beads_dir = beads_rust_beads_dir(repo_root);
+    if let Err(err) = fs::create_dir_all(&beads_dir) {
+        println!(
+            "⚠️ Failed to prepare repo-local beads dir {}: {}",
+            beads_dir.display(),
+            err
+        );
         return;
-    };
+    }
 
     let project_path = repo_root.display().to_string();
     let project_name = repo_root
@@ -10357,14 +11436,11 @@ fn gitedit_globally_enabled() -> bool {
 
 /// Check if gitedit mirroring is enabled in flow.toml.
 fn gitedit_mirror_enabled() -> bool {
-    let cwd = std::env::current_dir().ok();
-
-    if let Some(cwd) = cwd {
-        let local_config = cwd.join("flow.toml");
-        if local_config.exists() {
-            if let Ok(cfg) = config::load(&local_config) {
-                return cfg.options.gitedit_mirror.unwrap_or(false);
-            }
+    let repo_root = git_root_or_cwd();
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = config::load(&local_config) {
+            return cfg.options.gitedit_mirror.unwrap_or(false);
         }
     }
 
@@ -11641,7 +12717,8 @@ fn delegate_to_hub(
     include_unhash: bool,
     stage_paths: &[String],
 ) -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let repo_root = git_root_or_cwd();
+    warn_if_commit_invoked_from_subdir(&repo_root);
 
     // Build the command to run using the current executable path
     let push_flag = if push { "" } else { " --no-push" };
@@ -11673,7 +12750,7 @@ fn delegate_to_hub(
                 "flox": [],
             },
         },
-        "cwd": cwd.to_string_lossy(),
+        "cwd": repo_root.to_string_lossy(),
         "flow_version": env!("CARGO_PKG_VERSION"),
     });
 
@@ -11712,8 +12789,8 @@ fn delegate_to_hub_with_check(
     stage_paths: &[String],
     gate_overrides: CommitGateOverrides,
 ) -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to get current directory")?;
     let repo_root = resolve_commit_with_check_root()?;
+    warn_if_commit_invoked_from_subdir(&repo_root);
 
     // Generate early gitedit hash from session IDs + owner/repo
     let early_gitedit_url = generate_early_gitedit_url(&repo_root);
@@ -11790,7 +12867,7 @@ fn delegate_to_hub_with_check(
                 "flox": [],
             },
         },
-        "cwd": cwd.to_string_lossy(),
+        "cwd": repo_root.to_string_lossy(),
         "flow_version": env!("CARGO_PKG_VERSION"),
     });
 
@@ -12262,4 +13339,91 @@ pub fn get_review_instructions(repo_root: &Path) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_scratch_tests_are_excluded_from_related_tests() {
+        let repo_root = Path::new(".");
+        let changed = vec![
+            ".ai/test/generated/auth-flow.test.ts".to_string(),
+            "mobile/src/pages/chats/home/ui/ChatsList.test.tsx".to_string(),
+        ];
+
+        let related = find_related_tests(repo_root, &changed, ".ai/test");
+        assert_eq!(
+            related,
+            vec!["mobile/src/pages/chats/home/ui/ChatsList.test.tsx".to_string()]
+        );
+    }
+
+    #[test]
+    fn path_within_dir_handles_relative_prefixes() {
+        assert!(path_is_within_dir("./.ai/test/foo.test.ts", ".ai/test"));
+        assert!(path_is_within_dir(".ai/test", ".ai/test"));
+        assert!(!path_is_within_dir("mobile/src/foo.test.ts", ".ai/test"));
+    }
+
+    #[test]
+    fn commit_message_selection_parsing_supports_fallback_specs() {
+        assert!(matches!(
+            parse_commit_message_selection_spec("remote"),
+            Some(CommitMessageSelection::Remote)
+        ));
+        assert!(matches!(
+            parse_commit_message_selection_spec("openai"),
+            Some(CommitMessageSelection::OpenAi)
+        ));
+        assert!(matches!(
+            parse_commit_message_selection_spec("heuristic"),
+            Some(CommitMessageSelection::Heuristic)
+        ));
+
+        match parse_commit_message_selection_spec("openrouter:moonshotai/kimi-k2") {
+            Some(CommitMessageSelection::OpenRouter { model }) => {
+                assert_eq!(model, "moonshotai/kimi-k2")
+            }
+            _ => panic!("expected openrouter message selection"),
+        }
+
+        match parse_commit_message_selection_with_model(
+            "rise",
+            Some("zai:glm-4.7-thinking".to_string()),
+        ) {
+            Some(CommitMessageSelection::Rise { model }) => {
+                assert_eq!(model, "zai:glm-4.7-thinking")
+            }
+            _ => panic!("expected rise message selection"),
+        }
+    }
+
+    #[test]
+    fn deterministic_commit_message_includes_changed_files() {
+        let diff = format!(
+            "{} b/src/lib.rs\n+added\n{} b/src/main.rs\n+added",
+            "+++", "+++"
+        );
+        let message = build_deterministic_commit_message(&diff);
+        assert!(message.starts_with("Update 2 files"));
+        assert!(message.contains("- src/lib.rs"));
+        assert!(message.contains("- src/main.rs"));
+    }
+
+    #[test]
+    fn glm5_alias_maps_to_rise_selection() {
+        match parse_review_selection_spec("glm5") {
+            Some(ReviewSelection::Rise { model }) => assert_eq!(model, DEFAULT_GLM5_RISE_MODEL),
+            _ => panic!("expected glm5 to map to rise review selection"),
+        }
+
+        match parse_commit_message_selection_spec("glm5") {
+            Some(CommitMessageSelection::Rise { model }) => {
+                assert_eq!(model, DEFAULT_GLM5_RISE_MODEL)
+            }
+            _ => panic!("expected glm5 to map to rise commit message selection"),
+        }
+    }
 }

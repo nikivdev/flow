@@ -182,6 +182,40 @@ pub struct CommitConfig {
         alias = "messageModel"
     )]
     pub message_model: Option<String>,
+    /// Continue commit if review fails after fallbacks (default: true)
+    #[serde(
+        default,
+        rename = "review-fail-open",
+        alias = "review_fail_open",
+        alias = "reviewFailOpen"
+    )]
+    pub review_fail_open: Option<bool>,
+    /// Continue commit if commit-message generation fails after fallbacks (default: true)
+    #[serde(
+        default,
+        rename = "message-fail-open",
+        alias = "message_fail_open",
+        alias = "messageFailOpen"
+    )]
+    pub message_fail_open: Option<bool>,
+    /// Optional ordered fallback chain for review tool/model.
+    /// Examples: ["openrouter:openrouter/free", "claude", "codex-high"]
+    #[serde(
+        default,
+        rename = "review-fallbacks",
+        alias = "review_fallbacks",
+        alias = "reviewFallbacks"
+    )]
+    pub review_fallbacks: Option<Vec<String>>,
+    /// Optional ordered fallback chain for commit message generation.
+    /// Examples: ["remote", "openai", "openrouter:openrouter/free", "heuristic"]
+    #[serde(
+        default,
+        rename = "message-fallbacks",
+        alias = "message_fallbacks",
+        alias = "messageFallbacks"
+    )]
+    pub message_fallbacks: Option<Vec<String>>,
     /// Queue commits for review before push.
     #[serde(default)]
     pub queue: Option<bool>,
@@ -250,6 +284,15 @@ pub struct TestingConfig {
     /// Require at least one related test for staged source changes. Default: true.
     #[serde(default)]
     pub require_related_tests: Option<bool>,
+    /// Directory for AI scratch tests (typically gitignored). Default: ".ai/test".
+    #[serde(default)]
+    pub ai_scratch_test_dir: Option<String>,
+    /// Run AI scratch tests when no related tracked tests are detected. Default: true.
+    #[serde(default)]
+    pub run_ai_scratch_tests: Option<bool>,
+    /// Allow AI scratch tests to satisfy related-test gate requirements. Default: false.
+    #[serde(default)]
+    pub allow_ai_scratch_to_satisfy_gate: Option<bool>,
     /// Soft budget in seconds for the local test gate; emits warning if exceeded. Default: 15.
     #[serde(default)]
     pub max_local_gate_seconds: Option<u64>,
@@ -409,6 +452,38 @@ pub struct TsCommitConfig {
         alias = "message-model"
     )]
     pub message_model: Option<String>,
+    /// Continue commit if review fails after fallbacks (default: true)
+    #[serde(
+        default,
+        rename = "reviewFailOpen",
+        alias = "review_fail_open",
+        alias = "review-fail-open"
+    )]
+    pub review_fail_open: Option<bool>,
+    /// Continue commit if commit-message generation fails after fallbacks (default: true)
+    #[serde(
+        default,
+        rename = "messageFailOpen",
+        alias = "message_fail_open",
+        alias = "message-fail-open"
+    )]
+    pub message_fail_open: Option<bool>,
+    /// Optional ordered fallback chain for review.
+    #[serde(
+        default,
+        rename = "reviewFallbacks",
+        alias = "review_fallbacks",
+        alias = "review-fallbacks"
+    )]
+    pub review_fallbacks: Option<Vec<String>>,
+    /// Optional ordered fallback chain for message generation.
+    #[serde(
+        default,
+        rename = "messageFallbacks",
+        alias = "message_fallbacks",
+        alias = "message-fallbacks"
+    )]
+    pub message_fallbacks: Option<Vec<String>>,
     /// Custom review instructions
     #[serde(default)]
     pub review_instructions: Option<String>,
@@ -783,6 +858,9 @@ impl OptionsConfig {
         }
         if other.commit_with_check_timeout_secs.is_some() {
             self.commit_with_check_timeout_secs = other.commit_with_check_timeout_secs;
+        }
+        if other.commit_with_check_review_retries.is_some() {
+            self.commit_with_check_review_retries = other.commit_with_check_review_retries;
         }
         if other.commit_with_check_review_url.is_some() {
             self.commit_with_check_review_url = other.commit_with_check_review_url;
@@ -2180,6 +2258,16 @@ commit_with_check_timeout_secs = 120
     }
 
     #[test]
+    fn options_commit_with_check_review_retries_parses() {
+        let toml = r#"
+[options]
+commit_with_check_review_retries = 3
+"#;
+        let cfg: Config = toml::from_str(toml).expect("options table should parse");
+        assert_eq!(cfg.options.commit_with_check_review_retries, Some(3));
+    }
+
+    #[test]
     fn options_commit_with_check_async_parses() {
         let toml = r#"
 [options]
@@ -2217,6 +2305,9 @@ mode = "block"
 runner = "bun"
 bun_repo_strict = true
 require_related_tests = true
+ai_scratch_test_dir = ".ai/test"
+run_ai_scratch_tests = true
+allow_ai_scratch_to_satisfy_gate = false
 max_local_gate_seconds = 20
 "#;
         let cfg: Config = toml::from_str(toml).expect("commit.testing should parse");
@@ -2226,6 +2317,9 @@ max_local_gate_seconds = 20
         assert_eq!(testing.runner.as_deref(), Some("bun"));
         assert_eq!(testing.bun_repo_strict, Some(true));
         assert_eq!(testing.require_related_tests, Some(true));
+        assert_eq!(testing.ai_scratch_test_dir.as_deref(), Some(".ai/test"));
+        assert_eq!(testing.run_ai_scratch_tests, Some(true));
+        assert_eq!(testing.allow_ai_scratch_to_satisfy_gate, Some(false));
         assert_eq!(testing.max_local_gate_seconds, Some(20));
     }
 

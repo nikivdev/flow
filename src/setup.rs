@@ -103,6 +103,9 @@ pub fn run(opts: SetupOpts) -> Result<()> {
             name: "setup".to_string(),
             args: Vec::new(),
         });
+        if let Err(err) = refresh_skills_after_setup_task(&project_root, &config_path) {
+            eprintln!("⚠ failed to refresh project skills after setup task: {err}");
+        }
         if result.is_ok() {
             if let Err(err) = write_setup_checkpoint(&project_root, &config_path) {
                 eprintln!("⚠ failed to write setup checkpoint: {err}");
@@ -139,6 +142,31 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         eprintln!("⚠ failed to write setup checkpoint: {err}");
     }
 
+    Ok(())
+}
+
+fn refresh_skills_after_setup_task(project_root: &Path, config_path: &Path) -> Result<()> {
+    let (_, cfg) = load_project_config(config_path.to_path_buf())?;
+    let summary = skills::ensure_project_skills_at(project_root, &cfg)?;
+    if !summary.is_noop() {
+        if summary.task_skills_created > 0 || summary.task_skills_updated > 0 {
+            println!(
+                "✓ Refreshed flow.toml tasks to .ai/skills after setup (created {}, updated {})",
+                summary.task_skills_created, summary.task_skills_updated
+            );
+        }
+        if !summary.installed_skills.is_empty() {
+            println!(
+                "✓ Installed skills after setup: {}",
+                summary.installed_skills.join(", ")
+            );
+        }
+        skills::maybe_reload_codex_skills(
+            project_root,
+            cfg.skills.as_ref(),
+            "setup post-task skill sync",
+        );
+    }
     Ok(())
 }
 
@@ -3014,6 +3042,9 @@ mode = "block"
 runner = "bun"
 bun_repo_strict = true
 require_related_tests = true
+ai_scratch_test_dir = ".ai/test"
+run_ai_scratch_tests = true
+allow_ai_scratch_to_satisfy_gate = false
 max_local_gate_seconds = 20"#,
         );
     }

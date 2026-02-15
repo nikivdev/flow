@@ -105,8 +105,11 @@ review_instructions_file = ".ai/commit-review-instructions.md"
 
 [commit.testing]
 mode = "block"                    # off | warn | block
-runner = "auto"                   # repo-specific
+runner = "bun"                    # Bun-first local gate
 require_related_tests = true
+ai_scratch_test_dir = ".ai/test"  # optional gitignored AI scratch tests
+run_ai_scratch_tests = true       # run scratch tests when no related tracked tests
+allow_ai_scratch_to_satisfy_gate = false
 max_local_gate_seconds = 30
 
 [commit.quality]

@@ -45,6 +45,9 @@ quality-bun-feature-delivery = 2
 #runner = "bun"
 #bun_repo_strict = true
 #require_related_tests = true
+#ai_scratch_test_dir = ".ai/test"
+#run_ai_scratch_tests = true
+#allow_ai_scratch_to_satisfy_gate = false
 #max_local_gate_seconds = 20
 "#;
 
