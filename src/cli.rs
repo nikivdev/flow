@@ -1436,6 +1436,9 @@ pub struct CommitOpts {
     /// Dry run: show context that would be passed to review without committing.
     #[arg(long)]
     pub dry: bool,
+    /// Commit immediately and run Codex review asynchronously in the background.
+    #[arg(long, conflicts_with = "dry")]
+    pub quick: bool,
     /// Use Codex instead of Claude for code review (default: Claude).
     #[arg(long)]
     pub codex: bool,
@@ -2023,6 +2026,14 @@ pub enum ProviderAiAction {
     /// List sessions for this provider.
     #[command(alias = "ls")]
     List,
+    /// Open provider-native interactive session picker.
+    #[command(alias = "sess")]
+    Sessions,
+    /// Continue the most recent session for this provider.
+    Continue {
+        /// Session name or ID to continue (optional).
+        session: Option<String>,
+    },
     /// Start a new session (ignores existing sessions).
     New,
     /// Resume a session.

@@ -2525,6 +2525,87 @@ pub fn run_fast(
     Ok(())
 }
 
+/// Commit immediately and trigger Codex queue review in the background.
+/// This gives a fast "commit now" UX while preserving deep review asynchronously.
+pub fn run_quick_then_async_review(
+    push: bool,
+    queue: CommitQueueMode,
+    include_unhash: bool,
+    stage_paths: &[String],
+    fast_message: Option<&str>,
+) -> Result<()> {
+    let explicit_no_queue = queue.override_flag == Some(false);
+
+    if let Some(message) = fast_message {
+        run_fast(message, push, queue, include_unhash, stage_paths)?;
+    } else {
+        run_sync(push, queue, include_unhash, stage_paths)?;
+    }
+
+    if explicit_no_queue {
+        println!("Skipped async Codex review because --no-queue was requested.");
+        return Ok(());
+    }
+
+    let repo_root = git_root_or_cwd();
+    let commit_sha = git_capture_in(&repo_root, &["rev-parse", "--verify", "HEAD"])?
+        .trim()
+        .to_string();
+    if commit_sha.is_empty() {
+        bail!("failed to resolve HEAD commit after quick commit");
+    }
+
+    ensure_commit_queued_for_async_review(&repo_root, &commit_sha)?;
+
+    match spawn_async_queue_review(&repo_root, &commit_sha) {
+        Ok(()) => {
+            println!(
+                "Started async Codex review for {} (running in background).",
+                short_sha(&commit_sha)
+            );
+            println!(
+                "  Check status: f commit-queue show {}",
+                short_sha(&commit_sha)
+            );
+        }
+        Err(err) => {
+            println!("⚠️ Failed to start async review automatically: {}", err);
+            println!("  Run manually: f commit-queue review {}", short_sha(&commit_sha));
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_commit_queued_for_async_review(repo_root: &Path, commit_sha: &str) -> Result<()> {
+    if resolve_commit_queue_entry(repo_root, commit_sha).is_ok() {
+        return Ok(());
+    }
+
+    let entry = queue_existing_commit_for_approval(repo_root, commit_sha, false)?;
+    println!(
+        "Queued {} for async review.",
+        short_sha(&entry.commit_sha)
+    );
+    Ok(())
+}
+
+fn spawn_async_queue_review(repo_root: &Path, commit_sha: &str) -> Result<()> {
+    let flow_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("f"));
+
+    let mut cmd = Command::new(flow_bin);
+    cmd.current_dir(repo_root)
+        .arg("commit-queue")
+        .arg("review")
+        .arg(commit_sha)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    cmd.spawn().context("failed to spawn background queue review")?;
+    Ok(())
+}
+
 /// Run commit with code review: stage, review with Codex or Claude, generate message, commit, push.
 /// If hub is running, delegates to it for async execution.
 pub fn run_with_check(
@@ -7390,8 +7471,11 @@ fn print_queue_instructions(repo_root: &Path, commit_sha: &str) {
     println!("Queued commit {} for review.", short_sha(commit_sha));
     println!("  f commit-queue list");
     println!("  f commit-queue show {}", short_sha(commit_sha));
-    println!("  f commit-queue approve {}", short_sha(commit_sha));
-    println!("  f commit-queue approve --all");
+    println!(
+        "  When review passes: f commit-queue approve {}",
+        short_sha(commit_sha)
+    );
+    println!("  When all pass: f commit-queue approve --all");
     println!("  f review copy {}", short_sha(commit_sha));
     print_other_queued_review_count(repo_root, commit_sha);
 }

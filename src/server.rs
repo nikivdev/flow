@@ -29,11 +29,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
-    ai,
     cli::DaemonOpts,
     config::{self, Config, ServerConfig},
     log_store::{self, LogEntry, LogQuery},
-    projects,
     running,
     screen::ScreenBroadcaster,
     servers::{LogLine, ManagedServer, ServerSnapshot},
@@ -141,10 +139,6 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
         // Log ingestion endpoints
         .route("/logs/ingest", post(logs_ingest))
         .route("/logs/query", get(logs_query))
-        // Flow projects + AI sessions
-        .route("/projects", get(projects_list_all))
-        .route("/projects/:name/sessions", get(project_sessions))
-        .route("/sessions/:id", get(session_detail))
         .layer(cors)
         .with_state(state);
 
@@ -817,96 +811,6 @@ fn same_file(a: &Path, b: &Path) -> bool {
 async fn shutdown_signal() {
     if tokio::signal::ctrl_c().await.is_ok() {
         tracing::info!("shutdown signal received");
-    }
-}
-
-// ============================================================================
-// Flow Projects + AI Sessions
-// ============================================================================
-
-/// GET /projects - List all registered Flow projects.
-async fn projects_list_all() -> impl IntoResponse {
-    let result = tokio::task::spawn_blocking(|| projects::list_projects()).await;
-    match result {
-        Ok(Ok(entries)) => (StatusCode::OK, Json(json!({ "projects": entries }))).into_response(),
-        Ok(Err(err)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
-        )
-            .into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /projects/:name/sessions - List AI sessions for a project.
-async fn project_sessions(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
-    let result = tokio::task::spawn_blocking(move || {
-        let project = projects::resolve_project(&name)?;
-        let project = project.ok_or_else(|| anyhow::anyhow!("project not found: {}", name))?;
-        ai::get_sessions_for_web(&project.project_root)
-    })
-    .await;
-
-    match result {
-        Ok(Ok(sessions)) => (StatusCode::OK, Json(json!({ "sessions": sessions }))).into_response(),
-        Ok(Err(err)) => {
-            let status = if err.to_string().contains("not found") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, Json(json!({ "error": err.to_string() }))).into_response()
-        }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionDetailQuery {
-    project: Option<String>,
-}
-
-/// GET /sessions/:id?project=/path/to/root - Get full session conversation.
-async fn session_detail(
-    AxumPath(session_id): AxumPath<String>,
-    Query(query): Query<SessionDetailQuery>,
-) -> impl IntoResponse {
-    let result = tokio::task::spawn_blocking(move || {
-        let project_root = match query.project {
-            Some(path) => std::path::PathBuf::from(path),
-            None => anyhow::bail!("missing ?project= query parameter"),
-        };
-        ai::get_sessions_for_web(&project_root).map(|sessions| {
-            sessions.into_iter().find(|s| s.id == session_id)
-        })
-    })
-    .await;
-
-    match result {
-        Ok(Ok(Some(session))) => (StatusCode::OK, Json(json!(session))).into_response(),
-        Ok(Ok(None)) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "session not found" })),
-        )
-            .into_response(),
-        Ok(Err(err)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
-        )
-            .into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
-        )
-            .into_response(),
     }
 }
 

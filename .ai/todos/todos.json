@@ -57,5 +57,15 @@
     "note": "Source: flow review\nCommit: 0f2d9648acd4e91cdfa807d379adcc834937d3a9\nModel: gpt-5.1-codex-max\n\n[P2] AI branch selection errors on valid `none` response — /Users/nikiv/code/flow/src/branches.rs:93-105",
     "session": null,
     "external_ref": "flow-review-issue-cb4f1393f4e9"
+  },
+  {
+    "id": "e52b2941b9b94e0289ba8d01f7e2fa83",
+    "title": "[P2] Missing project param returns 500 instead of client error — /Users/nikiv/code/flow/src/server.rs:900-907",
+    "status": "pending",
+    "created_at": "2026-02-16T10:41:04.444182+00:00",
+    "updated_at": null,
+    "note": "Source: flow review\nCommit: 4133ea3a77aa72f21abd21c4e26799bac3278f34\nModel: gpt-5.1-codex-max\n\n[P2] Missing project param returns 500 instead of client error — /Users/nikiv/code/flow/src/server.rs:900-907",
+    "session": null,
+    "external_ref": "flow-review-issue-cc5166e8114b"
   }
 ]

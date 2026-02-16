@@ -213,6 +213,16 @@ fn main() -> Result<()> {
                 let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
                     .with_open_review(open_review);
                 let push = !opts.no_push;
+                if opts.quick {
+                    commit::run_quick_then_async_review(
+                        push,
+                        queue,
+                        opts.hashed,
+                        &opts.paths,
+                        opts.fast.as_deref(),
+                    )?;
+                    return Ok(());
+                }
                 if let Some(message) = opts.fast.as_deref() {
                     commit::run_fast(message, push, queue, opts.hashed, &opts.paths)?;
                     return Ok(());
@@ -324,6 +334,16 @@ fn main() -> Result<()> {
                 let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
                     .with_open_review(open_review);
                 let push = !opts.no_push;
+                if opts.quick {
+                    commit::run_quick_then_async_review(
+                        push,
+                        queue,
+                        opts.hashed,
+                        &opts.paths,
+                        opts.fast.as_deref(),
+                    )?;
+                    return Ok(());
+                }
                 let review_selection =
                     commit::resolve_review_selection_v2(opts.codex, opts.review_model.clone());
                 if opts.dry {

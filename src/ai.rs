@@ -166,6 +166,8 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
     match action {
         None => quick_start_session(provider)?,
         Some(ProviderAiAction::List) => list_sessions(provider)?,
+        Some(ProviderAiAction::Sessions) => provider_sessions(provider)?,
+        Some(ProviderAiAction::Continue { session }) => continue_session(session, provider)?,
         Some(ProviderAiAction::New) => new_session(provider)?,
         Some(ProviderAiAction::Resume { session }) => resume_session(session, provider)?,
         Some(ProviderAiAction::Copy { session }) => copy_session(session, provider)?,
@@ -187,6 +189,10 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Claude { action } => match action {
             None => quick_start_session(Provider::Claude)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Claude)?,
+            Some(ProviderAiAction::Sessions) => provider_sessions(Provider::Claude)?,
+            Some(ProviderAiAction::Continue { session }) => {
+                continue_session(session, Provider::Claude)?
+            }
             Some(ProviderAiAction::New) => new_session(Provider::Claude)?,
             Some(ProviderAiAction::Resume { session }) => {
                 resume_session(session, Provider::Claude)?
@@ -201,6 +207,10 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Codex { action } => match action {
             None => quick_start_session(Provider::Codex)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Codex)?,
+            Some(ProviderAiAction::Sessions) => provider_sessions(Provider::Codex)?,
+            Some(ProviderAiAction::Continue { session }) => {
+                continue_session(session, Provider::Codex)?
+            }
             Some(ProviderAiAction::New) => new_session(Provider::Codex)?,
             Some(ProviderAiAction::Resume { session }) => resume_session(session, Provider::Codex)?,
             Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Codex)?,
@@ -2105,10 +2115,92 @@ fn launch_claude_continue() -> Result<bool> {
     Ok(status.success())
 }
 
+fn launch_claude_resume_picker() -> Result<bool> {
+    let status = Command::new("claude")
+        .arg("--resume")
+        .arg("--dangerously-skip-permissions")
+        .status()
+        .with_context(|| "failed to launch claude --resume")?;
+    Ok(status.success())
+}
+
+fn launch_codex_resume_picker() -> Result<bool> {
+    let status = Command::new("codex")
+        .arg("resume")
+        .arg("--dangerously-bypass-approvals-and-sandbox")
+        .status()
+        .with_context(|| "failed to launch codex resume")?;
+    Ok(status.success())
+}
+
+fn launch_codex_continue_last() -> Result<bool> {
+    let status = Command::new("codex")
+        .arg("resume")
+        .arg("--last")
+        .arg("--dangerously-bypass-approvals-and-sandbox")
+        .status()
+        .with_context(|| "failed to launch codex resume --last")?;
+    Ok(status.success())
+}
+
 fn provider_name(provider: Provider) -> &'static str {
     match provider {
-        Provider::Claude | Provider::All => "claude",
+        Provider::Claude => "claude",
         Provider::Codex => "codex",
+        Provider::All => "ai",
+    }
+}
+
+fn ensure_provider_tty(provider: Provider, action: &str) -> Result<()> {
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        return Ok(());
+    }
+
+    bail!(
+        "{} {} requires an interactive terminal (TTY); run this in a terminal tab (e.g. Zed/Ghostty)",
+        provider_name(provider),
+        action
+    );
+}
+
+fn provider_sessions(provider: Provider) -> Result<()> {
+    if provider == Provider::All {
+        bail!("sessions requires a specific provider (claude or codex)");
+    }
+    ensure_provider_tty(provider, "sessions")?;
+
+    let launched = match provider {
+        Provider::Claude => launch_claude_resume_picker()?,
+        Provider::Codex => launch_codex_resume_picker()?,
+        Provider::All => false,
+    };
+
+    if launched {
+        Ok(())
+    } else {
+        bail!("failed to open {} session picker", provider_name(provider))
+    }
+}
+
+fn continue_session(session: Option<String>, provider: Provider) -> Result<()> {
+    if session.is_some() {
+        return resume_session(session, provider);
+    }
+    if provider == Provider::All {
+        bail!("continue requires a specific provider (claude or codex)");
+    }
+    ensure_provider_tty(provider, "continue")?;
+
+    let launched = match provider {
+        Provider::Claude => launch_claude_continue()?,
+        Provider::Codex => launch_codex_continue_last()?,
+        Provider::All => false,
+    };
+
+    if launched {
+        Ok(())
+    } else {
+        bail!("failed to continue {} session", provider_name(provider))
     }
 }
 
@@ -3788,7 +3880,6 @@ fn resume_session(session: Option<String>, provider: Provider) -> Result<()> {
         provider_name(session_provider),
         session_id
     );
-
 }
 
 /// Save a session with a name.
