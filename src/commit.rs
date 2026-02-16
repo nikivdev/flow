@@ -2193,6 +2193,42 @@ fn save_commit_checkpoint_for_repo(repo_root: &Path) {
     }
 }
 
+fn git_commit_timestamp_iso(repo_root: &Path, rev: &str) -> Option<String> {
+    git_capture_in(repo_root, &["show", "-s", "--format=%cI", rev])
+        .ok()
+        .map(|ts| ts.trim().to_string())
+        .filter(|ts| !ts.is_empty())
+}
+
+fn collect_sync_sessions_for_commit(repo_root: &Path) -> Vec<ai::GitEditSessionData> {
+    let until_ts = git_commit_timestamp_iso(repo_root, "HEAD");
+    let since_ts = git_commit_timestamp_iso(repo_root, "HEAD~1");
+
+    if until_ts.is_some() {
+        match ai::get_sessions_for_gitedit_between(
+            &repo_root.to_path_buf(),
+            since_ts.as_deref(),
+            until_ts.as_deref(),
+        ) {
+            Ok(sessions) => return sessions,
+            Err(err) => {
+                debug!(
+                    "failed to collect AI sessions in commit timestamp window (since={:?}, until={:?}): {}",
+                    since_ts, until_ts, err
+                );
+            }
+        }
+    }
+
+    match ai::get_sessions_for_gitedit(&repo_root.to_path_buf()) {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            debug!("failed to collect AI sessions using checkpoint fallback: {}", err);
+            Vec::new()
+        }
+    }
+}
+
 /// Run commit synchronously (called directly or by hub).
 pub fn run_sync(
     push: bool,
@@ -2392,13 +2428,7 @@ pub fn run_sync(
     let sync_gitedit = gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit(&repo_root);
     let sync_myflow = myflow_mirror_enabled(&repo_root);
     let sync_sessions = if sync_gitedit || sync_myflow {
-        match ai::get_sessions_for_gitedit(&repo_root) {
-            Ok(sessions) => sessions,
-            Err(err) => {
-                debug!("failed to collect AI sessions for commit sync: {}", err);
-                Vec::new()
-            }
-        }
+        collect_sync_sessions_for_commit(&repo_root)
     } else {
         Vec::new()
     };
@@ -2558,13 +2588,7 @@ pub fn run_fast(
     let sync_gitedit = gitedit_globally_enabled() && gitedit_mirror_enabled();
     let sync_myflow = myflow_mirror_enabled(&repo_root);
     let sync_sessions = if sync_gitedit || sync_myflow {
-        match ai::get_sessions_for_gitedit(&repo_root) {
-            Ok(sessions) => sessions,
-            Err(err) => {
-                debug!("failed to collect AI sessions for fast commit sync: {}", err);
-                Vec::new()
-            }
-        }
+        collect_sync_sessions_for_commit(&repo_root)
     } else {
         Vec::new()
     };
@@ -4274,22 +4298,16 @@ pub fn run_with_check_sync(
     let mut unhash_sessions: Vec<ai::GitEditSessionData> = Vec::new();
 
     if gitedit_enabled || unhash_enabled {
-        match ai::get_sessions_for_gitedit(&repo_root) {
-            Ok(sessions) => {
-                if !sessions.is_empty() {
-                    if gitedit_enabled {
-                        if let Some((owner, repo)) = get_gitedit_project(&repo_root) {
-                            gitedit_session_hash = gitedit_sessions_hash(&owner, &repo, &sessions);
-                        }
-                        gitedit_sessions = sessions.clone();
-                    }
-                    if unhash_enabled {
-                        unhash_sessions = sessions;
-                    }
+        let sessions = collect_sync_sessions_for_commit(&repo_root);
+        if !sessions.is_empty() {
+            if gitedit_enabled {
+                if let Some((owner, repo)) = get_gitedit_project(&repo_root) {
+                    gitedit_session_hash = gitedit_sessions_hash(&owner, &repo, &sessions);
                 }
+                gitedit_sessions = sessions.clone();
             }
-            Err(err) => {
-                debug!("failed to collect AI sessions for gitedit/unhash: {}", err);
+            if unhash_enabled {
+                unhash_sessions = sessions;
             }
         }
     }
@@ -4602,10 +4620,7 @@ pub fn run_with_check_sync(
             reviewer: Some(review_reviewer_label.to_string()),
         };
         // Get AI sessions for myflow even if gitedit didn't collect them
-        let myflow_sessions = match ai::get_sessions_for_gitedit(&repo_root) {
-            Ok(sessions) => sessions,
-            Err(_) => Vec::new(),
-        };
+        let myflow_sessions = collect_sync_sessions_for_commit(&repo_root);
         sync_to_myflow(
             &repo_root,
             "commit_with_check",

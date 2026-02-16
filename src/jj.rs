@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::cli::{
     JjAction, JjBookmarkAction, JjCommand, JjPushOpts, JjRebaseOpts, JjSyncOpts, JjWorkspaceAction,
@@ -224,12 +224,7 @@ fn default_branch(repo_root: &Path) -> String {
 }
 
 fn default_remote(repo_root: &Path) -> String {
-    if let Some(cfg) = load_jj_config(repo_root) {
-        if let Some(remote) = cfg.remote {
-            return remote;
-        }
-    }
-    "origin".to_string()
+    config::preferred_git_remote_for_repo(repo_root)
 }
 
 fn auto_track_enabled(repo_root: &Path) -> bool {
@@ -256,6 +251,26 @@ fn load_jj_config(repo_root: &Path) -> Option<config::JjConfig> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn default_remote_uses_git_remote_when_set() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+
+        std::fs::write(
+            repo_root.join("flow.toml"),
+            "[git]\nremote = \"myflow-i\"\n",
+        )
+        .expect("write flow.toml");
+
+        assert_eq!(default_remote(repo_root), "myflow-i");
+    }
 }
 
 fn is_jj_repo(path: &Path) -> bool {
