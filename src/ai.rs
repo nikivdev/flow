@@ -2096,6 +2096,22 @@ fn launch_session(session_id: &str, provider: Provider) -> Result<bool> {
     Ok(status.success())
 }
 
+fn launch_claude_continue() -> Result<bool> {
+    let status = Command::new("claude")
+        .arg("--continue")
+        .arg("--dangerously-skip-permissions")
+        .status()
+        .with_context(|| "failed to launch claude --continue")?;
+    Ok(status.success())
+}
+
+fn provider_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude | Provider::All => "claude",
+        Provider::Codex => "codex",
+    }
+}
+
 /// Quick start: continue last session or create new one with dangerous flags.
 pub fn quick_start_session(provider: Provider) -> Result<()> {
     // Auto-import any new sessions silently
@@ -3661,6 +3677,12 @@ fn get_session_last_timestamp_for_session(session: &CrossProjectSession) -> Resu
 fn resume_session(session: Option<String>, provider: Provider) -> Result<()> {
     let index = load_index()?;
     let sessions = read_sessions_for_project(provider)?;
+    let explicit_session_requested = session.is_some();
+    let default_provider = if provider == Provider::All {
+        Provider::Claude
+    } else {
+        provider
+    };
 
     let (session_id, session_provider) = match session {
         Some(s) => {
@@ -3671,15 +3693,15 @@ fn resume_session(session: Option<String>, provider: Provider) -> Result<()> {
                     .iter()
                     .find(|sess| sess.session_id == saved.id)
                     .map(|sess| sess.provider)
-                    .unwrap_or(Provider::Claude);
+                    .unwrap_or(default_provider);
                 (saved.id.clone(), prov)
             } else if s.len() >= 8 {
                 // Might be a session ID or prefix
                 if let Some(sess) = sessions.iter().find(|sess| sess.session_id.starts_with(&s)) {
                     (sess.session_id.clone(), sess.provider)
                 } else {
-                    // Assume it's a full ID for claude by default
-                    (s, Provider::Claude)
+                    // Assume it's a full ID for requested provider.
+                    (s, default_provider)
                 }
             } else {
                 // Try numeric index (1-based)
@@ -3704,13 +3726,69 @@ fn resume_session(session: Option<String>, provider: Provider) -> Result<()> {
         }
     };
 
+    let has_tty = io::stdin().is_terminal() && io::stdout().is_terminal();
+    if !has_tty {
+        match session_provider {
+            Provider::Codex => {
+                bail!(
+                    "codex resume requires an interactive terminal (TTY); run this in a terminal tab (e.g. Zed/Ghostty)"
+                );
+            }
+            Provider::Claude => {
+                bail!(
+                    "claude resume requires an interactive terminal (TTY); run this in a terminal tab (e.g. Zed/Ghostty)"
+                );
+            }
+            Provider::All => {}
+        }
+    }
+
     println!(
         "Resuming session {}...",
         &session_id[..8.min(session_id.len())]
     );
-    launch_session(&session_id, session_provider)?;
+    let launched = launch_session(&session_id, session_provider)?;
+    if launched {
+        return Ok(());
+    }
 
-    Ok(())
+    // Claude occasionally cannot reopen older local transcript IDs.
+    // For explicit IDs, do not auto-fallback to --continue because that can
+    // open a different conversation and hide the failure.
+    if session_provider == Provider::Claude {
+        eprintln!(
+            "Claude could not resume session {}.",
+            &session_id[..8.min(session_id.len())]
+        );
+        if explicit_session_requested {
+            bail!(
+                "failed to resume exact claude session {}. refusing fallback to `claude --continue` to avoid opening the wrong session",
+                session_id
+            );
+        }
+        if !has_tty {
+            bail!(
+                "failed to resume claude session {} (non-interactive shell; fallback continue unavailable)",
+                session_id
+            );
+        }
+        eprintln!("Falling back to `claude --continue` in this directory...");
+        let continued = launch_claude_continue()?;
+        if continued {
+            return Ok(());
+        }
+        bail!(
+            "failed to resume claude session {} and fallback `claude --continue` also failed",
+            session_id
+        );
+    }
+
+    bail!(
+        "failed to resume {} session {}",
+        provider_name(session_provider),
+        session_id
+    );
+
 }
 
 /// Save a session with a name.

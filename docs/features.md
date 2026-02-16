@@ -111,6 +111,11 @@ f ai resume my-session
 f ai claude resume
 ```
 
+Important resume rules:
+- `f ai claude resume <explicit-id-or-name>` is strict (fails instead of opening a different session).
+- `f ai codex resume ...` requires an interactive TTY.
+- For full details, see `commands/ai.md`.
+
 ### Copying Session Content
 
 ```bash
