@@ -12,6 +12,13 @@ Stages all changes, runs AI code review for bugs and security issues, generates 
 # Standard commit with review
 f commit
 
+# Fast commit (no AI review), then Codex reviews async in background
+f commit --quick
+
+# Fast commit with custom message (no AI review, no Codex follow-up)
+f commit --fast "fix typo"
+f commit --fast  # defaults to "." as message
+
 # Queue for review (no push) + create jj review bookmark
 f commit --queue
 
@@ -35,6 +42,8 @@ f commit -m "Fixes #123"
 | `--sync` | | Run synchronously (don't delegate to hub) |
 | `--context` | | Include AI session context in code review |
 | `--dry` | | Dry run: show context without committing |
+| `--quick` | | Commit now, run Codex review async in background |
+| `--fast [MSG]` | | Fast commit with no AI review (defaults to ".") |
 | `--codex` | | Use Codex instead of Claude for review |
 | `--review-model <MODEL>` | | Choose specific review model |
 | `--message <MSG>` | `-m` | Custom message appended to commit |
@@ -55,6 +64,44 @@ f commit --codex
 # Specific model
 f commit --review-model codex-high
 ```
+
+---
+
+## Fast Commit + Deferred Codex Review
+
+Two flags for skipping the synchronous AI review when you want to commit quickly:
+
+### `--quick` — commit now, Codex reviews later
+
+Commits immediately (generates an AI commit message but skips the blocking code review), then spawns a background Codex review for that commit. The review result is queued and visible via `f commit-queue list`.
+
+```bash
+f commit --quick
+f commit --quick -m "wip: rough draft"
+```
+
+What happens:
+1. Stages all changes, generates commit message, commits, pushes
+2. Queues the commit SHA for async review
+3. Spawns a background Codex process that reviews the diff
+4. You keep working — check results later with `f commit-queue list`
+
+### `--fast` — instant commit, no review at all
+
+Commits with a provided message (or `"."` if omitted). No AI review, no async follow-up. Useful for trivial changes.
+
+```bash
+f commit --fast "fix typo"
+f commit --fast              # message defaults to "."
+```
+
+### When to use which
+
+| Flag | AI message | Code review | Async review | Best for |
+|------|-----------|-------------|-------------|----------|
+| (none) | Yes | Yes (blocking) | No | Normal workflow |
+| `--quick` | Yes | No | Yes (Codex background) | Fast iteration, review later |
+| `--fast` | No (you provide) | No | No | Trivial/WIP commits |
 
 ---
 

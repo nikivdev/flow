@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use axum::{
     Router,
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::{Method, StatusCode},
     response::{
         IntoResponse, Json,
@@ -26,6 +26,7 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::cli::{ServerAction, ServerOpts};
 use crate::log_store::{self, LogEntry, LogQuery};
 use crate::pr_edit::PrEditService;
+use crate::{ai, projects};
 
 #[derive(Clone)]
 struct AppState {
@@ -142,6 +143,10 @@ fn run_foreground(host: &str, port: u16) -> Result<()> {
             .route("/logs/errors/stream", get(logs_errors_stream))
             .route("/pr-edit/status", get(pr_edit_status))
             .route("/pr-edit/rescan", post(pr_edit_rescan))
+            // Flow projects + AI sessions
+            .route("/projects", get(projects_list_all))
+            .route("/projects/{name}/sessions", get(project_sessions))
+            .route("/sessions/{id}", get(session_detail))
             .layer(cors)
             .with_state(state);
 
@@ -348,6 +353,105 @@ async fn logs_query(Query(query): Query<LogQuery>) -> impl IntoResponse {
             )
                 .into_response()
         }
+    }
+}
+
+// ============================================================================
+// Flow Projects + AI Sessions
+// ============================================================================
+
+/// GET /projects - List all registered Flow projects.
+async fn projects_list_all() -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(|| projects::list_projects()).await;
+    match result {
+        Ok(Ok(entries)) => (StatusCode::OK, Json(json!({ "projects": entries }))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /projects/:name/sessions - List AI sessions for a project.
+async fn project_sessions(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        let project = projects::resolve_project(&name)?;
+        let project = project.ok_or_else(|| anyhow::anyhow!("project not found: {}", name))?;
+        ai::get_sessions_for_web(&project.project_root)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(sessions)) => (StatusCode::OK, Json(json!({ "sessions": sessions }))).into_response(),
+        Ok(Err(err)) => {
+            let status = if err.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(json!({ "error": err.to_string() }))).into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionDetailQuery {
+    project: Option<String>,
+}
+
+/// GET /sessions/:id?project=/path/to/root - Get full session conversation.
+async fn session_detail(
+    AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<SessionDetailQuery>,
+) -> impl IntoResponse {
+    let Some(project) = query
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing ?project= query parameter" })),
+        )
+            .into_response();
+    };
+    let project_root = std::path::PathBuf::from(project);
+
+    let result = tokio::task::spawn_blocking(move || {
+        ai::get_sessions_for_web(&project_root)
+            .map(|sessions| sessions.into_iter().find(|s| s.id == session_id))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(Some(session))) => (StatusCode::OK, Json(json!(session))).into_response(),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "session not found" })),
+        )
+            .into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
     }
 }
 
