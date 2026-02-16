@@ -2185,9 +2185,7 @@ fn jj_bookmark_create_or_set(repo_root: &Path, name: &str, rev: &str) -> Result<
         Err(create_err) => {
             if jj_bookmark_exists(repo_root, name) {
                 jj_run_in(repo_root, &["bookmark", "set", name, "-r", rev]).with_context(|| {
-                    format!(
-                        "create failed ({create_err}); bookmark exists, but set also failed"
-                    )
+                    format!("create failed ({create_err}); bookmark exists, but set also failed")
                 })
             } else {
                 Err(create_err)

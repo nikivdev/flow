@@ -47,5 +47,15 @@
     "note": "Source: flow review\nCommit: 2177d65d15ebc28e13152b31413aa8263e8f8f71\nModel: gpt-5.1-codex-max\nReview summary: Codex review timed out after 300s\n\nRe-run review: review timed out for commit 2177d65",
     "session": null,
     "external_ref": "flow-review-issue-e11c99ffe84e"
+  },
+  {
+    "id": "f21c30c0925f48ac858e716fa4ca5473",
+    "title": "[P2] AI branch selection errors on valid `none` response — /Users/nikiv/code/flow/src/branches.rs:93-105",
+    "status": "pending",
+    "created_at": "2026-02-15T14:53:56.021590+00:00",
+    "updated_at": null,
+    "note": "Source: flow review\nCommit: 0f2d9648acd4e91cdfa807d379adcc834937d3a9\nModel: gpt-5.1-codex-max\n\n[P2] AI branch selection errors on valid `none` response — /Users/nikiv/code/flow/src/branches.rs:93-105",
+    "session": null,
+    "external_ref": "flow-review-issue-cb4f1393f4e9"
   }
 ]

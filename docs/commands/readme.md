@@ -17,7 +17,7 @@ Complete documentation for all `f` (flow) commands.
 | [`tasks`](tasks.md) | List and run project tasks |
 | [`global`](global.md) | Run tasks from global flow config |
 | [`setup`](setup.md) | Print aliases or run setup task |
-| [`ai`](ai.md) | Manage AI coding sessions (Claude Code) |
+| [`ai`](ai.md) | Manage AI coding sessions (Claude + Codex) |
 | [`daemon`](daemon.md) | Manage background daemons |
 | [`parallel`](parallel.md) | Run tasks in parallel |
 | [`docs`](docs.md) | Manage auto-generated documentation |
