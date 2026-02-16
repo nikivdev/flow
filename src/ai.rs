@@ -521,16 +521,25 @@ pub fn get_session_ids_for_hash(project_path: &PathBuf) -> Result<(Vec<String>, 
 /// Returns sessions with full exchange history since the last checkpoint.
 pub fn get_sessions_for_gitedit(project_path: &PathBuf) -> Result<Vec<GitEditSessionData>> {
     let checkpoints = load_checkpoints(project_path).unwrap_or_default();
+    let since_ts = checkpoints
+        .last_commit
+        .as_ref()
+        .and_then(|c| c.last_entry_timestamp.clone());
+    get_sessions_for_gitedit_between(project_path, since_ts.as_deref(), None)
+}
+
+/// Get structured AI session data for GitEdit/myflow sync in a strict time window.
+/// Includes exchanges where `since_ts < exchange_ts <= until_ts` (when bounds are provided).
+pub fn get_sessions_for_gitedit_between(
+    project_path: &PathBuf,
+    since_ts: Option<&str>,
+    until_ts: Option<&str>,
+) -> Result<Vec<GitEditSessionData>> {
     let sessions = read_sessions_for_path(Provider::All, project_path)?;
 
     if sessions.is_empty() {
         return Ok(vec![]);
     }
-
-    let since_ts = checkpoints
-        .last_commit
-        .as_ref()
-        .and_then(|c| c.last_entry_timestamp.clone());
 
     let mut result = Vec::new();
 
@@ -545,7 +554,8 @@ pub fn get_sessions_for_gitedit(project_path: &PathBuf) -> Result<Vec<GitEditSes
         let exchanges = get_session_exchanges_since(
             &session.session_id,
             session.provider,
-            since_ts.as_deref(),
+            since_ts,
+            until_ts,
             project_path,
         )?;
 
@@ -586,12 +596,13 @@ fn get_session_exchanges_since(
     session_id: &str,
     provider: Provider,
     since_ts: Option<&str>,
+    until_ts: Option<&str>,
     project_path: &PathBuf,
 ) -> Result<Vec<GitEditExchange>> {
     if provider == Provider::Codex {
         let session_file = find_codex_session_file(session_id);
         if let Some(session_file) = session_file {
-            let (exchanges, _) = read_codex_exchanges(&session_file, since_ts)?;
+            let (exchanges, _) = read_codex_exchanges(&session_file, since_ts, until_ts)?;
             return Ok(exchanges
                 .into_iter()
                 .map(|(user, assistant, ts)| GitEditExchange {
@@ -630,9 +641,12 @@ fn get_session_exchanges_since(
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             let entry_ts = entry.timestamp.clone();
 
-            // Skip entries before checkpoint
-            if let (Some(since), Some(ts)) = (since_ts, &entry_ts) {
-                if ts.as_str() <= since {
+            // In bounded mode, require a timestamp and enforce window.
+            if since_ts.is_some() || until_ts.is_some() {
+                let Some(ref ts) = entry_ts else {
+                    continue;
+                };
+                if !timestamp_in_window(ts, since_ts, until_ts) {
                     continue;
                 }
             }
@@ -965,7 +979,7 @@ fn read_codex_context_since(
     session_file: &PathBuf,
     since_ts: Option<&str>,
 ) -> Result<(String, Option<String>)> {
-    let (exchanges, last_ts) = read_codex_exchanges(session_file, since_ts)?;
+    let (exchanges, last_ts) = read_codex_exchanges(session_file, since_ts, None)?;
 
     if exchanges.is_empty() {
         return Ok((String::new(), last_ts));
@@ -1013,7 +1027,7 @@ fn read_codex_context_since(
 }
 
 fn read_codex_last_context(session_file: &PathBuf, count: usize) -> Result<String> {
-    let (exchanges, _last_ts) = read_codex_exchanges(session_file, None)?;
+    let (exchanges, _last_ts) = read_codex_exchanges(session_file, None, None)?;
 
     if exchanges.is_empty() {
         bail!("No exchanges found in session");
@@ -1043,6 +1057,7 @@ fn read_codex_last_context(session_file: &PathBuf, count: usize) -> Result<Strin
 fn read_codex_exchanges(
     session_file: &PathBuf,
     since_ts: Option<&str>,
+    until_ts: Option<&str>,
 ) -> Result<(Vec<(String, String, String)>, Option<String>)> {
     let content = fs::read_to_string(session_file).context("failed to read session file")?;
 
@@ -1062,11 +1077,12 @@ fn read_codex_exchanges(
         };
 
         let entry_ts = entry.timestamp.clone();
-        if let Some(ts) = entry_ts.as_deref() {
-            if let Some(since) = since_ts {
-                if ts <= since {
-                    continue;
-                }
+        if since_ts.is_some() || until_ts.is_some() {
+            let Some(ts) = entry_ts.as_deref() else {
+                continue;
+            };
+            if !timestamp_in_window(ts, since_ts, until_ts) {
+                continue;
             }
         }
 
@@ -1101,6 +1117,57 @@ fn read_codex_exchanges(
     }
 
     Ok((exchanges, last_ts))
+}
+
+fn parse_timestamp_for_compare(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.fZ")
+                .map(|dt| dt.and_utc())
+        })
+        .ok()
+}
+
+fn timestamp_in_window(ts: &str, since_ts: Option<&str>, until_ts: Option<&str>) -> bool {
+    let ts_dt = parse_timestamp_for_compare(ts);
+    let since_dt = since_ts.and_then(parse_timestamp_for_compare);
+    let until_dt = until_ts.and_then(parse_timestamp_for_compare);
+
+    if let Some(entry_dt) = ts_dt {
+        if let Some(lower) = since_dt {
+            if entry_dt <= lower {
+                return false;
+            }
+        } else if let Some(lower_raw) = since_ts {
+            if ts <= lower_raw {
+                return false;
+            }
+        }
+
+        if let Some(upper) = until_dt {
+            if entry_dt > upper {
+                return false;
+            }
+        } else if let Some(upper_raw) = until_ts {
+            if ts > upper_raw {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if let Some(lower_raw) = since_ts {
+        if ts <= lower_raw {
+            return false;
+        }
+    }
+    if let Some(upper_raw) = until_ts {
+        if ts > upper_raw {
+            return false;
+        }
+    }
+    true
 }
 
 fn get_codex_last_timestamp(session_file: &PathBuf) -> Result<Option<String>> {
@@ -4825,7 +4892,7 @@ fn read_codex_cross_project_context(
     since_ts: Option<&str>,
     max_count: Option<usize>,
 ) -> Result<(String, Option<String>)> {
-    let (exchanges, last_ts) = read_codex_exchanges(session_file, since_ts)?;
+    let (exchanges, last_ts) = read_codex_exchanges(session_file, since_ts, None)?;
 
     if exchanges.is_empty() {
         return Ok((String::new(), last_ts));
