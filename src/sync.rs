@@ -1,9 +1,9 @@
 //! Git sync command - comprehensive repo synchronization.
 //!
 //! Provides a single command to sync a git repository:
-//! - Pull from origin (with rebase)
+//! - Pull from tracking/default remote (with rebase)
 //! - Sync upstream if configured (fetch, merge)
-//! - Push to origin
+//! - Push to configured git remote (default: origin)
 
 use std::env;
 use std::fs;
@@ -236,8 +236,20 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
             .trim()
             .to_string();
         let repo_root_path = Path::new(&repo_root);
+        let preferred_remote = config::preferred_git_remote_for_repo(repo_root_path);
         let mut use_jj = should_use_jj(repo_root_path);
         let mut jj_disabled_by_custom_tracking = false;
+        if use_jj && preferred_remote != "origin" && preferred_remote != "upstream" {
+            println!(
+                "⚠️  Configured git.remote '{}' detected; using git sync flow.",
+                preferred_remote
+            );
+            recorder.record(
+                "mode",
+                format!("jj bypassed (configured git.remote {})", preferred_remote),
+            );
+            use_jj = false;
+        }
         if use_jj {
             if let Ok(branch) =
                 git_capture_in(repo_root_path, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -421,18 +433,44 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
             recorder.record("stash", format!("stashed={}", stashed));
         }
 
-        // Check if we have an origin remote
+        // Resolve remotes for sync.
+        let push_remote = preferred_remote.clone();
+        let has_push_remote = git_capture(&["remote", "get-url", &push_remote]).is_ok();
+
+        // Keep explicit origin/upstream detection for fork-sync heuristics.
         let has_origin = git_capture(&["remote", "get-url", "origin"]).is_ok();
         let has_upstream = git_capture(&["remote", "get-url", "upstream"]).is_ok();
 
-        // Check if origin remote is reachable (repo exists on remote)
+        // Check if remotes are reachable (repo exists on remote)
+        let push_remote_reachable = has_push_remote
+            && git_capture(&["ls-remote", "--exit-code", "-q", &push_remote]).is_ok();
         let origin_reachable =
             has_origin && git_capture(&["ls-remote", "--exit-code", "-q", "origin"]).is_ok();
 
-        // Step 1: Pull from tracking branch (e.g., fork/<branch>, origin/<branch>, etc.)
-        if let Some((tracking_remote, tracking_branch)) =
-            resolve_tracking_remote_branch_in(repo_root_path, Some(current))
-        {
+        // Step 1: Pull from tracking branch.
+        let mut tracking = resolve_tracking_remote_branch_in(repo_root_path, Some(current));
+        if current != "HEAD" && has_push_remote {
+            let should_retarget = tracking
+                .as_ref()
+                .map(|(remote, _)| remote != &push_remote)
+                .unwrap_or(true);
+            if should_retarget && remote_branch_exists(repo_root_path, &push_remote, current) {
+                let branch_remote_key = format!("branch.{}.remote", current);
+                let branch_merge_key = format!("branch.{}.merge", current);
+                let merge_ref = format!("refs/heads/{}", current);
+                let _ = git_run_in(
+                    repo_root_path,
+                    &["config", "--local", &branch_remote_key, &push_remote],
+                );
+                let _ = git_run_in(
+                    repo_root_path,
+                    &["config", "--local", &branch_merge_key, &merge_ref],
+                );
+                tracking = Some((push_remote.clone(), current.to_string()));
+            }
+        }
+
+        if let Some((tracking_remote, tracking_branch)) = tracking {
             let tracking_reachable = git_capture_in(
                 repo_root_path,
                 &["ls-remote", "--exit-code", "-q", &tracking_remote],
@@ -602,39 +640,57 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
             recorder.record("upstream", "skipped (no upstream remote)");
         }
 
-        // Step 3: Push to origin
-        if has_origin && should_push {
-            // Check if origin == upstream (read-only clone, no fork)
-            let origin_url = git_capture(&["remote", "get-url", "origin"]).unwrap_or_default();
+        // Step 3: Push to configured remote (defaults to origin).
+        if has_push_remote && should_push {
+            // Check if push remote == upstream (read-only clone, no fork)
+            let push_remote_url =
+                git_capture(&["remote", "get-url", &push_remote]).unwrap_or_default();
             let upstream_url = git_capture(&["remote", "get-url", "upstream"]).unwrap_or_default();
-            let is_read_only =
-                has_upstream && normalize_git_url(&origin_url) == normalize_git_url(&upstream_url);
+            let is_read_only = has_upstream
+                && normalize_git_url(&push_remote_url) == normalize_git_url(&upstream_url);
 
             if is_read_only {
-                println!("==> Skipping push (origin == upstream, read-only clone)");
+                println!(
+                    "==> Skipping push (remote '{}' == upstream, read-only clone)",
+                    push_remote
+                );
                 println!("  To push, create a fork first: gh repo fork --remote");
-                recorder.record("push", "skipped (origin == upstream)");
-            } else if !origin_reachable {
-                // Origin repo doesn't exist
-                if cmd.create_repo {
+                recorder.record("push", "skipped (push remote == upstream)");
+            } else if !push_remote_reachable {
+                // Remote repo doesn't exist or is unreachable.
+                if cmd.create_repo && push_remote == "origin" {
                     println!("==> Creating origin repo...");
                     if try_create_origin_repo()? {
-                        println!("==> Pushing to origin...");
-                        git_run(&["push", "-u", "origin", current])?;
-                        recorder.record("push", "created repo and pushed to origin");
+                        println!("==> Pushing to {}...", push_remote);
+                        git_run(&["push", "-u", &push_remote, current])?;
+                        recorder.record(
+                            "push",
+                            format!("created repo and pushed to {}", push_remote),
+                        );
                     } else {
                         println!("  Could not create repo, skipping push");
                         recorder.record("push", "skipped (create repo failed)");
                     }
                 } else {
-                    println!("==> Origin unreachable, skipping push");
+                    println!("==> Remote '{}' unreachable, skipping push", push_remote);
                     println!("  The remote may be missing, private, or auth/network failed.");
-                    println!("  Use --create-repo if origin does not exist yet.");
-                    recorder.record("push", "skipped (origin unreachable)");
+                    if push_remote == "origin" {
+                        println!("  Use --create-repo if origin does not exist yet.");
+                    } else {
+                        println!(
+                            "  Create/fix remote '{}' and re-run sync (or set [git].remote).",
+                            push_remote
+                        );
+                    }
+                    recorder.record(
+                        "push",
+                        format!("skipped (remote unreachable: {})", push_remote),
+                    );
                 }
             } else {
-                println!("==> Pushing to origin...");
-                let push_result = push_with_autofix(current, auto_fix, cmd.max_fix_attempts);
+                println!("==> Pushing to {}...", push_remote);
+                let push_result =
+                    push_with_autofix(current, &push_remote, auto_fix, cmd.max_fix_attempts);
                 if let Err(e) = push_result {
                     restore_stash(repo_root_path, stashed);
                     recorder.record("push", "push failed");
@@ -644,10 +700,10 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
             }
         } else if cmd.no_push {
             recorder.record("push", "skipped (--no-push)");
-        } else if has_origin {
+        } else if has_push_remote {
             recorder.record("push", "skipped (default; use --push)");
         } else {
-            recorder.record("push", "skipped (no origin)");
+            recorder.record("push", format!("skipped (missing remote: {})", push_remote));
         }
 
         // Restore stash
@@ -1553,9 +1609,9 @@ fn run_jj_sync(
         } else {
             println!("==> Pushing to origin...");
             let push_result = if did_rebase {
-                push_with_autofix_force(&current_branch, auto_fix, cmd.max_fix_attempts)
+                push_with_autofix_force(&current_branch, "origin", auto_fix, cmd.max_fix_attempts)
             } else {
-                push_with_autofix(&current_branch, auto_fix, cmd.max_fix_attempts)
+                push_with_autofix(&current_branch, "origin", auto_fix, cmd.max_fix_attempts)
             };
             if let Err(e) = push_result {
                 recorder.record("push", "push failed");
@@ -2050,29 +2106,7 @@ fn jj_workspace_healthy(repo_root: &Path) -> bool {
 }
 
 fn jj_default_remote(repo_root: &Path) -> String {
-    let local_config = repo_root.join("flow.toml");
-    if local_config.exists() {
-        if let Ok(cfg) = config::load(&local_config) {
-            if let Some(jj_cfg) = cfg.jj {
-                if let Some(remote) = jj_cfg.remote {
-                    return remote;
-                }
-            }
-        }
-    }
-
-    let global_config = config::default_config_path();
-    if global_config.exists() {
-        if let Ok(cfg) = config::load(&global_config) {
-            if let Some(jj_cfg) = cfg.jj {
-                if let Some(remote) = jj_cfg.remote {
-                    return remote;
-                }
-            }
-        }
-    }
-
-    "origin".to_string()
+    config::preferred_git_remote_for_repo(repo_root)
 }
 
 fn jj_default_branch(repo_root: &Path) -> String {
@@ -2722,14 +2756,14 @@ fn git_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Push to origin with optional auto-fix on failure.
-fn push_with_autofix(branch: &str, auto_fix: bool, max_attempts: u32) -> Result<()> {
+/// Push to a remote with optional auto-fix on failure.
+fn push_with_autofix(branch: &str, remote: &str, auto_fix: bool, max_attempts: u32) -> Result<()> {
     let mut attempts = 0;
 
     loop {
         // Try push and capture output
         let output = Command::new("git")
-            .args(["push", "origin", branch])
+            .args(["push", remote, branch])
             .output()
             .context("failed to run git push")?;
 
@@ -2765,7 +2799,7 @@ fn push_with_autofix(branch: &str, auto_fix: bool, max_attempts: u32) -> Result<
             if !should_fix {
                 println!("{}", combined);
             }
-            bail!("git push origin {} failed", branch);
+            bail!("git push {} {} failed", remote, branch);
         }
 
         println!(
@@ -2799,13 +2833,18 @@ fn push_with_autofix(branch: &str, auto_fix: bool, max_attempts: u32) -> Result<
     }
 }
 
-/// Push to origin with --force-with-lease, with optional auto-fix on failure.
-fn push_with_autofix_force(branch: &str, auto_fix: bool, max_attempts: u32) -> Result<()> {
+/// Push to a remote with --force-with-lease, with optional auto-fix on failure.
+fn push_with_autofix_force(
+    branch: &str,
+    remote: &str,
+    auto_fix: bool,
+    max_attempts: u32,
+) -> Result<()> {
     let mut attempts = 0;
 
     loop {
         let output = Command::new("git")
-            .args(["push", "--force-with-lease", "origin", branch])
+            .args(["push", "--force-with-lease", remote, branch])
             .output()
             .context("failed to run git push --force-with-lease")?;
 
@@ -2839,7 +2878,7 @@ fn push_with_autofix_force(branch: &str, auto_fix: bool, max_attempts: u32) -> R
             if !should_fix {
                 println!("{}", combined);
             }
-            bail!("git push --force-with-lease origin {} failed", branch);
+            bail!("git push --force-with-lease {} {} failed", remote, branch);
         }
 
         println!(

@@ -99,6 +99,9 @@ pub struct Config {
     /// Commit workflow config (fixers, review instructions).
     #[serde(default)]
     pub commit: Option<CommitConfig>,
+    /// Git workflow config (default remotes for push/sync).
+    #[serde(default)]
+    pub git: Option<GitConfig>,
     /// Jujutsu (jj) workflow config.
     #[serde(default)]
     pub jj: Option<JjConfig>,
@@ -344,6 +347,14 @@ pub struct JjConfig {
     pub review_prefix: Option<String>,
 }
 
+/// Git workflow config.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GitConfig {
+    /// Default writable remote used by flow commit/sync (e.g., "origin", "fork", "myflow-i").
+    #[serde(default)]
+    pub remote: Option<String>,
+}
+
 /// TypeScript config loaded from ~/.config/flow/config.ts
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TsConfig {
@@ -546,6 +557,7 @@ impl Default for Config {
             prod: None,
             release: None,
             commit: None,
+            git: None,
             jj: None,
             setup: None,
             ssh: None,
@@ -1833,6 +1845,9 @@ fn merge_config(base: &mut Config, other: Config) {
     if base.analytics.is_none() {
         base.analytics = other.analytics;
     }
+    if base.git.is_none() {
+        base.git = other.git;
+    }
     if base.jj.is_none() {
         base.jj = other.jj;
     }
@@ -1910,6 +1925,60 @@ fn merge_release_config(base: &mut Config, other: Option<ReleaseConfig>) {
             registry.latest = other_registry.latest;
         }
     }
+}
+
+fn first_non_empty_remote(value: Option<&str>) -> Option<String> {
+    let trimmed = value.map(str::trim).unwrap_or_default();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn preferred_git_remote_from_cfg(cfg: &Config) -> Option<String> {
+    if let Some(remote) = cfg
+        .git
+        .as_ref()
+        .and_then(|git_cfg| first_non_empty_remote(git_cfg.remote.as_deref()))
+    {
+        return Some(remote);
+    }
+
+    // Backward compatibility: honor jj.remote when git.remote is not set.
+    cfg.jj
+        .as_ref()
+        .and_then(|jj_cfg| first_non_empty_remote(jj_cfg.remote.as_deref()))
+}
+
+/// Resolve the preferred writable git remote for a repository.
+///
+/// Precedence:
+/// 1. `<repo>/flow.toml` `[git].remote`
+/// 2. `<repo>/flow.toml` `[jj].remote` (legacy fallback)
+/// 3. `~/.config/flow/flow.toml` `[git].remote`
+/// 4. `~/.config/flow/flow.toml` `[jj].remote` (legacy fallback)
+/// 5. `"origin"`
+pub fn preferred_git_remote_for_repo(repo_root: &Path) -> String {
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = load(&local_config) {
+            if let Some(remote) = preferred_git_remote_from_cfg(&cfg) {
+                return remote;
+            }
+        }
+    }
+
+    let global_config = default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = load(&global_config) {
+            if let Some(remote) = preferred_git_remote_from_cfg(&cfg) {
+                return remote;
+            }
+        }
+    }
+
+    "origin".to_string()
 }
 
 /// Load config from the given path, logging a warning and returning an empty
@@ -2368,6 +2437,38 @@ task_skill_allow_implicit_invocation = false
         assert_eq!(codex.generate_openai_yaml, Some(true));
         assert_eq!(codex.force_reload_after_sync, Some(true));
         assert_eq!(codex.task_skill_allow_implicit_invocation, Some(false));
+    }
+
+    #[test]
+    fn git_remote_config_parses() {
+        let toml = r#"
+[git]
+remote = "myflow-i"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("git config should parse");
+        let git = cfg.git.expect("git config expected");
+        assert_eq!(git.remote.as_deref(), Some("myflow-i"));
+    }
+
+    #[test]
+    fn preferred_git_remote_prefers_git_then_jj() {
+        let mut cfg = Config::default();
+        cfg.jj = Some(JjConfig {
+            remote: Some("jj-remote".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            preferred_git_remote_from_cfg(&cfg).as_deref(),
+            Some("jj-remote")
+        );
+
+        cfg.git = Some(GitConfig {
+            remote: Some("git-remote".to_string()),
+        });
+        assert_eq!(
+            preferred_git_remote_from_cfg(&cfg).as_deref(),
+            Some("git-remote")
+        );
     }
 
     #[test]
