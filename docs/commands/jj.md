@@ -33,9 +33,12 @@ f jj sync --bookmark feature-x
 Add to `flow.toml`:
 
 ```toml
+[git]
+remote = "myflow-i"  # optional preferred writable remote
+
 [jj]
 default_branch = "main"
-remote = "origin"
+remote = "origin"     # optional legacy fallback if [git].remote is unset
 auto_track = true
 ```
 

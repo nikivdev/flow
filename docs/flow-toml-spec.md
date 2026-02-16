@@ -58,6 +58,9 @@ install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/sk
 [commit.skill_gate.min_version]
 # quality-bun-feature-delivery = 2
 
+[git]                 # optional: git remote defaults for commit/sync
+# remote = "origin"   # e.g. "myflow-i" for contributor mirror repos
+
 [[alias]]             # optional shell aliases (or use [aliases] table)
 fr = "f run"          # key/value pairs of alias -> command
 
@@ -84,6 +87,7 @@ fr = "f run"
 - `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
 - `[commit.testing]`: optional local testing gate evaluated during `f commit`; supports Bun-first strict mode plus optional AI scratch-test fallback (`.ai/test` by default).
 - `[commit.skill_gate]`: optional required-skill policy for `f commit`; can enforce presence and minimum skill versions.
+- `[git].remote`: preferred writable remote used by `f commit`/`f sync --push` (and jj remote defaults). Fallback order is `[git].remote`, then legacy `[jj].remote`, then `origin`.
 
 ## Notes
 

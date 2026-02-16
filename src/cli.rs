@@ -412,7 +412,7 @@ pub enum Commands {
     Hive(HiveCommand),
     #[command(
         about = "Sync git repo: pull + upstream merge (push optional).",
-        long_about = "Comprehensive git sync: pulls from origin and merges/rebases upstream changes when configured. Use --push to push to origin."
+        long_about = "Comprehensive git sync: pulls from tracking/default remote and merges/rebases upstream changes when configured. Use --push to push to the configured git remote (defaults to origin)."
     )]
     Sync(SyncCommand),
     #[command(
@@ -1722,7 +1722,7 @@ pub struct JjSyncOpts {
     /// Destination to rebase onto (default: jj.default_branch or main/master).
     #[arg(long)]
     pub dest: Option<String>,
-    /// Remote to sync with (default: jj.remote or origin).
+    /// Remote to sync with (default: git.remote, then jj.remote, then origin).
     #[arg(long)]
     pub remote: Option<String>,
     /// Skip pushing after rebase.
@@ -1752,7 +1752,7 @@ pub enum JjBookmarkAction {
     Track {
         /// Bookmark name.
         name: String,
-        /// Remote name (default: jj.remote or origin).
+        /// Remote name (default: git.remote, then jj.remote, then origin).
         #[arg(long)]
         remote: Option<String>,
     },
@@ -1766,7 +1766,7 @@ pub enum JjBookmarkAction {
         /// Whether to track the remote bookmark (default: jj.auto_track).
         #[arg(long)]
         track: Option<bool>,
-        /// Remote to track (default: jj.remote or origin).
+        /// Remote to track (default: git.remote, then jj.remote, then origin).
         #[arg(long)]
         remote: Option<String>,
     },
@@ -2988,10 +2988,10 @@ pub struct SyncCommand {
     /// Use rebase instead of merge when pulling.
     #[arg(long, short)]
     pub rebase: bool,
-    /// Push to origin after sync (default: false).
+    /// Push to configured git remote after sync (default: false).
     #[arg(long)]
     pub push: bool,
-    /// Skip pushing to origin (legacy; default is already no push).
+    /// Skip pushing to configured git remote (legacy; default is already no push).
     #[arg(long, overrides_with = "push")]
     pub no_push: bool,
     /// Auto-stash uncommitted changes (default: true).

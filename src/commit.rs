@@ -2173,6 +2173,26 @@ pub fn run(
     run_sync(push, queue, include_unhash, stage_paths)
 }
 
+fn save_commit_checkpoint_for_repo(repo_root: &Path) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let (session_id, last_ts) = match ai::get_last_entry_timestamp_for_path(&repo_root.to_path_buf()) {
+        Ok(Some((session_id, last_ts))) => (Some(session_id), Some(last_ts)),
+        Ok(None) => (None, Some(now.clone())),
+        Err(err) => {
+            debug!("failed to resolve latest session timestamp for checkpoint: {}", err);
+            (None, Some(now.clone()))
+        }
+    };
+    let checkpoint = ai::CommitCheckpoint {
+        timestamp: now,
+        session_id,
+        last_entry_timestamp: last_ts,
+    };
+    if let Err(err) = ai::save_checkpoint(&repo_root.to_path_buf(), checkpoint) {
+        debug!("failed to save commit checkpoint: {}", err);
+    }
+}
+
 /// Run commit synchronously (called directly or by hub).
 pub fn run_sync(
     push: bool,
@@ -2313,10 +2333,15 @@ pub fn run_sync(
     // Push if requested
     let mut pushed = false;
     if push {
+        let push_remote = config::preferred_git_remote_for_repo(&repo_root);
+        let push_branch = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_else(|_| "HEAD".to_string())
+            .trim()
+            .to_string();
         print!("Pushing... ");
         io::stdout().flush()?;
 
-        match git_push_try() {
+        match git_push_try(&push_remote, &push_branch) {
             PushResult::Success => {
                 println!("done");
                 info!("pushed to remote");
@@ -2332,12 +2357,12 @@ pub fn run_sync(
                 print!("Pulling with rebase... ");
                 io::stdout().flush()?;
 
-                match git_try(&["pull", "--rebase"]) {
+                match git_pull_rebase_try(&push_remote, &push_branch) {
                     Ok(_) => {
                         println!("done");
                         print!("Pushing... ");
                         io::stdout().flush()?;
-                        git_run(&["push"])?;
+                        git_push_run(&push_remote, &push_branch)?;
                         println!("done");
                         info!("pulled and pushed to remote");
                         pushed = true;
@@ -2362,16 +2387,28 @@ pub fn run_sync(
     // Record undo action
     record_undo_action(&repo_root, pushed, Some(&message));
 
-    // Sync to gitedit if enabled
+    // Sync mirrors with AI sessions since previous checkpoint.
     let cwd = std::env::current_dir().unwrap_or_default();
-    if gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit(&repo_root) {
-        sync_to_gitedit(&cwd, "commit", &[], None, None);
+    let sync_gitedit = gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit(&repo_root);
+    let sync_myflow = myflow_mirror_enabled(&repo_root);
+    let sync_sessions = if sync_gitedit || sync_myflow {
+        match ai::get_sessions_for_gitedit(&repo_root) {
+            Ok(sessions) => sessions,
+            Err(err) => {
+                debug!("failed to collect AI sessions for commit sync: {}", err);
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if sync_gitedit {
+        sync_to_gitedit(&cwd, "commit", &sync_sessions, None, None);
     }
-
-    // Sync to myflow if enabled
-    if myflow_mirror_enabled(&repo_root) {
-        sync_to_myflow(&repo_root, "commit", &[], None, None);
+    if sync_myflow {
+        sync_to_myflow(&repo_root, "commit", &sync_sessions, None, None);
     }
+    save_commit_checkpoint_for_repo(&repo_root);
 
     Ok(())
 }
@@ -2468,10 +2505,15 @@ pub fn run_fast(
     // Push if requested
     let mut pushed = false;
     if push {
+        let push_remote = config::preferred_git_remote_for_repo(&repo_root);
+        let push_branch = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_else(|_| "HEAD".to_string())
+            .trim()
+            .to_string();
         print!("Pushing... ");
         io::stdout().flush()?;
 
-        match git_push_try() {
+        match git_push_try(&push_remote, &push_branch) {
             PushResult::Success => {
                 println!("done");
                 pushed = true;
@@ -2484,12 +2526,12 @@ pub fn run_fast(
                 print!("Pulling with rebase... ");
                 io::stdout().flush()?;
 
-                match git_try(&["pull", "--rebase"]) {
+                match git_pull_rebase_try(&push_remote, &push_branch) {
                     Ok(_) => {
                         println!("done");
                         print!("Pushing... ");
                         io::stdout().flush()?;
-                        git_run(&["push"])?;
+                        git_push_run(&push_remote, &push_branch)?;
                         println!("done");
                         pushed = true;
                     }
@@ -2513,14 +2555,26 @@ pub fn run_fast(
     // Record undo action
     record_undo_action(&repo_root, pushed, Some(&full_message));
 
-    if gitedit_globally_enabled() && gitedit_mirror_enabled() {
-        sync_to_gitedit(&cwd, "commit", &[], None, None);
+    let sync_gitedit = gitedit_globally_enabled() && gitedit_mirror_enabled();
+    let sync_myflow = myflow_mirror_enabled(&repo_root);
+    let sync_sessions = if sync_gitedit || sync_myflow {
+        match ai::get_sessions_for_gitedit(&repo_root) {
+            Ok(sessions) => sessions,
+            Err(err) => {
+                debug!("failed to collect AI sessions for fast commit sync: {}", err);
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if sync_gitedit {
+        sync_to_gitedit(&cwd, "commit", &sync_sessions, None, None);
     }
-
-    // Sync to myflow if enabled
-    if myflow_mirror_enabled(&repo_root) {
-        sync_to_myflow(&repo_root, "commit", &[], None, None);
+    if sync_myflow {
+        sync_to_myflow(&repo_root, "commit", &sync_sessions, None, None);
     }
+    save_commit_checkpoint_for_repo(&repo_root);
 
     Ok(())
 }
@@ -2570,7 +2624,10 @@ pub fn run_quick_then_async_review(
         }
         Err(err) => {
             println!("⚠️ Failed to start async review automatically: {}", err);
-            println!("  Run manually: f commit-queue review {}", short_sha(&commit_sha));
+            println!(
+                "  Run manually: f commit-queue review {}",
+                short_sha(&commit_sha)
+            );
         }
     }
 
@@ -2583,10 +2640,7 @@ fn ensure_commit_queued_for_async_review(repo_root: &Path, commit_sha: &str) -> 
     }
 
     let entry = queue_existing_commit_for_approval(repo_root, commit_sha, false)?;
-    println!(
-        "Queued {} for async review.",
-        short_sha(&entry.commit_sha)
-    );
+    println!("Queued {} for async review.", short_sha(&entry.commit_sha));
     Ok(())
 }
 
@@ -2602,7 +2656,8 @@ fn spawn_async_queue_review(repo_root: &Path, commit_sha: &str) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    cmd.spawn().context("failed to spawn background queue review")?;
+    cmd.spawn()
+        .context("failed to spawn background queue review")?;
     Ok(())
 }
 
@@ -4446,10 +4501,15 @@ pub fn run_with_check_sync(
     // Push if requested
     let mut pushed = false;
     if push {
+        let push_remote = config::preferred_git_remote_for_repo(&repo_root);
+        let push_branch = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_else(|_| "HEAD".to_string())
+            .trim()
+            .to_string();
         print!("Pushing... ");
         io::stdout().flush()?;
 
-        match git_push_try() {
+        match git_push_try(&push_remote, &push_branch) {
             PushResult::Success => {
                 println!("done");
                 pushed = true;
@@ -4462,12 +4522,12 @@ pub fn run_with_check_sync(
                 print!("Pulling with rebase... ");
                 io::stdout().flush()?;
 
-                match git_try(&["pull", "--rebase"]) {
+                match git_pull_rebase_try(&push_remote, &push_branch) {
                     Ok(_) => {
                         println!("done");
                         print!("Pushing... ");
                         io::stdout().flush()?;
-                        git_run(&["push"])?;
+                        git_push_run(&push_remote, &push_branch)?;
                         println!("done");
                         pushed = true;
                     }
@@ -4494,25 +4554,8 @@ pub fn run_with_check_sync(
 
     cleanup_staged_snapshot(&staged_snapshot);
 
-    // Save checkpoint for next commit
-    if include_context {
-        let now = chrono::Utc::now().to_rfc3339();
-        let (session_id, last_ts) = match ai::get_last_entry_timestamp_for_path(&repo_root) {
-            Ok(Some((session_id, last_ts))) => (Some(session_id), Some(last_ts)),
-            Ok(None) => (None, Some(now.clone())),
-            Err(_) => (None, Some(now.clone())),
-        };
-        let checkpoint = ai::CommitCheckpoint {
-            timestamp: now,
-            session_id,
-            last_entry_timestamp: last_ts,
-        };
-        if let Err(e) = ai::save_checkpoint(&repo_root, checkpoint) {
-            debug!("failed to save commit checkpoint: {}", e);
-        } else {
-            debug!("saved commit checkpoint");
-        }
-    }
+    // Advance checkpoint for all commit paths so syncs only include new exchanges.
+    save_commit_checkpoint_for_repo(&repo_root);
 
     // Sync to gitedit if enabled
     let should_sync = if force_gitedit {
@@ -6674,6 +6717,12 @@ fn record_undo_action(repo_root: &Path, pushed: bool, message: Option<&str>) {
     } else {
         undo::ActionType::Commit
     };
+    let push_remote = config::preferred_git_remote_for_repo(repo_root);
+    let remote_for_undo = if pushed {
+        Some(push_remote.as_str())
+    } else {
+        None
+    };
 
     if let Err(e) = undo::record_action(
         repo_root,
@@ -6682,7 +6731,7 @@ fn record_undo_action(repo_root: &Path, pushed: bool, message: Option<&str>) {
         &after_sha,
         branch.trim(),
         pushed,
-        Some("origin"),
+        remote_for_undo,
         message,
     ) {
         debug!("failed to record undo action: {}", e);
@@ -7654,11 +7703,13 @@ fn approve_all_queued_commits(
     }
 
     let before_sha = git_capture_in(repo_root, &["rev-parse", "@{u}"]).ok();
+    let push_remote = config::preferred_git_remote_for_repo(repo_root);
+    let push_branch = current_branch.trim().to_string();
 
     print!("Pushing... ");
     io::stdout().flush()?;
     let mut pushed = false;
-    match git_push_try_in(repo_root) {
+    match git_push_try_in(repo_root, &push_remote, &push_branch) {
         PushResult::Success => {
             println!("done");
             pushed = true;
@@ -7670,12 +7721,12 @@ fn approve_all_queued_commits(
             println!("failed (remote ahead)");
             print!("Pulling with rebase... ");
             io::stdout().flush()?;
-            match git_try_in(repo_root, &["pull", "--rebase"]) {
+            match git_pull_rebase_try_in(repo_root, &push_remote, &push_branch) {
                 Ok(_) => {
                     println!("done");
                     print!("Pushing... ");
                     io::stdout().flush()?;
-                    git_run_in(repo_root, &["push"])?;
+                    git_push_run_in(repo_root, &push_remote, &push_branch)?;
                     println!("done");
                     pushed = true;
                 }
@@ -7710,7 +7761,7 @@ fn approve_all_queued_commits(
                 after_sha,
                 branch,
                 true,
-                Some("origin"),
+                Some(push_remote.as_str()),
                 None,
             );
         }
@@ -9109,11 +9160,13 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
             }
 
             let before_sha = git_capture_in(&repo_root, &["rev-parse", "@{u}"]).ok();
+            let push_remote = config::preferred_git_remote_for_repo(&repo_root);
+            let push_branch = current_branch.trim().to_string();
 
             print!("Pushing... ");
             io::stdout().flush()?;
             let mut pushed = false;
-            match git_push_try_in(&repo_root) {
+            match git_push_try_in(&repo_root, &push_remote, &push_branch) {
                 PushResult::Success => {
                     println!("done");
                     pushed = true;
@@ -9125,12 +9178,12 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                     println!("failed (remote ahead)");
                     print!("Pulling with rebase... ");
                     io::stdout().flush()?;
-                    match git_try_in(&repo_root, &["pull", "--rebase"]) {
+                    match git_pull_rebase_try_in(&repo_root, &push_remote, &push_branch) {
                         Ok(_) => {
                             println!("done");
                             print!("Pushing... ");
                             io::stdout().flush()?;
-                            git_run_in(&repo_root, &["push"])?;
+                            git_push_run_in(&repo_root, &push_remote, &push_branch)?;
                             println!("done");
                             pushed = true;
                         }
@@ -9165,7 +9218,7 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
                         after_sha,
                         branch,
                         true,
-                        Some("origin"),
+                        Some(push_remote.as_str()),
                         Some(&entry.message),
                     );
                 }
@@ -10303,9 +10356,51 @@ enum PushResult {
     NoRemoteRepo,
 }
 
+fn branch_is_detached(branch: &str) -> bool {
+    let trimmed = branch.trim();
+    trimmed.is_empty() || trimmed == "HEAD"
+}
+
+fn git_push_args<'a>(remote: &'a str, branch: &'a str) -> Vec<&'a str> {
+    if branch_is_detached(branch) {
+        vec!["push", remote, "HEAD"]
+    } else {
+        vec!["push", "-u", remote, branch.trim()]
+    }
+}
+
+fn git_pull_rebase_args<'a>(remote: &'a str, branch: &'a str) -> Vec<&'a str> {
+    if branch_is_detached(branch) {
+        vec!["pull", "--rebase"]
+    } else {
+        vec!["pull", "--rebase", remote, branch.trim()]
+    }
+}
+
+fn git_push_run(remote: &str, branch: &str) -> Result<()> {
+    let args = git_push_args(remote, branch);
+    git_run(&args)
+}
+
+fn git_push_run_in(workdir: &std::path::Path, remote: &str, branch: &str) -> Result<()> {
+    let args = git_push_args(remote, branch);
+    git_run_in(workdir, &args)
+}
+
+fn git_pull_rebase_try(remote: &str, branch: &str) -> Result<()> {
+    let args = git_pull_rebase_args(remote, branch);
+    git_try(&args)
+}
+
+fn git_pull_rebase_try_in(workdir: &std::path::Path, remote: &str, branch: &str) -> Result<()> {
+    let args = git_pull_rebase_args(remote, branch);
+    git_try_in(workdir, &args)
+}
+
 /// Try to push and detect if failure is due to missing remote repo.
-fn git_push_try() -> PushResult {
-    let output = Command::new("git").args(["push"]).output().ok();
+fn git_push_try(remote: &str, branch: &str) -> PushResult {
+    let args = git_push_args(remote, branch);
+    let output = Command::new("git").args(args).output().ok();
 
     let Some(output) = output else {
         return PushResult::RemoteAhead;
@@ -10326,10 +10421,11 @@ fn git_push_try() -> PushResult {
     }
 }
 
-fn git_push_try_in(workdir: &std::path::Path) -> PushResult {
+fn git_push_try_in(workdir: &std::path::Path, remote: &str, branch: &str) -> PushResult {
+    let args = git_push_args(remote, branch);
     let output = Command::new("git")
         .current_dir(workdir)
-        .args(["push"])
+        .args(args)
         .output()
         .ok();
 
