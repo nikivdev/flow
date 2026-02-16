@@ -94,6 +94,11 @@ fn run_ai(opts: BranchAiOpts) -> Result<()> {
     let prompt = build_ai_prompt(&query, &candidates);
     let response =
         ai_server::quick_prompt(&prompt, opts.model.as_deref(), opts.url.as_deref(), None)?;
+    let cleaned_response = response.trim().trim_matches('`').trim();
+    if cleaned_response.eq_ignore_ascii_case("none") {
+        println!("AI selected no matching branch.");
+        return Ok(());
+    }
     let selected_name = parse_ai_branch_response(&response, &candidates)
         .with_context(|| format!("Could not parse AI branch response: {}", response.trim()))?;
 

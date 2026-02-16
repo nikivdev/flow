@@ -1288,6 +1288,10 @@ fn run_jj_sync(
         head_ref.to_string()
     };
 
+    let push_remote = config::preferred_git_remote_for_repo(repo_root);
+    let has_push_remote = git_capture_in(repo_root, &["remote", "get-url", &push_remote]).is_ok();
+    let push_remote_reachable = has_push_remote
+        && git_capture_in(repo_root, &["ls-remote", "--exit-code", "-q", &push_remote]).is_ok();
     let has_origin = git_capture_in(repo_root, &["remote", "get-url", "origin"]).is_ok();
     let has_upstream = git_capture_in(repo_root, &["remote", "get-url", "upstream"]).is_ok();
     let origin_reachable = has_origin
@@ -1358,6 +1362,45 @@ fn run_jj_sync(
             recorder.record("jj", "skip origin (unreachable)");
         }
 
+        if has_push_remote
+            && push_remote != "origin"
+            && push_remote != "upstream"
+            && push_remote_reachable
+        {
+            recorder.record(
+                "jj",
+                format!(
+                    "jj git fetch --remote {} --branch {}",
+                    push_remote, current_branch
+                ),
+            );
+            if let Err(err) = jj_run_in(
+                repo_root,
+                &[
+                    "--quiet",
+                    "git",
+                    "fetch",
+                    "--remote",
+                    &push_remote,
+                    "--branch",
+                    &current_branch,
+                ],
+            ) {
+                failures.push(format!("{}: {}", push_remote, err));
+            } else {
+                fetched_any = true;
+            }
+        } else if has_push_remote
+            && push_remote != "origin"
+            && push_remote != "upstream"
+            && !push_remote_reachable
+        {
+            recorder.record(
+                "jj",
+                format!("skip {} (unreachable)", push_remote),
+            );
+        }
+
         if has_upstream {
             recorder.record(
                 "jj",
@@ -1411,12 +1454,12 @@ fn run_jj_sync(
         }
     }
 
-    let origin_url =
-        git_capture_in(repo_root, &["remote", "get-url", "origin"]).unwrap_or_default();
+    let push_remote_url =
+        git_capture_in(repo_root, &["remote", "get-url", &push_remote]).unwrap_or_default();
     let upstream_url =
         git_capture_in(repo_root, &["remote", "get-url", "upstream"]).unwrap_or_default();
     let is_read_only =
-        has_upstream && normalize_git_url(&origin_url) == normalize_git_url(&upstream_url);
+        has_upstream && normalize_git_url(&push_remote_url) == normalize_git_url(&upstream_url);
 
     let mut dest_ref: Option<String> = None;
     if has_upstream {
@@ -1427,9 +1470,8 @@ fn run_jj_sync(
         dest_ref = Some(format!("{}@origin", default_branch));
     }
 
-    if dest_ref.is_none() && has_origin {
-        let remote = jj_default_remote(repo_root);
-        dest_ref = Some(format!("{}@{}", current_branch, remote));
+    if dest_ref.is_none() && has_push_remote {
+        dest_ref = Some(format!("{}@{}", current_branch, push_remote));
     }
 
     let mut did_rebase = false;
@@ -1584,34 +1626,50 @@ fn run_jj_sync(
         recorder.record("jj", "skipped (no remotes)");
     }
 
-    if has_origin && should_push {
+    if has_push_remote && should_push {
         if is_read_only {
-            println!("==> Skipping push (origin == upstream, read-only clone)");
+            println!(
+                "==> Skipping push (remote '{}' == upstream, read-only clone)",
+                push_remote
+            );
             println!("  To push, create a fork first: gh repo fork --remote");
-            recorder.record("push", "skipped (origin == upstream)");
-        } else if !origin_reachable {
-            if cmd.create_repo {
+            recorder.record("push", "skipped (push remote == upstream)");
+        } else if !push_remote_reachable {
+            if cmd.create_repo && push_remote == "origin" {
                 println!("==> Creating origin repo...");
                 if try_create_origin_repo()? {
-                    println!("==> Pushing to origin...");
-                    git_run(&["push", "-u", "origin", &current_branch])?;
-                    recorder.record("push", "created repo and pushed to origin");
+                    println!("==> Pushing to {}...", push_remote);
+                    git_run(&["push", "-u", &push_remote, &current_branch])?;
+                    recorder.record(
+                        "push",
+                        format!("created repo and pushed to {}", push_remote),
+                    );
                 } else {
                     println!("  Could not create repo, skipping push");
                     recorder.record("push", "skipped (create repo failed)");
                 }
             } else {
-                println!("==> Origin unreachable, skipping push");
+                println!("==> Remote '{}' unreachable, skipping push", push_remote);
                 println!("  The remote may be missing, private, or auth/network failed.");
-                println!("  Use --create-repo if origin does not exist yet.");
-                recorder.record("push", "skipped (origin unreachable)");
+                if push_remote == "origin" {
+                    println!("  Use --create-repo if origin does not exist yet.");
+                } else {
+                    println!(
+                        "  Create/fix remote '{}' and re-run sync (or set [git].remote).",
+                        push_remote
+                    );
+                }
+                recorder.record(
+                    "push",
+                    format!("skipped (remote unreachable: {})", push_remote),
+                );
             }
         } else {
-            println!("==> Pushing to origin...");
+            println!("==> Pushing to {}...", push_remote);
             let push_result = if did_rebase {
-                push_with_autofix_force(&current_branch, "origin", auto_fix, cmd.max_fix_attempts)
+                push_with_autofix_force(&current_branch, &push_remote, auto_fix, cmd.max_fix_attempts)
             } else {
-                push_with_autofix(&current_branch, "origin", auto_fix, cmd.max_fix_attempts)
+                push_with_autofix(&current_branch, &push_remote, auto_fix, cmd.max_fix_attempts)
             };
             if let Err(e) = push_result {
                 recorder.record("push", "push failed");
@@ -1621,10 +1679,10 @@ fn run_jj_sync(
         }
     } else if cmd.no_push {
         recorder.record("push", "skipped (--no-push)");
-    } else if has_origin {
+    } else if has_push_remote {
         recorder.record("push", "skipped (default; use --push)");
     } else {
-        recorder.record("push", "skipped (no origin)");
+        recorder.record("push", format!("skipped (missing remote: {})", push_remote));
     }
 
     // Check for jj conflicts left after rebase
@@ -2103,10 +2161,6 @@ fn jj_workspace_healthy(repo_root: &Path) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-fn jj_default_remote(repo_root: &Path) -> String {
-    config::preferred_git_remote_for_repo(repo_root)
 }
 
 fn jj_default_branch(repo_root: &Path) -> String {
