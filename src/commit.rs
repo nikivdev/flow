@@ -2223,7 +2223,43 @@ fn collect_sync_sessions_for_commit(repo_root: &Path) -> Vec<ai::GitEditSessionD
     match ai::get_sessions_for_gitedit(&repo_root.to_path_buf()) {
         Ok(sessions) => sessions,
         Err(err) => {
-            debug!("failed to collect AI sessions using checkpoint fallback: {}", err);
+            debug!(
+                "failed to collect AI sessions using checkpoint fallback: {}",
+                err
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn collect_sync_sessions_for_pending_commit(repo_root: &Path) -> Vec<ai::GitEditSessionData> {
+    // commit-with-check calls this before creating the new commit; use HEAD as the lower
+    // bound and include everything after it so current-cycle AI exchanges are not dropped.
+    let since_ts = git_commit_timestamp_iso(repo_root, "HEAD");
+
+    if since_ts.is_some() {
+        match ai::get_sessions_for_gitedit_between(
+            &repo_root.to_path_buf(),
+            since_ts.as_deref(),
+            None,
+        ) {
+            Ok(sessions) => return sessions,
+            Err(err) => {
+                debug!(
+                    "failed to collect AI sessions for pending commit window (since={:?}): {}",
+                    since_ts, err
+                );
+            }
+        }
+    }
+
+    match ai::get_sessions_for_gitedit(&repo_root.to_path_buf()) {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            debug!(
+                "failed to collect AI sessions using checkpoint fallback: {}",
+                err
+            );
             Vec::new()
         }
     }
@@ -4298,7 +4334,7 @@ pub fn run_with_check_sync(
     let mut unhash_sessions: Vec<ai::GitEditSessionData> = Vec::new();
 
     if gitedit_enabled || unhash_enabled {
-        let sessions = collect_sync_sessions_for_commit(&repo_root);
+        let sessions = collect_sync_sessions_for_pending_commit(&repo_root);
         if !sessions.is_empty() {
             if gitedit_enabled {
                 if let Some((owner, repo)) = get_gitedit_project(&repo_root) {
