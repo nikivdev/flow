@@ -1,19 +1,19 @@
 # f commit
 
-AI-powered commit with code review and GitEdit sync.
+AI-powered commit with deferred Codex review and GitEdit sync.
 
 ## Overview
 
-Stages all changes, runs AI code review for bugs and security issues, generates a commit message, commits, pushes, and syncs AI sessions to gitedit.dev.
+Stages all changes, commits quickly by default, runs Codex deep review asynchronously in the background, pushes, and syncs AI sessions to gitedit.dev.
 
 ## Quick Start
 
 ```bash
-# Standard commit with review
+# Default flow: commit now, Codex review runs in background
 f commit
 
-# Fast commit (no AI review), then Codex reviews async in background
-f commit --quick
+# Blocking pre-commit review (legacy behavior)
+f commit --slow
 
 # Fast commit with custom message (no AI review, no Codex follow-up)
 f commit --fast "fix typo"
@@ -42,7 +42,8 @@ f commit -m "Fixes #123"
 | `--sync` | | Run synchronously (don't delegate to hub) |
 | `--context` | | Include AI session context in code review |
 | `--dry` | | Dry run: show context without committing |
-| `--quick` | | Commit now, run Codex review async in background |
+| `--quick` | | Explicitly use fast commit + async Codex review (compat alias) |
+| `--slow` | | Run blocking pre-commit review before commit |
 | `--fast [MSG]` | | Fast commit with no AI review (defaults to ".") |
 | `--codex` | | Use Codex instead of Claude for review |
 | `--review-model <MODEL>` | | Choose specific review model |
@@ -69,15 +70,15 @@ f commit --review-model codex-high
 
 ## Fast Commit + Deferred Codex Review
 
-Two flags for skipping the synchronous AI review when you want to commit quickly:
+`f commit` now uses this mode by default.
 
-### `--quick` — commit now, Codex reviews later
+### Default (`f commit`) / `--quick` — commit now, Codex reviews later
 
 Commits immediately (generates an AI commit message but skips the blocking code review), then spawns a background Codex review for that commit. The review result is queued and visible via `f commit-queue list`.
 
 ```bash
+f commit
 f commit --quick
-f commit --quick -m "wip: rough draft"
 ```
 
 What happens:
@@ -85,6 +86,15 @@ What happens:
 2. Queues the commit SHA for async review
 3. Spawns a background Codex process that reviews the diff
 4. You keep working — check results later with `f commit-queue list`
+
+### `--slow` — run blocking review before commit
+
+Runs the pre-commit AI review before creating the commit.
+
+```bash
+f commit --slow
+f commit --slow --review-model codex-high
+```
 
 ### `--fast` — instant commit, no review at all
 
@@ -99,20 +109,21 @@ f commit --fast              # message defaults to "."
 
 | Flag | AI message | Code review | Async review | Best for |
 |------|-----------|-------------|-------------|----------|
-| (none) | Yes | Yes (blocking) | No | Normal workflow |
-| `--quick` | Yes | No | Yes (Codex background) | Fast iteration, review later |
+| (none) | Yes | No | Yes (Codex background) | Default fast workflow |
+| `--quick` | Yes | No | Yes (Codex background) | Explicit fast mode |
+| `--slow` | Yes | Yes (blocking) | No | Pre-commit deep check |
 | `--fast` | No (you provide) | No | No | Trivial/WIP commits |
 
-### Default Fast Lane (No Extra Flags)
+### Opt Out Of Fast Default
 
-If you want `f commit` to default to fast commit + deferred Codex review, set:
+If you want plain `f commit` to run blocking review by default, set:
 
 ```toml
 [commit]
-quick-default = true
+quick-default = false
 ```
 
-With this enabled, plain `f commit` behaves like `f commit --quick` unless you explicitly ask for blocking review options.
+With this set, plain `f commit` behaves like `f commit --slow` unless you explicitly pass `--quick`.
 
 Run deep review in batches:
 
@@ -291,7 +302,7 @@ Threshold: 500+ lines added/removed.
 
 | Command | Description |
 |---------|-------------|
-| `f commit` | Full review + GitEdit sync (default) |
+| `f commit` | Fast commit + deferred Codex review (default) |
 | `f commitWithCheck` | Review without GitEdit sync |
 | `f commitSimple` | No review, just AI commit message |
 

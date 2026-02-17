@@ -147,6 +147,8 @@ pub fn run_global(opts: MatchOpts) -> Result<()> {
             config_path: config_path.clone(),
             relative_dir: "global".to_string(),
             depth: 0,
+            scope: "global".to_string(),
+            scope_aliases: vec!["global".to_string()],
         })
         .collect();
 
@@ -473,6 +475,8 @@ mod tests {
             config_path: PathBuf::from("flow.toml"),
             relative_dir: String::new(),
             depth: 0,
+            scope: "root".to_string(),
+            scope_aliases: vec!["root".to_string()],
         }
     }
 

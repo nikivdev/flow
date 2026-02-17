@@ -460,6 +460,8 @@ mod tests {
             config_path: PathBuf::from("flow.toml"),
             relative_dir: String::new(),
             depth: 0,
+            scope: "root".to_string(),
+            scope_aliases: vec!["root".to_string()],
         }
     }
 

@@ -19,6 +19,10 @@ pub struct DiscoveredTask {
     pub relative_dir: String,
     /// Depth from the discovery root (0 = root, 1 = immediate subdirectory, etc.)
     pub depth: usize,
+    /// Primary scope label used for display and selector prefixes (e.g. "mobile", "root").
+    pub scope: String,
+    /// Scope aliases accepted during selector matching.
+    pub scope_aliases: Vec<String>,
 }
 
 impl DiscoveredTask {
@@ -29,6 +33,15 @@ impl DiscoveredTask {
         } else {
             Some(self.relative_dir.clone())
         }
+    }
+
+    /// Case-insensitive scope match against discovered aliases.
+    pub fn matches_scope(&self, scope: &str) -> bool {
+        let needle = normalize_scope_token(scope);
+        if needle.is_empty() {
+            return false;
+        }
+        self.scope_aliases.iter().any(|alias| alias == &needle)
     }
 }
 
@@ -64,6 +77,7 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
     if root_flow_toml.exists() {
         match config::load(&root_flow_toml) {
             Ok(cfg) => {
+                let (scope, scope_aliases) = infer_scope_metadata("", &cfg);
                 root_config = Some(root_flow_toml.clone());
                 for task in &cfg.tasks {
                     discovered.push(DiscoveredTask {
@@ -71,6 +85,8 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
                         config_path: root_flow_toml.clone(),
                         relative_dir: String::new(),
                         depth: 0,
+                        scope: scope.clone(),
+                        scope_aliases: scope_aliases.clone(),
                     });
                 }
                 root_cfg = Some(cfg);
@@ -157,6 +173,7 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
         let depth = relative_dir.matches('/').count()
             + relative_dir.matches('\\').count()
             + if relative_dir.is_empty() { 0 } else { 1 };
+        let (scope, scope_aliases) = infer_scope_metadata(&relative_dir, &cfg);
 
         for task in cfg.tasks {
             discovered.push(DiscoveredTask {
@@ -164,6 +181,8 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
                 config_path: flow_toml.clone(),
                 relative_dir: relative_dir.clone(),
                 depth,
+                scope: scope.clone(),
+                scope_aliases: scope_aliases.clone(),
             });
         }
     }
@@ -181,6 +200,49 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
         root_config,
         root_cfg,
     })
+}
+
+fn normalize_scope_token(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.trim().chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.') {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').trim_matches('/').to_string()
+}
+
+fn infer_scope_metadata(relative_dir: &str, cfg: &Config) -> (String, Vec<String>) {
+    let mut aliases: Vec<String> = Vec::new();
+    let mut push_alias = |raw: &str| {
+        let normalized = normalize_scope_token(raw);
+        if !normalized.is_empty() && !aliases.iter().any(|v| v == &normalized) {
+            aliases.push(normalized);
+        }
+    };
+
+    if let Some(name) = cfg.project_name.as_deref() {
+        push_alias(name);
+    } else if relative_dir.trim().is_empty() {
+        push_alias("root");
+    } else {
+        if let Some(leaf) = std::path::Path::new(relative_dir)
+            .file_name()
+            .and_then(|s| s.to_str())
+        {
+            push_alias(leaf);
+        }
+        push_alias(relative_dir);
+    }
+
+    let primary = aliases
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "root".to_string());
+    (primary, aliases)
 }
 
 #[cfg(test)]
@@ -210,6 +272,7 @@ command = "echo test"
         assert_eq!(result.tasks[0].task.name, "test");
         assert_eq!(result.tasks[0].depth, 0);
         assert!(result.tasks[0].relative_dir.is_empty());
+        assert_eq!(result.tasks[0].scope, "root");
     }
 
     #[test]
@@ -246,6 +309,7 @@ command = "echo api"
         assert_eq!(result.tasks[1].task.name, "api-task");
         assert!(result.tasks[1].depth > 0);
         assert!(result.tasks[1].relative_dir.contains("packages"));
+        assert_eq!(result.tasks[1].scope, "api");
     }
 
     #[test]

@@ -1136,7 +1136,7 @@ pub fn commit_quick_default_enabled() -> bool {
         }
     }
 
-    false
+    true
 }
 
 fn commit_review_fail_open_enabled(repo_root: &Path) -> bool {

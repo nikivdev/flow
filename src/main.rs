@@ -185,7 +185,7 @@ fn main() -> Result<()> {
                 branches::run(cmd)?;
             }
             Some(Commands::Commit(opts)) => {
-                // Default: Claude review, no context, gitedit sync
+                // Default: fast commit lane with deferred Codex deep review.
                 let mut force = opts.force || opts.approved;
                 let mut message_arg = opts.message_arg.as_deref();
                 let mut open_review = opts.review;
@@ -213,21 +213,25 @@ fn main() -> Result<()> {
                 let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
                     .with_open_review(open_review);
                 let push = !opts.no_push;
+                let explicit_blocking = opts.slow
+                    || opts.dry
+                    || opts.context
+                    || opts.sync
+                    || opts.codex
+                    || opts.review_model.is_some()
+                    || opts.skip_quality
+                    || opts.skip_docs
+                    || opts.skip_tests
+                    || opts.message.is_some()
+                    || message_arg.is_some();
                 let implicit_quick = !opts.quick
+                    && !explicit_blocking
                     && opts.fast.is_none()
-                    && !opts.dry
-                    && !opts.context
-                    && !opts.sync
-                    && !opts.codex
-                    && opts.review_model.is_none()
-                    && !opts.skip_quality
-                    && !opts.skip_docs
-                    && !opts.skip_tests
                     && commit::commit_quick_default_enabled();
                 if opts.quick || implicit_quick {
                     if implicit_quick {
                         println!(
-                            "ℹ️  commit.quick_default enabled; using fast commit + deferred Codex deep review."
+                            "ℹ️  using fast commit + deferred Codex deep review by default. Pass --slow for blocking pre-commit review."
                         );
                     }
                     commit::run_quick_then_async_review(

@@ -9,7 +9,6 @@ This guide configures a speed-first commit workflow with deferred deep review:
 
 ```toml
 [commit]
-quick-default = true
 queue = false
 queue_on_issues = false
 
@@ -66,6 +65,6 @@ This replaces manual “copy `f commit` output into Codex and ask to address all
 
 ## Notes
 
-- `quick-default = true` applies to plain `f commit` (not `f commit-with-check`) and uses the fast lane (`--quick`) unless you explicitly request blocking review options.
+- Plain `f commit` already uses the fast lane (`--quick`) by default. Set `quick-default = false` only if you want blocking review as the default.
 - Async queued Codex reviews now emit `commit_queue_review` mirror sync events to myflow/gitedit when the reviewed commit is current `HEAD` (the default `f commit --quick` flow).
 - `f reviews-todo codex --all` is a workflow alias over commit queue deep review.

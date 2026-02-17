@@ -108,6 +108,14 @@ pub struct Config {
     /// Setup defaults (global or project-level).
     #[serde(default)]
     pub setup: Option<SetupConfig>,
+    /// Task lookup resolution policy for nested flow.toml discovery.
+    #[serde(
+        default,
+        rename = "task_resolution",
+        alias = "task-resolution",
+        alias = "taskResolution"
+    )]
+    pub task_resolution: Option<TaskResolutionConfig>,
     /// SSH defaults (global or project-level).
     #[serde(default)]
     pub ssh: Option<SshConfig>,
@@ -593,6 +601,7 @@ impl Default for Config {
             git: None,
             jj: None,
             setup: None,
+            task_resolution: None,
             ssh: None,
             macos: None,
             proxy: None,
@@ -812,6 +821,30 @@ pub struct SetupServerConfig {
     pub host: Option<crate::deploy::HostConfig>,
 }
 
+/// Task lookup policy for nested flow.toml discovery.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TaskResolutionConfig {
+    /// Preferred scope order for ambiguous task names (e.g. ["mobile", "root"]).
+    #[serde(
+        default,
+        rename = "preferred_scopes",
+        alias = "preferred-scopes",
+        alias = "preferredScopes"
+    )]
+    pub preferred_scopes: Vec<String>,
+    /// Exact task-name routes (task -> scope), used before preferred scope order.
+    #[serde(default)]
+    pub routes: HashMap<String, String>,
+    /// Print a note when implicit scope routing chooses a target.
+    #[serde(
+        default,
+        rename = "warn_on_implicit_scope",
+        alias = "warn-on-implicit-scope",
+        alias = "warnOnImplicitScope"
+    )]
+    pub warn_on_implicit_scope: Option<bool>,
+}
+
 /// Global feature toggles.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OptionsConfig {
@@ -943,6 +976,26 @@ impl OptionsConfig {
         }
         if other.codex_bin.is_some() {
             self.codex_bin = other.codex_bin;
+        }
+    }
+}
+
+impl TaskResolutionConfig {
+    fn merge(&mut self, other: TaskResolutionConfig) {
+        if self.preferred_scopes.is_empty() {
+            self.preferred_scopes = other.preferred_scopes;
+        } else {
+            for scope in other.preferred_scopes {
+                if !self.preferred_scopes.iter().any(|s| s == &scope) {
+                    self.preferred_scopes.push(scope);
+                }
+            }
+        }
+        if self.warn_on_implicit_scope.is_none() {
+            self.warn_on_implicit_scope = other.warn_on_implicit_scope;
+        }
+        for (task, scope) in other.routes {
+            self.routes.entry(task).or_insert(scope);
         }
     }
 }
@@ -1882,6 +1935,13 @@ fn merge_config(base: &mut Config, other: Config) {
             }
         }
     }
+    if base.task_resolution.is_none() {
+        base.task_resolution = other.task_resolution;
+    } else if let (Some(base_resolution), Some(other_resolution)) =
+        (base.task_resolution.as_mut(), other.task_resolution)
+    {
+        base_resolution.merge(other_resolution);
+    }
     if base.analytics.is_none() {
         base.analytics = other.analytics;
     }
@@ -2414,6 +2474,36 @@ codex_bin = "/tmp/codex-jazz"
 "#;
         let cfg: Config = toml::from_str(toml).expect("options table should parse");
         assert_eq!(cfg.options.codex_bin.as_deref(), Some("/tmp/codex-jazz"));
+    }
+
+    #[test]
+    fn task_resolution_config_parses() {
+        let toml = r#"
+[task_resolution]
+preferred_scopes = ["mobile", "root"]
+warn_on_implicit_scope = true
+
+[task_resolution.routes]
+dev = "mobile"
+test = "root"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("task_resolution should parse");
+        let resolution = cfg
+            .task_resolution
+            .expect("task_resolution config expected");
+        assert_eq!(
+            resolution.preferred_scopes,
+            vec!["mobile".to_string(), "root".to_string()]
+        );
+        assert_eq!(resolution.warn_on_implicit_scope, Some(true));
+        assert_eq!(
+            resolution.routes.get("dev").map(String::as_str),
+            Some("mobile")
+        );
+        assert_eq!(
+            resolution.routes.get("test").map(String::as_str),
+            Some("root")
+        );
     }
 
     #[test]
