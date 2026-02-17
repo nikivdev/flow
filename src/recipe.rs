@@ -119,11 +119,7 @@ fn run_recipe(opts: RecipeRunOpts) -> Result<()> {
     };
 
     let cwd = resolve_cwd(opts.cwd.as_deref())?;
-    let shell_bin = if recipe.shell.eq_ignore_ascii_case("fish") {
-        "fish"
-    } else {
-        "/bin/sh"
-    };
+    let shell_bin = resolve_shell_bin(&recipe.shell);
     let shell_cmd = recipe.command.trim();
 
     println!(
@@ -140,7 +136,7 @@ fn run_recipe(opts: RecipeRunOpts) -> Result<()> {
         return Ok(());
     }
 
-    let status = Command::new(shell_bin)
+    let status = Command::new(&shell_bin)
         .arg("-lc")
         .arg(shell_cmd)
         .current_dir(&cwd)
@@ -434,15 +430,15 @@ fn extract_first_shell_block(body: &str) -> Option<(String, String)> {
             }
 
             in_block = true;
-            let lang = trimmed
-                .trim_start_matches("```")
-                .trim()
+            let fence_info = trimmed.trim_start_matches("```").trim();
+            let lang = fence_info
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
                 .to_ascii_lowercase();
             if is_shell_lang(&lang) {
                 capture = true;
-                if !lang.is_empty() {
-                    shell = lang;
-                }
+                shell = normalize_shell_lang(&lang);
             } else {
                 capture = false;
             }
@@ -458,6 +454,32 @@ fn extract_first_shell_block(body: &str) -> Option<(String, String)> {
 
 fn is_shell_lang(lang: &str) -> bool {
     matches!(lang, "" | "sh" | "bash" | "zsh" | "shell" | "fish")
+}
+
+fn normalize_shell_lang(lang: &str) -> String {
+    let normalized = lang.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "shell" {
+        "sh".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn resolve_shell_bin(shell: &str) -> String {
+    let token = shell.split_whitespace().next().unwrap_or("").trim();
+    match token.to_ascii_lowercase().as_str() {
+        "" | "sh" | "shell" => "/bin/sh".to_string(),
+        "bash" => "bash".to_string(),
+        "zsh" => "zsh".to_string(),
+        "fish" => "fish".to_string(),
+        other => {
+            if other.is_empty() {
+                "/bin/sh".to_string()
+            } else {
+                token.to_string()
+            }
+        }
+    }
 }
 
 fn filter_recipes(recipes: Vec<Recipe>, query: Option<&str>) -> Vec<Recipe> {
@@ -554,19 +576,24 @@ fn detect_project_root() -> Result<PathBuf> {
 }
 
 fn resolve_global_dir(project_root: &Path, override_dir: Option<&str>) -> PathBuf {
+    let env_override = env::var(ENV_GLOBAL_RECIPE_DIR).ok();
+    resolve_global_dir_with_env(project_root, override_dir, env_override.as_deref())
+}
+
+fn resolve_global_dir_with_env(
+    _project_root: &Path,
+    override_dir: Option<&str>,
+    env_override: Option<&str>,
+) -> PathBuf {
     if let Some(dir) = override_dir {
         return expand_tilde(dir);
     }
-    if let Ok(dir) = env::var(ENV_GLOBAL_RECIPE_DIR)
+    if let Some(dir) = env_override
         && !dir.trim().is_empty()
     {
-        return expand_tilde(&dir);
+        return expand_tilde(dir);
     }
-    let cfg = config::global_config_dir().join("recipes");
-    if cfg.exists() {
-        return cfg;
-    }
-    project_root.join(".ai/recipes/global")
+    config::global_config_dir().join("recipes")
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
@@ -655,6 +682,48 @@ tags: [a, b]\n\
         let (shell, command) = extract_first_shell_block(body).expect("shell block");
         assert_eq!(shell, "bash");
         assert_eq!(command, "echo hi");
+    }
+
+    #[test]
+    fn extracts_shell_block_with_fence_metadata() {
+        let body = "# T\n\n```zsh title=\"run\"\necho hi\n```\n";
+        let (shell, command) = extract_first_shell_block(body).expect("shell block");
+        assert_eq!(shell, "zsh");
+        assert_eq!(command, "echo hi");
+    }
+
+    #[test]
+    fn normalize_shell_lang_handles_shell_alias() {
+        assert_eq!(normalize_shell_lang("shell"), "sh");
+        assert_eq!(normalize_shell_lang(""), "sh");
+    }
+
+    #[test]
+    fn resolve_shell_bin_honors_declared_shell() {
+        assert_eq!(resolve_shell_bin("bash"), "bash");
+        assert_eq!(resolve_shell_bin("zsh"), "zsh");
+        assert_eq!(resolve_shell_bin("fish"), "fish");
+        assert_eq!(resolve_shell_bin("sh"), "/bin/sh");
+        assert_eq!(resolve_shell_bin("shell"), "/bin/sh");
+    }
+
+    #[test]
+    fn resolve_global_dir_prefers_override_then_env_then_config() {
+        let root = PathBuf::from("/tmp/project");
+        let override_dir = resolve_global_dir_with_env(&root, Some("~/recipes-x"), None);
+        assert!(
+            override_dir.to_string_lossy().contains("recipes-x"),
+            "override dir should be used"
+        );
+
+        let env_dir = resolve_global_dir_with_env(&root, None, Some("~/recipes-y"));
+        assert!(
+            env_dir.to_string_lossy().contains("recipes-y"),
+            "env dir should be used"
+        );
+
+        let cfg_dir = resolve_global_dir_with_env(&root, None, None);
+        assert_eq!(cfg_dir, config::global_config_dir().join("recipes"));
     }
 
     #[test]
