@@ -1110,6 +1110,35 @@ fn load_global_commit_config() -> Option<config::CommitConfig> {
     config::load(&global).ok().and_then(|cfg| cfg.commit)
 }
 
+pub fn commit_quick_default_enabled() -> bool {
+    if let Ok(value) = env::var("FLOW_COMMIT_QUICK_DEFAULT") {
+        if let Some(parsed) = parse_boolish(&value) {
+            return parsed;
+        }
+    }
+
+    if let Some(ts) = load_ts_commit_config() {
+        if let Some(enabled) = ts.quick_default {
+            return enabled;
+        }
+    }
+
+    let repo_root = git_root_or_cwd();
+    if let Some(local) = load_local_commit_config(&repo_root) {
+        if let Some(enabled) = local.quick_default {
+            return enabled;
+        }
+    }
+
+    if let Some(global) = load_global_commit_config() {
+        if let Some(enabled) = global.quick_default {
+            return enabled;
+        }
+    }
+
+    false
+}
+
 fn commit_review_fail_open_enabled(repo_root: &Path) -> bool {
     if let Ok(value) = env::var("FLOW_COMMIT_REVIEW_FAIL_OPEN") {
         if let Some(parsed) = parse_boolish(&value) {
@@ -2175,14 +2204,18 @@ pub fn run(
 
 fn save_commit_checkpoint_for_repo(repo_root: &Path) {
     let now = chrono::Utc::now().to_rfc3339();
-    let (session_id, last_ts) = match ai::get_last_entry_timestamp_for_path(&repo_root.to_path_buf()) {
-        Ok(Some((session_id, last_ts))) => (Some(session_id), Some(last_ts)),
-        Ok(None) => (None, Some(now.clone())),
-        Err(err) => {
-            debug!("failed to resolve latest session timestamp for checkpoint: {}", err);
-            (None, Some(now.clone()))
-        }
-    };
+    let (session_id, last_ts) =
+        match ai::get_last_entry_timestamp_for_path(&repo_root.to_path_buf()) {
+            Ok(Some((session_id, last_ts))) => (Some(session_id), Some(last_ts)),
+            Ok(None) => (None, Some(now.clone())),
+            Err(err) => {
+                debug!(
+                    "failed to resolve latest session timestamp for checkpoint: {}",
+                    err
+                );
+                (None, Some(now.clone()))
+            }
+        };
     let checkpoint = ai::CommitCheckpoint {
         timestamp: now,
         session_id,
@@ -5066,11 +5099,7 @@ fn run_codex_review_once(
         }
     }
 
-    let codex_bin = env::var("CODEX_BIN")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "codex".to_string());
+    let codex_bin = configured_codex_bin_for_workdir(workdir);
 
     // Spawn codex app-server (JSON-RPC over stdio)
     let mut child = Command::new(&codex_bin)
@@ -5370,6 +5399,55 @@ Review:\n{}",
         timed_out: false,
         quality,
     })
+}
+
+fn configured_codex_bin_for_workdir(workdir: &Path) -> String {
+    if let Ok(value) = env::var("CODEX_BIN") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let mut roots: Vec<PathBuf> = vec![workdir.to_path_buf()];
+    if let Ok(repo_root) = git_capture_in(workdir, &["rev-parse", "--show-toplevel"]) {
+        let trimmed = repo_root.trim();
+        if !trimmed.is_empty() {
+            let root = PathBuf::from(trimmed);
+            if !roots.iter().any(|r| r == &root) {
+                roots.push(root);
+            }
+        }
+    }
+
+    for root in roots {
+        let cfg_path = root.join("flow.toml");
+        if !cfg_path.exists() {
+            continue;
+        }
+        if let Ok(cfg) = config::load(&cfg_path) {
+            if let Some(bin) = cfg.options.codex_bin {
+                let trimmed = bin.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+
+    let global_cfg = config::default_config_path();
+    if global_cfg.exists() {
+        if let Ok(cfg) = config::load(&global_cfg) {
+            if let Some(bin) = cfg.options.codex_bin {
+                let trimmed = bin.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+
+    "codex".to_string()
 }
 
 fn normalize_review_url(url: &str) -> String {
@@ -8176,19 +8254,84 @@ fn review_queue_entry_with_codex(
     entry.review_reviewer = Some(reviewer_label.to_string());
     entry.review_todo_ids = review_todo_ids;
     entry.review = format_review_body(&review);
-    entry.summary = review.summary.and_then(|value| {
-        let trimmed = value.trim().to_string();
+    entry.summary = review.summary.as_ref().and_then(|value| {
+        let trimmed = value.trim();
         if trimmed.is_empty() {
             None
         } else {
-            Some(trimmed)
+            Some(trimmed.to_string())
         }
     });
 
     let path = write_commit_queue_entry(repo_root, entry)?;
     entry.record_path = Some(path);
     let _ = write_rise_review_session(repo_root, entry);
+    maybe_sync_queue_review_to_mirrors(repo_root, entry, &diff, &review, reviewer_label);
     Ok(())
+}
+
+/// Mirror queued-review results to myflow/gitedit when the reviewed commit is the current HEAD.
+/// This keeps async `f commit --quick` reviews visible in mirrors without risking wrong SHA syncs
+/// when users review arbitrary queued commits from other branches.
+fn maybe_sync_queue_review_to_mirrors(
+    repo_root: &Path,
+    entry: &CommitQueueEntry,
+    diff: &str,
+    review: &ReviewResult,
+    reviewer_label: &str,
+) {
+    let head_sha = match git_capture_in(repo_root, &["rev-parse", "HEAD"]) {
+        Ok(sha) => sha.trim().to_string(),
+        Err(err) => {
+            debug!(
+                error = %err,
+                "skipping queue review mirror sync: failed to resolve HEAD"
+            );
+            return;
+        }
+    };
+    if head_sha != entry.commit_sha {
+        debug!(
+            queue_commit = %entry.commit_sha,
+            head_commit = %head_sha,
+            "skipping queue review mirror sync: reviewed commit is not HEAD"
+        );
+        return;
+    }
+
+    let sync_gitedit = gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit(repo_root);
+    let sync_myflow = myflow_mirror_enabled(repo_root);
+    if !sync_gitedit && !sync_myflow {
+        return;
+    }
+
+    let sync_sessions = collect_sync_sessions_for_commit(repo_root);
+    let review_data = GitEditReviewData {
+        diff: Some(diff.to_string()),
+        issues_found: review.issues_found,
+        issues: review.issues.clone(),
+        summary: review.summary.clone(),
+        reviewer: Some(reviewer_label.to_string()),
+    };
+
+    if sync_gitedit {
+        sync_to_gitedit(
+            repo_root,
+            "commit_queue_review",
+            &sync_sessions,
+            None,
+            Some(&review_data),
+        );
+    }
+    if sync_myflow {
+        sync_to_myflow(
+            repo_root,
+            "commit_queue_review",
+            &sync_sessions,
+            Some(&review_data),
+            None,
+        );
+    }
 }
 
 fn queue_flag_for_command(queue: CommitQueueMode) -> String {

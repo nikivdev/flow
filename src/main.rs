@@ -13,9 +13,9 @@ use flowd::{
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fish_install, fish_trace,
     fix, fixup, git_guard, gitignore_policy, hash, health, help_search, history, hive, home, hub,
     info, init, init_tracing, install, jj, latest, log_server, macos, notify, otp, palette,
-    parallel, processes, projects, proxy, publish, push, registry, release, repos, services, setup,
-    skills, ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo,
-    upgrade, upstream, usage, web,
+    parallel, processes, projects, proxy, publish, push, recipe, registry, release, repos,
+    reviews_todo, services, setup, skills, ssh_keys, storage, supervisor, sync, task_match, tasks,
+    todo, tools, traces, undo, upgrade, upstream, usage, web,
 };
 
 fn main() -> Result<()> {
@@ -213,7 +213,23 @@ fn main() -> Result<()> {
                 let queue = commit::resolve_commit_queue_mode(opts.queue, opts.no_queue || force)
                     .with_open_review(open_review);
                 let push = !opts.no_push;
-                if opts.quick {
+                let implicit_quick = !opts.quick
+                    && opts.fast.is_none()
+                    && !opts.dry
+                    && !opts.context
+                    && !opts.sync
+                    && !opts.codex
+                    && opts.review_model.is_none()
+                    && !opts.skip_quality
+                    && !opts.skip_docs
+                    && !opts.skip_tests
+                    && commit::commit_quick_default_enabled();
+                if opts.quick || implicit_quick {
+                    if implicit_quick {
+                        println!(
+                            "ℹ️  commit.quick_default enabled; using fast commit + deferred Codex deep review."
+                        );
+                    }
                     commit::run_quick_then_async_review(
                         push,
                         queue,
@@ -270,11 +286,17 @@ fn main() -> Result<()> {
             Some(Commands::CommitQueue(cmd)) => {
                 commit::run_commit_queue(cmd)?;
             }
+            Some(Commands::ReviewsTodo(cmd)) => {
+                reviews_todo::run(cmd)?;
+            }
             Some(Commands::Pr(opts)) => {
                 commit::run_pr(opts)?;
             }
             Some(Commands::Gitignore(cmd)) => {
                 gitignore_policy::run(cmd)?;
+            }
+            Some(Commands::Recipe(cmd)) => {
+                recipe::run(cmd)?;
             }
             Some(Commands::Review(cmd)) => match cmd.action {
                 Some(ReviewAction::Latest) | None => {

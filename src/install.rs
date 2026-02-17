@@ -28,18 +28,46 @@ pub fn run(mut opts: InstallOpts) -> Result<()> {
         InstallBackend::Registry => registry::install(opts),
         InstallBackend::Flox => install_with_flox(&opts),
         InstallBackend::Parm => install_with_parm(&opts),
-        InstallBackend::Auto => {
-            if registry_configured(&opts) {
-                if let Err(err) = registry::install(opts.clone()) {
-                    eprintln!("WARN registry install failed: {err}");
-                    eprintln!("Falling back to flox install.");
-                    install_with_flox(&opts)
-                } else {
-                    Ok(())
-                }
-            } else {
-                install_with_flox(&opts)
+        InstallBackend::Auto => install_with_auto(&opts),
+    }
+}
+
+fn install_with_auto(opts: &InstallOpts) -> Result<()> {
+    let mut errors: Vec<String> = Vec::new();
+
+    if registry_configured(opts) {
+        match registry::install(opts.clone()) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                eprintln!("WARN registry install failed: {err}");
+                errors.push(format!("registry: {err}"));
             }
+        }
+    }
+
+    if should_try_parm(opts) {
+        match install_with_parm(opts) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                eprintln!("WARN parm install failed: {err}");
+                errors.push(format!("parm: {err}"));
+            }
+        }
+    } else if let Some(name) = opts.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        eprintln!(
+            "INFO skipping parm fallback for '{}' (no owner/repo mapping; set FLOW_INSTALL_OWNER or pass owner/repo)",
+            name
+        );
+    }
+
+    match install_with_flox(opts) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            errors.push(format!("flox: {err}"));
+            bail!(
+                "install failed after trying auto backends:\n- {}",
+                errors.join("\n- ")
+            );
         }
     }
 }
@@ -227,8 +255,40 @@ fn resolve_owner_repo(raw: &str) -> Result<String> {
         return Ok(raw.to_string());
     }
 
+    if let Some(mapped) = known_owner_repo(raw) {
+        return Ok(mapped.to_string());
+    }
+
     // Prefer explicit env var; fall back to Flow personal env store.
-    let owner = std::env::var("FLOW_INSTALL_OWNER")
+    let owner = resolve_install_owner();
+
+    let Some(owner) = owner else {
+        bail!(
+            "package name '{}' is missing owner (expected owner/repo).\nSet FLOW_INSTALL_OWNER (env or Flow personal env store), use a known alias (flow/rise), or pass owner/repo directly.",
+            raw
+        );
+    };
+
+    Ok(format!("{}/{}", owner, raw))
+}
+
+fn should_try_parm(opts: &InstallOpts) -> bool {
+    let Some(name) = opts.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) else {
+        return false;
+    };
+    name.contains('/') || known_owner_repo(name).is_some() || resolve_install_owner().is_some()
+}
+
+fn known_owner_repo(name: &str) -> Option<&'static str> {
+    match name {
+        "f" | "flow" | "lin" => Some("nikivdev/flow"),
+        "rise" => Some("nikivdev/rise"),
+        _ => None,
+    }
+}
+
+fn resolve_install_owner() -> Option<String> {
+    std::env::var("FLOW_INSTALL_OWNER")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -238,16 +298,7 @@ fn resolve_owner_repo(raw: &str) -> Result<String> {
                 .flatten()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-        });
-
-    let Some(owner) = owner else {
-        bail!(
-            "package name '{}' is missing owner (expected owner/repo).\nSet FLOW_INSTALL_OWNER (env or Flow personal env store) or pass owner/repo directly.",
-            raw
-        );
-    };
-
-    Ok(format!("{}/{}", owner, raw))
+        })
 }
 
 fn resolve_github_token() -> Result<Option<String>> {

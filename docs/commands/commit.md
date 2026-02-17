@@ -103,6 +103,57 @@ f commit --fast              # message defaults to "."
 | `--quick` | Yes | No | Yes (Codex background) | Fast iteration, review later |
 | `--fast` | No (you provide) | No | No | Trivial/WIP commits |
 
+### Default Fast Lane (No Extra Flags)
+
+If you want `f commit` to default to fast commit + deferred Codex review, set:
+
+```toml
+[commit]
+quick-default = true
+```
+
+With this enabled, plain `f commit` behaves like `f commit --quick` unless you explicitly ask for blocking review options.
+
+Run deep review in batches:
+
+```bash
+f reviews-todo codex --all
+f reviews-todo list
+```
+
+### Myflow Fast + Deep Profile
+
+For `~/code/myflow`, this profile gives a fast default loop while keeping deep Codex coverage:
+
+```toml
+[commit]
+quick-default = true
+queue = false
+queue_on_issues = false
+
+# Fast message generation path via zerg/ai (glm + cerebras), then fallbacks.
+message_fallbacks = [
+  "rise:zai:glm-5",
+  "rise:cerebras:gpt-oss-120b",
+  "remote",
+  "openai"
+]
+
+# When you explicitly run blocking review, prefer fast models first.
+review_fallbacks = [
+  "glm5",
+  "rise:cerebras:gpt-oss-120b",
+  "codex-high"
+]
+```
+
+Then operate with:
+
+```bash
+f commit
+f reviews-todo codex --all
+```
+
 ---
 
 ## What Happens
