@@ -5401,7 +5401,7 @@ Review:\n{}",
     })
 }
 
-fn configured_codex_bin_for_workdir(workdir: &Path) -> String {
+pub(crate) fn configured_codex_bin_for_workdir(workdir: &Path) -> String {
     if let Ok(value) = env::var("CODEX_BIN") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {

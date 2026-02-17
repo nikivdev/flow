@@ -259,8 +259,9 @@ fn fix_single_todo(root: &Path, item: &todo::TodoItem) -> Result<()> {
     prompt
         .push_str("\nApply the minimal fix to resolve this issue. Only change what is necessary.");
 
-    // Run codex
-    let status = Command::new("codex")
+    let codex_bin = commit::configured_codex_bin_for_workdir(root);
+    // Run codex with the same configured binary resolution as commit reviews.
+    let status = Command::new(&codex_bin)
         .args(["--approval-mode", "full-auto", "--quiet", &prompt])
         .current_dir(root)
         .status();
@@ -286,7 +287,10 @@ fn fix_single_todo(root: &Path, item: &todo::TodoItem) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            eprintln!("  ✗ Failed to run codex for {}: {}", short_id, e);
+            eprintln!(
+                "  ✗ Failed to run codex (bin: {}) for {}: {}",
+                codex_bin, short_id, e
+            );
             Ok(())
         }
     }
