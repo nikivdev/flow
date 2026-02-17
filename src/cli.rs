@@ -433,7 +433,7 @@ pub enum Commands {
     Checkout(CheckoutCommand),
     #[command(
         about = "Switch to a branch and align upstream tracking.",
-        long_about = "Switches to a target branch (creating it from upstream/origin when needed), updates flow upstream tracking for that branch, and imports git changes into jj when present."
+        long_about = "Switches to a target branch (creating it from upstream/origin when needed), updates flow upstream tracking for that branch, and imports git changes into jj when present. Accepts branch names, PR numbers (for example: 123 or #123), and GitHub PR URLs."
     )]
     Switch(SwitchCommand),
     #[command(
@@ -3162,7 +3162,7 @@ pub struct SyncCommand {
 
 #[derive(Args, Debug, Clone)]
 pub struct SwitchCommand {
-    /// Branch name to switch to (for example: v31).
+    /// Branch name, PR number (for example: 123 or #123), or PR URL.
     pub branch: String,
     /// Preferred remote to track from (default: upstream, then origin).
     #[arg(long)]

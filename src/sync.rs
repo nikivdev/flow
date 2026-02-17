@@ -18,7 +18,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     terminal,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ai_context;
 use crate::cli::{CheckoutCommand, SwitchCommand, SyncCommand};
@@ -829,8 +829,8 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
         bail!("Not a git repository");
     }
 
-    let target_branch = cmd.branch.trim();
-    if target_branch.is_empty() {
+    let target_input = cmd.branch.trim();
+    if target_input.is_empty() {
         bail!("Branch name cannot be empty");
     }
 
@@ -838,6 +838,8 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
         .trim()
         .to_string();
     let repo_root_path = PathBuf::from(repo_root);
+    let resolution = resolve_switch_target(&repo_root_path, target_input)?;
+    let target_branch = resolution.branch;
     git_guard::ensure_clean_for_push(&repo_root_path)?;
 
     let stash_enabled = cmd.stash && !cmd.no_stash;
@@ -852,8 +854,12 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
 
     let preserve_enabled = cmd.preserve && !cmd.no_preserve;
     if preserve_enabled && current_branch != "HEAD" && current_branch != target_branch {
-        let preserve_reason =
-            switch_preserve_reason(&repo_root_path, &current_branch, target_branch, has_changes);
+        let preserve_reason = switch_preserve_reason(
+            &repo_root_path,
+            &current_branch,
+            &target_branch,
+            has_changes,
+        );
         if let Some(reason) = preserve_reason {
             let snapshot_name = create_switch_safety_snapshot(&repo_root_path, &current_branch);
             match snapshot_name {
@@ -890,50 +896,73 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
         }
     }
 
+    let mut switched_branch = target_branch.clone();
     let switch_result = (|| -> Result<()> {
         let tracking_remote = resolve_tracking_remote_and_fetch(
             &repo_root_path,
-            target_branch,
+            &switched_branch,
             cmd.remote.as_deref(),
         )?;
 
-        if git_ref_exists_in(&repo_root_path, &format!("refs/heads/{}", target_branch)) {
-            println!("==> Switching to local branch {}...", target_branch);
-            git_run_in(&repo_root_path, &["switch", target_branch])?;
+        if git_ref_exists_in(&repo_root_path, &format!("refs/heads/{}", switched_branch)) {
+            println!("==> Switching to local branch {}...", switched_branch);
+            git_run_in(&repo_root_path, &["switch", &switched_branch])?;
         } else if let Some(remote) = tracking_remote.as_deref() {
             println!(
                 "==> Creating {} from {}/{}...",
-                target_branch, remote, target_branch
+                switched_branch, remote, switched_branch
             );
-            let remote_branch = format!("{}/{}", remote, target_branch);
+            let remote_branch = format!("{}/{}", remote, switched_branch);
             git_run_in(
                 &repo_root_path,
-                &["switch", "-c", target_branch, "--track", &remote_branch],
+                &["switch", "-c", &switched_branch, "--track", &remote_branch],
             )?;
+        } else if let Some(pr_target) = resolution.pr.as_ref() {
+            println!(
+                "==> Branch '{}' not found on remotes; checking out {} via gh...",
+                switched_branch, pr_target.display
+            );
+            ensure_gh_available()?;
+            let gh_args =
+                build_gh_pr_checkout_args(&pr_target.checkout_target, cmd.remote.as_deref());
+            run_gh_in(&repo_root_path, &gh_args)?;
+            let checked_out =
+                git_capture_in(&repo_root_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+                    .unwrap_or_else(|_| "HEAD".to_string())
+                    .trim()
+                    .to_string();
+            if checked_out.is_empty() || checked_out == "HEAD" {
+                bail!(
+                    "checked out {}, but git is detached; please run `gh pr checkout {}` manually",
+                    pr_target.display,
+                    pr_target.checkout_target
+                );
+            }
+            switched_branch = checked_out;
         } else {
             let preferred = cmd.remote.as_deref().unwrap_or("upstream/origin");
             bail!(
                 "Branch '{}' not found locally or on remotes (searched: {}).",
-                target_branch,
+                switched_branch,
                 preferred
             );
         }
 
-        if remote_branch_exists(&repo_root_path, "upstream", target_branch) {
+        if remote_branch_exists(&repo_root_path, "upstream", &switched_branch) {
             println!(
                 "==> Updating flow upstream tracking to upstream/{}...",
-                target_branch
+                switched_branch
             );
             git_run_in(
                 &repo_root_path,
                 &["config", "branch.upstream.remote", "upstream"],
             )?;
-            let merge_ref = format!("refs/heads/{}", target_branch);
+            let merge_ref = format!("refs/heads/{}", switched_branch);
             git_run_in(
                 &repo_root_path,
                 &["config", "branch.upstream.merge", &merge_ref],
             )?;
-            sync_local_upstream_branch(&repo_root_path, target_branch)?;
+            sync_local_upstream_branch(&repo_root_path, &switched_branch)?;
         }
 
         if should_use_jj(&repo_root_path) {
@@ -962,7 +991,7 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
         }
     }
 
-    println!("✓ Switched to {}", target_branch);
+    println!("✓ Switched to {}", switched_branch);
 
     if cmd.sync {
         println!("==> Running sync (default no push)...");
@@ -979,13 +1008,94 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
             max_fix_attempts: 3,
             allow_review_issues: false,
         }) {
-            let _ = ensure_branch_attached(&repo_root_path, target_branch);
+            let _ = ensure_branch_attached(&repo_root_path, &switched_branch);
             return Err(sync_err);
         }
-        ensure_branch_attached(&repo_root_path, target_branch)?;
+        ensure_branch_attached(&repo_root_path, &switched_branch)?;
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct SwitchPrTarget {
+    checkout_target: String,
+    display: String,
+}
+
+#[derive(Debug, Clone)]
+struct SwitchTargetResolution {
+    branch: String,
+    pr: Option<SwitchPrTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwitchPrView {
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+}
+
+fn resolve_switch_target(repo_root: &Path, target: &str) -> Result<SwitchTargetResolution> {
+    let trimmed = target.trim();
+    if let Some((repo, number)) = parse_github_pr_url(trimmed) {
+        ensure_gh_available()?;
+        let branch = resolve_pr_head_branch(repo_root, &number, Some(&repo))?;
+        println!("==> Resolved PR {repo}#{number} to branch {branch}");
+        return Ok(SwitchTargetResolution {
+            branch,
+            pr: Some(SwitchPrTarget {
+                checkout_target: number.clone(),
+                display: format!("{repo}#{number}"),
+            }),
+        });
+    }
+
+    let pr_number = if let Some(stripped) = trimmed.strip_prefix('#') {
+        stripped.trim()
+    } else {
+        trimmed
+    };
+    if !pr_number.is_empty() && pr_number.chars().all(|c| c.is_ascii_digit()) {
+        ensure_gh_available()?;
+        let branch = resolve_pr_head_branch(repo_root, pr_number, None)?;
+        println!("==> Resolved PR #{pr_number} to branch {branch}");
+        return Ok(SwitchTargetResolution {
+            branch,
+            pr: Some(SwitchPrTarget {
+                checkout_target: pr_number.to_string(),
+                display: format!("#{pr_number}"),
+            }),
+        });
+    }
+
+    Ok(SwitchTargetResolution {
+        branch: trimmed.to_string(),
+        pr: None,
+    })
+}
+
+fn resolve_pr_head_branch(repo_root: &Path, number: &str, repo: Option<&str>) -> Result<String> {
+    let mut args: Vec<String> = vec![
+        "pr".to_string(),
+        "view".to_string(),
+        number.to_string(),
+        "--json".to_string(),
+        "headRefName".to_string(),
+    ];
+    if let Some(repo) = repo.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--repo".to_string());
+        args.push(repo.to_string());
+    }
+
+    let ref_args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = gh_capture_in(repo_root, &ref_args)?;
+    let parsed: SwitchPrView = serde_json::from_str(out.trim())
+        .with_context(|| format!("failed to parse gh pr view JSON for #{number}"))?;
+    let branch = parsed.head_ref_name.trim();
+    if branch.is_empty() {
+        bail!("PR #{} returned empty head branch", number);
+    }
+    Ok(branch.to_string())
 }
 
 /// Checkout a GitHub PR safely while preserving local changes.
@@ -1354,6 +1464,22 @@ fn run_gh_in(repo_root: &Path, args: &[String]) -> Result<()> {
         bail!("gh {} failed with status {}", args.join(" "), status);
     }
     Ok(())
+}
+
+fn gh_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("gh")
+        .current_dir(repo_root)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run gh {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn remote_branch_exists(repo_root: &Path, remote: &str, branch: &str) -> bool {
