@@ -641,6 +641,8 @@ main() {
             info "Registry install failed; falling back to release/source."
             REGISTRY_URL=""
         else
+            ensure_aliases
+            bootstrap_core_tools
             ensure_path_hint
             info "Done. Launch with \"flow --help\" or \"f --help\"."
             return
