@@ -12,16 +12,18 @@ use crate::ai;
 use crate::cli::{TodoAction, TodoCommand, TodoStatusArg};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct TodoItem {
-    id: String,
-    title: String,
-    status: String,
-    created_at: String,
-    updated_at: Option<String>,
-    note: Option<String>,
-    session: Option<String>,
+pub(crate) struct TodoItem {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+    pub note: Option<String>,
+    pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    external_ref: Option<String>,
+    pub external_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
 }
 
 pub fn run(cmd: TodoCommand) -> Result<()> {
@@ -133,6 +135,7 @@ fn add(
         note: note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
         session: session_ref,
         external_ref: None,
+        priority: None,
     };
     items.push(item.clone());
     save_items(&path, &items)?;
@@ -253,7 +256,7 @@ fn load_items() -> Result<(PathBuf, Vec<TodoItem>)> {
     Ok((path, items))
 }
 
-fn load_items_at_root(root: &Path) -> Result<(PathBuf, Vec<TodoItem>)> {
+pub(crate) fn load_items_at_root(root: &Path) -> Result<(PathBuf, Vec<TodoItem>)> {
     let dir = root.join(".ai").join("todos");
     let path = dir.join("todos.json");
 
@@ -271,7 +274,7 @@ fn load_items_at_root(root: &Path) -> Result<(PathBuf, Vec<TodoItem>)> {
     Ok((path, items))
 }
 
-fn save_items(path: &Path, items: &[TodoItem]) -> Result<()> {
+pub(crate) fn save_items(path: &Path, items: &[TodoItem]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -308,6 +311,73 @@ fn external_ref_for_review_issue(commit_sha: &str, issue: &str) -> String {
     let hex = hex::encode(hasher.finalize());
     let short = hex.get(..12).unwrap_or(&hex);
     format!("flow-review-issue-{}", short)
+}
+
+/// Infer priority from issue text using keyword heuristics.
+pub(crate) fn parse_priority_from_issue(issue: &str) -> String {
+    let lower = issue.to_lowercase();
+    if lower.contains("secret")
+        || lower.contains("credential")
+        || lower.contains("api key")
+        || lower.contains("injection")
+        || lower.contains("vulnerability")
+        || lower.contains("security")
+    {
+        return "P1".to_string();
+    }
+    if lower.contains("crash")
+        || lower.contains("data loss")
+        || lower.contains("race condition")
+        || lower.contains("memory leak")
+        || lower.contains("buffer overflow")
+    {
+        return "P2".to_string();
+    }
+    if lower.contains("bug")
+        || lower.contains("error handling")
+        || lower.contains("panic")
+        || lower.contains("unwrap")
+        || lower.contains("missing validation")
+    {
+        return "P3".to_string();
+    }
+    "P4".to_string()
+}
+
+/// Load only review todos (those with external_ref starting with "flow-review-issue-").
+pub(crate) fn load_review_todos(repo_root: &Path) -> Result<Vec<TodoItem>> {
+    let (_path, items) = load_items_at_root(repo_root)?;
+    Ok(items
+        .into_iter()
+        .filter(|item| {
+            item.external_ref
+                .as_deref()
+                .map(|r| r.starts_with("flow-review-issue-"))
+                .unwrap_or(false)
+        })
+        .collect())
+}
+
+/// Count open (non-completed) review todos by priority.
+/// Returns (p1, p2, p3, p4, total).
+pub(crate) fn count_open_review_todos_by_priority(
+    repo_root: &Path,
+) -> Result<(usize, usize, usize, usize, usize)> {
+    let items = load_review_todos(repo_root)?;
+    let (mut p1, mut p2, mut p3, mut p4) = (0, 0, 0, 0);
+    for item in &items {
+        if item.status == "completed" {
+            continue;
+        }
+        match item.priority.as_deref().unwrap_or("P4") {
+            "P1" => p1 += 1,
+            "P2" => p2 += 1,
+            "P3" => p3 += 1,
+            _ => p4 += 1,
+        }
+    }
+    let total = p1 + p2 + p3 + p4;
+    Ok((p1, p2, p3, p4, total))
 }
 
 /// Record review issues as project-scoped todos under `.ai/todos/todos.json`.
@@ -364,6 +434,7 @@ pub fn record_review_issues_as_todos(
         note.push_str(issue.trim());
 
         let id = Uuid::new_v4().simple().to_string();
+        let priority = parse_priority_from_issue(issue);
         items.push(TodoItem {
             id: id.clone(),
             title,
@@ -373,6 +444,7 @@ pub fn record_review_issues_as_todos(
             note: Some(note),
             session: None,
             external_ref: Some(ext.clone()),
+            priority: Some(priority),
         });
         existing_refs.insert(ext);
         created_ids.push(id);
@@ -465,7 +537,7 @@ fn is_review_timeout_followup(item: &TodoItem) -> bool {
         .unwrap_or(false)
 }
 
-fn find_item_index(items: &[TodoItem], id: &str) -> Result<usize> {
+pub(crate) fn find_item_index(items: &[TodoItem], id: &str) -> Result<usize> {
     let mut matches = Vec::new();
     for (idx, item) in items.iter().enumerate() {
         if item.id == id || item.id.starts_with(id) {
@@ -501,7 +573,7 @@ fn resolve_session_ref(session: Option<&str>, no_session: bool) -> Result<Option
     }
 }
 
-fn project_root() -> PathBuf {
+pub(crate) fn project_root() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(flow_path) = find_flow_toml(&cwd) {
         return flow_path.parent().unwrap_or(&cwd).to_path_buf();

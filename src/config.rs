@@ -230,6 +230,14 @@ pub struct CommitConfig {
         alias = "queueOnIssues"
     )]
     pub queue_on_issues: Option<bool>,
+    /// Use `f commit --quick` behavior by default (fast commit + async Codex deep review).
+    #[serde(
+        default,
+        rename = "quick-default",
+        alias = "quick_default",
+        alias = "quickDefault"
+    )]
+    pub quick_default: Option<bool>,
     /// Quality gate configuration for commit-time feature doc/test enforcement.
     #[serde(default)]
     pub quality: Option<QualityConfig>,
@@ -244,6 +252,14 @@ pub struct CommitConfig {
         alias = "skillGate"
     )]
     pub skill_gate: Option<SkillGateConfig>,
+    /// Push gate for review todos: "warn" (default) | "block" | "off"
+    #[serde(
+        default,
+        rename = "review-push-gate",
+        alias = "review_push_gate",
+        alias = "reviewPushGate"
+    )]
+    pub review_push_gate: Option<String>,
 }
 
 /// Quality gate configuration: enforce documentation and test requirements at commit time.
@@ -353,6 +369,15 @@ pub struct GitConfig {
     /// Default writable remote used by flow commit/sync (e.g., "origin", "fork", "myflow-i").
     #[serde(default)]
     pub remote: Option<String>,
+    /// Enable private fork push (pushes to `{owner}/{repo}{suffix}` instead of origin).
+    #[serde(default, rename = "fork-push", alias = "fork_push")]
+    pub fork_push: Option<bool>,
+    /// Suffix appended to repo name for fork push (default: "-i").
+    #[serde(default, rename = "fork-push-suffix", alias = "fork_push_suffix")]
+    pub fork_push_suffix: Option<String>,
+    /// GitHub owner for fork push (auto-detected from `gh api user` / `git config github.user`).
+    #[serde(default, rename = "fork-push-owner", alias = "fork_push_owner")]
+    pub fork_push_owner: Option<String>,
 }
 
 /// TypeScript config loaded from ~/.config/flow/config.ts
@@ -509,6 +534,14 @@ pub struct TsCommitConfig {
         alias = "queue-on-issues"
     )]
     pub queue_on_issues: Option<bool>,
+    /// Use `f commit --quick` behavior by default.
+    #[serde(
+        default,
+        rename = "quickDefault",
+        alias = "quick_default",
+        alias = "quick-default"
+    )]
+    pub quick_default: Option<bool>,
     /// Whether to run async (delegate to hub). Default true.
     #[serde(default, rename = "async")]
     pub async_enabled: Option<bool>,
@@ -855,6 +888,10 @@ pub struct OptionsConfig {
     /// Optional token for myflow sync.
     #[serde(default, rename = "myflow_token", alias = "myflow-token")]
     pub myflow_token: Option<String>,
+    /// Override Codex binary path/name (defaults to "codex").
+    /// Useful for wrapper transports that still support `app-server` JSON-RPC.
+    #[serde(default, rename = "codex_bin", alias = "codex-bin")]
+    pub codex_bin: Option<String>,
 }
 
 impl OptionsConfig {
@@ -903,6 +940,9 @@ impl OptionsConfig {
         }
         if other.myflow_token.is_some() {
             self.myflow_token = other.myflow_token;
+        }
+        if other.codex_bin.is_some() {
+            self.codex_bin = other.codex_bin;
         }
     }
 }
@@ -2367,6 +2407,16 @@ commit_with_check_gitedit_mirror = true
     }
 
     #[test]
+    fn options_codex_bin_parses() {
+        let toml = r#"
+[options]
+codex_bin = "/tmp/codex-jazz"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("options table should parse");
+        assert_eq!(cfg.options.codex_bin.as_deref(), Some("/tmp/codex-jazz"));
+    }
+
+    #[test]
     fn commit_testing_config_parses() {
         let toml = r#"
 [commit.testing]
@@ -2390,6 +2440,17 @@ max_local_gate_seconds = 20
         assert_eq!(testing.run_ai_scratch_tests, Some(true));
         assert_eq!(testing.allow_ai_scratch_to_satisfy_gate, Some(false));
         assert_eq!(testing.max_local_gate_seconds, Some(20));
+    }
+
+    #[test]
+    fn commit_quick_default_parses() {
+        let toml = r#"
+[commit]
+quick-default = true
+"#;
+        let cfg: Config = toml::from_str(toml).expect("commit config should parse");
+        let commit = cfg.commit.expect("commit config expected");
+        assert_eq!(commit.quick_default, Some(true));
     }
 
     #[test]
@@ -2464,6 +2525,7 @@ remote = "myflow-i"
 
         cfg.git = Some(GitConfig {
             remote: Some("git-remote".to_string()),
+            ..Default::default()
         });
         assert_eq!(
             preferred_git_remote_from_cfg(&cfg).as_deref(),

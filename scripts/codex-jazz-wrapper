@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Shared Codex wrapper for Flow-managed repos.
+# Keep stdio untouched so `app-server` JSON-RPC works exactly like raw codex.
+#
+# Optional env:
+# - CODEX_REAL_BIN: absolute path to the real codex binary.
+# - CODEX_JAZZ_HOOK: executable hook invoked asynchronously as:
+#     <hook> <real-codex-bin> <original-args...>
+#   Hook output is suppressed and never affects review flow.
+
+SELF_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+resolve_real_codex() {
+  if [ -n "${CODEX_REAL_BIN:-}" ]; then
+    printf '%s\n' "$CODEX_REAL_BIN"
+    return 0
+  fi
+
+  while IFS= read -r candidate; do
+    [ -z "$candidate" ] && continue
+    if [ "$candidate" != "$SELF_PATH" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(which -a codex 2>/dev/null || true)
+
+  return 1
+}
+
+if ! REAL_CODEX_BIN="$(resolve_real_codex)"; then
+  echo "codex-jazz-wrapper: could not resolve real codex binary; set CODEX_REAL_BIN" >&2
+  exit 127
+fi
+
+if [ -n "${CODEX_JAZZ_HOOK:-}" ] && [ -x "${CODEX_JAZZ_HOOK}" ]; then
+  "${CODEX_JAZZ_HOOK}" "${REAL_CODEX_BIN}" "$@" >/dev/null 2>&1 || true &
+fi
+
+exec "${REAL_CODEX_BIN}" "$@"

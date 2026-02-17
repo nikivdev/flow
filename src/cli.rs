@@ -234,6 +234,12 @@ pub enum Commands {
     )]
     CommitQueue(CommitQueueCommand),
     #[command(
+        about = "Manage deferred deep-review todos for queued commits.",
+        long_about = "Workflow-friendly wrapper around commit queue reviews. Use `codex --all` to run deep Codex reviews across pending commits, then approve after issues are addressed.",
+        alias = "rt"
+    )]
+    ReviewsTodo(ReviewsTodoCommand),
+    #[command(
         about = "Create a GitHub PR from current changes or a queued commit.",
         long_about = "By default, stages and commits current changes (or only paths passed via --path) into the queue, then creates/updates a GitHub PR for the latest queued commit. Use --no-commit to skip committing and create a PR from an existing queued commit.\n\nSpecial:\n  `f pr open` opens the PR for the current branch (or falls back to the queued commit).\n  `f pr open edit` opens a local markdown editor file and syncs PR title/body on save."
     )]
@@ -243,6 +249,11 @@ pub enum Commands {
         long_about = "Audit and clean personal tooling ignore patterns from project .gitignore files. This helps keep external repositories free of local-only patterns like .beads/ and .rise/."
     )]
     Gitignore(GitignoreCommand),
+    #[command(
+        about = "Search and execute markdown recipes.",
+        long_about = "Recipes are markdown files with executable shell blocks. Flow discovers project recipes from .ai/recipes and global recipes from ~/.config/flow/recipes (or overrides), then lets you list/search/run them."
+    )]
+    Recipe(RecipeCommand),
     #[command(
         about = "Open queued commits for review in Rise.",
         long_about = "Open the latest queued commit (or a specific one in the future) in Rise's review UI.",
@@ -511,8 +522,8 @@ pub enum Commands {
     )]
     Release(ReleaseCommand),
     #[command(
-        about = "Install a binary from the Flow registry.",
-        long_about = "Download a binary from a Flow registry and install it into your PATH.",
+        about = "Install a CLI/tool binary (registry, parm, or flox).",
+        long_about = "Install binaries via Flow registry, GitHub releases via parm, or flox. Auto mode tries registry first, then parm, then flox.",
         alias = "inst"
     )]
     Install(InstallCommand),
@@ -1537,6 +1548,84 @@ pub struct GitignorePolicyInitOpts {
     #[arg(long)]
     pub force: bool,
 }
+
+#[derive(Args, Debug, Clone)]
+pub struct RecipeCommand {
+    #[command(subcommand)]
+    pub action: Option<RecipeAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum RecipeAction {
+    /// List available recipes.
+    List(RecipeListOpts),
+    /// Search recipes by text query.
+    Search(RecipeSearchOpts),
+    /// Run a recipe by id or name.
+    Run(RecipeRunOpts),
+    /// Initialize recipe directories and starter files.
+    Init(RecipeInitOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RecipeListOpts {
+    /// Scope to include.
+    #[arg(long, value_enum, default_value = "all")]
+    pub scope: RecipeScopeArg,
+    /// Optional text filter.
+    #[arg(long)]
+    pub query: Option<String>,
+    /// Override global recipes directory.
+    #[arg(long)]
+    pub global_dir: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RecipeSearchOpts {
+    /// Search text.
+    pub query: String,
+    /// Scope to include.
+    #[arg(long, value_enum, default_value = "all")]
+    pub scope: RecipeScopeArg,
+    /// Override global recipes directory.
+    #[arg(long)]
+    pub global_dir: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RecipeRunOpts {
+    /// Recipe id or name fragment.
+    pub selector: String,
+    /// Scope to include.
+    #[arg(long, value_enum, default_value = "all")]
+    pub scope: RecipeScopeArg,
+    /// Override global recipes directory.
+    #[arg(long)]
+    pub global_dir: Option<String>,
+    /// Working directory for execution.
+    #[arg(long)]
+    pub cwd: Option<String>,
+    /// Print command without executing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RecipeInitOpts {
+    /// Scope to initialize.
+    #[arg(long, value_enum, default_value = "all")]
+    pub scope: RecipeScopeArg,
+    /// Override global recipes directory.
+    #[arg(long)]
+    pub global_dir: Option<String>,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecipeScopeArg {
+    Project,
+    Global,
+    All,
+}
 #[derive(Args, Debug, Clone)]
 pub struct CommitQueueCommand {
     #[command(subcommand)]
@@ -1547,6 +1636,12 @@ pub struct CommitQueueCommand {
 pub struct ReviewCommand {
     #[command(subcommand)]
     pub action: Option<ReviewAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReviewsTodoCommand {
+    #[command(subcommand)]
+    pub action: Option<ReviewsTodoAction>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1662,6 +1757,51 @@ pub enum ReviewAction {
     Copy {
         /// Commit hash (short or full). Defaults to latest queued commit.
         hash: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ReviewsTodoAction {
+    /// List pending review todos with priority indicators.
+    #[command(alias = "ls")]
+    List,
+    /// Show details for a review todo.
+    Show {
+        /// Todo id (short prefix or full).
+        id: String,
+    },
+    /// Mark a review todo as resolved.
+    Done {
+        /// Todo id (short prefix or full).
+        id: String,
+    },
+    /// Auto-fix a review todo via Codex.
+    Fix {
+        /// Todo id to fix. If omitted with --all, fixes all open review todos.
+        id: Option<String>,
+        /// Fix all open review todos.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Run Codex deep review for queued commits.
+    Codex {
+        /// Commit hashes (short or full). If omitted, reviews current branch queue entries.
+        hashes: Vec<String>,
+        /// Review all queued commits across branches.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Approve all queued commits once deep review todos are resolved.
+    ApproveAll {
+        /// Push even if the branch is behind its remote.
+        #[arg(long, short = 'f')]
+        force: bool,
+        /// Allow pushing even if some queued commits have review issues recorded.
+        #[arg(long)]
+        allow_issues: bool,
+        /// Allow pushing even if some queued commits have review timed out / missing.
+        #[arg(long)]
+        allow_unreviewed: bool,
     },
 }
 
@@ -3015,6 +3155,9 @@ pub struct SyncCommand {
     /// Maximum fix attempts before giving up.
     #[arg(long, default_value = "3")]
     pub max_fix_attempts: u32,
+    /// Allow push even if P1/P2 review todos are open.
+    #[arg(long)]
+    pub allow_review_issues: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -3270,7 +3413,7 @@ pub struct InstallOpts {
     /// Registry base URL (defaults to FLOW_REGISTRY_URL).
     #[arg(long)]
     pub registry: Option<String>,
-    /// Install backend (auto tries registry, falls back to flox).
+    /// Install backend (auto tries registry, then parm, then flox).
     #[arg(long, value_enum, default_value = "auto")]
     pub backend: InstallBackend,
     /// Version to install (defaults to latest).

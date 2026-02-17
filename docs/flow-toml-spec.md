@@ -42,6 +42,21 @@ install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/sk
 # scraper_base_url = "http://127.0.0.1:7444"
 # allow_direct_fallback = true
 
+[commit]             # optional: commit workflow defaults
+# quick-default = true        # make `f commit` behave like `--quick` by default
+# queue = false               # keep fast path pushing by default
+# queue_on_issues = false     # do not force queue-only flow on review issues
+# message-fallbacks = ["rise:zai:glm-5", "rise:cerebras:gpt-oss-120b", "remote", "openai"]
+# review-fallbacks = ["glm5", "rise:cerebras:gpt-oss-120b", "codex-high"]
+
+[options]            # optional: transport/runtime integrations
+# myflow_mirror = true         # mirror commit + queue review events to myflow
+# myflow_url = "https://myflow.sh"
+# myflow_token = "..."
+# codex_bin = "/path/to/codex-wrapper"  # must support `app-server` JSON-RPC
+# codex_bin = "/Users/nikiv/code/flow/scripts/codex-jazz-wrapper"
+# You can set this in repo flow.toml or global ~/.config/flow/flow.toml
+
 [commit.testing]      # optional: local commit-time test gate
 # mode = "warn"       # "warn" | "block" | "off"
 # runner = "bun"      # currently optimized for bun in Bun repos
@@ -85,6 +100,8 @@ fr = "f run"
 - `[skills]`: optional skill enforcement; `sync_tasks` generates `.ai/skills` from tasks and `install` ensures registry skills are present (skills are gitignored by default).
 - `[skills.codex]`: optional Codex tuning; task skill `agents/openai.yaml` generation, post-sync force reload, and implicit invocation policy defaults.
 - `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
+- `[commit]`: optional commit workflow defaults; `quick-default = true` makes plain `f commit` use fast commit + deferred Codex deep review.
+- `[options]`: optional integration/runtime toggles; use `myflow_mirror` for mirror sync and `codex_bin` to route review calls through a wrapper transport.
 - `[commit.testing]`: optional local testing gate evaluated during `f commit`; supports Bun-first strict mode plus optional AI scratch-test fallback (`.ai/test` by default).
 - `[commit.skill_gate]`: optional required-skill policy for `f commit`; can enforce presence and minimum skill versions.
 - `[git].remote`: preferred writable remote used by `f commit`/`f sync --push` (and jj remote defaults). Fallback order is `[git].remote`, then legacy `[jj].remote`, then `origin`.

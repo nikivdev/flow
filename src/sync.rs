@@ -25,6 +25,8 @@ use crate::cli::{CheckoutCommand, SwitchCommand, SyncCommand};
 use crate::commit;
 use crate::config;
 use crate::git_guard;
+use crate::push;
+use crate::todo;
 
 #[derive(Serialize, Clone)]
 struct SyncEvent {
@@ -211,6 +213,68 @@ impl SyncRecorder {
 
         if let Err(err) = write_sync_snapshot(&snapshot) {
             eprintln!("warn: failed to write sync snapshot: {err}");
+        }
+    }
+}
+
+/// Check the review-todo push gate. Returns `true` if push should proceed.
+/// Only P1+P2 items trigger the gate; P3/P4 are non-blocking.
+/// Reads `[commit].review-push-gate` from config: "warn" (default) | "block" | "off".
+/// `--allow-review-issues` overrides any mode.
+/// Fails open if todos can't be loaded.
+fn check_review_todo_push_gate(
+    repo_root: &Path,
+    allow_review_issues: bool,
+    recorder: &mut SyncRecorder,
+) -> bool {
+    if allow_review_issues {
+        return true;
+    }
+
+    let (p1, p2, _p3, _p4, _total) = match todo::count_open_review_todos_by_priority(repo_root) {
+        Ok(counts) => counts,
+        Err(_) => return true, // fail open
+    };
+
+    let blocking = p1 + p2;
+    if blocking == 0 {
+        return true;
+    }
+
+    // Read gate mode from config
+    let config_path = repo_root.join("flow.toml");
+    let gate_mode = if config_path.exists() {
+        config::load(&config_path)
+            .ok()
+            .and_then(|cfg| cfg.commit)
+            .and_then(|c| c.review_push_gate)
+            .unwrap_or_else(|| "warn".to_string())
+    } else {
+        "warn".to_string()
+    };
+
+    match gate_mode.as_str() {
+        "off" => true,
+        "block" => {
+            eprintln!(
+                "✗ Push blocked: {} open review todos (P1:{}, P2:{})",
+                blocking, p1, p2
+            );
+            eprintln!(
+                "  Resolve with `f reviews-todo list` or use --allow-review-issues to override."
+            );
+            recorder.record("review-gate", format!("blocked (P1:{}, P2:{})", p1, p2));
+            false
+        }
+        _ => {
+            // "warn" (default)
+            eprintln!(
+                "⚠  {} open review todos (P1:{}, P2:{}) — consider reviewing before push",
+                blocking, p1, p2
+            );
+            eprintln!("  Run `f reviews-todo list` to see details.");
+            recorder.record("review-gate", format!("warned (P1:{}, P2:{})", p1, p2));
+            true
         }
     }
 }
@@ -641,6 +705,43 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
         }
 
         // Step 3: Push to configured remote (defaults to origin).
+        // Fork push override: redirect to private fork remote if configured.
+        let (mut push_remote, mut has_push_remote, mut push_remote_reachable) =
+            (push_remote, has_push_remote, push_remote_reachable);
+        if should_push {
+            if let Some((fork_remote, fork_owner, fork_repo)) =
+                resolve_fork_push_target(repo_root_path)
+            {
+                let target_url = push::build_github_ssh_url(&fork_owner, &fork_repo);
+                if let Err(e) = push::ensure_remote_points_to_target(
+                    repo_root_path,
+                    &fork_remote,
+                    &target_url,
+                    None,
+                    true,
+                ) {
+                    eprintln!("Warning: could not set up fork remote: {}", e);
+                } else {
+                    push::ensure_github_repo_exists(&fork_owner, &fork_repo).ok();
+                    println!(
+                        "==> Fork push enabled: {}/{}  (remote: {})",
+                        fork_owner, fork_repo, fork_remote
+                    );
+                    push_remote = fork_remote;
+                    has_push_remote = true;
+                    push_remote_reachable = true;
+                }
+            }
+        }
+
+        // Review-todo push gate (git sync path)
+        if should_push
+            && !check_review_todo_push_gate(repo_root_path, cmd.allow_review_issues, &mut recorder)
+        {
+            recorder.record("push", "blocked by review-todo gate");
+            bail!("Push blocked by open review todos. Use --allow-review-issues to override.");
+        }
+
         if has_push_remote && should_push {
             // Check if push remote == upstream (read-only clone, no fork)
             let push_remote_url =
@@ -876,6 +977,7 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
             fix: true,
             no_fix: false,
             max_fix_attempts: 3,
+            allow_review_issues: false,
         }) {
             let _ = ensure_branch_attached(&repo_root_path, target_branch);
             return Err(sync_err);
@@ -1395,10 +1497,7 @@ fn run_jj_sync(
             && push_remote != "upstream"
             && !push_remote_reachable
         {
-            recorder.record(
-                "jj",
-                format!("skip {} (unreachable)", push_remote),
-            );
+            recorder.record("jj", format!("skip {} (unreachable)", push_remote));
         }
 
         if has_upstream {
@@ -1499,12 +1598,43 @@ fn run_jj_sync(
                         "==> Rebasing branch {} with jj onto {}...",
                         current_branch, dest
                     );
-                    recorder.record("jj", format!("jj rebase -b {} -d {}", current_branch, dest));
-                    if let Err(err) =
-                        jj_run_in(repo_root, &["rebase", "-b", &current_branch, "-d", &dest])
-                    {
+                    let preempt_ignore_immutable = !is_read_only
+                        && branch_tip_matches_remote(repo_root, &current_branch, &push_remote);
+                    if preempt_ignore_immutable {
+                        recorder.record(
+                            "jj",
+                            format!(
+                                "branch {} matches {}/{}; preemptively using --ignore-immutable",
+                                current_branch, push_remote, current_branch
+                            ),
+                        );
+                    }
+                    let initial_rebase_args: Vec<&str> = if preempt_ignore_immutable {
+                        vec![
+                            "rebase",
+                            "--ignore-immutable",
+                            "-b",
+                            &current_branch,
+                            "-d",
+                            &dest,
+                        ]
+                    } else {
+                        vec!["rebase", "-b", &current_branch, "-d", &dest]
+                    };
+                    recorder.record(
+                        "jj",
+                        if preempt_ignore_immutable {
+                            format!(
+                                "jj rebase --ignore-immutable -b {} -d {}",
+                                current_branch, dest
+                            )
+                        } else {
+                            format!("jj rebase -b {} -d {}", current_branch, dest)
+                        },
+                    );
+                    if let Err(err) = jj_run_in(repo_root, &initial_rebase_args) {
                         recorder.record("jj", "jj branch rebase failed");
-                        if !is_read_only {
+                        if !preempt_ignore_immutable && !is_read_only {
                             println!(
                                 "==> Rebase blocked by immutable commits; retrying with --ignore-immutable..."
                             );
@@ -1626,6 +1756,46 @@ fn run_jj_sync(
         recorder.record("jj", "skipped (no remotes)");
     }
 
+    // Fork push override: redirect to private fork remote if configured.
+    let (mut push_remote, mut has_push_remote, mut push_remote_reachable, mut is_read_only) = (
+        push_remote,
+        has_push_remote,
+        push_remote_reachable,
+        is_read_only,
+    );
+    if should_push {
+        if let Some((fork_remote, fork_owner, fork_repo)) = resolve_fork_push_target(repo_root) {
+            let target_url = push::build_github_ssh_url(&fork_owner, &fork_repo);
+            if let Err(e) = push::ensure_remote_points_to_target(
+                repo_root,
+                &fork_remote,
+                &target_url,
+                None,
+                true,
+            ) {
+                eprintln!("Warning: could not set up fork remote: {}", e);
+            } else {
+                push::ensure_github_repo_exists(&fork_owner, &fork_repo).ok();
+                // Let jj know about the new remote.
+                let _ = jj_capture_in(repo_root, &["git", "fetch", "--remote", &fork_remote]);
+                println!(
+                    "==> Fork push enabled: {}/{}  (remote: {})",
+                    fork_owner, fork_repo, fork_remote
+                );
+                push_remote = fork_remote;
+                has_push_remote = true;
+                push_remote_reachable = true;
+                is_read_only = false;
+            }
+        }
+    }
+
+    // Review-todo push gate (jj sync path)
+    if should_push && !check_review_todo_push_gate(repo_root, cmd.allow_review_issues, recorder) {
+        recorder.record("push", "blocked by review-todo gate");
+        bail!("Push blocked by open review todos. Use --allow-review-issues to override.");
+    }
+
     if has_push_remote && should_push {
         if is_read_only {
             println!(
@@ -1667,9 +1837,19 @@ fn run_jj_sync(
         } else {
             println!("==> Pushing to {}...", push_remote);
             let push_result = if did_rebase {
-                push_with_autofix_force(&current_branch, &push_remote, auto_fix, cmd.max_fix_attempts)
+                push_with_autofix_force(
+                    &current_branch,
+                    &push_remote,
+                    auto_fix,
+                    cmd.max_fix_attempts,
+                )
             } else {
-                push_with_autofix(&current_branch, &push_remote, auto_fix, cmd.max_fix_attempts)
+                push_with_autofix(
+                    &current_branch,
+                    &push_remote,
+                    auto_fix,
+                    cmd.max_fix_attempts,
+                )
             };
             if let Err(e) = push_result {
                 recorder.record("push", "push failed");
@@ -2303,6 +2483,20 @@ fn jj_has_divergence(repo_root: &Path, current: &str, dest: &str) -> Result<bool
     Ok(!output.trim().is_empty())
 }
 
+fn branch_tip_matches_remote(repo_root: &Path, branch: &str, remote: &str) -> bool {
+    let local_ref = format!("refs/heads/{}", branch);
+    let remote_ref = format!("refs/remotes/{}/{}", remote, branch);
+    let local_sha = match git_capture_in(repo_root, &["rev-parse", &local_ref]) {
+        Ok(value) => value.trim().to_string(),
+        Err(_) => return false,
+    };
+    let remote_sha = match git_capture_in(repo_root, &["rev-parse", &remote_ref]) {
+        Ok(value) => value.trim().to_string(),
+        Err(_) => return false,
+    };
+    !local_sha.is_empty() && local_sha == remote_sha
+}
+
 fn jj_stash_commits(repo_root: &Path, current: &str, dest: &str) -> Result<String> {
     let ts = Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let stash_name = format!("f-sync-stash/{}/{}", current, ts);
@@ -2727,6 +2921,53 @@ fn drop_stash_if_untracked_restored(repo_root: &Path) -> Result<bool> {
 
     git_run_in(repo_root, &["stash", "drop", "stash@{0}"])?;
     Ok(true)
+}
+
+/// If fork-push is enabled in config, resolve the target remote name, owner, and fork repo name.
+///
+/// Returns `Some((remote_name, owner, fork_repo_name))` when fork push should be used.
+fn resolve_fork_push_target(repo_root: &Path) -> Option<(String, String, String)> {
+    // Check local config first, then global.
+    let cfg = {
+        let local = repo_root.join("flow.toml");
+        if local.exists() {
+            config::load(&local).ok()
+        } else {
+            None
+        }
+        .or_else(|| {
+            let global = config::default_config_path();
+            if global.exists() {
+                config::load(&global).ok()
+            } else {
+                None
+            }
+        })
+    };
+    let git_cfg = cfg.as_ref().and_then(|c| c.git.as_ref());
+    if git_cfg.map(|g| g.fork_push.unwrap_or(false)) != Some(true) {
+        return None;
+    }
+    let git_cfg = git_cfg.unwrap();
+
+    let owner = push::resolve_fork_owner(git_cfg.fork_push_owner.as_deref()).ok()?;
+    let suffix = git_cfg.fork_push_suffix.as_deref().unwrap_or("-i");
+
+    // Derive base repo name from upstream or origin URL.
+    let upstream_url = git_capture_in(repo_root, &["remote", "get-url", "upstream"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let origin_url = git_capture_in(repo_root, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let base_name =
+        push::derive_repo_name(repo_root, upstream_url.as_deref(), origin_url.as_deref()).ok()?;
+
+    let fork_repo = format!("{}{}", base_name, suffix);
+    let remote_name = format!("fork{}", suffix);
+    Some((remote_name, owner, fork_repo))
 }
 
 /// Normalize a git URL for comparison (handle ssh vs https, trailing .git).

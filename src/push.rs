@@ -65,6 +65,20 @@ fn resolve_push_owner(cli: Option<&str>) -> Result<String> {
         }
     }
 
+    resolve_fork_owner(None)
+}
+
+/// Resolve the GitHub owner for fork push operations.
+///
+/// Priority: explicit config → FLOW_PUSH_OWNER env → personal env → `gh api user` → `git config github.user`.
+pub(crate) fn resolve_fork_owner(config_owner: Option<&str>) -> Result<String> {
+    if let Some(value) = config_owner {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
     if let Ok(value) = std::env::var("FLOW_PUSH_OWNER") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
@@ -79,12 +93,46 @@ fn resolve_push_owner(cli: Option<&str>) -> Result<String> {
         }
     }
 
+    // Try `gh api user`
+    if let Ok(output) = Command::new("gh")
+        .args(["api", "user", "-q", ".login"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !login.is_empty() {
+                return Ok(login);
+            }
+        }
+    }
+
+    // Try `git config github.user`
+    if let Ok(output) = Command::new("git")
+        .args(["config", "github.user"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            let user = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !user.is_empty() {
+                return Ok(user);
+            }
+        }
+    }
+
     bail!(
-        "FLOW_PUSH_OWNER not set. Configure it via:\n  f env set FLOW_PUSH_OWNER=<owner> --personal\nor pass --owner <owner>"
+        "Could not determine GitHub owner. Configure it via:\n  \
+         [git] fork-push-owner in flow.toml, or\n  \
+         f env set FLOW_PUSH_OWNER=<owner> --personal, or\n  \
+         gh auth login, or\n  \
+         git config --global github.user <owner>"
     );
 }
 
-fn derive_repo_name(
+pub(crate) fn derive_repo_name(
     repo_root: &Path,
     upstream_url: Option<&str>,
     origin_url: Option<&str>,
@@ -106,7 +154,7 @@ fn derive_repo_name(
         .to_string())
 }
 
-fn build_github_ssh_url(owner: &str, repo: &str) -> String {
+pub(crate) fn build_github_ssh_url(owner: &str, repo: &str) -> String {
     let owner = owner.trim();
     let repo = repo.trim();
     format!("git@github.com:{}/{}.git", owner, repo)
@@ -153,7 +201,7 @@ fn choose_github_remote_url(owner: &str, repo: &str, cmd: &PushCommand) -> Resul
     }
 }
 
-fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
+pub(crate) fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
     let trimmed = url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return None;
@@ -174,7 +222,7 @@ fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
     None
 }
 
-fn ensure_remote_points_to_target(
+pub(crate) fn ensure_remote_points_to_target(
     repo_root: &Path,
     remote: &str,
     target_url: &str,
@@ -214,7 +262,7 @@ fn ensure_remote_points_to_target(
     Ok(())
 }
 
-fn ensure_github_repo_exists(owner: &str, repo: &str) -> Result<()> {
+pub(crate) fn ensure_github_repo_exists(owner: &str, repo: &str) -> Result<()> {
     let full_name = format!("{}/{}", owner.trim(), repo.trim());
 
     let view = Command::new("gh")
@@ -243,7 +291,7 @@ fn ensure_github_repo_exists(owner: &str, repo: &str) -> Result<()> {
     }
 }
 
-fn normalize_git_url(url: &str) -> String {
+pub(crate) fn normalize_git_url(url: &str) -> String {
     let url = url.trim();
     let url = if url.starts_with("git@github.com:") {
         url.replace("git@github.com:", "github.com/")
@@ -283,7 +331,7 @@ fn current_branch(repo_root: &Path) -> Result<String> {
     Ok(name)
 }
 
-fn git_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo_root)
@@ -295,7 +343,7 @@ fn git_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn git_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
+pub(crate) fn git_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("git")
         .args(args)
         .current_dir(repo_root)

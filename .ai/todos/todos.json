@@ -21,9 +21,9 @@
   {
     "id": "26717fd7a4774eceb418c88579de547c",
     "title": "Re-run review: review timed out for commit 6ace98e",
-    "status": "pending",
+    "status": "completed",
     "created_at": "2026-02-13T14:20:44.173471+00:00",
-    "updated_at": null,
+    "updated_at": "2026-02-16T21:59:53.299632+00:00",
     "note": "Source: flow review\nCommit: 6ace98ebb6984d2b237007c964066d50f6faa153\nModel: gpt-5.1-codex-max\nReview summary: Codex review timed out after 300s\n\nRe-run review: review timed out for commit 6ace98e",
     "session": null,
     "external_ref": "flow-review-issue-ce0f9bb6b555"
@@ -41,9 +41,9 @@
   {
     "id": "1d57246970fd4297b5bba7e2bb1c4ce3",
     "title": "Re-run review: review timed out for commit 2177d65",
-    "status": "pending",
+    "status": "completed",
     "created_at": "2026-02-14T16:21:46.629833+00:00",
-    "updated_at": null,
+    "updated_at": "2026-02-16T21:59:53.395640+00:00",
     "note": "Source: flow review\nCommit: 2177d65d15ebc28e13152b31413aa8263e8f8f71\nModel: gpt-5.1-codex-max\nReview summary: Codex review timed out after 300s\n\nRe-run review: review timed out for commit 2177d65",
     "session": null,
     "external_ref": "flow-review-issue-e11c99ffe84e"
@@ -77,5 +77,15 @@
     "note": "Source: flow review\nCommit: 0b6424d81eeee048a5e1507cc67094ea4e883819\nModel: gpt-5.1-codex-max\n\n[P2] JJ default remote ignores new git.remote setting — /Users/nikiv/code/flow/src/cli.rs:1718-1726",
     "session": null,
     "external_ref": "flow-review-issue-aa7d77e8a06c"
+  },
+  {
+    "id": "ccc4555e52c745e4aa017237f10a8c97",
+    "title": "[P1] Collect gitedit sessions after creating commit — /Users/nikiv/code/flow/src/commit.rs:4299-4311",
+    "status": "pending",
+    "created_at": "2026-02-16T19:43:51.443004+00:00",
+    "updated_at": null,
+    "note": "Source: flow review\nCommit: 18a4bde4ca0433b7b3689560cfd6a949ebfd0565\nModel: gpt-5.1-codex-max\n\n[P1] Collect gitedit sessions after creating commit — /Users/nikiv/code/flow/src/commit.rs:4299-4311",
+    "session": null,
+    "external_ref": "flow-review-issue-4f55a14a7a31"
   }
 ]
