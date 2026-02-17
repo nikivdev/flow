@@ -9,7 +9,8 @@ Complete documentation for all `f` (flow) commands.
 | [`deploy`](deploy.md) | Deploy to Linux hosts, Cloudflare Workers, or Railway |
 | [`release`](release.md) | Publish a release to registry or GitHub |
 | [`publish`](publish.md) | Publish project to GitHub |
-| [`install`](install.md) | Install a binary from a Flow registry |
+| [`install`](install.md) | Install a CLI/tool via registry, parm, or flox |
+| [`recipe`](recipe.md) | Search and run markdown recipes |
 | [`repos`](repos.md) | Clone repositories into ~/repos |
 | [`commit`](commit.md) | AI-powered commit with code review |
 | [`upstream`](upstream.md) | Manage upstream fork workflow |
@@ -89,11 +90,12 @@ f commit --help
 
 - **[docs](docs.md)** - Manage auto-generated documentation
 - **[commits](commits.md)** - Browse commits with AI metadata
+- **[recipe](recipe.md)** - Search and run markdown recipes
 
 ### Other
 
 - **[skills](skills.md)** - Manage Codex skills
-- **[install](install.md)** - Install binaries from a Flow registry
+- **[install](install.md)** - Install binaries via registry/parm/flox
 - **[db](db.md)** - Manage databases and providers
 - **[tools](tools.md)** - Manage AI tools
 - **[notify](notify.md)** - Send proposal notifications

@@ -87,5 +87,38 @@
     "note": "Source: flow review\nCommit: 18a4bde4ca0433b7b3689560cfd6a949ebfd0565\nModel: gpt-5.1-codex-max\n\n[P1] Collect gitedit sessions after creating commit — /Users/nikiv/code/flow/src/commit.rs:4299-4311",
     "session": null,
     "external_ref": "flow-review-issue-4f55a14a7a31"
+  },
+  {
+    "id": "f264371559114db59152e00a394a999b",
+    "title": "[P1] Honor recipe shell selection when running commands — /Users/nikiv/code/flow/src/recipe.rs:122-126",
+    "status": "pending",
+    "created_at": "2026-02-17T11:40:29.148363+00:00",
+    "updated_at": null,
+    "note": "Source: flow review\nCommit: c52538d993835214221eb89252777e1e64027454\nModel: gpt-5.1-codex-max\n\n[P1] Honor recipe shell selection when running commands — /Users/nikiv/code/flow/src/recipe.rs:122-126",
+    "session": null,
+    "external_ref": "flow-review-issue-551b4c7441b9",
+    "priority": "P4"
+  },
+  {
+    "id": "e2b50f22152841f299d47ab83dc2e264",
+    "title": "[P2] Global recipes default to project directory — /Users/nikiv/code/flow/src/recipe.rs:560-569",
+    "status": "pending",
+    "created_at": "2026-02-17T11:40:29.148363+00:00",
+    "updated_at": null,
+    "note": "Source: flow review\nCommit: c52538d993835214221eb89252777e1e64027454\nModel: gpt-5.1-codex-max\n\n[P2] Global recipes default to project directory — /Users/nikiv/code/flow/src/recipe.rs:560-569",
+    "session": null,
+    "external_ref": "flow-review-issue-658624948e1a",
+    "priority": "P4"
+  },
+  {
+    "id": "1531571a23a44211837aa0a3f7692a6f",
+    "title": "[P2] reviews-todo fix ignores configured Codex binary — /Users/nikiv/code/flow/src/reviews_todo.rs:262-265",
+    "status": "pending",
+    "created_at": "2026-02-17T11:40:29.148363+00:00",
+    "updated_at": null,
+    "note": "Source: flow review\nCommit: c52538d993835214221eb89252777e1e64027454\nModel: gpt-5.1-codex-max\n\n[P2] reviews-todo fix ignores configured Codex binary — /Users/nikiv/code/flow/src/reviews_todo.rs:262-265",
+    "session": null,
+    "external_ref": "flow-review-issue-9f11354ed9dd",
+    "priority": "P4"
   }
 ]
