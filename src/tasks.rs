@@ -605,6 +605,32 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
         bail!("No tasks defined in {} or subdirectories", root.display());
     }
 
+    let discovered = select_discovered_task(&discovery, task_name)?;
+    if let Some(discovered) = discovered {
+        return run(TaskRunOpts {
+            config: discovered.config_path.clone(),
+            delegate_to_hub: false,
+            hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+            hub_port: 9050,
+            name: discovered.task.name.clone(),
+            args,
+        });
+    }
+
+    // List available tasks in error message
+    let available: Vec<_> = discovery.tasks.iter().map(task_reference).collect();
+    bail!(
+        "task '{}' not found.\nAvailable tasks: {}",
+        task_name,
+        available.join(", ")
+    );
+}
+
+fn select_discovered_task<'a>(
+    discovery: &'a discover::DiscoveryResult,
+    task_name: &str,
+) -> Result<Option<&'a discover::DiscoveredTask>> {
+    let mut scoped_not_found: Option<(String, String, Vec<String>)> = None;
     if let Some((scope, scoped_task)) = parse_scoped_selector(task_name) {
         let scope_exists = discovery.tasks.iter().any(|d| d.matches_scope(&scope));
         if scope_exists {
@@ -640,14 +666,7 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
             };
 
             if let Some(discovered) = selected {
-                return run(TaskRunOpts {
-                    config: discovered.config_path.clone(),
-                    delegate_to_hub: false,
-                    hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
-                    hub_port: 9050,
-                    name: discovered.task.name.clone(),
-                    args,
-                });
+                return Ok(Some(discovered));
             }
 
             let scoped_available: Vec<String> = discovery
@@ -656,16 +675,7 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
                 .filter(|d| d.matches_scope(&scope))
                 .map(task_reference)
                 .collect();
-            bail!(
-                "task '{}' not found in scope '{}'.\nAvailable in scope: {}",
-                scoped_task,
-                scope,
-                if scoped_available.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    scoped_available.join(", ")
-                }
-            );
+            scoped_not_found = Some((scope, scoped_task, scoped_available));
         }
     }
 
@@ -706,23 +716,23 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
     };
 
     if let Some(discovered) = discovered {
-        return run(TaskRunOpts {
-            config: discovered.config_path.clone(),
-            delegate_to_hub: false,
-            hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
-            hub_port: 9050,
-            name: discovered.task.name.clone(),
-            args,
-        });
+        return Ok(Some(discovered));
     }
 
-    // List available tasks in error message
-    let available: Vec<_> = discovery.tasks.iter().map(task_reference).collect();
-    bail!(
-        "task '{}' not found.\nAvailable tasks: {}",
-        task_name,
-        available.join(", ")
-    );
+    if let Some((scope, scoped_task, scoped_available)) = scoped_not_found {
+        bail!(
+            "task '{}' not found in scope '{}'.\nAvailable in scope: {}",
+            scoped_task,
+            scope,
+            if scoped_available.is_empty() {
+                "(none)".to_string()
+            } else {
+                scoped_available.join(", ")
+            }
+        );
+    }
+
+    Ok(None)
 }
 
 fn parse_scoped_selector(selector: &str) -> Option<(String, String)> {
@@ -3170,6 +3180,23 @@ mod tests {
         let selected = resolve_ambiguous_task_match("dev", &matches, Some(&cfg))
             .expect("preferred scope should pick");
         assert_eq!(selected.scope, "root");
+    }
+
+    #[test]
+    fn select_discovered_task_allows_exact_names_with_scope_delimiters() {
+        let scoped = discovered_task("mobile", "mobile", "run");
+        let exact = discovered_task("root", "", "mobile:dev");
+        let discovery = discover::DiscoveryResult {
+            tasks: vec![scoped, exact],
+            root_config: None,
+            root_cfg: None,
+        };
+
+        let selected = select_discovered_task(&discovery, "mobile:dev")
+            .expect("selection should succeed")
+            .expect("exact task should resolve");
+        assert_eq!(selected.scope, "root");
+        assert_eq!(selected.task.name, "mobile:dev");
     }
 
     #[test]
