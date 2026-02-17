@@ -223,7 +223,7 @@ pub enum Commands {
     Branches(BranchesCommand),
     #[command(
         about = "AI-powered commit with code review and optional GitEdit sync.",
-        long_about = "Stages all changes (or only paths passed via --path), runs code review for bugs/security, generates commit message, commits, pushes (unless commit queue is enabled), and syncs AI sessions to gitedit.dev when enabled in global config.",
+        long_about = "Stages all changes (or only paths passed via --path), commits quickly by default, starts deferred Codex deep review in the background, and syncs AI sessions to gitedit.dev when enabled in global config. Use --slow to run blocking review before commit.",
         alias = "c"
     )]
     Commit(CommitOpts),
@@ -792,10 +792,22 @@ pub struct TasksCommand {
 pub enum TasksAction {
     /// List tasks from the current project flow.toml.
     List(TasksListOpts),
+    /// Show duplicate task names discovered across nested flow.toml files.
+    Dupes(TasksDupesOpts),
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct TasksListOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+    /// Show only duplicate task names and their scopes.
+    #[arg(long)]
+    pub dupes: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TasksDupesOpts {
     /// Path to the project flow config (flow.toml).
     #[arg(long, default_value = "flow.toml")]
     pub config: PathBuf,
@@ -1450,6 +1462,9 @@ pub struct CommitOpts {
     /// Commit immediately and run Codex review asynchronously in the background.
     #[arg(long, conflicts_with = "dry")]
     pub quick: bool,
+    /// Run blocking review before committing (legacy commitWithCheck behavior).
+    #[arg(long, conflicts_with = "quick")]
+    pub slow: bool,
     /// Use Codex instead of Claude for code review (default: Claude).
     #[arg(long)]
     pub codex: bool,

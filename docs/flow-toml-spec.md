@@ -43,11 +43,18 @@ install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/sk
 # allow_direct_fallback = true
 
 [commit]             # optional: commit workflow defaults
-# quick-default = true        # make `f commit` behave like `--quick` by default
+# quick-default = false       # optional override: make plain `f commit` run blocking review (`--slow`)
 # queue = false               # keep fast path pushing by default
 # queue_on_issues = false     # do not force queue-only flow on review issues
 # message-fallbacks = ["rise:zai:glm-5", "rise:cerebras:gpt-oss-120b", "remote", "openai"]
 # review-fallbacks = ["glm5", "rise:cerebras:gpt-oss-120b", "codex-high"]
+
+[task_resolution]    # optional: nested-task disambiguation policy
+# preferred_scopes = ["mobile", "root"]    # used when plain task name is ambiguous
+# warn_on_implicit_scope = true             # print note when fallback routing is applied
+[task_resolution.routes]
+# dev = "mobile"                            # route ambiguous task name -> scope
+# test = "root"
 
 [options]            # optional: transport/runtime integrations
 # myflow_mirror = true         # mirror commit + queue review events to myflow
@@ -100,7 +107,8 @@ fr = "f run"
 - `[skills]`: optional skill enforcement; `sync_tasks` generates `.ai/skills` from tasks and `install` ensures registry skills are present (skills are gitignored by default).
 - `[skills.codex]`: optional Codex tuning; task skill `agents/openai.yaml` generation, post-sync force reload, and implicit invocation policy defaults.
 - `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
-- `[commit]`: optional commit workflow defaults; `quick-default = true` makes plain `f commit` use fast commit + deferred Codex deep review.
+- `[commit]`: optional commit workflow defaults; plain `f commit` uses fast commit + deferred Codex deep review by default. Set `quick-default = false` to make plain `f commit` run blocking review instead.
+- `[task_resolution]`: optional policy for nested task discovery (`f <scope>:<task>`, preferred scopes, and per-task routes when plain names collide).
 - `[options]`: optional integration/runtime toggles; use `myflow_mirror` for mirror sync and `codex_bin` to route review calls through a wrapper transport.
 - `[commit.testing]`: optional local testing gate evaluated during `f commit`; supports Bun-first strict mode plus optional AI scratch-test fallback (`.ai/test` by default).
 - `[commit.skill_gate]`: optional required-skill policy for `f commit`; can enforce presence and minimum skill versions.

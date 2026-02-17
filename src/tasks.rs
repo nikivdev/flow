@@ -1,5 +1,5 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{BTreeMap, hash_map::DefaultHasher},
     env,
     fs::{self, File, OpenOptions},
     hash::{Hash, Hasher},
@@ -26,7 +26,7 @@ use which::which;
 use crate::{
     cli::{
         GlobalAction, GlobalCommand, HubAction, HubCommand, HubOpts, TaskActivateOpts, TaskRunOpts,
-        TasksAction, TasksCommand, TasksListOpts, TasksOpts,
+        TasksAction, TasksCommand, TasksDupesOpts, TasksListOpts, TasksOpts,
     },
     config::{self, Config, FloxInstallSpec, TaskConfig},
     discover,
@@ -338,6 +338,7 @@ fn needs_interactive_mode(command: &str) -> bool {
 pub fn run_tasks_command(cmd: TasksCommand) -> Result<()> {
     match cmd.action {
         Some(TasksAction::List(opts)) => list_tasks(opts),
+        Some(TasksAction::Dupes(opts)) => list_task_duplicates(opts),
         None => fuzzy_search_task_history(),
     }
 }
@@ -468,6 +469,9 @@ fn list_tasks(opts: TasksListOpts) -> Result<()> {
     }
 
     let discovery = discover::discover_tasks(&root)?;
+    if opts.dupes {
+        return print_duplicate_tasks(&discovery.tasks);
+    }
 
     if discovery.tasks.is_empty() {
         println!("No tasks defined in {} or subdirectories", root.display());
@@ -480,6 +484,24 @@ fn list_tasks(opts: TasksListOpts) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn list_task_duplicates(opts: TasksDupesOpts) -> Result<()> {
+    let mut root = if opts.config.is_absolute() {
+        opts.config
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
+    if is_default_flow_config(&opts.config) && !root.join("flow.toml").exists() {
+        if let Some(found) = find_flow_toml_upwards(&root) {
+            root = found.parent().unwrap_or(&root).to_path_buf();
+        }
+    }
+    let discovery = discover::discover_tasks(&root)?;
+    print_duplicate_tasks(&discovery.tasks)
 }
 
 pub fn list(opts: TasksOpts) -> Result<()> {
@@ -579,38 +601,111 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
         }
     }
     let discovery = discover::discover_tasks(&root)?;
+    if discovery.tasks.is_empty() {
+        bail!("No tasks defined in {} or subdirectories", root.display());
+    }
 
-    // Find the task in discovered tasks
-    let discovered = discovery.tasks.iter().find(|d| {
-        d.task.name.eq_ignore_ascii_case(task_name)
-            || d.task
-                .shortcuts
+    if let Some((scope, scoped_task)) = parse_scoped_selector(task_name) {
+        let scope_exists = discovery.tasks.iter().any(|d| d.matches_scope(&scope));
+        if scope_exists {
+            let scoped_matches: Vec<&discover::DiscoveredTask> = discovery
+                .tasks
                 .iter()
-                .any(|s| s.eq_ignore_ascii_case(task_name))
-    });
+                .filter(|d| d.matches_scope(&scope))
+                .filter(|d| task_matches_selector(d, &scoped_task))
+                .collect();
 
-    // Also try abbreviation matching
-    let discovered = discovered.or_else(|| {
+            let selected = if scoped_matches.is_empty() {
+                let needle = scoped_task.to_ascii_lowercase();
+                if needle.len() < 2 {
+                    None
+                } else {
+                    let mut matches = discovery.tasks.iter().filter(|d| {
+                        d.matches_scope(&scope)
+                            && generate_abbreviation(&d.task.name)
+                                .map(|abbr| abbr == needle)
+                                .unwrap_or(false)
+                    });
+                    let first = matches.next();
+                    if first.is_some() && matches.next().is_none() {
+                        first
+                    } else {
+                        None
+                    }
+                }
+            } else if scoped_matches.len() == 1 {
+                Some(scoped_matches[0])
+            } else {
+                return Err(ambiguous_task_error(task_name, &scoped_matches));
+            };
+
+            if let Some(discovered) = selected {
+                return run(TaskRunOpts {
+                    config: discovered.config_path.clone(),
+                    delegate_to_hub: false,
+                    hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+                    hub_port: 9050,
+                    name: discovered.task.name.clone(),
+                    args,
+                });
+            }
+
+            let scoped_available: Vec<String> = discovery
+                .tasks
+                .iter()
+                .filter(|d| d.matches_scope(&scope))
+                .map(task_reference)
+                .collect();
+            bail!(
+                "task '{}' not found in scope '{}'.\nAvailable in scope: {}",
+                scoped_task,
+                scope,
+                if scoped_available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    scoped_available.join(", ")
+                }
+            );
+        }
+    }
+
+    let exact_matches: Vec<&discover::DiscoveredTask> = discovery
+        .tasks
+        .iter()
+        .filter(|d| task_matches_selector(d, task_name))
+        .collect();
+
+    let discovered = if exact_matches.is_empty() {
         let needle = task_name.to_ascii_lowercase();
         if needle.len() < 2 {
-            return None;
-        }
-        let mut matches = discovery.tasks.iter().filter(|d| {
-            generate_abbreviation(&d.task.name)
-                .map(|abbr| abbr == needle)
-                .unwrap_or(false)
-        });
-        let first = matches.next()?;
-        // Only match if unambiguous
-        if matches.next().is_some() {
             None
         } else {
-            Some(first)
+            let mut matches = discovery.tasks.iter().filter(|d| {
+                generate_abbreviation(&d.task.name)
+                    .map(|abbr| abbr == needle)
+                    .unwrap_or(false)
+            });
+            if let Some(first) = matches.next() {
+                if matches.next().is_some() {
+                    None
+                } else {
+                    Some(first)
+                }
+            } else {
+                None
+            }
         }
-    });
+    } else if exact_matches.len() == 1 {
+        Some(exact_matches[0])
+    } else {
+        Some(resolve_ambiguous_task_match(
+            task_name,
+            &exact_matches,
+            discovery.root_cfg.as_ref(),
+        )?)
+    };
 
     if let Some(discovered) = discovered {
-        // Run the task with its specific config path
         return run(TaskRunOpts {
             config: discovered.config_path.clone(),
             delegate_to_hub: false,
@@ -622,22 +717,131 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
     }
 
     // List available tasks in error message
-    let available: Vec<_> = discovery
-        .tasks
-        .iter()
-        .map(|d| {
-            if d.relative_dir.is_empty() {
-                d.task.name.clone()
-            } else {
-                format!("{} ({})", d.task.name, d.relative_dir)
-            }
-        })
-        .collect();
+    let available: Vec<_> = discovery.tasks.iter().map(task_reference).collect();
     bail!(
         "task '{}' not found.\nAvailable tasks: {}",
         task_name,
         available.join(", ")
     );
+}
+
+fn parse_scoped_selector(selector: &str) -> Option<(String, String)> {
+    let trimmed = selector.trim();
+    if let Some((scope, task)) = trimmed.split_once(':') {
+        let scope = scope.trim();
+        let task = task.trim();
+        if !scope.is_empty() && !task.is_empty() {
+            return Some((scope.to_string(), task.to_string()));
+        }
+    }
+    if let Some((scope, task)) = trimmed.split_once('/') {
+        let scope = scope.trim();
+        let task = task.trim();
+        if !scope.is_empty() && !task.is_empty() {
+            return Some((scope.to_string(), task.to_string()));
+        }
+    }
+    None
+}
+
+fn task_matches_selector(task: &discover::DiscoveredTask, needle: &str) -> bool {
+    task.task.name.eq_ignore_ascii_case(needle)
+        || task
+            .task
+            .shortcuts
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(needle))
+}
+
+fn task_reference(task: &discover::DiscoveredTask) -> String {
+    let mut out = format!("{}:{}", task.scope, task.task.name);
+    if !task.relative_dir.is_empty() {
+        out.push_str(&format!(" ({})", task.relative_dir));
+    }
+    out
+}
+
+fn ambiguous_task_error(task_name: &str, matches: &[&discover::DiscoveredTask]) -> anyhow::Error {
+    let mut msg = String::new();
+    msg.push_str(&format!("task '{}' is ambiguous.\n", task_name));
+    msg.push_str("Discovered matches:\n");
+    for task in matches {
+        msg.push_str(&format!("  - {}\n", task_reference(task)));
+    }
+    msg.push_str("Try one of:\n");
+    for task in matches {
+        msg.push_str(&format!(
+            "  f {}:{}\n  f run --config {} {}\n",
+            task.scope,
+            task.task.name,
+            task.config_path.display(),
+            task.task.name
+        ));
+    }
+    anyhow::anyhow!(msg.trim_end().to_string())
+}
+
+fn resolve_ambiguous_task_match<'a>(
+    query: &str,
+    matches: &[&'a discover::DiscoveredTask],
+    root_cfg: Option<&Config>,
+) -> Result<&'a discover::DiscoveredTask> {
+    let Some(policy) = root_cfg.and_then(|cfg| cfg.task_resolution.as_ref()) else {
+        return Err(ambiguous_task_error(query, matches));
+    };
+
+    let mut route_scope: Option<&str> = None;
+    for (task, scope) in &policy.routes {
+        if task.eq_ignore_ascii_case(query)
+            || matches
+                .iter()
+                .any(|m| m.task.name.eq_ignore_ascii_case(task))
+        {
+            route_scope = Some(scope.as_str());
+            break;
+        }
+    }
+    if let Some(scope) = route_scope {
+        let routed: Vec<&discover::DiscoveredTask> = matches
+            .iter()
+            .copied()
+            .filter(|m| m.matches_scope(scope))
+            .collect();
+        if routed.len() == 1 {
+            if policy.warn_on_implicit_scope.unwrap_or(false) {
+                eprintln!(
+                    "note: routed '{}' to scope '{}' via [task_resolution.routes].",
+                    query, scope
+                );
+            }
+            return Ok(routed[0]);
+        }
+        if routed.len() > 1 {
+            return Err(ambiguous_task_error(query, &routed));
+        }
+    }
+
+    for scope in &policy.preferred_scopes {
+        let preferred: Vec<&discover::DiscoveredTask> = matches
+            .iter()
+            .copied()
+            .filter(|m| m.matches_scope(scope))
+            .collect();
+        if preferred.len() == 1 {
+            if policy.warn_on_implicit_scope.unwrap_or(false) {
+                eprintln!(
+                    "note: selected '{}' from preferred scope '{}'.",
+                    query, scope
+                );
+            }
+            return Ok(preferred[0]);
+        }
+        if preferred.len() > 1 {
+            return Err(ambiguous_task_error(query, &preferred));
+        }
+    }
+
+    Err(ambiguous_task_error(query, matches))
 }
 
 pub fn run(opts: TaskRunOpts) -> Result<()> {
@@ -1242,7 +1446,7 @@ fn format_discovered_task_lines(tasks: &[discover::DiscoveredTask]) -> Vec<Strin
             format!(" [{}]", task.shortcuts.join(", "))
         };
 
-        // Show relative path for nested tasks
+        // Keep relative path visible for debugging where each selector resolves.
         let path_suffix = if let Some(path_label) = discovered.path_label() {
             format!(" ({})", path_label)
         } else {
@@ -1250,8 +1454,9 @@ fn format_discovered_task_lines(tasks: &[discover::DiscoveredTask]) -> Vec<Strin
         };
 
         lines.push(format!(
-            "{:>2}. {}{}{} – {}",
+            "{:>2}. {}:{}{}{} – {}",
             idx + 1,
+            discovered.scope,
             task.name,
             shortcut_display,
             path_suffix,
@@ -1262,6 +1467,52 @@ fn format_discovered_task_lines(tasks: &[discover::DiscoveredTask]) -> Vec<Strin
         }
     }
     lines
+}
+
+fn print_duplicate_tasks(tasks: &[discover::DiscoveredTask]) -> Result<()> {
+    let mut by_name: BTreeMap<String, Vec<&discover::DiscoveredTask>> = BTreeMap::new();
+    for task in tasks {
+        by_name
+            .entry(task.task.name.to_ascii_lowercase())
+            .or_default()
+            .push(task);
+    }
+
+    let mut duplicates: Vec<(String, Vec<&discover::DiscoveredTask>)> = by_name
+        .into_iter()
+        .filter_map(|(name, mut entries)| {
+            if entries.len() < 2 {
+                return None;
+            }
+            entries.sort_by(|a, b| {
+                a.scope
+                    .cmp(&b.scope)
+                    .then_with(|| a.relative_dir.cmp(&b.relative_dir))
+            });
+            Some((name, entries))
+        })
+        .collect();
+    duplicates.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if duplicates.is_empty() {
+        println!("No duplicate task names found.");
+        return Ok(());
+    }
+
+    println!("Duplicate task names:");
+    for (name, entries) in duplicates {
+        println!();
+        println!("  {} ({})", name, entries.len());
+        for entry in entries {
+            println!(
+                "    - {}:{}  [{}]",
+                entry.scope,
+                entry.task.name,
+                entry.config_path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn find_task<'a>(cfg: &'a Config, needle: &str) -> Option<&'a TaskConfig> {
@@ -2812,7 +3063,8 @@ fn format_task_submit_url(host: IpAddr, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DependencySpec, FloxConfig};
+    use crate::config::{DependencySpec, FloxConfig, TaskResolutionConfig};
+    use std::collections::HashMap;
     use std::path::Path;
 
     #[test]
@@ -2855,6 +3107,76 @@ mod tests {
                 " 2. test – gotestsum ./...".to_string(),
             ]
         );
+    }
+
+    fn discovered_task(scope: &str, relative_dir: &str, name: &str) -> discover::DiscoveredTask {
+        discover::DiscoveredTask {
+            task: TaskConfig {
+                name: name.to_string(),
+                command: format!("echo {}", name),
+                delegate_to_hub: false,
+                activate_on_cd_to_root: false,
+                dependencies: Vec::new(),
+                description: None,
+                shortcuts: Vec::new(),
+                interactive: false,
+                confirm_on_match: false,
+                on_cancel: None,
+                output_file: None,
+            },
+            config_path: PathBuf::from(format!("{}/flow.toml", scope)),
+            relative_dir: relative_dir.to_string(),
+            depth: if relative_dir.is_empty() { 0 } else { 1 },
+            scope: scope.to_string(),
+            scope_aliases: vec![scope.to_ascii_lowercase()],
+        }
+    }
+
+    #[test]
+    fn parse_scoped_selector_supports_colon_and_slash() {
+        assert_eq!(
+            parse_scoped_selector("mobile:dev"),
+            Some(("mobile".to_string(), "dev".to_string()))
+        );
+        assert_eq!(
+            parse_scoped_selector("mobile/dev"),
+            Some(("mobile".to_string(), "dev".to_string()))
+        );
+        assert!(parse_scoped_selector("dev").is_none());
+    }
+
+    #[test]
+    fn resolve_ambiguous_task_match_uses_route_then_preferred_scope() {
+        let mobile = discovered_task("mobile", "mobile", "dev");
+        let root = discovered_task("root", "", "dev");
+        let matches = vec![&mobile, &root];
+
+        let mut cfg = Config::default();
+        cfg.task_resolution = Some(TaskResolutionConfig {
+            preferred_scopes: vec!["root".to_string()],
+            routes: HashMap::from([(String::from("dev"), String::from("mobile"))]),
+            warn_on_implicit_scope: Some(false),
+        });
+
+        let selected =
+            resolve_ambiguous_task_match("dev", &matches, Some(&cfg)).expect("route should pick");
+        assert_eq!(selected.scope, "mobile");
+
+        cfg.task_resolution = Some(TaskResolutionConfig {
+            preferred_scopes: vec!["root".to_string()],
+            routes: HashMap::new(),
+            warn_on_implicit_scope: Some(false),
+        });
+        let selected = resolve_ambiguous_task_match("dev", &matches, Some(&cfg))
+            .expect("preferred scope should pick");
+        assert_eq!(selected.scope, "root");
+    }
+
+    #[test]
+    fn format_discovered_task_lines_prefixes_scope() {
+        let entries = vec![discovered_task("mobile", "mobile", "dev")];
+        let lines = format_discovered_task_lines(&entries);
+        assert!(lines[0].contains("mobile:dev"));
     }
 
     #[test]
