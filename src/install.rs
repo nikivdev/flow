@@ -25,7 +25,7 @@ pub fn run(mut opts: InstallOpts) -> Result<()> {
     }
 
     match opts.backend {
-        InstallBackend::Registry => registry::install(opts),
+        InstallBackend::Registry => registry::install(normalize_registry_install_opts(opts)),
         InstallBackend::Flox => install_with_flox(&opts),
         InstallBackend::Parm => install_with_parm(&opts),
         InstallBackend::Auto => install_with_auto(&opts),
@@ -36,9 +36,13 @@ fn install_with_auto(opts: &InstallOpts) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
 
     if registry_configured(opts) {
-        match registry::install(opts.clone()) {
+        let registry_opts = normalize_registry_install_opts(opts.clone());
+        match registry::install(registry_opts) {
             Ok(()) => return Ok(()),
             Err(err) => {
+                if is_existing_destination_error(&err) {
+                    return Err(err);
+                }
                 eprintln!("WARN registry install failed: {err}");
                 errors.push(format!("registry: {err}"));
             }
@@ -49,11 +53,19 @@ fn install_with_auto(opts: &InstallOpts) -> Result<()> {
         match install_with_parm(opts) {
             Ok(()) => return Ok(()),
             Err(err) => {
+                if is_existing_destination_error(&err) {
+                    return Err(err);
+                }
                 eprintln!("WARN parm install failed: {err}");
                 errors.push(format!("parm: {err}"));
             }
         }
-    } else if let Some(name) = opts.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+    } else if let Some(name) = opts
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
         eprintln!(
             "INFO skipping parm fallback for '{}' (no owner/repo mapping; set FLOW_INSTALL_OWNER or pass owner/repo)",
             name
@@ -70,6 +82,10 @@ fn install_with_auto(opts: &InstallOpts) -> Result<()> {
             );
         }
     }
+}
+
+fn is_existing_destination_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains("already exists")
 }
 
 pub fn run_index(opts: InstallIndexOpts) -> Result<()> {
@@ -273,7 +289,12 @@ fn resolve_owner_repo(raw: &str) -> Result<String> {
 }
 
 fn should_try_parm(opts: &InstallOpts) -> bool {
-    let Some(name) = opts.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) else {
+    let Some(name) = opts
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    else {
         return false;
     };
     name.contains('/') || known_owner_repo(name).is_some() || resolve_install_owner().is_some()
@@ -283,7 +304,37 @@ fn known_owner_repo(name: &str) -> Option<&'static str> {
     match name {
         "f" | "flow" | "lin" => Some("nikivdev/flow"),
         "rise" => Some("nikivdev/rise"),
+        "seq" | "seqd" => Some("nikivdev/seq"),
         _ => None,
+    }
+}
+
+fn normalize_registry_install_opts(mut opts: InstallOpts) -> InstallOpts {
+    let Some(raw) = opts.name.clone().map(|n| n.trim().to_string()) else {
+        return opts;
+    };
+    if raw.is_empty() {
+        return opts;
+    }
+    let (package, default_bin) = registry_alias(&raw);
+    if package != raw {
+        opts.name = Some(package.to_string());
+        if opts.bin.is_none() {
+            if let Some(bin) = default_bin {
+                opts.bin = Some(bin.to_string());
+            }
+        }
+    }
+    opts
+}
+
+fn registry_alias(raw: &str) -> (&str, Option<&str>) {
+    match raw {
+        "f" => ("flow", Some("f")),
+        "lin" => ("flow", Some("lin")),
+        "seqd" => ("seq", Some("seqd")),
+        "seq" => ("seq", Some("seq")),
+        _ => (raw, None),
     }
 }
 

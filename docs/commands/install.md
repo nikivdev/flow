@@ -26,7 +26,18 @@ f install <name>
 ## Auto backend notes
 
 - `f install rise` can resolve through `parm` using built-in owner/repo mapping.
+- Built-in aliases:
+  - `f install seqd` resolves registry package `seq` with binary `seqd`.
+  - `f install lin` resolves registry package `flow` with binary `lin`.
 - If a package name is ambiguous for `parm`, set `FLOW_INSTALL_OWNER` (env or Flow personal env store) or pass `owner/repo` directly.
+
+## Bootstrap from installer
+
+The hosted installer can bootstrap core tools after installing flow:
+
+- `FLOW_BOOTSTRAP_TOOLS="rise seq seqd"` (default) installs those with `f install ... --backend auto`.
+- `FLOW_BOOTSTRAP_TOOLS=0` disables this.
+- `FLOW_BOOTSTRAP_INSTALL_PARM=1` (default) attempts to install `parm` for robust GitHub fallback.
 
 ## Registry layout
 

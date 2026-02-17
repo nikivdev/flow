@@ -1,7 +1,33 @@
-#!/usr/bin/env bash
+#!/bin/sh
+# Allow `curl ... | sh` while still running the installer in bash.
+if [ -z "${BASH_VERSION:-}" ]; then
+    if ! command -v bash >/dev/null 2>&1; then
+        echo "flow installer: bash is required. Install bash, then rerun the installer." >&2
+        exit 1
+    fi
+    case "${0:-}" in
+        sh|-sh|dash|-dash|*/sh|*/dash)
+            tmp="$(mktemp "${TMPDIR:-/tmp}/flow-install.XXXXXX.bash")" || {
+                echo "flow installer: failed to create temp file" >&2
+                exit 1
+            }
+            cat > "${tmp}"
+            FLOW_INSTALL_SCRIPT_TMP="${tmp}" exec bash "${tmp}" "$@"
+            ;;
+        *)
+            exec bash "$0" "$@"
+            ;;
+    esac
+fi
+
 set -euo pipefail
 
+if [[ -n "${FLOW_INSTALL_SCRIPT_TMP:-}" ]]; then
+    trap 'rm -f "${FLOW_INSTALL_SCRIPT_TMP}"' EXIT
+fi
+
 # Installs flow + f to the current user. Usage:
+#   curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | bash
 # Customize with:
 #   FLOW_INSTALL_ROOT=/usr/local         # overrides install prefix (default: ~/.local)
@@ -14,6 +40,8 @@ set -euo pipefail
 #   FLOW_REGISTRY_URL=<url>              # install from Flow registry (e.g., https://myflow.sh)
 #   FLOW_REGISTRY_PACKAGE=<name>         # registry package name (default: flow)
 #   FLOW_INSTALL_LIN=0                   # skip installing the lin helper binary
+#   FLOW_BOOTSTRAP_TOOLS="rise seq seqd" # install additional tools via `f install` after flow
+#   FLOW_BOOTSTRAP_INSTALL_PARM=1         # auto-install parm before tool bootstrap
 #   FLOW_NO_RELEASE=1                    # force source build even if a release exists
 #   FLOW_DEV=1                           # dev install: clone to ~/code/org/1f/flow with jazz
 #   FLOW_SKIP_DEPS=1                     # skip installing dependencies (brew, fnm, node, bun, rust)
@@ -27,6 +55,8 @@ REGISTRY_PACKAGE="${FLOW_REGISTRY_PACKAGE:-flow}"
 DEV_INSTALL="${FLOW_DEV:-}"
 SKIP_DEPS="${FLOW_SKIP_DEPS:-}"
 RELEASE_ONLY="${FLOW_RELEASE_ONLY:-}"
+BOOTSTRAP_TOOLS="${FLOW_BOOTSTRAP_TOOLS:-rise seq seqd}"
+BOOTSTRAP_INSTALL_PARM="${FLOW_BOOTSTRAP_INSTALL_PARM:-1}"
 FLOW_INSTALLED=0
 RESOLVED_VERSION=""
 OS_NAME=""
@@ -467,6 +497,60 @@ ensure_path_hint() {
     esac
 }
 
+install_parm_if_needed() {
+    if command -v parm >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ "${BOOTSTRAP_INSTALL_PARM}" == "0" ]]; then
+        return 1
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        info "curl missing; cannot auto-install parm."
+        return 1
+    fi
+    info "Installing parm for robust GitHub fallback..."
+    if curl -fsSL https://raw.githubusercontent.com/yhoundz/parm/master/scripts/install.sh | sh; then
+        export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+        return 0
+    fi
+    info "parm install failed; continuing with registry/flox-only bootstrap."
+    return 1
+}
+
+bootstrap_core_tools() {
+    local fbin="${BIN_DIR}/f"
+    if [[ ! -x "${fbin}" ]]; then
+        return 0
+    fi
+    if [[ -z "${BOOTSTRAP_TOOLS}" || "${BOOTSTRAP_TOOLS}" == "0" || "${BOOTSTRAP_TOOLS}" == "false" ]]; then
+        return 0
+    fi
+
+    info ""
+    info "=== Bootstrap Core Tools ==="
+    info ""
+
+    install_parm_if_needed || true
+
+    local failures=0
+    local tool=""
+    for tool in ${BOOTSTRAP_TOOLS}; do
+        info "Bootstrapping ${tool}..."
+        if "${fbin}" install "${tool}" --backend auto --bin-dir "${BIN_DIR}" --force; then
+            :
+        else
+            info "WARN failed to bootstrap ${tool}. Retry later with: f install ${tool} --backend auto"
+            failures=$((failures + 1))
+        fi
+    done
+
+    if [[ "${failures}" -eq 0 ]]; then
+        info "Bootstrap complete: ${BOOTSTRAP_TOOLS}"
+    else
+        info "Bootstrap completed with ${failures} warning(s)."
+    fi
+}
+
 # Dev install: clone repos to ~/code/org/1f/ and build from source
 install_dev() {
     # Install all dependencies first
@@ -579,6 +663,7 @@ main() {
     fi
 
     ensure_aliases
+    bootstrap_core_tools
     ensure_path_hint
 
     info "Done. Launch with \"flow --help\" or \"f --help\"."
