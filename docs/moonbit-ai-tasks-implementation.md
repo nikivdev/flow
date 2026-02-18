@@ -18,6 +18,7 @@ Core runtime and wiring:
 - `src/ai_tasks.rs`
 - `src/ai_taskd.rs`
 - `src/tasks.rs`
+- `src/bin/ai_taskd_client.rs`
 - `src/palette.rs`
 - `src/cli.rs`
 - `src/lib.rs`
@@ -83,6 +84,14 @@ Flow now includes a lightweight Unix-socket daemon for repeated AI task runs:
 - socket: `~/.flow/run/ai-taskd.sock`
 - lifecycle: `f tasks daemon start|status|stop`
 - daemon execution: `f tasks run-ai --daemon <selector>`
+- low-overhead client execution: `./target/release/ai-taskd-client <selector>`
+
+Recent runtime optimizations:
+- daemon-side task discovery cache with TTL (`FLOW_AI_TASKD_DISCOVERY_TTL_MS`)
+- daemon-side hot artifact reuse cache with TTL (`FLOW_AI_TASKD_ARTIFACT_TTL_MS`)
+- fast exact selector resolution (skip full `.ai/tasks` scan for `ai:scope/task`)
+- cache key generation optimized to use file metadata fingerprints + cached Moon version
+- optional low-latency dispatch via `fai` with auto-preference from `f` for latency-tagged AI tasks in daemon mode
 
 ## Task Pack Added
 

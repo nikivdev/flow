@@ -83,6 +83,16 @@ def find_flow_bin(repo: Path, flow_bin: str | None) -> str:
     return "f"
 
 
+def find_ai_taskd_client_bin(repo: Path) -> str | None:
+    for candidate in [
+        repo / "target" / "release" / "ai-taskd-client",
+        repo / "target" / "debug" / "ai-taskd-client",
+    ]:
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def ensure_cached_binary(repo: Path, flow_bin: str) -> str:
     proc = run_cmd([flow_bin, "tasks", "build-ai", "ai:flow/noop"], cwd=repo)
     if proc.returncode != 0:
@@ -111,9 +121,12 @@ def main() -> int:
 
     repo = Path(__file__).resolve().parents[1]
     flow_bin = find_flow_bin(repo, args.flow_bin)
+    ai_taskd_client_bin = find_ai_taskd_client_bin(repo)
 
     print(f"repo: {repo}")
     print(f"flow_bin: {flow_bin}")
+    if ai_taskd_client_bin:
+        print(f"ai_taskd_client_bin: {ai_taskd_client_bin}")
     print(f"iterations={args.iterations} warmup={args.warmup}")
 
     # ensure daemon is up for daemon path benchmark
@@ -148,6 +161,14 @@ def main() -> int:
             {"FLOW_AI_TASK_PROJECT_ROOT": str(repo)},
         ),
     ]
+    if ai_taskd_client_bin:
+        scenarios.append(
+            (
+                "daemon_client_noop",
+                [ai_taskd_client_bin, "ai:flow/noop"],
+                None,
+            )
+        )
 
     results: Dict[str, Dict[str, float]] = {}
     for label, cmd, env in scenarios:
@@ -170,6 +191,12 @@ def main() -> int:
 
     print(f"p95 ratio moon_run/cached: {cached_vs_moon:.2f}x")
     print(f"p95 ratio daemon/cached:  {daemon_vs_cached:.2f}x")
+    daemon_client_vs_f = None
+    if "daemon_client_noop" in results:
+        daemon_client_vs_f = (
+            results["daemon_cached_noop"]["p95_us"] / results["daemon_client_noop"]["p95_us"]
+        )
+        print(f"p95 ratio f-daemon/client-daemon:  {daemon_client_vs_f:.2f}x")
 
     payload = {
         "repo": str(repo),
@@ -180,6 +207,7 @@ def main() -> int:
         "ratios": {
             "moon_run_p95_div_cached_p95": cached_vs_moon,
             "daemon_p95_div_cached_p95": daemon_vs_cached,
+            "f_daemon_p95_div_client_daemon_p95": daemon_client_vs_f,
         },
     }
 

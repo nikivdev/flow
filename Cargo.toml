@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "lin"
 path = "src/bin/lin.rs"
 
+[[bin]]
+name = "ai-taskd-client"
+path = "src/bin/ai_taskd_client.rs"
+
 [dependencies]
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

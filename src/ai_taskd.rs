@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -10,6 +11,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai_tasks;
 
+#[derive(Debug, Clone)]
+struct CachedDiscovery {
+    tasks: Vec<ai_tasks::DiscoveredAiTask>,
+    refreshed_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct CachedArtifact {
+    binary_path: PathBuf,
+    refreshed_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct TaskdState {
+    discoveries: HashMap<PathBuf, CachedDiscovery>,
+    artifacts: HashMap<String, CachedArtifact>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TaskdRequest {
@@ -20,7 +39,13 @@ enum TaskdRequest {
         selector: String,
         args: Vec<String>,
         no_cache: bool,
+        #[serde(default = "default_capture_output")]
+        capture_output: bool,
     },
+}
+
+fn default_capture_output() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,7 +100,8 @@ pub fn stop() -> Result<()> {
         Ok(response) => response,
         Err(error) => {
             let message = format!("{error:#}");
-            if message.contains("Connection refused") || message.contains("No such file or directory")
+            if message.contains("Connection refused")
+                || message.contains("No such file or directory")
             {
                 fs::remove_file(socket_path()).ok();
                 fs::remove_file(pid_path()).ok();
@@ -113,6 +139,7 @@ pub fn run_via_daemon(
         selector: selector.to_string(),
         args: args.to_vec(),
         no_cache,
+        capture_output: true,
     };
 
     let response = send_request(&request)?;
@@ -153,6 +180,7 @@ pub fn serve() -> Result<()> {
         .with_context(|| format!("failed to write {}", pid_path().display()))?;
 
     let mut should_stop = false;
+    let mut state = TaskdState::default();
     while !should_stop {
         let (mut stream, _) = match listener.accept() {
             Ok(tuple) => tuple,
@@ -163,18 +191,24 @@ pub fn serve() -> Result<()> {
         };
         let mut payload = Vec::new();
         if let Err(error) = stream.read_to_end(&mut payload) {
-            write_error_response(&mut stream, format!("ai-taskd read request failed: {error}"));
+            write_error_response(
+                &mut stream,
+                format!("ai-taskd read request failed: {error}"),
+            );
             continue;
         }
 
         let request: TaskdRequest = match serde_json::from_slice(&payload) {
             Ok(request) => request,
             Err(error) => {
-                write_error_response(&mut stream, format!("ai-taskd invalid request payload: {error}"));
+                write_error_response(
+                    &mut stream,
+                    format!("ai-taskd invalid request payload: {error}"),
+                );
                 continue;
             }
         };
-        let response = handle_request(&request);
+        let response = handle_request(&request, &mut state);
         if matches!(request, TaskdRequest::Stop) {
             should_stop = true;
         }
@@ -182,7 +216,10 @@ pub fn serve() -> Result<()> {
         let body = match serde_json::to_vec(&response) {
             Ok(body) => body,
             Err(error) => {
-                write_error_response(&mut stream, format!("ai-taskd encode response failed: {error}"));
+                write_error_response(
+                    &mut stream,
+                    format!("ai-taskd encode response failed: {error}"),
+                );
                 continue;
             }
         };
@@ -198,7 +235,7 @@ pub fn serve() -> Result<()> {
     Ok(())
 }
 
-fn handle_request(request: &TaskdRequest) -> TaskdResponse {
+fn handle_request(request: &TaskdRequest, state: &mut TaskdState) -> TaskdResponse {
     match request {
         TaskdRequest::Ping => TaskdResponse {
             ok: true,
@@ -219,9 +256,10 @@ fn handle_request(request: &TaskdRequest) -> TaskdResponse {
             selector,
             args,
             no_cache,
+            capture_output,
         } => {
             let root = PathBuf::from(project_root);
-            match run_request(&root, selector, args, *no_cache) {
+            match run_request(state, &root, selector, args, *no_cache, *capture_output) {
                 Ok((code, stdout, stderr)) => TaskdResponse {
                     ok: code == 0,
                     message: if code == 0 {
@@ -245,26 +283,200 @@ fn handle_request(request: &TaskdRequest) -> TaskdResponse {
     }
 }
 
+fn discovery_ttl() -> Duration {
+    let ms = std::env::var("FLOW_AI_TASKD_DISCOVERY_TTL_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(750);
+    Duration::from_millis(ms)
+}
+
+fn artifact_ttl() -> Duration {
+    let ms = std::env::var("FLOW_AI_TASKD_ARTIFACT_TTL_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(1500);
+    Duration::from_millis(ms)
+}
+
+fn get_discovered_tasks(
+    state: &mut TaskdState,
+    project_root: &Path,
+) -> Result<(Vec<ai_tasks::DiscoveredAiTask>, bool)> {
+    let key = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    if let Some(entry) = state.discoveries.get(&key)
+        && entry.refreshed_at.elapsed() <= discovery_ttl()
+    {
+        return Ok((entry.tasks.clone(), true));
+    }
+
+    let tasks = refresh_discovery(state, &key)?;
+    Ok((tasks, false))
+}
+
+fn refresh_discovery(
+    state: &mut TaskdState,
+    project_root: &Path,
+) -> Result<Vec<ai_tasks::DiscoveredAiTask>> {
+    let key = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let tasks = ai_tasks::discover_tasks(&key)?;
+    state.discoveries.insert(
+        key,
+        CachedDiscovery {
+            tasks: tasks.clone(),
+            refreshed_at: Instant::now(),
+        },
+    );
+    Ok(tasks)
+}
+
 fn run_request(
+    state: &mut TaskdState,
     project_root: &Path,
     selector: &str,
     args: &[String],
     no_cache: bool,
+    capture_output: bool,
 ) -> Result<(i32, String, String)> {
-    let tasks = ai_tasks::discover_tasks(project_root)?;
-    let task = ai_tasks::select_task(&tasks, selector)?
-        .with_context(|| format!("AI task '{}' not found", selector))?;
+    let mut selected = ai_tasks::resolve_task_fast(project_root, selector)?;
+    if selected.is_none() {
+        let (tasks, from_cache) = get_discovered_tasks(state, project_root)?;
+        selected = ai_tasks::select_task(&tasks, selector)?.cloned();
+        if selected.is_none() && from_cache {
+            // If cache was stale, refresh once and retry task selection.
+            let fresh = refresh_discovery(state, project_root)?;
+            selected = ai_tasks::select_task(&fresh, selector)?.cloned();
+        }
+    }
+    let task = selected.with_context(|| format!("AI task '{}' not found", selector))?;
+
+    if !capture_output && !no_cache {
+        let status = run_cached_task_status_hot(state, project_root, &task, args)?;
+        return Ok((status.code().unwrap_or(1), String::new(), String::new()));
+    }
 
     let output = if no_cache {
-        ai_tasks::run_task_via_moon_output(task, project_root, args)?
+        ai_tasks::run_task_via_moon_output(&task, project_root, args)?
     } else {
-        ai_tasks::run_task_cached_output(task, project_root, args)?
+        run_cached_task_output_hot(state, project_root, &task, args)?
     };
 
     let code = output.status.code().unwrap_or(1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     Ok((code, stdout, stderr))
+}
+
+fn run_cached_task_output_hot(
+    state: &mut TaskdState,
+    project_root: &Path,
+    task: &ai_tasks::DiscoveredAiTask,
+    args: &[String],
+) -> Result<std::process::Output> {
+    let canonical_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let key = format!("{}::{}", canonical_root.display(), task.id);
+
+    if let Some(entry) = state.artifacts.get(&key)
+        && entry.refreshed_at.elapsed() <= artifact_ttl()
+        && entry.binary_path.exists()
+    {
+        return run_artifact_output(&entry.binary_path, &canonical_root, &task.id, args);
+    }
+
+    let artifact = ai_tasks::build_task_cached(task, &canonical_root, false)?;
+    let binary_path = artifact.binary_path.clone();
+    state.artifacts.insert(
+        key,
+        CachedArtifact {
+            binary_path: binary_path.clone(),
+            refreshed_at: Instant::now(),
+        },
+    );
+    run_artifact_output(&binary_path, &canonical_root, &task.id, args)
+}
+
+fn run_cached_task_status_hot(
+    state: &mut TaskdState,
+    project_root: &Path,
+    task: &ai_tasks::DiscoveredAiTask,
+    args: &[String],
+) -> Result<std::process::ExitStatus> {
+    let canonical_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let key = format!("{}::{}", canonical_root.display(), task.id);
+
+    if let Some(entry) = state.artifacts.get(&key)
+        && entry.refreshed_at.elapsed() <= artifact_ttl()
+        && entry.binary_path.exists()
+    {
+        return run_artifact_status(&entry.binary_path, &canonical_root, &task.id, args);
+    }
+
+    let artifact = ai_tasks::build_task_cached(task, &canonical_root, false)?;
+    let binary_path = artifact.binary_path.clone();
+    state.artifacts.insert(
+        key,
+        CachedArtifact {
+            binary_path: binary_path.clone(),
+            refreshed_at: Instant::now(),
+        },
+    );
+    run_artifact_status(&binary_path, &canonical_root, &task.id, args)
+}
+
+fn run_artifact_output(
+    binary_path: &Path,
+    project_root: &Path,
+    task_id: &str,
+    args: &[String],
+) -> Result<std::process::Output> {
+    let output = Command::new(binary_path)
+        .args(args)
+        .current_dir(project_root)
+        .env(
+            "FLOW_AI_TASK_PROJECT_ROOT",
+            project_root.to_string_lossy().to_string(),
+        )
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run cached AI task '{}' binary {}",
+                task_id,
+                binary_path.display()
+            )
+        })?;
+    Ok(output)
+}
+
+fn run_artifact_status(
+    binary_path: &Path,
+    project_root: &Path,
+    task_id: &str,
+    args: &[String],
+) -> Result<std::process::ExitStatus> {
+    let status = Command::new(binary_path)
+        .args(args)
+        .current_dir(project_root)
+        .env(
+            "FLOW_AI_TASK_PROJECT_ROOT",
+            project_root.to_string_lossy().to_string(),
+        )
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to run cached AI task '{}' binary {}",
+                task_id,
+                binary_path.display()
+            )
+        })?;
+    Ok(status)
 }
 
 fn ping() -> Result<()> {
