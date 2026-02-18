@@ -36,3 +36,10 @@ f install-ai-fast-client
 f tasks daemon start
 f fast ai:flow/noop
 ```
+
+For pooled burst execution and timings, use `fai` directly:
+
+```bash
+fai --timings ai:flow/noop
+printf 'ai:flow/noop\nai:flow/noop\n' | fai --batch-stdin --timings
+```

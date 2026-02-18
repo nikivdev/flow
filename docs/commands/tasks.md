@@ -20,6 +20,8 @@ f tasks run-ai --daemon ai:flow/dev-check
 f tasks daemon start
 f tasks daemon status
 f tasks daemon stop
+f ai-taskd-launchd-install
+f ai-taskd-launchd-status
 cargo build --release --bin ai-taskd-client
 ./target/release/ai-taskd-client ai:flow/dev-check
 f install-ai-fast-client
@@ -71,6 +73,14 @@ f ai:project/release-flow
   - `./target/release/ai-taskd-client ai:<selector>`
   - or `f install-ai-fast-client` then use `fai ai:<selector>`
   - This bypasses full `f` startup for hot-loop calls.
+- `fai` supports:
+  - `--protocol msgpack|json` (msgpack default)
+  - `--timings` (server-side phase timings)
+  - `--batch-stdin` (pooled burst mode in one client process)
+- For stable startup/jitter, prefer always-on daemon via launchd:
+  - `f ai-taskd-launchd-install`
+  - `f ai-taskd-launchd-status`
+  - `f ai-taskd-launchd-logs`
 - Automatic preference for latency-critical AI selectors:
   - Opt in with `FLOW_AI_TASK_FAST_CLIENT=1` (typically together with `FLOW_AI_TASK_DAEMON=1`).
   - Then `f` will auto-prefer fast client dispatch for AI tasks tagged `fast`, `latency`, `hot`, or `hotkey`.
