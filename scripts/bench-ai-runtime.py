@@ -76,8 +76,8 @@ def benchmark_command(
 def find_flow_bin(repo: Path, flow_bin: str | None) -> str:
     if flow_bin:
         return flow_bin
-    # Prefer debug binary first: during active refactors it's usually the freshest build.
-    for candidate in [repo / "target" / "debug" / "f", repo / "target" / "release" / "f"]:
+    # Prefer release binary first to reduce stale-protocol mismatch when debug was not rebuilt.
+    for candidate in [repo / "target" / "release" / "f", repo / "target" / "debug" / "f"]:
         if candidate.exists() and os.access(candidate, os.X_OK):
             return str(candidate)
     return "f"
@@ -129,7 +129,8 @@ def main() -> int:
         print(f"ai_taskd_client_bin: {ai_taskd_client_bin}")
     print(f"iterations={args.iterations} warmup={args.warmup}")
 
-    # ensure daemon is up for daemon path benchmark
+    # ensure daemon is up for daemon path benchmark (restart to avoid stale protocol mismatch)
+    _ = run_cmd([flow_bin, "tasks", "daemon", "stop"], cwd=repo)
     _ = run_cmd([flow_bin, "tasks", "daemon", "start"], cwd=repo)
 
     cached_binary = ensure_cached_binary(repo, flow_bin)

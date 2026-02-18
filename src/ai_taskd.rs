@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai_tasks;
 
+const MSGPACK_WIRE_PREFIX: u8 = 0xFF;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireEncoding {
+    Json,
+    Msgpack,
+}
+
 #[derive(Debug, Clone)]
 struct CachedDiscovery {
     tasks: Vec<ai_tasks::DiscoveredAiTask>,
@@ -41,6 +49,8 @@ enum TaskdRequest {
         no_cache: bool,
         #[serde(default = "default_capture_output")]
         capture_output: bool,
+        #[serde(default)]
+        include_timings: bool,
     },
 }
 
@@ -55,6 +65,31 @@ struct TaskdResponse {
     exit_code: i32,
     stdout: String,
     stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timings: Option<RequestTimings>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct RequestTimings {
+    resolve_selector_us: u64,
+    run_task_us: u64,
+    total_us: u64,
+    used_fast_selector: bool,
+    used_cache: bool,
+}
+
+impl RequestTimings {
+    fn to_kv_line(&self, selector: &str) -> String {
+        format!(
+            "selector={} resolve_us={} run_us={} total_us={} fast_selector={} cache={}",
+            selector,
+            self.resolve_selector_us,
+            self.run_task_us,
+            self.total_us,
+            self.used_fast_selector,
+            self.used_cache,
+        )
+    }
 }
 
 pub fn start() -> Result<()> {
@@ -96,7 +131,7 @@ pub fn start() -> Result<()> {
 }
 
 pub fn stop() -> Result<()> {
-    let response = match send_request(&TaskdRequest::Stop) {
+    let response = match send_request(&TaskdRequest::Stop, WireEncoding::Json) {
         Ok(response) => response,
         Err(error) => {
             let message = format!("{error:#}");
@@ -140,9 +175,10 @@ pub fn run_via_daemon(
         args: args.to_vec(),
         no_cache,
         capture_output: true,
+        include_timings: false,
     };
 
-    let response = send_request(&request)?;
+    let response = send_request(&request, WireEncoding::Json)?;
     if !response.stdout.is_empty() {
         print!("{}", response.stdout);
     }
@@ -194,16 +230,18 @@ pub fn serve() -> Result<()> {
             write_error_response(
                 &mut stream,
                 format!("ai-taskd read request failed: {error}"),
+                WireEncoding::Json,
             );
             continue;
         }
 
-        let request: TaskdRequest = match serde_json::from_slice(&payload) {
+        let (request, encoding): (TaskdRequest, WireEncoding) = match decode_request(&payload) {
             Ok(request) => request,
             Err(error) => {
                 write_error_response(
                     &mut stream,
                     format!("ai-taskd invalid request payload: {error}"),
+                    infer_encoding_from_payload(&payload),
                 );
                 continue;
             }
@@ -213,12 +251,13 @@ pub fn serve() -> Result<()> {
             should_stop = true;
         }
 
-        let body = match serde_json::to_vec(&response) {
+        let body = match encode_response(&response, encoding) {
             Ok(body) => body,
             Err(error) => {
                 write_error_response(
                     &mut stream,
                     format!("ai-taskd encode response failed: {error}"),
+                    encoding,
                 );
                 continue;
             }
@@ -243,6 +282,7 @@ fn handle_request(request: &TaskdRequest, state: &mut TaskdState) -> TaskdRespon
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
+            timings: None,
         },
         TaskdRequest::Stop => TaskdResponse {
             ok: true,
@@ -250,6 +290,7 @@ fn handle_request(request: &TaskdRequest, state: &mut TaskdState) -> TaskdRespon
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
+            timings: None,
         },
         TaskdRequest::Run {
             project_root,
@@ -257,30 +298,59 @@ fn handle_request(request: &TaskdRequest, state: &mut TaskdState) -> TaskdRespon
             args,
             no_cache,
             capture_output,
+            include_timings,
         } => {
             let root = PathBuf::from(project_root);
-            match run_request(state, &root, selector, args, *no_cache, *capture_output) {
-                Ok((code, stdout, stderr)) => TaskdResponse {
-                    ok: code == 0,
-                    message: if code == 0 {
-                        format!("ai task '{}' completed", selector)
-                    } else {
-                        format!("ai task '{}' failed with status {}", selector, code)
-                    },
-                    exit_code: code,
-                    stdout,
-                    stderr,
-                },
+            match run_request(
+                state,
+                &root,
+                selector,
+                args,
+                *no_cache,
+                *capture_output,
+            ) {
+                Ok(result) => {
+                    if (*include_timings || timings_log_enabled())
+                        && let Some(timings) = result.timings.as_ref()
+                        && timings_log_enabled()
+                    {
+                        eprintln!("[ai-taskd][timings] {}", timings.to_kv_line(selector));
+                    }
+                    TaskdResponse {
+                        ok: result.code == 0,
+                        message: if result.code == 0 {
+                            format!("ai task '{}' completed", selector)
+                        } else {
+                            format!("ai task '{}' failed with status {}", selector, result.code)
+                        },
+                        exit_code: result.code,
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        timings: if *include_timings {
+                            result.timings
+                        } else {
+                            None
+                        },
+                    }
+                }
                 Err(e) => TaskdResponse {
                     ok: false,
                     message: format!("ai-taskd run failed: {e}"),
                     exit_code: 1,
                     stdout: String::new(),
                     stderr: String::new(),
+                    timings: None,
                 },
             }
         }
     }
+}
+
+struct RunRequestOutcome {
+    code: i32,
+    stdout: String,
+    stderr: String,
+    timings: Option<RequestTimings>,
 }
 
 fn discovery_ttl() -> Duration {
@@ -341,9 +411,13 @@ fn run_request(
     args: &[String],
     no_cache: bool,
     capture_output: bool,
-) -> Result<(i32, String, String)> {
+) -> Result<RunRequestOutcome> {
+    let started = Instant::now();
+    let resolve_started = Instant::now();
+    let mut used_fast_selector = true;
     let mut selected = ai_tasks::resolve_task_fast(project_root, selector)?;
     if selected.is_none() {
+        used_fast_selector = false;
         let (tasks, from_cache) = get_discovered_tasks(state, project_root)?;
         selected = ai_tasks::select_task(&tasks, selector)?.cloned();
         if selected.is_none() && from_cache {
@@ -353,10 +427,26 @@ fn run_request(
         }
     }
     let task = selected.with_context(|| format!("AI task '{}' not found", selector))?;
+    let resolve_selector_us = resolve_started.elapsed().as_micros() as u64;
 
+    let run_started = Instant::now();
+    let used_cache = !no_cache;
     if !capture_output && !no_cache {
         let status = run_cached_task_status_hot(state, project_root, &task, args)?;
-        return Ok((status.code().unwrap_or(1), String::new(), String::new()));
+        let run_task_us = run_started.elapsed().as_micros() as u64;
+        let total_us = started.elapsed().as_micros() as u64;
+        return Ok(RunRequestOutcome {
+            code: status.code().unwrap_or(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            timings: Some(RequestTimings {
+                resolve_selector_us,
+                run_task_us,
+                total_us,
+                used_fast_selector,
+                used_cache,
+            }),
+        });
     }
 
     let output = if no_cache {
@@ -368,7 +458,20 @@ fn run_request(
     let code = output.status.code().unwrap_or(1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    Ok((code, stdout, stderr))
+    let run_task_us = run_started.elapsed().as_micros() as u64;
+    let total_us = started.elapsed().as_micros() as u64;
+    Ok(RunRequestOutcome {
+        code,
+        stdout,
+        stderr,
+        timings: Some(RequestTimings {
+            resolve_selector_us,
+            run_task_us,
+            total_us,
+            used_fast_selector,
+            used_cache,
+        }),
+    })
 }
 
 fn run_cached_task_output_hot(
@@ -480,7 +583,7 @@ fn run_artifact_status(
 }
 
 fn ping() -> Result<()> {
-    let response = send_request(&TaskdRequest::Ping)?;
+    let response = send_request(&TaskdRequest::Ping, WireEncoding::Json)?;
     if response.ok {
         Ok(())
     } else {
@@ -488,11 +591,11 @@ fn ping() -> Result<()> {
     }
 }
 
-fn send_request(request: &TaskdRequest) -> Result<TaskdResponse> {
+fn send_request(request: &TaskdRequest, encoding: WireEncoding) -> Result<TaskdResponse> {
     let socket = socket_path();
     let mut stream = UnixStream::connect(&socket)
         .with_context(|| format!("failed to connect to ai-taskd at {}", socket.display()))?;
-    let body = serde_json::to_vec(request).context("failed to encode ai-taskd request")?;
+    let body = encode_request(request, encoding)?;
     stream
         .write_all(&body)
         .context("failed to write ai-taskd request")?;
@@ -504,9 +607,74 @@ fn send_request(request: &TaskdRequest) -> Result<TaskdResponse> {
     stream
         .read_to_end(&mut response)
         .context("failed to read ai-taskd response")?;
-    let decoded: TaskdResponse =
-        serde_json::from_slice(&response).context("failed to decode ai-taskd response")?;
+    let decoded = decode_response(&response)?;
     Ok(decoded)
+}
+
+fn encode_request(request: &TaskdRequest, encoding: WireEncoding) -> Result<Vec<u8>> {
+    match encoding {
+        WireEncoding::Json => {
+            serde_json::to_vec(request).context("failed to encode ai-taskd request as json")
+        }
+        WireEncoding::Msgpack => {
+            let mut body = vec![MSGPACK_WIRE_PREFIX];
+            let encoded = rmp_serde::to_vec_named(request)
+                .context("failed to encode ai-taskd request as msgpack")?;
+            body.extend(encoded);
+            Ok(body)
+        }
+    }
+}
+
+fn decode_request(payload: &[u8]) -> Result<(TaskdRequest, WireEncoding)> {
+    match infer_encoding_from_payload(payload) {
+        WireEncoding::Msgpack => {
+            let request = rmp_serde::from_slice::<TaskdRequest>(&payload[1..])
+                .context("failed to decode ai-taskd msgpack request")?;
+            Ok((request, WireEncoding::Msgpack))
+        }
+        WireEncoding::Json => {
+            let request = serde_json::from_slice::<TaskdRequest>(payload)
+                .context("failed to decode ai-taskd json request")?;
+            Ok((request, WireEncoding::Json))
+        }
+    }
+}
+
+fn encode_response(response: &TaskdResponse, encoding: WireEncoding) -> Result<Vec<u8>> {
+    match encoding {
+        WireEncoding::Json => {
+            serde_json::to_vec(response).context("failed to encode ai-taskd json response")
+        }
+        WireEncoding::Msgpack => {
+            let mut body = vec![MSGPACK_WIRE_PREFIX];
+            let encoded = rmp_serde::to_vec_named(response)
+                .context("failed to encode ai-taskd msgpack response")?;
+            body.extend(encoded);
+            Ok(body)
+        }
+    }
+}
+
+fn decode_response(payload: &[u8]) -> Result<TaskdResponse> {
+    match infer_encoding_from_payload(payload) {
+        WireEncoding::Msgpack => {
+            rmp_serde::from_slice::<TaskdResponse>(&payload[1..])
+                .context("failed to decode ai-taskd msgpack response")
+        }
+        WireEncoding::Json => {
+            serde_json::from_slice::<TaskdResponse>(payload)
+                .context("failed to decode ai-taskd json response")
+        }
+    }
+}
+
+fn infer_encoding_from_payload(payload: &[u8]) -> WireEncoding {
+    if payload.first() == Some(&MSGPACK_WIRE_PREFIX) {
+        WireEncoding::Msgpack
+    } else {
+        WireEncoding::Json
+    }
 }
 
 fn socket_path() -> PathBuf {
@@ -530,16 +698,29 @@ fn shell_quote(raw: &str) -> String {
     format!("'{}'", escaped)
 }
 
-fn write_error_response(stream: &mut UnixStream, message: String) {
+fn write_error_response(stream: &mut UnixStream, message: String, encoding: WireEncoding) {
     let response = TaskdResponse {
         ok: false,
         message,
         exit_code: 1,
         stdout: String::new(),
         stderr: String::new(),
+        timings: None,
     };
-    if let Ok(body) = serde_json::to_vec(&response) {
+    if let Ok(body) = encode_response(&response, encoding) {
         let _ = stream.write_all(&body);
         let _ = stream.flush();
     }
+}
+
+fn timings_log_enabled() -> bool {
+    matches!(
+        std::env::var("FLOW_AI_TASKD_TIMINGS_LOG")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }

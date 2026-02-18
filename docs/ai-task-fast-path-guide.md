@@ -57,13 +57,20 @@ f tasks daemon status
 fai ai:flow/noop
 ```
 
+For always-on daemon across login sessions (recommended for stable latency):
+
+```bash
+f ai-taskd-launchd-install
+f ai-taskd-launchd-status
+```
+
 ---
 
 ## 3. Fast-Path Architecture
 
 ### `fai` path
 
-1. `fai` sends a small JSON request to `~/.flow/run/ai-taskd.sock`
+1. `fai` sends a compact request to `~/.flow/run/ai-taskd.sock`
 2. `ai-taskd` resolves task selector (fast exact path first)
 3. `ai-taskd` reuses cached binary artifact when available
 4. task process runs with `FLOW_AI_TASK_PROJECT_ROOT` set
@@ -84,6 +91,11 @@ Moon version knobs:
 
 - `FLOW_AI_TASK_MOON_VERSION` (explicit override)
 - `FLOW_AI_TASK_MOON_VERSION_TTL_SECS` (default `43200`)
+
+Wire protocol knobs:
+
+- `fai --protocol msgpack` (default)
+- `fai --protocol json` (compat / debugging)
 
 ---
 
@@ -117,7 +129,8 @@ Without `FLOW_AI_TASK_FAST_CLIENT=1`, `f` keeps normal daemon behavior.
 ## 5. `fai` CLI Usage
 
 ```bash
-fai [--root PATH] [--socket PATH] [--no-cache] [--capture-output] <selector> [-- <args...>]
+fai [--root PATH] [--socket PATH] [--protocol json|msgpack] [--no-cache] [--capture-output] [--timings] <selector> [-- <args...>]
+fai [--root PATH] [--socket PATH] [--protocol json|msgpack] [--no-cache] [--capture-output] [--timings] --batch-stdin
 ```
 
 Examples:
@@ -126,12 +139,16 @@ Examples:
 fai ai:flow/noop
 fai --root ~/code/flow ai:flow/bench-cli -- --iterations 50
 fai --no-cache ai:flow/dev-check
+fai --timings ai:flow/noop
+printf 'ai:flow/noop\nai:flow/noop\n' | fai --batch-stdin
 ```
 
 Notes:
 
 - default is no-capture mode for lower overhead
 - use `--capture-output` if you need command output returned through client response
+- use `--timings` to print server-side phase timings (`resolve_us`, `run_us`, `total_us`)
+- use `--batch-stdin` for pooled client bursts (single client process, multiple requests)
 
 ---
 
@@ -213,6 +230,12 @@ f tasks daemon status
 ls -l ~/.flow/run/ai-taskd.sock
 ```
 
+Or install persistent daemon:
+
+```bash
+f ai-taskd-launchd-install
+```
+
 ### Task not found with `fai`
 
 Use full selector:
@@ -237,14 +260,26 @@ Then rerun benchmark with warmup.
 
 Use `--capture-output` on `fai` for output-capture parity.
 
+### Need in-daemon stage attribution for profiling
+
+```bash
+fai --timings ai:flow/noop
+FLOW_AI_TASKD_TIMINGS_LOG=1 f tasks daemon serve
+```
+
 ---
 
-## 9. What To Optimize Next
+## 9. Implemented Optimization Set
 
-If we want to push lower:
+Implemented in this iteration:
 
-1. keep daemon always-on via launch agent rather than on-demand start
-2. add binary request framing (msgpack/cbor) if JSON parse becomes measurable
-3. add pooled client process for repeated bursts from a parent shell loop
-4. expose per-request timings from `ai-taskd` for in-daemon stage attribution
+1. always-on daemon support via launchd tasks (`ai-taskd-launchd-*`)
+2. binary request framing support (`msgpack`) in `fai` + `ai-taskd`
+3. pooled client burst mode via `fai --batch-stdin`
+4. per-request stage timings exposed via `fai --timings` and daemon timing logs
 
+Potential next frontier:
+
+1. keep a persistent client-side socket session with framed multi-request protocol
+2. add lock-free shared-memory ring for local burst dispatch if socket overhead becomes dominant
+3. push per-stage timing aggregation into benchmark JSON outputs for automatic regression gating
