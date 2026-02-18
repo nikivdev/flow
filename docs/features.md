@@ -397,10 +397,10 @@ ecosystems = "npm,pypi,cargo,swift"
 ```
 .ai/skills/
 └── deploy-worker/
-    └── skill.md
+    └── SKILL.md
 ```
 
-Each `skill.md` contains:
+Each `SKILL.md` contains:
 
 ```markdown
 ---
@@ -575,5 +575,5 @@ alias f="flow"
     │       └── index.json
     └── skills/            # Codex skills (gitignored, materialized locally)
         └── <skill-name>/
-            └── skill.md
+            └── SKILL.md
 ```

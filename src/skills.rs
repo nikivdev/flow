@@ -1,6 +1,6 @@
 //! Codex skills management.
 //!
-//! Skills are stored in .ai/skills/<name>/skill.md (gitignored by default).
+//! Skills are stored in .ai/skills/<name>/SKILL.md (gitignored by default).
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -123,28 +123,62 @@ fn skill_file_upper(skill_dir: &Path) -> PathBuf {
     skill_dir.join("SKILL.md")
 }
 
-fn find_skill_file(skill_dir: &Path) -> Option<PathBuf> {
-    let lower = skill_file_lower(skill_dir);
-    if lower.exists() {
-        return Some(lower);
+fn has_exact_skill_filename(skill_dir: &Path, filename: &str) -> Result<bool> {
+    if !skill_dir.exists() {
+        return Ok(false);
     }
+    for entry in fs::read_dir(skill_dir)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy() == filename {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn find_skill_file(skill_dir: &Path) -> Option<PathBuf> {
     let upper = skill_file_upper(skill_dir);
     if upper.exists() {
         return Some(upper);
+    }
+    let lower = skill_file_lower(skill_dir);
+    if lower.exists() {
+        return Some(lower);
     }
     None
 }
 
 fn normalize_single_skill_file(skill_dir: &Path) -> Result<bool> {
+    if !skill_dir.exists() {
+        return Ok(false);
+    }
+
     let lower = skill_file_lower(skill_dir);
-    if lower.exists() {
-        return Ok(false);
-    }
     let upper = skill_file_upper(skill_dir);
-    if !upper.exists() {
+    let lower_exact = has_exact_skill_filename(skill_dir, "skill.md")?;
+    let upper_exact = has_exact_skill_filename(skill_dir, "SKILL.md")?;
+
+    if upper_exact && lower_exact {
+        fs::remove_file(&lower)?;
+        return Ok(true);
+    }
+
+    if upper_exact {
         return Ok(false);
     }
-    fs::rename(&upper, &lower)?;
+
+    if !lower_exact {
+        return Ok(false);
+    }
+
+    // Case-only renames are unreliable on case-insensitive filesystems, so
+    // rename through a temporary filename.
+    let tmp = skill_dir.join(".flow-skill-case-tmp.md");
+    if tmp.exists() {
+        fs::remove_file(&tmp)?;
+    }
+    fs::rename(&lower, &tmp)?;
+    fs::rename(&tmp, &upper)?;
     Ok(true)
 }
 
@@ -280,7 +314,7 @@ fn list_skills() -> Result<()> {
     Ok(())
 }
 
-/// Parse the description from a skill.md file.
+/// Parse the description from a skill file.
 fn parse_skill_description(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
 
@@ -425,8 +459,10 @@ fn new_skill(name: &str, description: Option<&str>) -> Result<()> {
     // Create skill directory
     fs::create_dir_all(&skill_dir).context("failed to create skill directory")?;
 
-    // Create skill.md
+    // Create SKILL.md
     let desc = description.unwrap_or("TODO: Add description");
+    let fm_name = yaml_quote(name);
+    let fm_desc = yaml_quote(desc);
     let content = format!(
         r#"---
 name: {}
@@ -445,11 +481,11 @@ TODO: Add instructions for this skill.
 # Example usage
 ```
 "#,
-        name, desc, name
+        fm_name, fm_desc, name
     );
 
-    let skill_file = skill_dir.join("skill.md");
-    fs::write(&skill_file, content).context("failed to write skill.md")?;
+    let skill_file = skill_file_upper(&skill_dir);
+    fs::write(&skill_file, content).context("failed to write SKILL.md")?;
 
     // Ensure symlinks exist for Claude Code and Codex
     ensure_symlinks()?;
@@ -468,7 +504,7 @@ fn show_skill(name: &str) -> Result<()> {
         bail!("Skill '{}' not found", name);
     };
 
-    let content = fs::read_to_string(&skill_file).context("failed to read skill.md")?;
+    let content = fs::read_to_string(&skill_file).context("failed to read skill file")?;
 
     println!("{}", content);
 
@@ -480,7 +516,7 @@ fn edit_skill(name: &str) -> Result<()> {
     let skills_dir = get_skills_dir()?;
     let skill_dir = skills_dir.join(name);
     let skill_file = if normalize_single_skill_file(&skill_dir)? {
-        skill_file_lower(&skill_dir)
+        skill_file_upper(&skill_dir)
     } else if let Some(path) = find_skill_file(&skill_dir) {
         path
     } else {
@@ -529,7 +565,7 @@ fn publish_skill(name: &str) -> Result<()> {
         );
     };
 
-    let content = fs::read_to_string(&skill_file).context("failed to read skill.md")?;
+    let content = fs::read_to_string(&skill_file).context("failed to read skill file")?;
 
     // Parse description from YAML frontmatter
     let description = parse_frontmatter_field(&content, "description")
@@ -867,7 +903,7 @@ fn fetch_skills(fetch: &SkillsFetchCommand) -> Result<()> {
 
     println!("Fetched skills via seq into {}", out_path.display());
     if renamed > 0 {
-        println!("Normalized {} SKILL.md file(s) to skill.md", renamed);
+        println!("Normalized {} skill file(s) to SKILL.md", renamed);
     }
     println!("Symlinked to .claude/skills/ and .codex/skills/");
 
@@ -917,7 +953,7 @@ fn install_skill_inner(
         }
 
         fs::create_dir_all(&skill_dir)?;
-        fs::write(skill_dir.join("skill.md"), content)?;
+        fs::write(skill_file_upper(&skill_dir), content)?;
 
         ensure_symlinks_at(project_root)?;
 
@@ -950,9 +986,9 @@ fn install_skill_inner(
 
     let skill: SkillResponse = response.json().context("failed to parse skill response")?;
 
-    // Create skill directory and write skill.md.
+    // Create skill directory and write SKILL.md.
     fs::create_dir_all(&skill_dir)?;
-    fs::write(skill_dir.join("skill.md"), &skill.content)?;
+    fs::write(skill_file_upper(&skill_dir), &skill.content)?;
 
     // Ensure symlinks
     ensure_symlinks_at(project_root)?;
@@ -1179,6 +1215,8 @@ fn reload_skills() -> Result<()> {
 fn render_task_skill(task: &config::TaskConfig) -> String {
     let desc = task.description.as_deref().unwrap_or("Flow task");
     let command = task.command.lines().collect::<Vec<_>>().join("\n");
+    let fm_name = yaml_quote(&task.name);
+    let fm_desc = yaml_quote(desc);
     format!(
         r#"---
 name: {}
@@ -1186,25 +1224,13 @@ description: {}
 source: flow.toml
 ---
 
-# {}
-
-{}
-
-## Usage
-
-Run this task with:
-
-```bash
-f {}
-```
-
-## Command
+Run with `f {}`.
 
 ```bash
 {}
 ```
 "#,
-        task.name, desc, task.name, desc, task.name, command
+        fm_name, fm_desc, task.name, command
     )
 }
 
@@ -1220,9 +1246,12 @@ fn sync_tasks_to_skills(
 
     for task in tasks {
         let skill_dir = skills_dir.join(&task.name);
-        let skill_file = skill_dir.join("skill.md");
+        fs::create_dir_all(&skill_dir)?;
+
+        let existed = find_skill_file(&skill_dir).is_some();
+        let normalized = normalize_single_skill_file(&skill_dir)?;
+        let skill_file = skill_file_upper(&skill_dir);
         let content = render_task_skill(task);
-        let existed = skill_file.exists();
         let should_write = match fs::read_to_string(&skill_file) {
             Ok(existing) => existing != content,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
@@ -1230,13 +1259,12 @@ fn sync_tasks_to_skills(
         };
 
         if should_write {
-            fs::create_dir_all(&skill_dir)?;
             fs::write(&skill_file, content)?;
-            if existed {
-                updated += 1;
-            } else {
-                created += 1;
-            }
+        }
+        if !existed {
+            created += 1;
+        } else if should_write || normalized {
+            updated += 1;
         }
 
         write_task_skill_metadata(&skill_dir, task, options)?;
@@ -1258,6 +1286,7 @@ fn sync_skills() -> Result<()> {
     let cfg = config::load(&flow_toml)?;
 
     let skills_dir = get_skills_dir()?;
+    let normalized = normalize_skill_files(&skills_dir)?;
     let options = resolve_skill_sync_options(cfg.skills.as_ref());
     let (created, updated) = sync_tasks_to_skills(&skills_dir, &cfg.tasks, options)?;
 
@@ -1270,6 +1299,9 @@ fn sync_skills() -> Result<()> {
     }
     if updated > 0 {
         println!("  Updated: {}", updated);
+    }
+    if normalized > 0 {
+        println!("  Normalized: {}", normalized);
     }
     println!("\nSymlinked to .claude/skills/ and .codex/skills/");
     maybe_reload_codex_skills(&cwd, cfg.skills.as_ref(), "skills sync");
@@ -1287,6 +1319,7 @@ pub(crate) fn enforce_skills_from_config(
 
     let skills_dir = get_skills_dir_at(project_root);
     let mut summary = SkillsEnforceSummary::default();
+    let _ = normalize_skill_files(&skills_dir)?;
 
     if skills_cfg.sync_tasks {
         let options = resolve_skill_sync_options(Some(skills_cfg));
@@ -1313,7 +1346,7 @@ pub fn ensure_default_skills_at(project_root: &Path) -> Result<()> {
     start::update_gitignore(project_root)?;
 
     let env_dir = skills_dir.join("env");
-    let env_file = env_dir.join("skill.md");
+    let env_file = skill_file_upper(&env_dir);
     let should_write = if env_file.exists() {
         let content = fs::read_to_string(&env_file).unwrap_or_default();
         content.contains("source: flow-default")
@@ -1325,9 +1358,10 @@ pub fn ensure_default_skills_at(project_root: &Path) -> Result<()> {
         fs::create_dir_all(&env_dir)?;
         fs::write(&env_file, DEFAULT_ENV_SKILL)?;
     }
+    let _ = normalize_single_skill_file(&env_dir)?;
 
     let quality_dir = skills_dir.join("quality-bun-feature-delivery");
-    let quality_file = quality_dir.join("skill.md");
+    let quality_file = skill_file_upper(&quality_dir);
     let should_write_quality = if quality_file.exists() {
         let content = fs::read_to_string(&quality_file).unwrap_or_default();
         content.contains("source: flow-default")
@@ -1338,6 +1372,7 @@ pub fn ensure_default_skills_at(project_root: &Path) -> Result<()> {
         fs::create_dir_all(&quality_dir)?;
         fs::write(&quality_file, DEFAULT_QUALITY_BUN_FEATURE_DELIVERY_SKILL)?;
     }
+    let _ = normalize_single_skill_file(&quality_dir)?;
 
     ensure_symlinks_at(project_root)?;
 
@@ -1434,14 +1469,25 @@ mod tests {
     }
 
     #[test]
+    fn task_skill_frontmatter_quotes_yaml_sensitive_values() {
+        let task = sample_task(
+            "ooda-run-qwen3-4b",
+            Some("Q4B-baseline: gated confidence fix"),
+        );
+        let content = render_task_skill(&task);
+        assert!(content.contains("name: \"ooda-run-qwen3-4b\""));
+        assert!(content.contains("description: \"Q4B-baseline: gated confidence fix\""));
+    }
+
+    #[test]
     fn ensure_default_skills_writes_quality_bun_skill() {
         let dir = tempdir().expect("tempdir");
         ensure_default_skills_at(dir.path()).expect("default skills should be written");
 
-        let env = dir.path().join(".ai/skills/env/skill.md");
+        let env = dir.path().join(".ai/skills/env/SKILL.md");
         let quality = dir
             .path()
-            .join(".ai/skills/quality-bun-feature-delivery/skill.md");
+            .join(".ai/skills/quality-bun-feature-delivery/SKILL.md");
 
         assert!(env.exists(), "env default skill should exist");
         assert!(quality.exists(), "quality skill should exist");
@@ -1450,5 +1496,58 @@ mod tests {
         assert!(quality_content.contains("name: quality-bun-feature-delivery"));
         assert!(quality_content.contains("version: 2"));
         assert!(quality_content.contains("source: flow-default"));
+    }
+
+    #[test]
+    fn sync_tasks_writes_uppercase_skill_file() {
+        let dir = tempdir().expect("tempdir");
+        let skills_dir = dir.path().join(".ai/skills");
+        let tasks = vec![sample_task("hello-task", Some("Say hello"))];
+
+        let (created, updated) =
+            sync_tasks_to_skills(&skills_dir, &tasks, SkillSyncOptions::default())
+                .expect("sync should succeed");
+        assert_eq!(created, 1);
+        assert_eq!(updated, 0);
+
+        let task_dir = skills_dir.join("hello-task");
+        assert!(
+            has_exact_skill_filename(&task_dir, "SKILL.md").expect("exact check should succeed"),
+            "SKILL.md should exist with canonical casing"
+        );
+        assert!(
+            !has_exact_skill_filename(&task_dir, "skill.md").expect("exact check should succeed"),
+            "legacy lowercase filename should not remain"
+        );
+    }
+
+    #[test]
+    fn sync_tasks_migrates_legacy_lowercase_skill_file() {
+        let dir = tempdir().expect("tempdir");
+        let skills_dir = dir.path().join(".ai/skills");
+        let task = sample_task("migrate-me", Some("Migrate legacy skill case"));
+        let task_dir = skills_dir.join("migrate-me");
+        fs::create_dir_all(&task_dir).expect("task dir");
+
+        let legacy = skill_file_lower(&task_dir);
+        fs::write(&legacy, render_task_skill(&task)).expect("legacy skill write");
+        assert!(
+            has_exact_skill_filename(&task_dir, "skill.md").expect("exact check should succeed"),
+            "test fixture should start with lowercase filename"
+        );
+
+        let (created, updated) =
+            sync_tasks_to_skills(&skills_dir, &[task], SkillSyncOptions::default())
+                .expect("sync should succeed");
+        assert_eq!(created, 0);
+        assert_eq!(updated, 1, "case migration should count as an update");
+        assert!(
+            has_exact_skill_filename(&task_dir, "SKILL.md").expect("exact check should succeed"),
+            "legacy skill should be migrated to uppercase filename"
+        );
+        assert!(
+            !has_exact_skill_filename(&task_dir, "skill.md").expect("exact check should succeed"),
+            "legacy lowercase filename should be removed"
+        );
     }
 }
