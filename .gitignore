@@ -57,6 +57,8 @@ desktop/.tauri-dev.json
 .ai/review-log.jsonl
 .rise/
 .ai/state.json
+.ai/tasks/**/.mooncakes/
+.ai/tasks/**/_build/
 
 .beads/
 

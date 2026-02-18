@@ -1,0 +1,8 @@
+{
+  "name": "nikiv/flow-ai-tasks",
+  "version": "0.1.0",
+  "deps": {
+    "moonbitlang/async": "0.16.6",
+    "moonbitlang/x": "0.4.40"
+  }
+}
