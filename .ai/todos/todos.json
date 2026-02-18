@@ -91,9 +91,9 @@
   {
     "id": "f264371559114db59152e00a394a999b",
     "title": "[P1] Honor recipe shell selection when running commands — /Users/nikiv/code/flow/src/recipe.rs:122-126",
-    "status": "pending",
+    "status": "completed",
     "created_at": "2026-02-17T11:40:29.148363+00:00",
-    "updated_at": null,
+    "updated_at": "2026-02-17T14:43:38.741376+00:00",
     "note": "Source: flow review\nCommit: c52538d993835214221eb89252777e1e64027454\nModel: gpt-5.1-codex-max\n\n[P1] Honor recipe shell selection when running commands — /Users/nikiv/code/flow/src/recipe.rs:122-126",
     "session": null,
     "external_ref": "flow-review-issue-551b4c7441b9",
@@ -102,9 +102,9 @@
   {
     "id": "e2b50f22152841f299d47ab83dc2e264",
     "title": "[P2] Global recipes default to project directory — /Users/nikiv/code/flow/src/recipe.rs:560-569",
-    "status": "pending",
+    "status": "completed",
     "created_at": "2026-02-17T11:40:29.148363+00:00",
-    "updated_at": null,
+    "updated_at": "2026-02-17T14:43:38.749300+00:00",
     "note": "Source: flow review\nCommit: c52538d993835214221eb89252777e1e64027454\nModel: gpt-5.1-codex-max\n\n[P2] Global recipes default to project directory — /Users/nikiv/code/flow/src/recipe.rs:560-569",
     "session": null,
     "external_ref": "flow-review-issue-658624948e1a",
@@ -113,12 +113,45 @@
   {
     "id": "1531571a23a44211837aa0a3f7692a6f",
     "title": "[P2] reviews-todo fix ignores configured Codex binary — /Users/nikiv/code/flow/src/reviews_todo.rs:262-265",
-    "status": "pending",
+    "status": "completed",
     "created_at": "2026-02-17T11:40:29.148363+00:00",
-    "updated_at": null,
+    "updated_at": "2026-02-17T14:43:38.756548+00:00",
     "note": "Source: flow review\nCommit: c52538d993835214221eb89252777e1e64027454\nModel: gpt-5.1-codex-max\n\n[P2] reviews-todo fix ignores configured Codex binary — /Users/nikiv/code/flow/src/reviews_todo.rs:262-265",
     "session": null,
     "external_ref": "flow-review-issue-9f11354ed9dd",
+    "priority": "P4"
+  },
+  {
+    "id": "3aa07bb3ec6344cfbb2e11072ef39604",
+    "title": "[P2] Run bootstrap after registry installs — /Users/nikiv/code/flow/scripts/install.sh:637-646",
+    "status": "completed",
+    "created_at": "2026-02-17T13:40:09.528742+00:00",
+    "updated_at": "2026-02-17T14:43:38.764137+00:00",
+    "note": "Source: flow review\nCommit: 96f37f21bc5bcf51fafe38fe0fc8343a3cbb916b\nModel: gpt-5.1-codex-max\n\n[P2] Run bootstrap after registry installs — /Users/nikiv/code/flow/scripts/install.sh:637-646",
+    "session": null,
+    "external_ref": "flow-review-issue-245de484c8ee",
+    "priority": "P4"
+  },
+  {
+    "id": "0a7bc4060d23470d96cac5ea043a6b0a",
+    "title": "[P1] Scoped parsing blocks ':' or '/' task names — /var/folders/69/jnm2pqrx12103z_f8hh3_d1w0000gn/T/.tmpDgAgRL/repo/src/...",
+    "status": "completed",
+    "created_at": "2026-02-17T14:32:04.676369+00:00",
+    "updated_at": "2026-02-17T14:42:36.827744+00:00",
+    "note": "Source: flow review\nCommit: 527049ff7b73886705ded5e4105e35ca7a76d01b\nModel: gpt-5.1-codex-max\n\n[P1] Scoped parsing blocks ':' or '/' task names — /var/folders/69/jnm2pqrx12103z_f8hh3_d1w0000gn/T/.tmpDgAgRL/repo/src/tasks.rs:728-741",
+    "session": null,
+    "external_ref": "flow-review-issue-7cf264b052d8",
+    "priority": "P4"
+  },
+  {
+    "id": "8f2bdf3f63f440f1abbb034634fe2eae",
+    "title": "Re-run review: review timed out for commit 527049f",
+    "status": "completed",
+    "created_at": "2026-02-17T14:35:26.536392+00:00",
+    "updated_at": "2026-02-17T14:43:57.289970+00:00",
+    "note": "Source: flow review\nCommit: 527049ff7b73886705ded5e4105e35ca7a76d01b\nModel: gpt-5.1-codex-max\nReview summary: Codex review timed out after 360s\n\nRe-run review: review timed out for commit 527049f",
+    "session": null,
+    "external_ref": "flow-review-issue-c02170490800",
     "priority": "P4"
   }
 ]

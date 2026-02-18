@@ -140,7 +140,7 @@ For available features, see [docs](docs) or feed `f --help` to AI.
 
 ## Examples
 
-Projects run on flow, including flow itself.
+[Nikita](https://github.com/nikivdev)'s projects run on flow, including flow itself.
 
 ## Contributing
 

@@ -2,9 +2,9 @@ pub mod agent_setup;
 pub mod agents;
 pub mod ai;
 pub mod ai_context;
+pub mod ai_server;
 pub mod ai_taskd;
 pub mod ai_tasks;
-pub mod ai_server;
 pub mod ai_test;
 pub mod analytics;
 pub mod archive;
@@ -48,6 +48,7 @@ pub mod hub;
 pub mod info;
 pub mod init;
 pub mod install;
+pub mod invariants;
 #[path = "jazz_state_stub.rs"]
 pub mod jazz_state;
 pub mod jj;

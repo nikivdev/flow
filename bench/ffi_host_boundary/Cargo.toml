@@ -1,0 +1,20 @@
+[package]
+name = "flow_ffi_host_boundary"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "rust_boundary_bench"
+path = "src/bin/rust_boundary_bench.rs"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

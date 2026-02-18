@@ -1007,6 +1007,7 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
             no_fix: false,
             max_fix_attempts: 3,
             allow_review_issues: false,
+            compact: false,
         }) {
             let _ = ensure_branch_attached(&repo_root_path, &switched_branch);
             return Err(sync_err);
@@ -1491,6 +1492,131 @@ fn git_ref_exists_in(repo_root: &Path, reference: &str) -> bool {
     git_capture_in(repo_root, &["rev-parse", "--verify", reference]).is_ok()
 }
 
+#[derive(Clone, Debug)]
+struct TrackedRemoteRef {
+    remote: String,
+    branch: String,
+    before_tip: Option<String>,
+}
+
+fn track_remote_ref(
+    tracked: &mut Vec<TrackedRemoteRef>,
+    repo_root: &Path,
+    remote: &str,
+    branch: &str,
+) {
+    if remote.trim().is_empty() || branch.trim().is_empty() {
+        return;
+    }
+    if tracked
+        .iter()
+        .any(|item| item.remote == remote && item.branch == branch)
+    {
+        return;
+    }
+    tracked.push(TrackedRemoteRef {
+        remote: remote.to_string(),
+        branch: branch.to_string(),
+        before_tip: remote_branch_tip(repo_root, remote, branch),
+    });
+}
+
+fn remote_branch_tip(repo_root: &Path, remote: &str, branch: &str) -> Option<String> {
+    let reference = format!("refs/remotes/{}/{}", remote, branch);
+    git_capture_in(repo_root, &["rev-parse", "--verify", &reference])
+        .ok()
+        .map(|out| out.trim().to_string())
+        .filter(|sha| !sha.is_empty())
+}
+
+fn short_commit_id(sha: &str) -> &str {
+    let trimmed = sha.trim();
+    if trimmed.len() <= 8 {
+        trimmed
+    } else {
+        &trimmed[..8]
+    }
+}
+
+fn print_fetched_remote_commits(
+    repo_root: &Path,
+    tracked: &[TrackedRemoteRef],
+    recorder: &mut SyncRecorder,
+    compact: bool,
+) {
+    let mut printed_header = false;
+    for item in tracked {
+        let Some(after_tip) = remote_branch_tip(repo_root, &item.remote, &item.branch) else {
+            continue;
+        };
+        if item.before_tip.as_deref() == Some(after_tip.as_str()) {
+            continue;
+        }
+
+        if !printed_header {
+            println!("==> Fetched remote commits:");
+            printed_header = true;
+        }
+
+        let label = format!("{}/{}", item.remote, item.branch);
+        match item.before_tip.as_deref() {
+            None => {
+                println!("  {} -> {}", label, short_commit_id(&after_tip));
+                recorder.record(
+                    "jj",
+                    format!("fetched {} at {}", label, short_commit_id(&after_tip)),
+                );
+            }
+            Some(before_tip) => {
+                let range = format!("{}..{}", before_tip, after_tip);
+                let lines = git_capture_in(
+                    repo_root,
+                    &["log", "--oneline", "--no-decorate", "--reverse", &range],
+                )
+                .unwrap_or_default();
+                let commits: Vec<&str> = lines
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect();
+                if commits.is_empty() {
+                    println!(
+                        "  {} updated {} -> {}",
+                        label,
+                        short_commit_id(before_tip),
+                        short_commit_id(&after_tip)
+                    );
+                    recorder.record(
+                        "jj",
+                        format!(
+                            "fetched {} {} -> {}",
+                            label,
+                            short_commit_id(before_tip),
+                            short_commit_id(&after_tip)
+                        ),
+                    );
+                } else {
+                    if compact {
+                        println!("  {} (+{})", label, commits.len());
+                    } else {
+                        println!("  {} (+{}):", label, commits.len());
+                        for line in commits.iter().take(8) {
+                            println!("    {}", line);
+                        }
+                        if commits.len() > 8 {
+                            println!("    ... +{} more", commits.len() - 8);
+                        }
+                    }
+                    recorder.record(
+                        "jj",
+                        format!("fetched {} (+{} commits)", label, commits.len()),
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn run_jj_sync(
     repo_root: &Path,
     cmd: &SyncCommand,
@@ -1538,12 +1664,14 @@ fn run_jj_sync(
         .clone()
         .unwrap_or_else(|| jj_default_branch(repo_root));
 
+    let mut tracked_refs: Vec<TrackedRemoteRef> = Vec::new();
     if has_origin || has_upstream {
         println!("==> Fetching remotes via jj...");
         let mut fetched_any = false;
         let mut failures: Vec<String> = Vec::new();
 
         if has_origin && origin_reachable {
+            track_remote_ref(&mut tracked_refs, repo_root, "origin", &current_branch);
             recorder.record(
                 "jj",
                 format!("jj git fetch --remote origin --branch {}", current_branch),
@@ -1565,6 +1693,7 @@ fn run_jj_sync(
                 fetched_any = true;
             }
             if let Some(default_branch) = origin_default_branch.as_deref() {
+                track_remote_ref(&mut tracked_refs, repo_root, "origin", default_branch);
                 recorder.record(
                     "jj",
                     format!("jj git fetch --remote origin --branch {}", default_branch),
@@ -1595,6 +1724,7 @@ fn run_jj_sync(
             && push_remote != "upstream"
             && push_remote_reachable
         {
+            track_remote_ref(&mut tracked_refs, repo_root, &push_remote, &current_branch);
             recorder.record(
                 "jj",
                 format!(
@@ -1627,6 +1757,12 @@ fn run_jj_sync(
         }
 
         if has_upstream {
+            track_remote_ref(
+                &mut tracked_refs,
+                repo_root,
+                "upstream",
+                &upstream_branch_for_fetch,
+            );
             recorder.record(
                 "jj",
                 format!(
@@ -1672,6 +1808,7 @@ fn run_jj_sync(
         if fetched_any {
             recorder.record("jj", "jj git import");
             let _ = jj_run_in(repo_root, &["--quiet", "git", "import"]);
+            print_fetched_remote_commits(repo_root, &tracked_refs, recorder, cmd.compact);
             // Re-resolve after fetch/import so we can pick up newly discovered upstream refs.
             upstream_branch_opt = resolve_upstream_branch_in(repo_root, Some(&current_branch));
         } else if !failures.is_empty() {
@@ -1871,7 +2008,7 @@ fn run_jj_sync(
                                 &format!("refs/heads/{}", current_branch),
                             ],
                         );
-                        let _ = git_run_in(repo_root, &["reset", "--mixed", branch_sha]);
+                        let _ = git_run_in(repo_root, &["reset", "--mixed", "--quiet", branch_sha]);
                         recorder.record("jj", format!("re-attached HEAD to {}", current_branch));
                     }
                 }

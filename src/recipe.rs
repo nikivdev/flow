@@ -37,9 +37,14 @@ struct Recipe {
     description: String,
     path: PathBuf,
     scope: Scope,
-    shell: String,
-    command: String,
+    runner: RecipeRunner,
     tags: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum RecipeRunner {
+    Shell { shell: String, command: String },
+    MoonbitFile,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -50,6 +55,9 @@ struct Frontmatter {
 }
 
 pub fn run(cmd: RecipeCommand) -> Result<()> {
+    eprintln!(
+        "warning: `f recipe` is legacy compatibility. Prefer task-centric workflows with flow.toml tasks + .ai/tasks/*.mbt."
+    );
     match cmd.action.unwrap_or(RecipeAction::List(RecipeListOpts {
         scope: RecipeScopeArg::All,
         query: None,
@@ -119,8 +127,6 @@ fn run_recipe(opts: RecipeRunOpts) -> Result<()> {
     };
 
     let cwd = resolve_cwd(opts.cwd.as_deref())?;
-    let shell_bin = resolve_shell_bin(&recipe.shell);
-    let shell_cmd = recipe.command.trim();
 
     println!(
         "Running recipe {} ({}) from {}",
@@ -129,22 +135,48 @@ fn run_recipe(opts: RecipeRunOpts) -> Result<()> {
         recipe.path.display()
     );
     println!("cwd: {}", cwd.display());
-    println!("shell: {}", shell_bin);
-    println!("cmd: {}", shell_cmd);
+    match &recipe.runner {
+        RecipeRunner::Shell { shell, command } => {
+            let shell_bin = resolve_shell_bin(shell);
+            let shell_cmd = command.trim();
+            println!("engine: shell");
+            println!("shell: {}", shell_bin);
+            println!("cmd: {}", shell_cmd);
 
-    if opts.dry_run {
-        return Ok(());
-    }
+            if opts.dry_run {
+                return Ok(());
+            }
 
-    let status = Command::new(&shell_bin)
-        .arg("-lc")
-        .arg(shell_cmd)
-        .current_dir(&cwd)
-        .status()
-        .with_context(|| format!("failed to run recipe command via {}", shell_bin))?;
+            let status = Command::new(&shell_bin)
+                .arg("-lc")
+                .arg(shell_cmd)
+                .current_dir(&cwd)
+                .status()
+                .with_context(|| format!("failed to run recipe command via {}", shell_bin))?;
 
-    if !status.success() {
-        bail!("recipe '{}' failed with status {}", recipe.id, status);
+            if !status.success() {
+                bail!("recipe '{}' failed with status {}", recipe.id, status);
+            }
+        }
+        RecipeRunner::MoonbitFile => {
+            println!("engine: moonbit");
+            println!("cmd: moon run {}", recipe.path.display());
+
+            if opts.dry_run {
+                return Ok(());
+            }
+
+            let status = Command::new("moon")
+                .arg("run")
+                .arg(&recipe.path)
+                .current_dir(&cwd)
+                .status()
+                .with_context(|| format!("failed to run moon recipe {}", recipe.path.display()))?;
+
+            if !status.success() {
+                bail!("recipe '{}' failed with status {}", recipe.id, status);
+            }
+        }
     }
     Ok(())
 }
@@ -167,6 +199,11 @@ fn init_recipes(opts: RecipeInitOpts) -> Result<()> {
         write_starter_recipe(
             &project_dir.join("bridge-latency-bench.md"),
             STARTER_PROJECT_BENCH_RECIPE,
+            &mut created_files,
+        )?;
+        write_starter_recipe(
+            &project_dir.join("moonbit-starter.mbt"),
+            STARTER_PROJECT_MOONBIT_RECIPE,
             &mut created_files,
         )?;
     }
@@ -264,7 +301,7 @@ fn collect_recipe_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<
             .and_then(|e| e.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if ext == "md" || ext == "markdown" {
+        if ext == "md" || ext == "markdown" || ext == "mbt" {
             out.push(path);
         }
     }
@@ -272,6 +309,18 @@ fn collect_recipe_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<
 }
 
 fn parse_recipe(scope: Scope, root: &Path, path: &Path) -> Result<Option<Recipe>> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ext == "mbt" {
+        return parse_moonbit_recipe(scope, root, path);
+    }
+    parse_markdown_recipe(scope, root, path)
+}
+
+fn parse_markdown_recipe(scope: Scope, root: &Path, path: &Path) -> Result<Option<Recipe>> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let (frontmatter, body) = parse_frontmatter(&content);
@@ -310,10 +359,70 @@ fn parse_recipe(scope: Scope, root: &Path, path: &Path) -> Result<Option<Recipe>
         description,
         path: path.to_path_buf(),
         scope,
-        shell,
-        command,
+        runner: RecipeRunner::Shell { shell, command },
         tags: frontmatter.tags,
     }))
+}
+
+fn parse_moonbit_recipe(scope: Scope, root: &Path, path: &Path) -> Result<Option<Recipe>> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let frontmatter = parse_moonbit_metadata(&content);
+
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let id = format!(
+        "{}:{}",
+        scope.as_str(),
+        relative
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/")
+    );
+
+    let title = frontmatter.title.unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("recipe")
+            .replace(['-', '_'], " ")
+    });
+    let description = frontmatter.description.unwrap_or_default();
+
+    Ok(Some(Recipe {
+        id,
+        name: title,
+        description,
+        path: path.to_path_buf(),
+        scope,
+        runner: RecipeRunner::MoonbitFile,
+        tags: frontmatter.tags,
+    }))
+}
+
+fn parse_moonbit_metadata(content: &str) -> Frontmatter {
+    let mut fm = Frontmatter::default();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(comment) = line.strip_prefix("//") else {
+            break;
+        };
+        let comment = comment.trim();
+        let Some((key, value)) = comment.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if key == "title" {
+            fm.title = Some(strip_quotes(value));
+        } else if key == "description" {
+            fm.description = Some(strip_quotes(value));
+        } else if key == "tags" {
+            fm.tags = parse_tags(value);
+        }
+    }
+    fm
 }
 
 fn parse_frontmatter(content: &str) -> (Frontmatter, &str) {
@@ -646,6 +755,15 @@ python3 tools/bridge_latency_bench.py --build-if-missing --iterations 300 --warm
 ```
 "#;
 
+const STARTER_PROJECT_MOONBIT_RECIPE: &str = r#"// title: MoonBit Recipe Starter
+// description: Minimal runnable MoonBit recipe entry.
+// tags: [moonbit, recipe]
+
+fn main {
+  println("hello from moonbit recipe")
+}
+"#;
+
 const STARTER_GLOBAL_RECIPE: &str = r#"---
 title: System Ready Check
 description: Verify machine is in clean state before latency benchmarks.
@@ -734,11 +852,28 @@ tags: [a, b]\n\
             description: "fast".to_string(),
             path: PathBuf::from("a.md"),
             scope: Scope::Project,
-            shell: "sh".to_string(),
-            command: "echo".to_string(),
+            runner: RecipeRunner::Shell {
+                shell: "sh".to_string(),
+                command: "echo".to_string(),
+            },
             tags: vec!["browser".to_string()],
         }];
         let out = filter_recipes(recipes, Some("browser"));
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn parses_moonbit_metadata_header() {
+        let text = "// title: Fast App Open\n\
+// description: open app with moonbit\n\
+// tags: [moonbit, fast]\n\
+\n\
+fn main {\n\
+  println(\"ok\")\n\
+}\n";
+        let fm = parse_moonbit_metadata(text);
+        assert_eq!(fm.title.as_deref(), Some("Fast App Open"));
+        assert_eq!(fm.description.as_deref(), Some("open app with moonbit"));
+        assert_eq!(fm.tags, vec!["moonbit".to_string(), "fast".to_string()]);
     }
 }

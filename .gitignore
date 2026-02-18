@@ -59,6 +59,8 @@ desktop/.tauri-dev.json
 .ai/state.json
 .ai/tasks/**/.mooncakes/
 .ai/tasks/**/_build/
+bench/moon_ffi_boundary/_build/
+bench/moon_ffi_boundary/moon.pkg.json
 
 .beads/
 
