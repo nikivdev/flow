@@ -15,6 +15,7 @@ Complete documentation for all `f` (flow) commands.
 | [`upstream`](upstream.md) | Manage upstream fork workflow |
 | [`env`](env.md) | Sync project environment and manage env vars |
 | [`invariants`](invariants.md) | Validate project invariants from `flow.toml` |
+| [`fast`](fast.md) | Low-latency AI task invocation via fast client |
 | [`tasks`](tasks.md) | List and run project tasks |
 | [`global`](global.md) | Run tasks from global flow config |
 | [`setup`](setup.md) | Print aliases or run setup task |
@@ -53,6 +54,7 @@ f commit --help
 ### Task Management
 
 - **[tasks](tasks.md)** - List project tasks
+- **[fast](fast.md)** - Run AI tasks through the low-latency fast client path
 - **[global](global.md)** - Run tasks from ~/.config/flow/flow.toml
 - **[setup](setup.md)** - Print aliases or run setup task
 - **[run](run.md)** - Run a specific task

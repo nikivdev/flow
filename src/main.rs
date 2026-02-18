@@ -12,8 +12,8 @@ use flowd::{
     },
     code, commit, commits, daemon, deploy, deps, docs, doctor, env, ext, fish_install, fish_trace,
     fix, fixup, git_guard, gitignore_policy, hash, health, help_search, history, hive, home, hub,
-    info, init, init_tracing, install, jj, latest, log_server, macos, notify, otp, palette,
-    parallel, processes, projects, proxy, publish, push, recipe, registry, release, repos,
+    info, init, init_tracing, install, invariants, jj, latest, log_server, macos, notify, otp,
+    palette, parallel, processes, projects, proxy, publish, push, recipe, registry, release, repos,
     reviews_todo, services, setup, skills, ssh_keys, storage, supervisor, sync, task_match, tasks,
     todo, tools, traces, undo, upgrade, upstream, usage, web,
 };
@@ -88,8 +88,15 @@ fn main() -> Result<()> {
             Some(Commands::Health(opts)) => {
                 health::run(opts)?;
             }
+            Some(Commands::Invariants(opts)) => {
+                let root = std::env::current_dir()?;
+                invariants::check(&root, opts.staged)?;
+            }
             Some(Commands::Tasks(cmd)) => {
                 tasks::run_tasks_command(cmd)?;
+            }
+            Some(Commands::Fast(opts)) => {
+                tasks::run_fast(opts)?;
             }
             Some(Commands::AiTestNew(opts)) => {
                 ai_test::run(opts)?;
