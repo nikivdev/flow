@@ -125,7 +125,7 @@ pub enum Commands {
     Health(HealthOpts),
     #[command(
         about = "Fuzzy search task history or list available tasks.",
-        long_about = "Search through previously run tasks (most recent first) or list tasks from flow.toml."
+        long_about = "Search through previously run tasks (most recent first) or list project tasks from flow.toml plus AI MoonBit tasks under .ai/tasks/*.mbt."
     )]
     Tasks(TasksCommand),
     #[command(
@@ -250,8 +250,9 @@ pub enum Commands {
     )]
     Gitignore(GitignoreCommand),
     #[command(
-        about = "Search and execute markdown recipes.",
-        long_about = "Recipes are markdown files with executable shell blocks. Flow discovers project recipes from .ai/recipes and global recipes from ~/.config/flow/recipes (or overrides), then lets you list/search/run them."
+        about = "Legacy recipe command (prefer task-centric .ai/tasks/.mbt).",
+        long_about = "Legacy compatibility command for recipe files. Prefer task-centric workflows with flow.toml tasks + .ai/tasks/*.mbt.",
+        hide = true
     )]
     Recipe(RecipeCommand),
     #[command(
@@ -794,6 +795,14 @@ pub enum TasksAction {
     List(TasksListOpts),
     /// Show duplicate task names discovered across nested flow.toml files.
     Dupes(TasksDupesOpts),
+    /// Initialize AI task directory with a MoonBit starter task.
+    InitAi(TasksInitAiOpts),
+    /// Prebuild and cache a specific AI task binary.
+    BuildAi(TasksBuildAiOpts),
+    /// Run a specific AI task with optional cache/daemon execution.
+    RunAi(TasksRunAiOpts),
+    /// Manage the AI task daemon.
+    Daemon(TasksDaemonCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -811,6 +820,67 @@ pub struct TasksDupesOpts {
     /// Path to the project flow config (flow.toml).
     #[arg(long, default_value = "flow.toml")]
     pub config: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TasksInitAiOpts {
+    /// Root directory where .ai/tasks should be created.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Overwrite starter file if it already exists.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TasksBuildAiOpts {
+    /// AI task selector (e.g. ai:flow/dev-check or flow/dev-check).
+    #[arg(value_name = "TASK")]
+    pub name: String,
+    /// Root directory used for .ai/tasks discovery.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Force rebuild even if a cached artifact exists.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TasksRunAiOpts {
+    /// AI task selector (e.g. ai:flow/dev-check or flow/dev-check).
+    #[arg(value_name = "TASK")]
+    pub name: String,
+    /// Root directory used for .ai/tasks discovery.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Run through the AI task daemon.
+    #[arg(long)]
+    pub daemon: bool,
+    /// Disable binary cache and use direct moon run.
+    #[arg(long)]
+    pub no_cache: bool,
+    /// Additional arguments passed to the AI task.
+    #[arg(value_name = "ARGS", trailing_var_arg = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TasksDaemonCommand {
+    #[command(subcommand)]
+    pub action: TasksDaemonAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum TasksDaemonAction {
+    /// Start task daemon in the background.
+    Start,
+    /// Stop task daemon.
+    Stop,
+    /// Show task daemon status.
+    Status,
+    /// Run daemon server loop (internal).
+    #[command(hide = true)]
+    Serve,
 }
 
 #[derive(Args, Debug, Clone)]

@@ -24,9 +24,12 @@ use shell_words;
 use which::which;
 
 use crate::{
+    ai_taskd,
+    ai_tasks,
     cli::{
         GlobalAction, GlobalCommand, HubAction, HubCommand, HubOpts, TaskActivateOpts, TaskRunOpts,
-        TasksAction, TasksCommand, TasksDupesOpts, TasksListOpts, TasksOpts,
+        TasksAction, TasksBuildAiOpts, TasksCommand, TasksDaemonAction, TasksDaemonCommand,
+        TasksDupesOpts, TasksInitAiOpts, TasksListOpts, TasksOpts, TasksRunAiOpts,
     },
     config::{self, Config, FloxInstallSpec, TaskConfig},
     discover,
@@ -339,8 +342,64 @@ pub fn run_tasks_command(cmd: TasksCommand) -> Result<()> {
     match cmd.action {
         Some(TasksAction::List(opts)) => list_tasks(opts),
         Some(TasksAction::Dupes(opts)) => list_task_duplicates(opts),
+        Some(TasksAction::InitAi(opts)) => init_ai_tasks(opts),
+        Some(TasksAction::BuildAi(opts)) => build_ai_task(opts),
+        Some(TasksAction::RunAi(opts)) => run_ai_task(opts),
+        Some(TasksAction::Daemon(cmd)) => run_ai_task_daemon_command(cmd),
         None => fuzzy_search_task_history(),
     }
+}
+
+fn run_ai_task_daemon_command(cmd: TasksDaemonCommand) -> Result<()> {
+    match cmd.action {
+        TasksDaemonAction::Start => ai_taskd::start(),
+        TasksDaemonAction::Stop => ai_taskd::stop(),
+        TasksDaemonAction::Status => ai_taskd::status(),
+        TasksDaemonAction::Serve => ai_taskd::serve(),
+    }
+}
+
+fn build_ai_task(opts: TasksBuildAiOpts) -> Result<()> {
+    let root = resolve_ai_root(&opts.root)?;
+    let ai_discovery = ai_tasks::discover_tasks(&root)?;
+    let task = ai_tasks::select_task(&ai_discovery, &opts.name)?
+        .with_context(|| format!("AI task '{}' not found in {}", opts.name, root.display()))?;
+    let artifact = ai_tasks::build_task_cached(task, &root, opts.force)?;
+    println!(
+        "ai task cached: {}\n  key: {}\n  binary: {}\n  rebuilt: {}",
+        task.id,
+        artifact.cache_key,
+        artifact.binary_path.display(),
+        artifact.rebuilt
+    );
+    Ok(())
+}
+
+fn run_ai_task(opts: TasksRunAiOpts) -> Result<()> {
+    let root = resolve_ai_root(&opts.root)?;
+    if opts.daemon {
+        ai_taskd::start()?;
+        return ai_taskd::run_via_daemon(&root, &opts.name, &opts.args, opts.no_cache);
+    }
+
+    let ai_discovery = ai_tasks::discover_tasks(&root)?;
+    let task = ai_tasks::select_task(&ai_discovery, &opts.name)?
+        .with_context(|| format!("AI task '{}' not found in {}", opts.name, root.display()))?;
+
+    if opts.no_cache {
+        ai_tasks::run_task_via_moon(task, &root, &opts.args)
+    } else {
+        ai_tasks::run_task_cached(task, &root, &opts.args)
+    }
+}
+
+fn resolve_ai_root(root: &Path) -> Result<PathBuf> {
+    let root = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(root)
+    };
+    Ok(root.canonicalize().unwrap_or(root))
 }
 
 /// Fuzzy search through task history (most recent first).
@@ -469,17 +528,18 @@ fn list_tasks(opts: TasksListOpts) -> Result<()> {
     }
 
     let discovery = discover::discover_tasks(&root)?;
+    let ai_discovery = ai_tasks::discover_tasks(&root)?;
     if opts.dupes {
         return print_duplicate_tasks(&discovery.tasks);
     }
 
-    if discovery.tasks.is_empty() {
+    if discovery.tasks.is_empty() && ai_discovery.is_empty() {
         println!("No tasks defined in {} or subdirectories", root.display());
         return Ok(());
     }
 
     println!("Tasks (root: {}):", root.display());
-    for line in format_discovered_task_lines(&discovery.tasks) {
+    for line in format_discovered_task_lines(&discovery.tasks, &ai_discovery) {
         println!("{line}");
     }
 
@@ -504,6 +564,30 @@ fn list_task_duplicates(opts: TasksDupesOpts) -> Result<()> {
     print_duplicate_tasks(&discovery.tasks)
 }
 
+fn init_ai_tasks(opts: TasksInitAiOpts) -> Result<()> {
+    let root = if opts.root.is_absolute() {
+        opts.root
+    } else {
+        std::env::current_dir()?.join(opts.root)
+    };
+    let task_dir = root.join(".ai").join("tasks");
+    std::fs::create_dir_all(&task_dir)
+        .with_context(|| format!("failed to create {}", task_dir.display()))?;
+
+    let starter_path = task_dir.join("starter.mbt");
+    if starter_path.exists() && !opts.force {
+        println!("AI task starter already exists: {}", starter_path.display());
+        println!("Use --force to overwrite.");
+        return Ok(());
+    }
+
+    std::fs::write(&starter_path, AI_TASK_STARTER)
+        .with_context(|| format!("failed to write {}", starter_path.display()))?;
+    println!("Created AI task starter: {}", starter_path.display());
+    println!("Run it with: f starter");
+    Ok(())
+}
+
 pub fn list(opts: TasksOpts) -> Result<()> {
     // Determine root directory for discovery
     let mut root = if opts.config.is_absolute() {
@@ -521,14 +605,15 @@ pub fn list(opts: TasksOpts) -> Result<()> {
     }
 
     let discovery = discover::discover_tasks(&root)?;
+    let ai_discovery = ai_tasks::discover_tasks(&root)?;
 
-    if discovery.tasks.is_empty() {
+    if discovery.tasks.is_empty() && ai_discovery.is_empty() {
         println!("No tasks defined in {} or subdirectories", root.display());
         return Ok(());
     }
 
     println!("Tasks (root: {}):", root.display());
-    for line in format_discovered_task_lines(&discovery.tasks) {
+    for line in format_discovered_task_lines(&discovery.tasks, &ai_discovery) {
         println!("{line}");
     }
 
@@ -601,7 +686,8 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
         }
     }
     let discovery = discover::discover_tasks(&root)?;
-    if discovery.tasks.is_empty() {
+    let ai_discovery = ai_tasks::discover_tasks(&root)?;
+    if discovery.tasks.is_empty() && ai_discovery.is_empty() {
         bail!("No tasks defined in {} or subdirectories", root.display());
     }
 
@@ -617,12 +703,18 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
         });
     }
 
+    if let Some(ai_task) = ai_tasks::select_task(&ai_discovery, task_name)? {
+        return ai_tasks::run_task(ai_task, &root, &args);
+    }
+
     // List available tasks in error message
     let available: Vec<_> = discovery.tasks.iter().map(task_reference).collect();
+    let mut available_all = available;
+    available_all.extend(ai_discovery.iter().map(ai_tasks::task_reference));
     bail!(
         "task '{}' not found.\nAvailable tasks: {}",
         task_name,
-        available.join(", ")
+        available_all.join(", ")
     );
 }
 
@@ -867,7 +959,13 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
         let _ = projects::set_active_project(name);
     }
 
-    let Some(task) = find_task(&cfg, &opts.name) else {
+    let task = if let Some(task) = find_task(&cfg, &opts.name) {
+        task
+    } else {
+        let ai_discovery = ai_tasks::discover_tasks(workdir)?;
+        if let Some(ai_task) = ai_tasks::select_task(&ai_discovery, &opts.name)? {
+            return ai_tasks::run_task(ai_task, workdir, &opts.args);
+        }
         bail!(
             "task '{}' not found in {}",
             opts.name,
@@ -1446,7 +1544,10 @@ fn format_task_lines(tasks: &[TaskConfig]) -> Vec<String> {
     lines
 }
 
-fn format_discovered_task_lines(tasks: &[discover::DiscoveredTask]) -> Vec<String> {
+fn format_discovered_task_lines(
+    tasks: &[discover::DiscoveredTask],
+    ai_tasks_list: &[ai_tasks::DiscoveredAiTask],
+) -> Vec<String> {
     let mut lines = Vec::new();
     for (idx, discovered) in tasks.iter().enumerate() {
         let task = &discovered.task;
@@ -1476,6 +1577,27 @@ fn format_discovered_task_lines(tasks: &[discover::DiscoveredTask]) -> Vec<Strin
             lines.push(format!("    {desc}"));
         }
     }
+
+    let base = lines.len();
+    for (idx, task) in ai_tasks_list.iter().enumerate() {
+        let tags = if task.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", task.tags.join(","))
+        };
+        lines.push(format!(
+            "{:>2}. {}{} ({}) – moon run {}",
+            base + idx + 1,
+            task.id,
+            tags,
+            task.relative_path,
+            task.path.display()
+        ));
+        if !task.description.trim().is_empty() {
+            lines.push(format!("    {}", task.description.trim()));
+        }
+    }
+
     lines
 }
 
@@ -1524,6 +1646,20 @@ fn print_duplicate_tasks(tasks: &[discover::DiscoveredTask]) -> Result<()> {
     }
     Ok(())
 }
+
+const AI_TASK_STARTER: &str = r#"// title: Starter AI Task
+// description: Example MoonBit task under .ai/tasks.
+// tags: [ai, moonbit, task]
+//
+// Run with:
+//   f starter
+// or:
+//   f ai:starter
+
+fn main {
+  println("starter ai task: ok")
+}
+"#;
 
 pub(crate) fn find_task<'a>(cfg: &'a Config, needle: &str) -> Option<&'a TaskConfig> {
     let normalized = needle.trim();
@@ -3202,7 +3338,8 @@ mod tests {
     #[test]
     fn format_discovered_task_lines_prefixes_scope() {
         let entries = vec![discovered_task("mobile", "mobile", "dev")];
-        let lines = format_discovered_task_lines(&entries);
+        let ai_entries: Vec<ai_tasks::DiscoveredAiTask> = Vec::new();
+        let lines = format_discovered_task_lines(&entries, &ai_entries);
         assert!(lines[0].contains("mobile:dev"));
     }
 
