@@ -124,10 +124,20 @@ pub enum Commands {
     )]
     Health(HealthOpts),
     #[command(
+        about = "Check project invariants from flow.toml against working tree or staged changes.",
+        alias = "inv"
+    )]
+    Invariants(InvariantsOpts),
+    #[command(
         about = "Fuzzy search task history or list available tasks.",
         long_about = "Search through previously run tasks (most recent first) or list project tasks from flow.toml plus AI MoonBit tasks under .ai/tasks/*.mbt."
     )]
     Tasks(TasksCommand),
+    #[command(
+        about = "Run an AI task via the low-latency fast client path.",
+        long_about = "Dispatches AI task selectors through the fast daemon client when available (fai / ai-taskd-client), with safe fallback to Flow daemon execution."
+    )]
+    Fast(FastRunOpts),
     #[command(
         about = "Create a local AI scratch test file under .ai/test.",
         long_about = "Creates a gitignored test scaffold under .ai/test for fast AI-generated validation tests. Intended for local iteration without polluting tracked test suites."
@@ -971,6 +981,22 @@ pub struct TaskRunOpts {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct FastRunOpts {
+    /// AI task selector (e.g. ai:flow/dev-check).
+    #[arg(value_name = "TASK")]
+    pub name: String,
+    /// Root directory used for .ai/tasks discovery.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Disable binary cache and use direct moon run.
+    #[arg(long)]
+    pub no_cache: bool,
+    /// Additional arguments passed to the AI task.
+    #[arg(value_name = "ARGS", trailing_var_arg = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct TaskActivateOpts {
     /// Path to the project flow config (flow.toml).
     #[arg(long, default_value = "flow.toml")]
@@ -1045,6 +1071,13 @@ pub struct DoctorOpts {}
 
 #[derive(Args, Debug, Clone)]
 pub struct HealthOpts {}
+
+#[derive(Args, Debug, Clone)]
+pub struct InvariantsOpts {
+    /// Only check staged changes (default: check all changes vs HEAD).
+    #[arg(long)]
+    pub staged: bool,
+}
 
 #[derive(Args, Debug, Clone)]
 pub struct RerunOpts {
@@ -3243,6 +3276,9 @@ pub struct SyncCommand {
     /// Allow push even if P1/P2 review todos are open.
     #[arg(long)]
     pub allow_review_issues: bool,
+    /// Reduce sync output noise (show remote update counts without commit line listings).
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[derive(Args, Debug, Clone)]

@@ -26,9 +26,10 @@ use which::which;
 use crate::{
     ai_taskd, ai_tasks,
     cli::{
-        GlobalAction, GlobalCommand, HubAction, HubCommand, HubOpts, TaskActivateOpts, TaskRunOpts,
-        TasksAction, TasksBuildAiOpts, TasksCommand, TasksDaemonAction, TasksDaemonCommand,
-        TasksDupesOpts, TasksInitAiOpts, TasksListOpts, TasksOpts, TasksRunAiOpts,
+        FastRunOpts, GlobalAction, GlobalCommand, HubAction, HubCommand, HubOpts, TaskActivateOpts,
+        TaskRunOpts, TasksAction, TasksBuildAiOpts, TasksCommand, TasksDaemonAction,
+        TasksDaemonCommand, TasksDupesOpts, TasksInitAiOpts, TasksListOpts, TasksOpts,
+        TasksRunAiOpts,
     },
     config::{self, Config, FloxInstallSpec, TaskConfig},
     discover,
@@ -347,6 +348,23 @@ pub fn run_tasks_command(cmd: TasksCommand) -> Result<()> {
         Some(TasksAction::Daemon(cmd)) => run_ai_task_daemon_command(cmd),
         None => fuzzy_search_task_history(),
     }
+}
+
+pub fn run_fast(opts: FastRunOpts) -> Result<()> {
+    let root = resolve_ai_root(&opts.root)?;
+    let selector = opts.name.trim();
+    if !selector.to_ascii_lowercase().starts_with("ai:") {
+        bail!(
+            "f fast expects an AI task selector (for example: ai:flow/dev-check), got '{}'",
+            opts.name
+        );
+    }
+
+    if let Some(()) = run_via_fast_client(&root, selector, &opts.args, opts.no_cache)? {
+        return Ok(());
+    }
+
+    run_via_daemon_with_lazy_start(&root, selector, &opts.args, opts.no_cache)
 }
 
 fn run_ai_task_daemon_command(cmd: TasksDaemonCommand) -> Result<()> {

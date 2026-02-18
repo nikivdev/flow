@@ -23,6 +23,7 @@ f tasks daemon stop
 cargo build --release --bin ai-taskd-client
 ./target/release/ai-taskd-client ai:flow/dev-check
 f install-ai-fast-client
+f fast ai:flow/dev-check
 f bench-ai-runtime --iterations 80 --warmup 10
 f bench-ffi-boundary --iters 10000000
 f bench-ffi-boundary --iters 10000000 --native-opt
