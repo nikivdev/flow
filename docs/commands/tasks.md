@@ -20,6 +20,7 @@ f tasks run-ai --daemon ai:flow/dev-check
 f tasks daemon start
 f tasks daemon status
 f tasks daemon stop
+f bench-ai-runtime --iterations 80 --warmup 10
 ```
 
 ## AI Task Workflow

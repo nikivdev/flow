@@ -137,6 +137,11 @@ command = "bun tests/test_log_server.ts"
 description = "Test log ingestion and query endpoints (requires 'f server' running)"
 
 [[tasks]]
+name = "bench-ai-runtime"
+command = "python3 ./scripts/bench-ai-runtime.py $@"
+description = "Benchmark MoonBit AI task runtime paths (moon-run vs cached vs daemon)"
+
+[[tasks]]
 name = "test-args"
 command = "echo \"arg1=$1 arg2=$2 all=$@\""
 description = "Test that task args are passed correctly"
