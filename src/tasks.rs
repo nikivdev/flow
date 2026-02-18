@@ -377,20 +377,17 @@ fn build_ai_task(opts: TasksBuildAiOpts) -> Result<()> {
 
 fn run_ai_task(opts: TasksRunAiOpts) -> Result<()> {
     let root = resolve_ai_root(&opts.root)?;
+    let mut policy = AiTaskExecutionPolicy::from_env();
     if opts.daemon {
-        ai_taskd::start()?;
-        return ai_taskd::run_via_daemon(&root, &opts.name, &opts.args, opts.no_cache);
+        policy.use_daemon = true;
     }
-
-    let ai_discovery = ai_tasks::discover_tasks(&root)?;
-    let task = ai_tasks::select_task(&ai_discovery, &opts.name)?
-        .with_context(|| format!("AI task '{}' not found in {}", opts.name, root.display()))?;
-
     if opts.no_cache {
-        ai_tasks::run_task_via_moon(task, &root, &opts.args)
-    } else {
-        ai_tasks::run_task_cached(task, &root, &opts.args)
+        policy.no_cache = true;
     }
+    if !execute_ai_task_by_selector(&root, &opts.name, &opts.args, &policy)? {
+        bail!("AI task '{}' not found in {}", opts.name, root.display());
+    }
+    Ok(())
 }
 
 fn resolve_ai_root(root: &Path) -> Result<PathBuf> {
@@ -400,6 +397,70 @@ fn resolve_ai_root(root: &Path) -> Result<PathBuf> {
         std::env::current_dir()?.join(root)
     };
     Ok(root.canonicalize().unwrap_or(root))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AiTaskExecutionPolicy {
+    use_daemon: bool,
+    no_cache: bool,
+}
+
+impl AiTaskExecutionPolicy {
+    fn from_env() -> Self {
+        let runtime = std::env::var("FLOW_AI_TASK_RUNTIME")
+            .ok()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        Self {
+            use_daemon: env_flag_is_true("FLOW_AI_TASK_DAEMON"),
+            no_cache: runtime == "moon-run" || runtime == "moon",
+        }
+    }
+}
+
+fn env_flag_is_true(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(raw) => matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+fn execute_ai_task_by_selector(
+    root: &Path,
+    selector: &str,
+    args: &[String],
+    policy: &AiTaskExecutionPolicy,
+) -> Result<bool> {
+    let ai_discovery = ai_tasks::discover_tasks(root)?;
+    let Some(ai_task) = ai_tasks::select_task(&ai_discovery, selector)? else {
+        return Ok(false);
+    };
+
+    execute_ai_task(root, &ai_task.id, ai_task, args, policy)?;
+    Ok(true)
+}
+
+fn execute_ai_task(
+    root: &Path,
+    selector: &str,
+    task: &ai_tasks::DiscoveredAiTask,
+    args: &[String],
+    policy: &AiTaskExecutionPolicy,
+) -> Result<()> {
+    if policy.use_daemon {
+        ai_taskd::start()?;
+        return ai_taskd::run_via_daemon(root, selector, args, policy.no_cache);
+    }
+
+    if policy.no_cache {
+        ai_tasks::run_task_via_moon(task, root, args)
+    } else {
+        // Auto runtime policy currently resolves to cache-first with safe moon-run fallback.
+        ai_tasks::run_task(task, root, args)
+    }
 }
 
 /// Fuzzy search through task history (most recent first).
@@ -703,8 +764,9 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
         });
     }
 
-    if let Some(ai_task) = ai_tasks::select_task(&ai_discovery, task_name)? {
-        return ai_tasks::run_task(ai_task, &root, &args);
+    let ai_policy = AiTaskExecutionPolicy::from_env();
+    if execute_ai_task_by_selector(&root, task_name, &args, &ai_policy)? {
+        return Ok(());
     }
 
     // List available tasks in error message
@@ -959,12 +1021,12 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
         let _ = projects::set_active_project(name);
     }
 
+    let ai_policy = AiTaskExecutionPolicy::from_env();
     let task = if let Some(task) = find_task(&cfg, &opts.name) {
         task
     } else {
-        let ai_discovery = ai_tasks::discover_tasks(workdir)?;
-        if let Some(ai_task) = ai_tasks::select_task(&ai_discovery, &opts.name)? {
-            return ai_tasks::run_task(ai_task, workdir, &opts.args);
+        if execute_ai_task_by_selector(workdir, &opts.name, &opts.args, &ai_policy)? {
+            return Ok(());
         }
         bail!(
             "task '{}' not found in {}",
