@@ -93,6 +93,7 @@ Flow-local task pack under `.ai/tasks/flow/`:
 - `.ai/tasks/flow/regression-smoke/main.mbt`
 - `.ai/tasks/flow/release-preflight/main.mbt`
 - `.ai/tasks/flow/bench-cli/main.mbt`
+- `.ai/tasks/flow/noop/main.mbt`
 
 Each task has its own Moon package/workspace files:
 
@@ -130,6 +131,12 @@ Optional benchmark controls:
 
 ```bash
 FLOW_BENCH_ITERATIONS=30 FLOW_BENCH_WARMUP=5 f ai:flow/bench-cli
+```
+
+Runtime-path benchmark harness:
+
+```bash
+f bench-ai-runtime --iterations 80 --warmup 10 --json-out /tmp/flow_ai_runtime_bench.json
 ```
 
 ## Validation Commands
