@@ -24,8 +24,7 @@ use shell_words;
 use which::which;
 
 use crate::{
-    ai_taskd,
-    ai_tasks,
+    ai_taskd, ai_tasks,
     cli::{
         GlobalAction, GlobalCommand, HubAction, HubCommand, HubOpts, TaskActivateOpts, TaskRunOpts,
         TasksAction, TasksBuildAiOpts, TasksCommand, TasksDaemonAction, TasksDaemonCommand,
@@ -428,12 +427,189 @@ fn env_flag_is_true(name: &str) -> bool {
     }
 }
 
+fn should_prefer_fast_client(root: &Path, selector: &str) -> bool {
+    if !env_flag_is_true("FLOW_AI_TASK_FAST_CLIENT") {
+        return false;
+    }
+    if !selector.trim().to_ascii_lowercase().starts_with("ai:") {
+        return false;
+    }
+
+    if let Ok(raw) = std::env::var("FLOW_AI_TASK_FAST_SELECTORS")
+        && selector_matches_patterns(selector, &raw)
+    {
+        return true;
+    }
+
+    if let Ok(Some(task)) = ai_tasks::resolve_task_fast(root, selector) {
+        return task.tags.iter().any(|tag| {
+            matches!(
+                tag.trim().to_ascii_lowercase().as_str(),
+                "fast" | "latency" | "hot" | "hotkey"
+            )
+        });
+    }
+
+    false
+}
+
+fn selector_matches_patterns(selector: &str, patterns_csv: &str) -> bool {
+    let selector = selector.trim();
+    for raw in patterns_csv.split(',') {
+        let p = raw.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if p == "*" {
+            return true;
+        }
+        if p.starts_with('*') && p.ends_with('*') && p.len() >= 3 {
+            let needle = &p[1..p.len() - 1];
+            if selector.contains(needle) {
+                return true;
+            }
+            continue;
+        }
+        if let Some(prefix) = p.strip_suffix('*') {
+            if selector.starts_with(prefix) {
+                return true;
+            }
+            continue;
+        }
+        if let Some(suffix) = p.strip_prefix('*') {
+            if selector.ends_with(suffix) {
+                return true;
+            }
+            continue;
+        }
+        if selector.eq_ignore_ascii_case(p) {
+            return true;
+        }
+    }
+    false
+}
+
+fn fast_client_binary_path(root: &Path) -> Option<PathBuf> {
+    if let Ok(raw) = std::env::var("FLOW_AI_TASK_FAST_CLIENT_BIN") {
+        let p = PathBuf::from(raw.trim());
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        let fai = home.join(".local").join("bin").join("fai");
+        if fai.is_file() {
+            return Some(fai);
+        }
+    }
+
+    let release_local = root.join("target").join("release").join("ai-taskd-client");
+    if release_local.is_file() {
+        return Some(release_local);
+    }
+
+    let debug_local = root.join("target").join("debug").join("ai-taskd-client");
+    if debug_local.is_file() {
+        return Some(debug_local);
+    }
+
+    which("ai-taskd-client").ok()
+}
+
+fn run_via_fast_client(
+    root: &Path,
+    selector: &str,
+    args: &[String],
+    no_cache: bool,
+) -> Result<Option<()>> {
+    let Some(bin) = fast_client_binary_path(root) else {
+        return Ok(None);
+    };
+
+    fn invoke(
+        bin: &Path,
+        root: &Path,
+        selector: &str,
+        args: &[String],
+        no_cache: bool,
+    ) -> Result<std::process::Output> {
+        let mut cmd = Command::new(bin);
+        cmd.arg("--root").arg(root);
+        if no_cache {
+            cmd.arg("--no-cache");
+        }
+        cmd.arg(selector);
+        if !args.is_empty() {
+            cmd.arg("--");
+            cmd.args(args);
+        }
+        cmd.output().with_context(|| {
+            format!(
+                "failed to run fast ai client '{}' for selector '{}'",
+                bin.display(),
+                selector
+            )
+        })
+    }
+
+    let mut output = invoke(&bin, root, selector, args, no_cache)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        let unavailable = stderr.contains("failed to connect")
+            || stderr.contains("connection refused")
+            || stderr.contains("no such file or directory");
+        if unavailable {
+            ai_taskd::start()?;
+            output = invoke(&bin, root, selector, args, no_cache)?;
+        }
+    }
+
+    if !output.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    if output.status.success() {
+        Ok(Some(()))
+    } else {
+        let code = output.status.code().unwrap_or(1);
+        bail!("fast ai client failed for '{}': exit {}", selector, code);
+    }
+}
+
 fn execute_ai_task_by_selector(
     root: &Path,
     selector: &str,
     args: &[String],
     policy: &AiTaskExecutionPolicy,
 ) -> Result<bool> {
+    if policy.use_daemon {
+        if should_prefer_fast_client(root, selector)
+            && run_via_fast_client(root, selector, args, policy.no_cache)?.is_some()
+        {
+            return Ok(true);
+        }
+
+        match run_via_daemon_with_lazy_start(root, selector, args, policy.no_cache) {
+            Ok(()) => return Ok(true),
+            Err(error) => {
+                let msg = format!("{error:#}").to_ascii_lowercase();
+                if msg.contains("not found") {
+                    return Ok(false);
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    if let Some(ai_task) = ai_tasks::resolve_task_fast(root, selector)? {
+        execute_ai_task(root, &ai_task.id, &ai_task, args, policy)?;
+        return Ok(true);
+    }
+
     let ai_discovery = ai_tasks::discover_tasks(root)?;
     let Some(ai_task) = ai_tasks::select_task(&ai_discovery, selector)? else {
         return Ok(false);
@@ -451,8 +627,7 @@ fn execute_ai_task(
     policy: &AiTaskExecutionPolicy,
 ) -> Result<()> {
     if policy.use_daemon {
-        ai_taskd::start()?;
-        return ai_taskd::run_via_daemon(root, selector, args, policy.no_cache);
+        return run_via_daemon_with_lazy_start(root, selector, args, policy.no_cache);
     }
 
     if policy.no_cache {
@@ -460,6 +635,28 @@ fn execute_ai_task(
     } else {
         // Auto runtime policy currently resolves to cache-first with safe moon-run fallback.
         ai_tasks::run_task(task, root, args)
+    }
+}
+
+fn run_via_daemon_with_lazy_start(
+    root: &Path,
+    selector: &str,
+    args: &[String],
+    no_cache: bool,
+) -> Result<()> {
+    match ai_taskd::run_via_daemon(root, selector, args, no_cache) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            let msg = format!("{first_error:#}").to_ascii_lowercase();
+            let daemon_unavailable = msg.contains("failed to connect to ai-taskd")
+                || msg.contains("connection refused")
+                || msg.contains("no such file or directory");
+            if !daemon_unavailable {
+                return Err(first_error);
+            }
+            ai_taskd::start()?;
+            ai_taskd::run_via_daemon(root, selector, args, no_cache)
+        }
     }
 }
 
