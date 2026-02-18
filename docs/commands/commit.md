@@ -172,6 +172,7 @@ f reviews-todo codex --all
 1. **Safety Checks**
    - Warns about sensitive files (.env, .pem, keys, credentials)
    - Warns about files with large diffs (500+ lines)
+   - Runs invariant checks from `[invariants]` when configured
 
 2. **Stage Changes**
    - Runs `git add -A` to stage all changes
@@ -197,6 +198,14 @@ f reviews-todo codex --all
 
 7. **GitEdit Sync**
    - Syncs AI session data to gitedit.dev
+
+## Invariant Gate
+
+If your project defines `[invariants]` in `flow.toml`, `f commit` evaluates the staged diff against those rules (forbidden patterns, dependency allowlist policy, file line limits).
+
+- `mode = "warn"`: commit continues and findings are shown.
+- `mode = "block"`: commit is blocked on warning/critical findings.
+- Findings are injected into the AI review context.
 
 ---
 

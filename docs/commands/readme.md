@@ -10,11 +10,11 @@ Complete documentation for all `f` (flow) commands.
 | [`release`](release.md) | Publish a release to registry or GitHub |
 | [`publish`](publish.md) | Publish project to GitHub |
 | [`install`](install.md) | Install a CLI/tool via registry, parm, or flox |
-| [`recipe`](recipe.md) | Search and run markdown recipes |
 | [`repos`](repos.md) | Clone repositories into ~/repos |
 | [`commit`](commit.md) | AI-powered commit with code review |
 | [`upstream`](upstream.md) | Manage upstream fork workflow |
 | [`env`](env.md) | Sync project environment and manage env vars |
+| [`invariants`](invariants.md) | Validate project invariants from `flow.toml` |
 | [`tasks`](tasks.md) | List and run project tasks |
 | [`global`](global.md) | Run tasks from global flow config |
 | [`setup`](setup.md) | Print aliases or run setup task |
@@ -77,6 +77,7 @@ f commit --help
 ### Environment & Configuration
 
 - **[env](env.md)** - Manage environment variables
+- **[invariants](invariants.md)** - Validate invariant policies in `flow.toml`
 - **[init](init.md)** - Scaffold a new flow.toml
 - **[doctor](doctor.md)** - Verify tools and integrations
 
@@ -90,7 +91,10 @@ f commit --help
 
 - **[docs](docs.md)** - Manage auto-generated documentation
 - **[commits](commits.md)** - Browse commits with AI metadata
-- **[recipe](recipe.md)** - Search and run markdown recipes
+
+### Legacy Compatibility
+
+- **[recipe](recipe.md)** - Legacy recipe command (hidden; prefer `tasks` + `.ai/tasks/*.mbt`)
 
 ### Other
 

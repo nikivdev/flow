@@ -80,6 +80,20 @@ install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/sk
 [commit.skill_gate.min_version]
 # quality-bun-feature-delivery = 2
 
+[invariants]          # optional: AI-driven invariant enforcement
+# mode = "warn"       # "warn" | "block" | "off"
+# architecture_style = "layered monorepo"
+# non_negotiable = ["no inline imports", "no any without justification"]
+# forbidden = ["git add -A", "git reset --hard"]
+[invariants.terminology]
+# "pi-ai" = "LLM abstraction layer"
+# "pi-agent" = "stateful agent runtime"
+[invariants.deps]
+# policy = "approval_required"  # "approval_required" | "open"
+# approved = ["@sinclair/typebox", "@reatom/core"]
+[invariants.files]
+# max_lines = 300
+
 [git]                 # optional: git remote defaults for commit/sync
 # remote = "origin"   # e.g. "myflow-i" for contributor mirror repos
 
@@ -112,6 +126,7 @@ fr = "f run"
 - `[options]`: optional integration/runtime toggles; use `myflow_mirror` for mirror sync and `codex_bin` to route review calls through a wrapper transport.
 - `[commit.testing]`: optional local testing gate evaluated during `f commit`; supports Bun-first strict mode plus optional AI scratch-test fallback (`.ai/test` by default).
 - `[commit.skill_gate]`: optional required-skill policy for `f commit`; can enforce presence and minimum skill versions.
+- `[invariants]`: optional policy checks for forbidden patterns, dependency allowlists, terminology context, and file-size limits. `mode = "block"` makes invariant warnings fail `f invariants` and commit-time invariant gate checks.
 - `[git].remote`: preferred writable remote used by `f commit`/`f sync --push` (and jj remote defaults). Fallback order is `[git].remote`, then legacy `[jj].remote`, then `origin`.
 
 ## Notes
