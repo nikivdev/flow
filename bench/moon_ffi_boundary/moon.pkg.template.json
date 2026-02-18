@@ -1,0 +1,10 @@
+{
+  "is-main": true,
+  "support-targets": ["native"],
+  "link": {
+    "native": {
+      "cc-flags": "__CC_FLAGS__",
+      "cc-link-flags": "__CC_LINK_FLAGS__"
+    }
+  }
+}

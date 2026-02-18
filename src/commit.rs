@@ -3473,6 +3473,251 @@ fn combine_review_instructions(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Invariant gate: check staged diff against [invariants] from flow.toml
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+struct InvariantFinding {
+    severity: String, // "critical" | "warning" | "note"
+    category: String, // "forbidden" | "deps" | "files" | "terminology"
+    message: String,
+    file: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct InvariantGateReport {
+    findings: Vec<InvariantFinding>,
+}
+
+impl InvariantGateReport {
+    /// Build prompt context from findings + invariants for AI review injection.
+    fn to_prompt_context(&self, inv: &config::InvariantsConfig) -> String {
+        let mut parts = Vec::new();
+
+        // Always inject invariants into prompt even if no findings.
+        if let Some(style) = inv.architecture_style.as_deref() {
+            parts.push(format!("Architecture: {}", style));
+        }
+        if !inv.non_negotiable.is_empty() {
+            parts.push(format!(
+                "Non-negotiable rules:\n{}",
+                inv.non_negotiable
+                    .iter()
+                    .map(|r| format!("- {}", r))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        if !inv.terminology.is_empty() {
+            let terms: Vec<String> = inv
+                .terminology
+                .iter()
+                .map(|(k, v)| format!("- {}: {}", k, v))
+                .collect();
+            parts.push(format!(
+                "Terminology (do not rename):\n{}",
+                terms.join("\n")
+            ));
+        }
+
+        if !self.findings.is_empty() {
+            let finding_lines: Vec<String> = self
+                .findings
+                .iter()
+                .map(|f| {
+                    let loc = f.file.as_deref().unwrap_or("(repo)");
+                    format!("  [{}] {} — {}", f.severity, loc, f.message)
+                })
+                .collect();
+            parts.push(format!(
+                "Invariant findings on staged files:\n{}",
+                finding_lines.join("\n")
+            ));
+        }
+
+        if parts.is_empty() {
+            return String::new();
+        }
+        format!(
+            "\n## Project Invariants (enforced by flow)\n\n{}\n",
+            parts.join("\n\n")
+        )
+    }
+}
+
+fn resolve_invariants_config(repo_root: &Path) -> Option<config::InvariantsConfig> {
+    let cfg = config::load_or_default(repo_root.join("flow.toml"));
+    cfg.invariants
+}
+
+fn run_invariant_gate(
+    repo_root: &Path,
+    diff: &str,
+    changed_files: &[String],
+    gate_overrides: CommitGateOverrides,
+) -> Result<InvariantGateReport> {
+    if gate_overrides.skip_quality {
+        return Ok(InvariantGateReport {
+            findings: Vec::new(),
+        });
+    }
+
+    let Some(inv) = resolve_invariants_config(repo_root) else {
+        return Ok(InvariantGateReport {
+            findings: Vec::new(),
+        });
+    };
+
+    let mode = inv.mode.as_deref().unwrap_or("warn").to_ascii_lowercase();
+    if mode == "off" {
+        return Ok(InvariantGateReport {
+            findings: Vec::new(),
+        });
+    }
+
+    let mut findings: Vec<InvariantFinding> = Vec::new();
+
+    // 1. Forbidden patterns in diff content.
+    let skip_files = ["flow.toml"];
+    for pattern in &inv.forbidden {
+        let pat_lower = pattern.to_lowercase();
+        let mut current_file: Option<String> = None;
+        let mut skip_current = false;
+        for line in diff.lines() {
+            if let Some(file) = line.strip_prefix("+++ b/") {
+                let file = file.trim().trim_matches('"');
+                current_file = Some(file.to_string());
+                skip_current = skip_files.iter().any(|s| file.ends_with(s));
+                continue;
+            }
+            if current_file
+                .as_deref()
+                .is_some_and(|f| f.trim().trim_matches('"').ends_with("flow.toml"))
+            {
+                continue;
+            }
+            if skip_current {
+                continue;
+            }
+            // Only check added lines (lines starting with +, excluding +++ header).
+            if !line.starts_with('+') || line.starts_with("+++") {
+                continue;
+            }
+            if line.to_lowercase().contains(&pat_lower) {
+                findings.push(InvariantFinding {
+                    severity: "warning".to_string(),
+                    category: "forbidden".to_string(),
+                    message: format!("Forbidden pattern '{}' in added line", pattern),
+                    file: current_file.clone(),
+                });
+                break; // One finding per pattern is enough.
+            }
+        }
+    }
+
+    // 2. Dependency policy: check package.json changes for unapproved deps.
+    if let Some(deps_config) = &inv.deps {
+        let policy = deps_config.policy.as_deref().unwrap_or("approval_required");
+        if policy == "approval_required" && !deps_config.approved.is_empty() {
+            for file in changed_files {
+                if file.ends_with("package.json") {
+                    let full = repo_root.join(file);
+                    if let Ok(contents) = fs::read_to_string(&full) {
+                        check_unapproved_deps(
+                            &contents,
+                            &deps_config.approved,
+                            file,
+                            &mut findings,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. File size limits.
+    if let Some(files_config) = &inv.files {
+        if let Some(max_lines) = files_config.max_lines {
+            for file in changed_files {
+                let full = repo_root.join(file);
+                if let Ok(contents) = fs::read_to_string(&full) {
+                    let line_count = contents.lines().count() as u32;
+                    if line_count > max_lines {
+                        findings.push(InvariantFinding {
+                            severity: "warning".to_string(),
+                            category: "files".to_string(),
+                            message: format!("File has {} lines (max {})", line_count, max_lines),
+                            file: Some(file.clone()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let has_blocking = findings
+        .iter()
+        .any(|f| f.severity == "critical" || f.severity == "warning");
+
+    // Print findings.
+    if !findings.is_empty() {
+        eprintln!();
+        eprintln!("  invariants: {} finding(s)", findings.len());
+        for f in &findings {
+            let loc = f.file.as_deref().unwrap_or("(diff)");
+            eprintln!(
+                "    [{}:{}] {} — {}",
+                f.severity, f.category, loc, f.message
+            );
+        }
+    }
+
+    let pass = !has_blocking;
+    if !pass && mode == "block" {
+        bail!(
+            "Commit blocked by invariant gate ({} finding(s))",
+            findings.len()
+        );
+    }
+    if !pass {
+        eprintln!("  invariants: warning only (mode=warn)");
+    }
+
+    Ok(InvariantGateReport { findings })
+}
+
+/// Check a package.json for dependencies not on the approved list.
+fn check_unapproved_deps(
+    package_json: &str,
+    approved: &[String],
+    file_path: &str,
+    findings: &mut Vec<InvariantFinding>,
+) {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(package_json) else {
+        return;
+    };
+
+    let dep_sections = ["dependencies", "devDependencies", "peerDependencies"];
+    for section in &dep_sections {
+        if let Some(deps) = parsed.get(section).and_then(|v| v.as_object()) {
+            for dep_name in deps.keys() {
+                if !approved.iter().any(|a| a == dep_name) {
+                    findings.push(InvariantFinding {
+                        severity: "warning".to_string(),
+                        category: "deps".to_string(),
+                        message: format!(
+                            "'{}' in {} is not on the approved list",
+                            dep_name, section
+                        ),
+                        file: Some(file_path.to_string()),
+                    });
+                }
+            }
+        }
+    }
+}
+
 fn is_bun_repo_layout(repo_root: &Path) -> bool {
     if repo_root.join("build.zig").exists() && repo_root.join("src/bun.js").exists() {
         return true;
@@ -4020,6 +4265,9 @@ pub fn run_with_check_sync(
     // Fast feedback loop: run impacted tests with Bun before AI review.
     run_pre_commit_test_gate(&repo_root, &changed_files, gate_overrides)?;
 
+    // Enforce project invariants (forbidden patterns, dep policy, file size).
+    let invariant_report = run_invariant_gate(&repo_root, &diff, &changed_files, gate_overrides)?;
+
     // Get AI session context since last checkpoint (if enabled)
     let session_context = if include_context {
         ai::get_context_since_checkpoint_for_path(&repo_root)
@@ -4043,14 +4291,16 @@ pub fn run_with_check_sync(
         }
     }
 
-    // Merge [commit] review instructions with required skill instructions.
+    // Merge [commit] review instructions with required skill + invariant instructions.
     let custom_review_instructions = get_review_instructions(&repo_root);
     let required_skill_context =
         build_required_skills_prompt_context(&repo_root, &skill_gate_report);
-    let review_instructions = combine_review_instructions(
-        custom_review_instructions.as_deref(),
-        &required_skill_context,
-    );
+    let invariant_context = resolve_invariants_config(&repo_root)
+        .map(|inv| invariant_report.to_prompt_context(&inv))
+        .unwrap_or_default();
+    let combined_extra = format!("{}{}", required_skill_context, invariant_context);
+    let review_instructions =
+        combine_review_instructions(custom_review_instructions.as_deref(), &combined_extra);
 
     // Run code review with configured fallbacks.
     let review_attempts =
@@ -4068,7 +4318,10 @@ pub fn run_with_check_sync(
     if session_context.is_some() {
         println!("(with AI session context)");
     }
-    if custom_review_instructions.is_some() || !required_skill_context.is_empty() {
+    if custom_review_instructions.is_some()
+        || !required_skill_context.is_empty()
+        || !invariant_context.trim().is_empty()
+    {
         println!("(with custom review instructions)");
     }
     println!("────────────────────────────────────────");
@@ -13875,5 +14128,50 @@ mod tests {
         let input = "## Summary\n- already\n- multiline";
         let out = normalize_markdown_linebreaks(input);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn invariants_dep_check_flags_unapproved_dependencies() {
+        let package_json = r#"{
+          "dependencies": { "react": "^18.0.0", "@reatom/core": "^3.0.0" },
+          "devDependencies": { "vitest": "^1.0.0" }
+        }"#;
+        let approved = vec!["@reatom/core".to_string(), "vitest".to_string()];
+        let mut findings = Vec::new();
+
+        check_unapproved_deps(package_json, &approved, "package.json", &mut findings);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].category, "deps");
+        assert!(findings[0].message.contains("react"));
+        assert_eq!(findings[0].file.as_deref(), Some("package.json"));
+    }
+
+    #[test]
+    fn invariant_prompt_context_includes_rules_and_findings() {
+        let mut terminology = HashMap::new();
+        terminology.insert("Flow".to_string(), "CLI tool".to_string());
+        let inv = config::InvariantsConfig {
+            architecture_style: Some("event-driven".to_string()),
+            non_negotiable: vec!["no inline imports".to_string()],
+            terminology,
+            ..Default::default()
+        };
+        let report = InvariantGateReport {
+            findings: vec![InvariantFinding {
+                severity: "warning".to_string(),
+                category: "forbidden".to_string(),
+                message: "Forbidden pattern 'useState(' in added line".to_string(),
+                file: Some("web/app.tsx".to_string()),
+            }],
+        };
+
+        let ctx = report.to_prompt_context(&inv);
+        assert!(ctx.contains("Project Invariants"));
+        assert!(ctx.contains("Architecture: event-driven"));
+        assert!(ctx.contains("no inline imports"));
+        assert!(ctx.contains("Flow: CLI tool"));
+        assert!(ctx.contains("web/app.tsx"));
+        assert!(ctx.contains("Forbidden pattern"));
     }
 }

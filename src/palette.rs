@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
+    ai_tasks,
     cli::TasksOpts,
     config::{self, TaskConfig},
     discover::{self, DiscoveredTask},
@@ -202,6 +203,17 @@ impl PaletteEntry {
 
         Self { display, exec }
     }
+
+    fn from_ai_task(task: &ai_tasks::DiscoveredAiTask) -> Self {
+        let summary = if task.description.trim().is_empty() {
+            format!("moon run {}", task.path.display())
+        } else {
+            task.description.trim().to_string()
+        };
+        let display = format!("[task] {} – {}", task.id, truncate(&summary, 96));
+        let exec = vec![task.id.clone()];
+        Self { display, exec }
+    }
 }
 
 fn build_entries(project_opts: Option<TasksOpts>) -> Result<Vec<PaletteEntry>> {
@@ -222,11 +234,15 @@ fn build_entries(project_opts: Option<TasksOpts>) -> Result<Vec<PaletteEntry>> {
 
         // Discover all nested flow.toml files
         let discovery = discover::discover_tasks(&root)?;
+        let ai_discovery = ai_tasks::discover_tasks(&root)?;
 
-        if !discovery.tasks.is_empty() {
+        if !discovery.tasks.is_empty() || !ai_discovery.is_empty() {
             has_project = true;
             for discovered in &discovery.tasks {
                 entries.push(PaletteEntry::from_discovered(discovered));
+            }
+            for task in &ai_discovery {
+                entries.push(PaletteEntry::from_ai_task(task));
             }
         }
     }

@@ -60,6 +60,22 @@ f env run -- npm start
 f env get API_KEY -f value
 ```
 
+## Linsa/TestFlight Example
+
+For project-scoped keys used by local + ship flows (for example, assistant keys):
+
+```bash
+# Store in project space (recommended for app/server env)
+f env project set -e dev OPENROUTER_API_KEY=sk-...
+f env project set -e production OPENROUTER_API_KEY=sk-...
+f env project set -e dev OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
+f env project set -e production OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
+```
+
+Notes:
+- Do not commit secrets to docs or repository files.
+- Use `f env get -e production -f value OPENROUTER_API_KEY` at runtime when a ship script needs to inject a missing key.
+
 ## Subcommands
 
 | Command | Description |

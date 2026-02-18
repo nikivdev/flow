@@ -96,6 +96,9 @@ pub struct Config {
     /// Release configuration (hosts, npm, etc.).
     #[serde(default)]
     pub release: Option<ReleaseConfig>,
+    /// Project invariants for AI-driven enforcement.
+    #[serde(default)]
+    pub invariants: Option<InvariantsConfig>,
     /// Commit workflow config (fixers, review instructions).
     #[serde(default)]
     pub commit: Option<CommitConfig>,
@@ -337,6 +340,56 @@ pub struct SkillGateConfig {
     /// Optional per-skill minimum version (from skill frontmatter "version").
     #[serde(default, rename = "min_version", alias = "min-version")]
     pub min_version: Option<HashMap<String, u32>>,
+}
+
+/// Project invariants for AI-driven enforcement at commit time.
+///
+/// Defines machine-parseable rules that flow checks against staged changes.
+/// Findings are injected into AI review prompts and can block or warn on commit.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct InvariantsConfig {
+    /// Gate mode: "warn" (default) | "block" | "off"
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Architecture style description (informational, injected into AI prompts).
+    #[serde(default, rename = "architecture_style", alias = "architecture-style")]
+    pub architecture_style: Option<String>,
+    /// Non-negotiable patterns the project must follow (prose rules for AI context).
+    #[serde(default, rename = "non_negotiable", alias = "non-negotiable")]
+    pub non_negotiable: Vec<String>,
+    /// Forbidden string patterns checked against staged diff content.
+    /// If any pattern appears in the diff, a finding is emitted.
+    #[serde(default)]
+    pub forbidden: Vec<String>,
+    /// Canonical terminology map: term -> definition.
+    /// Injected into AI review prompts to prevent drift.
+    #[serde(default)]
+    pub terminology: HashMap<String, String>,
+    /// Dependency policy sub-section.
+    #[serde(default)]
+    pub deps: Option<InvariantsDepsConfig>,
+    /// File-level rules (max lines, etc.).
+    #[serde(default)]
+    pub files: Option<InvariantsFilesConfig>,
+}
+
+/// Dependency policy within invariants.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct InvariantsDepsConfig {
+    /// Policy: "approval_required" (default) | "open"
+    #[serde(default)]
+    pub policy: Option<String>,
+    /// Approved dependency names. New deps not on this list trigger a finding.
+    #[serde(default)]
+    pub approved: Vec<String>,
+}
+
+/// File-level invariant rules.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct InvariantsFilesConfig {
+    /// Maximum lines per source file. Files exceeding this in the diff trigger a warning.
+    #[serde(default, rename = "max_lines", alias = "max-lines")]
+    pub max_lines: Option<u32>,
 }
 
 /// Jujutsu (jj) workflow config.
@@ -597,6 +650,7 @@ impl Default for Config {
             web: None,
             prod: None,
             release: None,
+            invariants: None,
             commit: None,
             git: None,
             jj: None,
@@ -1958,6 +2012,7 @@ fn merge_config(base: &mut Config, other: Config) {
     base.watchers.extend(other.watchers);
     base.daemons.extend(other.daemons);
     base.stream = base.stream.take().or(other.stream);
+    base.invariants = base.invariants.take().or(other.invariants);
     base.storage = base.storage.take().or(other.storage);
     base.server_hub = base.server_hub.take().or(other.server_hub);
     for (key, value) in other.aliases {

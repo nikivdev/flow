@@ -49,8 +49,13 @@ Refactor target:
 Added:
 
 - `scripts/bench-ai-runtime.py`
+- `scripts/bench-moonbit-rust-ffi.py`
 - `flow.toml` task: `bench-ai-runtime`
+- `flow.toml` task: `bench-ffi-boundary`
 - minimal benchmark task: `.ai/tasks/flow/noop/*`
+- FFI microbench projects:
+  - `bench/ffi_host_boundary` (Rust staticlib + Rust baseline bench)
+  - `bench/moon_ffi_boundary` (MoonBit native bench calling Rust host exports)
 
 Benchmark scenarios:
 
@@ -68,6 +73,12 @@ f bench-ai-runtime --iterations 80 --warmup 10 --json-out /tmp/flow_ai_runtime_b
 ```
 
 This is the baseline gate to ensure refactors do not regress p95 latency.
+
+Run boundary-only microbench:
+
+```bash
+f bench-ffi-boundary --iters 10000000 --json-out /tmp/flow_ffi_boundary.json
+```
 
 ## 3. Zero-Cost Boundary Design (MoonBit <> Rust)
 
