@@ -35,15 +35,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkout seq dependency repo
-        run: |
-          if [ -d "$GITHUB_WORKSPACE/../seq/.git" ]; then
-            git -C "$GITHUB_WORKSPACE/../seq" fetch --depth 1 origin main
-            git -C "$GITHUB_WORKSPACE/../seq" reset --hard origin/main
-          else
-            git clone --depth 1 https://github.com/nikivdev/seq.git "$GITHUB_WORKSPACE/../seq"
-          fi
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -98,15 +89,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Checkout seq dependency repo
-        run: |
-          if [ -d "$GITHUB_WORKSPACE/../seq/.git" ]; then
-            git -C "$GITHUB_WORKSPACE/../seq" fetch --depth 1 origin main
-            git -C "$GITHUB_WORKSPACE/../seq" reset --hard origin/main
-          else
-            git clone --depth 1 https://github.com/nikivdev/seq.git "$GITHUB_WORKSPACE/../seq"
-          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
