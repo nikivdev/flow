@@ -26,7 +26,7 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::cli::{ServerAction, ServerOpts};
 use crate::log_store::{self, LogEntry, LogQuery};
 use crate::pr_edit::PrEditService;
-use crate::{ai, projects};
+use crate::{ai, explain_commits, projects};
 
 #[derive(Clone)]
 struct AppState {
@@ -147,6 +147,14 @@ fn run_foreground(host: &str, port: u16) -> Result<()> {
             .route("/projects", get(projects_list_all))
             .route("/projects/{name}/sessions", get(project_sessions))
             .route("/sessions/{id}", get(session_detail))
+            .route(
+                "/projects/{name}/commit-explanations",
+                get(project_commit_explanations),
+            )
+            .route(
+                "/projects/{name}/commit-explanations/{sha}",
+                get(project_commit_explanation_detail),
+            )
             .layer(cors)
             .with_state(state);
 
@@ -410,6 +418,11 @@ struct SessionDetailQuery {
     project: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CommitExplanationsQuery {
+    limit: Option<usize>,
+}
+
 /// GET /sessions/:id?project=/path/to/root - Get full session conversation.
 async fn session_detail(
     AxumPath(session_id): AxumPath<String>,
@@ -447,6 +460,70 @@ async fn session_detail(
             Json(json!({ "error": err.to_string() })),
         )
             .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /projects/:name/commit-explanations?limit=50 - List commit explanations for a project.
+async fn project_commit_explanations(
+    AxumPath(name): AxumPath<String>,
+    Query(query): Query<CommitExplanationsQuery>,
+) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        let project = projects::resolve_project(&name)?;
+        let project = project.ok_or_else(|| anyhow::anyhow!("project not found: {}", name))?;
+        explain_commits::list_explained_commits(&project.project_root, query.limit)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(commits)) => (StatusCode::OK, Json(json!({ "commits": commits }))).into_response(),
+        Ok(Err(err)) => {
+            let status = if err.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(json!({ "error": err.to_string() }))).into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /projects/:name/commit-explanations/:sha - Get one commit explanation by SHA/prefix.
+async fn project_commit_explanation_detail(
+    AxumPath((name, sha)): AxumPath<(String, String)>,
+) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        let project = projects::resolve_project(&name)?;
+        let project = project.ok_or_else(|| anyhow::anyhow!("project not found: {}", name))?;
+        explain_commits::get_explained_commit(&project.project_root, &sha)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(Some(commit))) => (StatusCode::OK, Json(json!(commit))).into_response(),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "commit explanation not found" })),
+        )
+            .into_response(),
+        Ok(Err(err)) => {
+            let status = if err.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(json!({ "error": err.to_string() }))).into_response()
+        }
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": err.to_string() })),

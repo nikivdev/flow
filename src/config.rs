@@ -131,6 +131,29 @@ pub struct Config {
     /// Proxy targets (array format: [[proxies]]).
     #[serde(default, alias = "proxy-target")]
     pub proxies: Vec<crate::proxy::ProxyTargetConfig>,
+    /// Commit explanation config (AI-generated markdown summaries).
+    #[serde(default, rename = "explain-commits", alias = "explain_commits")]
+    pub explain_commits: Option<ExplainCommitsConfig>,
+}
+
+/// Commit explanation config — AI-generated markdown summaries per commit.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ExplainCommitsConfig {
+    /// Whether auto-explain is enabled on sync (default: false).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Output directory relative to repo root (default: "docs/commits").
+    #[serde(default)]
+    pub output_dir: Option<String>,
+    /// AI model to use (default: "moonshotai/kimi-k2.5").
+    #[serde(default)]
+    pub model: Option<String>,
+    /// AI provider (default: "nvidia").
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Max commits to explain per sync (default: 10).
+    #[serde(default)]
+    pub batch_size: Option<usize>,
 }
 
 /// macOS launchd service management config.
@@ -660,6 +683,7 @@ impl Default for Config {
             macos: None,
             proxy: None,
             proxies: Vec::new(),
+            explain_commits: None,
         }
     }
 }

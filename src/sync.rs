@@ -26,6 +26,7 @@ use crate::commit;
 use crate::config;
 use crate::git_guard;
 use crate::push;
+use crate::secret_redact;
 use crate::todo;
 
 #[derive(Serialize, Clone)]
@@ -811,6 +812,19 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
         restore_stash(repo_root_path, stashed);
         if stashed {
             recorder.record("stash", "stash restored");
+        }
+
+        // Explain new commits if configured
+        let head_after_sha = git_capture(&["rev-parse", "HEAD"])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if recorder.head_before != head_after_sha {
+            if let Err(e) =
+                crate::explain_commits::maybe_run_after_sync(repo_root_path, &recorder.head_before)
+            {
+                eprintln!("warn: commit explanation failed: {e}");
+            }
         }
 
         println!("\n✓ Sync complete!");
@@ -3581,7 +3595,9 @@ fn sync_log_dirs() -> Vec<PathBuf> {
 }
 
 fn write_sync_snapshot(snapshot: &SyncSnapshot) -> Result<()> {
-    let payload = serde_json::to_string(snapshot)?;
+    let mut value = serde_json::to_value(snapshot)?;
+    secret_redact::redact_json_value(&mut value);
+    let payload = serde_json::to_string(&value)?;
     for base in sync_log_dirs() {
         let target_dir = base.join("sync");
         if !target_dir.exists() {

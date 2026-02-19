@@ -416,6 +416,12 @@ pub enum Commands {
     )]
     Commits(CommitsCommand),
     #[command(
+        name = "explain-commits",
+        about = "Generate AI explanations for recent commits.",
+        long_about = "Uses AI to generate markdown summaries for git commits. Writes one file per commit to docs/commits/. Skips already-processed commits unless --force is used."
+    )]
+    ExplainCommits(ExplainCommitsCommand),
+    #[command(
         about = "Bootstrap project and run setup task or aliases.",
         long_about = "Bootstraps the project if needed, creates flow.toml when missing, then runs the 'setup' task or prints shell aliases."
     )]
@@ -3457,6 +3463,15 @@ pub struct CommitsOpts {
     /// Show commits across all branches.
     #[arg(long)]
     pub all: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ExplainCommitsCommand {
+    /// Number of commits to explain (default: 1).
+    pub count: Option<usize>,
+    /// Re-explain even if already processed.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug, Clone)]

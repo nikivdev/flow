@@ -10,12 +10,12 @@ use flowd::{
         Cli, Commands, InstallAction, ProxyAction, ProxyCommand, RerunOpts, ReviewAction,
         ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
     },
-    code, commit, commits, daemon, deploy, deps, docs, doctor, domains, env, ext, fish_install,
-    fish_trace, fix, fixup, git_guard, gitignore_policy, hash, health, help_search, history, hive,
-    home, hub, info, init, init_tracing, install, invariants, jj, latest, log_server, macos,
-    notify, otp, palette, parallel, processes, projects, proxy, publish, push, recipe, registry,
-    release, repos, reviews_todo, services, setup, skills, ssh_keys, storage, supervisor, sync,
-    task_match, tasks, todo, tools, traces, undo, upgrade, upstream, usage, web,
+    code, commit, commits, daemon, deploy, deps, docs, doctor, domains, env, explain_commits, ext,
+    fish_install, fish_trace, fix, fixup, git_guard, gitignore_policy, hash, health, help_search,
+    history, hive, home, hub, info, init, init_tracing, install, invariants, jj, latest,
+    log_server, macos, notify, otp, palette, parallel, processes, projects, proxy, publish, push,
+    recipe, registry, release, repos, reviews_todo, services, setup, skills, ssh_keys, storage,
+    supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade, upstream, usage, web,
 };
 
 fn main() -> Result<()> {
@@ -490,6 +490,9 @@ fn main() -> Result<()> {
             }
             Some(Commands::Commits(cmd)) => {
                 commits::run(cmd)?;
+            }
+            Some(Commands::ExplainCommits(cmd)) => {
+                explain_commits::run_cli(cmd)?;
             }
             Some(Commands::Setup(opts)) => {
                 setup::run(opts)?;

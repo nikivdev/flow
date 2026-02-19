@@ -3,6 +3,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::db;
+use crate::secret_redact;
 
 /// A log entry for ingestion and storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +33,7 @@ pub struct StoredLogEntry {
 }
 
 /// Query parameters for filtering logs.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LogQuery {
     pub project: Option<String>,
     pub service: Option<String>,
@@ -48,6 +49,20 @@ pub struct LogQuery {
 
 fn default_limit() -> usize {
     100
+}
+
+impl Default for LogQuery {
+    fn default() -> Self {
+        Self {
+            project: None,
+            service: None,
+            log_type: None,
+            since: None,
+            until: None,
+            limit: default_limit(),
+            offset: 0,
+        }
+    }
 }
 
 /// Initialize the logs table schema.
@@ -76,19 +91,20 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 
 /// Insert a single log entry.
 pub fn insert_log(conn: &Connection, entry: &LogEntry) -> Result<i64> {
+    let sanitized = sanitize_entry(entry);
     conn.execute(
         r#"
         INSERT INTO logs (project, content, timestamp, log_type, service, stack, format)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         "#,
         params![
-            entry.project,
-            entry.content,
-            entry.timestamp,
-            entry.log_type,
-            entry.service,
-            entry.stack,
-            entry.format,
+            sanitized.project,
+            sanitized.content,
+            sanitized.timestamp,
+            sanitized.log_type,
+            sanitized.service,
+            sanitized.stack,
+            sanitized.format,
         ],
     )
     .context("failed to insert log")?;
@@ -101,19 +117,20 @@ pub fn insert_logs(conn: &mut Connection, entries: &[LogEntry]) -> Result<Vec<i6
     let mut ids = Vec::with_capacity(entries.len());
 
     for entry in entries {
+        let sanitized = sanitize_entry(entry);
         tx.execute(
             r#"
             INSERT INTO logs (project, content, timestamp, log_type, service, stack, format)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
             params![
-                entry.project,
-                entry.content,
-                entry.timestamp,
-                entry.log_type,
-                entry.service,
-                entry.stack,
-                entry.format,
+                sanitized.project,
+                sanitized.content,
+                sanitized.timestamp,
+                sanitized.log_type,
+                sanitized.service,
+                sanitized.stack,
+                sanitized.format,
             ],
         )
         .context("failed to insert log")?;
@@ -160,15 +177,17 @@ pub fn query_logs(conn: &Connection, query: &LogQuery) -> Result<Vec<StoredLogEn
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        let content: String = row.get(2)?;
+        let stack: Option<String> = row.get(6)?;
         Ok(StoredLogEntry {
             id: row.get(0)?,
             entry: LogEntry {
                 project: row.get(1)?,
-                content: row.get(2)?,
+                content: secret_redact::redact_text(&content),
                 timestamp: row.get(3)?,
                 log_type: row.get(4)?,
                 service: row.get(5)?,
-                stack: row.get(6)?,
+                stack: stack.map(|value| secret_redact::redact_text(&value)),
                 format: row.get(7)?,
             },
         })
@@ -199,6 +218,21 @@ pub fn open_log_db() -> Result<Connection> {
     let conn = db::open_db()?;
     init_schema(&conn)?;
     Ok(conn)
+}
+
+fn sanitize_entry(entry: &LogEntry) -> LogEntry {
+    LogEntry {
+        project: entry.project.clone(),
+        content: secret_redact::redact_text(&entry.content),
+        timestamp: entry.timestamp,
+        log_type: entry.log_type.clone(),
+        service: entry.service.clone(),
+        stack: entry
+            .stack
+            .as_ref()
+            .map(|value| secret_redact::redact_text(value)),
+        format: entry.format.clone(),
+    }
 }
 
 #[cfg(test)]
