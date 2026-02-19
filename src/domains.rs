@@ -1,13 +1,18 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{DomainsAction, DomainsAddOpts, DomainsCommand, DomainsRmOpts};
+use crate::cli::{DomainsAction, DomainsAddOpts, DomainsCommand, DomainsEngineArg, DomainsRmOpts};
 
 const PROXY_CONTAINER_NAME: &str = "flow-local-domains-proxy";
+const NATIVE_PROXY_HEADER: &str = "x-flow-domainsd: 1";
 
 const COMPOSE_FILE: &str = r#"services:
   proxy:
@@ -42,6 +47,9 @@ struct DomainsPaths {
     nginx_main: PathBuf,
     routes_dir: PathBuf,
     routes_state: PathBuf,
+    native_pid: PathBuf,
+    native_log: PathBuf,
+    native_bin: PathBuf,
 }
 
 impl DomainsPaths {
@@ -53,6 +61,9 @@ impl DomainsPaths {
             nginx_main: root.join("nginx").join("default.conf"),
             routes_dir: root.join("routes"),
             routes_state: root.join("routes.json"),
+            native_pid: root.join("domainsd.pid"),
+            native_log: root.join("domainsd.log"),
+            native_bin: root.join("domainsd-cpp"),
             root,
         })
     }
@@ -60,17 +71,40 @@ impl DomainsPaths {
 
 pub fn run(cmd: DomainsCommand) -> Result<()> {
     let paths = DomainsPaths::resolve()?;
+    let engine = resolve_engine(cmd.engine);
     match cmd.action {
-        Some(DomainsAction::Up) => run_up(&paths),
-        Some(DomainsAction::Down) => run_down(&paths),
+        Some(DomainsAction::Up) => run_up(&paths, engine),
+        Some(DomainsAction::Down) => run_down(&paths, engine),
         Some(DomainsAction::List) | None => run_list(&paths),
-        Some(DomainsAction::Add(opts)) => run_add(&paths, opts),
-        Some(DomainsAction::Rm(opts)) => run_rm(&paths, opts),
-        Some(DomainsAction::Doctor) => run_doctor(&paths),
+        Some(DomainsAction::Add(opts)) => run_add(&paths, opts, engine),
+        Some(DomainsAction::Rm(opts)) => run_rm(&paths, opts, engine),
+        Some(DomainsAction::Doctor) => run_doctor(&paths, engine),
     }
 }
 
-fn run_up(paths: &DomainsPaths) -> Result<()> {
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DomainsEngine {
+    Docker,
+    Native,
+}
+
+fn resolve_engine(cli_engine: Option<DomainsEngineArg>) -> DomainsEngine {
+    if let Some(engine) = cli_engine {
+        return match engine {
+            DomainsEngineArg::Docker => DomainsEngine::Docker,
+            DomainsEngineArg::Native => DomainsEngine::Native,
+        };
+    }
+    match std::env::var("FLOW_DOMAINS_ENGINE") {
+        Ok(v) if v.eq_ignore_ascii_case("native") => DomainsEngine::Native,
+        _ => DomainsEngine::Docker,
+    }
+}
+
+fn run_up(paths: &DomainsPaths, engine: DomainsEngine) -> Result<()> {
+    if engine == DomainsEngine::Native {
+        return run_up_native(paths);
+    }
     ensure_docker_available()?;
     ensure_layout(paths)?;
     let routes = load_routes(paths)?;
@@ -88,7 +122,10 @@ fn run_up(paths: &DomainsPaths) -> Result<()> {
     Ok(())
 }
 
-fn run_down(paths: &DomainsPaths) -> Result<()> {
+fn run_down(paths: &DomainsPaths, engine: DomainsEngine) -> Result<()> {
+    if engine == DomainsEngine::Native {
+        return run_down_native(paths);
+    }
     ensure_docker_available()?;
     ensure_layout(paths)?;
     run_compose(paths, &["down"])?;
@@ -113,7 +150,7 @@ fn run_list(paths: &DomainsPaths) -> Result<()> {
     Ok(())
 }
 
-fn run_add(paths: &DomainsPaths, opts: DomainsAddOpts) -> Result<()> {
+fn run_add(paths: &DomainsPaths, opts: DomainsAddOpts, engine: DomainsEngine) -> Result<()> {
     ensure_layout(paths)?;
     let host = normalize_host(&opts.host)?;
     let target = normalize_target(&opts.target)?;
@@ -122,7 +159,7 @@ fn run_add(paths: &DomainsPaths, opts: DomainsAddOpts) -> Result<()> {
     if let Some(existing) = routes.get(&host) {
         if existing == &target {
             println!("Route already exists: {host} -> {target}");
-            maybe_reload_running_proxy()?;
+            maybe_reload_running_proxy(paths, engine)?;
             return Ok(());
         }
         if !opts.replace {
@@ -137,12 +174,12 @@ fn run_add(paths: &DomainsPaths, opts: DomainsAddOpts) -> Result<()> {
     routes.insert(host.clone(), target.clone());
     save_routes(paths, &routes)?;
     write_route_files(paths, &routes)?;
-    maybe_reload_running_proxy()?;
+    maybe_reload_running_proxy(paths, engine)?;
     println!("Added route: {host} -> {target}");
     Ok(())
 }
 
-fn run_rm(paths: &DomainsPaths, opts: DomainsRmOpts) -> Result<()> {
+fn run_rm(paths: &DomainsPaths, opts: DomainsRmOpts, engine: DomainsEngine) -> Result<()> {
     ensure_layout(paths)?;
     let host = normalize_host(&opts.host)?;
     let mut routes = load_routes(paths)?;
@@ -151,12 +188,15 @@ fn run_rm(paths: &DomainsPaths, opts: DomainsRmOpts) -> Result<()> {
     }
     save_routes(paths, &routes)?;
     write_route_files(paths, &routes)?;
-    maybe_reload_running_proxy()?;
+    maybe_reload_running_proxy(paths, engine)?;
     println!("Removed route: {host}");
     Ok(())
 }
 
-fn run_doctor(paths: &DomainsPaths) -> Result<()> {
+fn run_doctor(paths: &DomainsPaths, engine: DomainsEngine) -> Result<()> {
+    if engine == DomainsEngine::Native {
+        return run_doctor_native(paths);
+    }
     ensure_layout(paths)?;
     let routes = load_routes(paths)?;
 
@@ -389,7 +429,21 @@ fn ensure_success(output: Output, context_msg: &str) -> Result<()> {
     bail!("{context_msg}: {detail}");
 }
 
-fn maybe_reload_running_proxy() -> Result<()> {
+fn maybe_reload_running_proxy(paths: &DomainsPaths, engine: DomainsEngine) -> Result<()> {
+    match engine {
+        DomainsEngine::Docker => maybe_reload_running_proxy_docker(),
+        DomainsEngine::Native => {
+            if native_proxy_running(paths)? {
+                // Native daemon reloads routes.json lazily on mtime change.
+                return Ok(());
+            }
+            println!("Native proxy not running yet. Start it with: f domains --engine native up");
+            Ok(())
+        }
+    }
+}
+
+fn maybe_reload_running_proxy_docker() -> Result<()> {
     if !docker_available() {
         return Ok(());
     }
@@ -495,6 +549,328 @@ fn port_80_listener_summary() -> Result<Option<String>> {
         return Ok(Some(compact));
     }
     Ok(None)
+}
+
+fn run_up_native(paths: &DomainsPaths) -> Result<()> {
+    ensure_layout(paths)?;
+    let routes = load_routes(paths)?;
+    assert_no_port_80_conflict_native(paths)?;
+    ensure_native_binary(paths)?;
+
+    if native_proxy_running(paths)? {
+        println!("Native local domains proxy is already running.");
+        println!("Config root: {}", paths.root.display());
+        println!("Routes: {}", routes.len());
+        return Ok(());
+    }
+
+    start_native_proxy(paths)?;
+    println!("Native local domains proxy is up (binary: domainsd-cpp).");
+    println!("Config root: {}", paths.root.display());
+    println!("Routes: {}", routes.len());
+    if routes.is_empty() {
+        println!("No routes yet. Add one with:");
+        println!("  f domains add linsa.localhost 127.0.0.1:3481");
+    }
+    Ok(())
+}
+
+fn run_down_native(paths: &DomainsPaths) -> Result<()> {
+    ensure_layout(paths)?;
+    let Some(pid) = read_native_pid(paths)? else {
+        println!("Native local domains proxy is not running.");
+        return Ok(());
+    };
+
+    if !pid_alive(pid) {
+        let _ = fs::remove_file(&paths.native_pid);
+        println!("Native local domains proxy was not running (removed stale pid file).");
+        return Ok(());
+    }
+
+    let output = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output()
+        .context("Failed to stop native local domains proxy")?;
+    if !output.status.success() {
+        ensure_success(output, "Failed to stop native local domains proxy")?;
+    }
+
+    for _ in 0..40 {
+        if !pid_alive(pid) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = fs::remove_file(&paths.native_pid);
+    println!("Native local domains proxy stopped.");
+    Ok(())
+}
+
+fn run_doctor_native(paths: &DomainsPaths) -> Result<()> {
+    ensure_layout(paths)?;
+    let routes = load_routes(paths)?;
+    let running = native_proxy_running(paths)?;
+
+    println!("Local domains doctor");
+    println!("--------------------");
+    println!("Engine: native");
+    println!("Config root: {}", paths.root.display());
+    println!("Routes: {}", routes.len());
+    println!(
+        "Native daemon: {}",
+        if running { "running" } else { "stopped" }
+    );
+    println!("Native binary: {}", paths.native_bin.display());
+    println!("Native pid file: {}", paths.native_pid.display());
+    println!("Native log file: {}", paths.native_log.display());
+
+    if let Some(owner) = docker_container_owning_port_80()? {
+        println!("Port 80 docker owner: {}", owner);
+    } else if let Some(listener) = port_80_listener_summary()? {
+        println!("Port 80 listener: {}", listener);
+    } else {
+        println!("Port 80 listener: none");
+    }
+
+    println!(
+        "Native health: {}",
+        if native_healthcheck().unwrap_or(false) {
+            "ok"
+        } else {
+            "unreachable"
+        }
+    );
+
+    if !routes.is_empty() {
+        println!();
+        println!("{:<32} {}", "HOST", "TARGET");
+        println!("{}", "-".repeat(58));
+        for (host, target) in routes {
+            println!("{:<32} {}", host, target);
+        }
+    }
+
+    Ok(())
+}
+
+fn native_source_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tools")
+        .join("domainsd-cpp")
+        .join("domainsd.cpp")
+}
+
+fn ensure_native_binary(paths: &DomainsPaths) -> Result<()> {
+    let source = native_source_path();
+    if !source.exists() {
+        bail!(
+            "Native domains daemon source not found at {}",
+            source.display()
+        );
+    }
+
+    let rebuild = if !paths.native_bin.exists() {
+        true
+    } else {
+        let src_mtime = fs::metadata(&source)
+            .and_then(|m| m.modified())
+            .context("Failed to read native daemon source mtime")?;
+        let bin_mtime = fs::metadata(&paths.native_bin)
+            .and_then(|m| m.modified())
+            .context("Failed to read native daemon binary mtime")?;
+        src_mtime > bin_mtime
+    };
+
+    if !rebuild {
+        return Ok(());
+    }
+
+    let compiler = if std::path::Path::new("/usr/bin/clang++").exists() {
+        PathBuf::from("/usr/bin/clang++")
+    } else {
+        which::which("clang++")
+            .context("clang++ is required for --engine native (install Xcode command line tools)")?
+    };
+
+    let output = Command::new(&compiler)
+        .args([
+            "-std=c++20",
+            "-O3",
+            "-DNDEBUG",
+            "-Wall",
+            "-Wextra",
+            "-pthread",
+            source.to_string_lossy().as_ref(),
+            "-o",
+            paths.native_bin.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .context("Failed to build native local domains daemon")?;
+    ensure_success(output, "Failed to build native local domains daemon")?;
+    Ok(())
+}
+
+fn assert_no_port_80_conflict_native(paths: &DomainsPaths) -> Result<()> {
+    if native_proxy_running(paths)? {
+        return Ok(());
+    }
+
+    if let Some(owner) = docker_container_owning_port_80()? {
+        bail!(
+            "Port 80 is owned by docker container '{}'. Stop it first before starting native domains proxy.",
+            owner
+        );
+    }
+    if let Some(listener) = port_80_listener_summary()? {
+        bail!(
+            "Port 80 is already in use by '{}'. Stop that listener, then retry `f domains --engine native up`.",
+            listener
+        );
+    }
+    Ok(())
+}
+
+fn start_native_proxy(paths: &DomainsPaths) -> Result<()> {
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.native_log)
+        .with_context(|| format!("Failed to open log file {}", paths.native_log.display()))?;
+    let err_file = log_file
+        .try_clone()
+        .context("Failed to duplicate native proxy log file handle")?;
+
+    let mut cmd = Command::new(&paths.native_bin);
+    cmd.arg("--listen")
+        .arg("127.0.0.1:80")
+        .arg("--routes")
+        .arg(&paths.routes_state)
+        .arg("--pidfile")
+        .arg(&paths.native_pid);
+
+    for (flag, value) in native_tuning_args()? {
+        cmd.arg(flag).arg(value);
+    }
+
+    let child = cmd
+        .stdout(log_file)
+        .stderr(err_file)
+        .spawn()
+        .context("Failed to spawn native local domains daemon")?;
+
+    let pid = child.id();
+    for _ in 0..50 {
+        if native_healthcheck().unwrap_or(false) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    bail!(
+        "Native local domains proxy failed to become healthy (pid {}). Check logs: {}",
+        pid,
+        paths.native_log.display()
+    )
+}
+
+fn native_tuning_args() -> Result<Vec<(&'static str, String)>> {
+    const MAPPINGS: [(&str, &str); 8] = [
+        (
+            "FLOW_DOMAINS_NATIVE_MAX_ACTIVE_CLIENTS",
+            "--max-active-clients",
+        ),
+        (
+            "FLOW_DOMAINS_NATIVE_UPSTREAM_CONNECT_TIMEOUT_MS",
+            "--upstream-connect-timeout-ms",
+        ),
+        (
+            "FLOW_DOMAINS_NATIVE_UPSTREAM_IO_TIMEOUT_MS",
+            "--upstream-io-timeout-ms",
+        ),
+        (
+            "FLOW_DOMAINS_NATIVE_CLIENT_IO_TIMEOUT_MS",
+            "--client-io-timeout-ms",
+        ),
+        (
+            "FLOW_DOMAINS_NATIVE_POOL_MAX_IDLE_PER_KEY",
+            "--pool-max-idle-per-key",
+        ),
+        (
+            "FLOW_DOMAINS_NATIVE_POOL_MAX_IDLE_TOTAL",
+            "--pool-max-idle-total",
+        ),
+        (
+            "FLOW_DOMAINS_NATIVE_POOL_IDLE_TIMEOUT_MS",
+            "--pool-idle-timeout-ms",
+        ),
+        ("FLOW_DOMAINS_NATIVE_POOL_MAX_AGE_MS", "--pool-max-age-ms"),
+    ];
+
+    let mut out = Vec::new();
+    for (env_name, flag) in MAPPINGS {
+        if let Ok(raw) = std::env::var(env_name) {
+            let parsed = raw
+                .trim()
+                .parse::<u64>()
+                .with_context(|| format!("Invalid {} value: {}", env_name, raw))?;
+            if parsed == 0 {
+                bail!("{} must be > 0", env_name);
+            }
+            out.push((flag, parsed.to_string()));
+        }
+    }
+    Ok(out)
+}
+
+fn read_native_pid(paths: &DomainsPaths) -> Result<Option<u32>> {
+    if !paths.native_pid.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&paths.native_pid)
+        .with_context(|| format!("Failed to read {}", paths.native_pid.display()))?;
+    let parsed = raw
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("Invalid pid in {}", paths.native_pid.display()))?;
+    Ok(Some(parsed))
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn native_proxy_running(paths: &DomainsPaths) -> Result<bool> {
+    let Some(pid) = read_native_pid(paths)? else {
+        return Ok(false);
+    };
+    if !pid_alive(pid) {
+        return Ok(false);
+    }
+    Ok(native_healthcheck().unwrap_or(false))
+}
+
+fn native_healthcheck() -> Result<bool> {
+    let mut stream = match TcpStream::connect("127.0.0.1:80") {
+        Ok(s) => s,
+        Err(_) => return Ok(false),
+    };
+    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(250)))?;
+    stream.write_all(
+        b"GET /_flow/domains/health HTTP/1.1\r\nHost: flow-domains-health.localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    let mut buf = [0_u8; 2048];
+    let n = stream.read(&mut buf)?;
+    if n == 0 {
+        return Ok(false);
+    }
+    let response = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+    Ok(response.contains(NATIVE_PROXY_HEADER))
 }
 
 #[cfg(test)]
