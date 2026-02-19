@@ -37,7 +37,7 @@ use crate::{
     history::{self, InvocationRecord},
     hub, init, jazz_state, projects,
     running::{self, RunningProcess},
-    task_failure_agents, task_match,
+    secret_redact, task_failure_agents, task_match,
 };
 
 /// Fire-and-forget log ingester that batches output lines and POSTs them to the
@@ -107,7 +107,7 @@ impl LogIngester {
     }
 
     fn send(&self, line: &str) {
-        let _ = self.tx.send(line.to_string());
+        let _ = self.tx.send(secret_redact::redact_text(line));
     }
 }
 
@@ -2149,7 +2149,7 @@ fn maybe_run_task_failure_hook(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     cmd.env("FLOW_TASK_NAME", task_name);
-    cmd.env("FLOW_TASK_COMMAND", command);
+    cmd.env("FLOW_TASK_COMMAND", secret_redact::redact_text(command));
     cmd.env("FLOW_TASK_WORKDIR", workdir.display().to_string());
     cmd.env("FLOW_TASK_STATUS", status.unwrap_or(-1).to_string());
     if let Some(path) = failure_bundle_path() {
@@ -2157,7 +2157,7 @@ fn maybe_run_task_failure_hook(
     }
     let tail = truncate_output_for_hook(output, 120, 12000);
     if !tail.is_empty() {
-        cmd.env("FLOW_TASK_OUTPUT_TAIL", tail);
+        cmd.env("FLOW_TASK_OUTPUT_TAIL", secret_redact::redact_text(&tail));
     }
     match cmd.status() {
         Ok(status) if status.success() => {}
@@ -2246,12 +2246,12 @@ fn write_failure_bundle(
 
     let payload = json!({
         "task": task_name,
-        "command": command,
+        "command": secret_redact::redact_text(command),
         "workdir": workdir.display().to_string(),
         "config": config_path.display().to_string(),
         "project": project_name,
         "status": status.unwrap_or(-1),
-        "output": truncate_for_bundle(output, 20_000),
+        "output": secret_redact::redact_text(&truncate_for_bundle(output, 20_000)),
         "fishx": fishx_enabled(),
         "ts": ts,
     });

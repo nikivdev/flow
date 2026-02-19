@@ -1,11 +1,11 @@
 # Local Domains, No Random Ports
 
-This pattern gives you stable local URLs like `http://maple.localhost` instead of remembering `localhost:3471`, `localhost:3472`, etc.
+This pattern gives stable local URLs like `http://gen.localhost` and `http://linsa.localhost` instead of remembering random ports.
 
-If you are on recent Flow, prefer shared ownership via `f domains` (see `docs/commands/domains.md`) so only one proxy binds port `80` across all repos.
+Use shared ownership via `f domains` (see `docs/commands/domains.md`) so only one proxy binds port `80` across all repos.
 
 It is fast and lightweight:
-- One local reverse proxy process (nginx).
+- One shared local reverse proxy container (nginx).
 - No system-wide DNS daemon required.
 - No VPN or packet filter changes.
 
@@ -14,127 +14,94 @@ It is fast and lightweight:
 Use `*.localhost` hostnames. They resolve to loopback by design, so traffic stays on your machine.
 
 That means:
-- `maple.localhost` can map to your web app.
-- `api.maple.localhost` can map to your API.
-- `ingest.maple.localhost` can map to your ingest endpoint.
+- `gen.localhost` can map to `127.0.0.1:5001`.
+- `linsa.localhost` can map to `127.0.0.1:3481`.
+- `api.myflow.localhost` can map to `127.0.0.1:8780`.
 
-## Compose Pattern
+## Recommended Pattern: Shared `f domains`
 
-Add a tiny proxy service and route by `Host` header.
-
-`docker-compose.yml`:
-
-```yaml
-services:
-  web:
-    ports:
-      - "3471:80"
-
-  api:
-    ports:
-      - "3472:3472"
-
-  ingest:
-    ports:
-      - "3474:3474"
-
-  local-domain-proxy:
-    image: nginx:1.27-alpine
-    profiles: ["domains"]
-    ports:
-      - "80:80"
-    volumes:
-      - ./docker/local-domain-proxy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      - web
-      - api
-      - ingest
-```
-
-`docker/local-domain-proxy/nginx.conf`:
-
-```nginx
-server {
-  listen 80;
-  server_name maple.localhost;
-  location / {
-    proxy_pass http://web:80;
-  }
-}
-
-server {
-  listen 80;
-  server_name api.maple.localhost;
-  location / {
-    proxy_pass http://api:3472;
-  }
-}
-
-server {
-  listen 80;
-  server_name ingest.maple.localhost;
-  location / {
-    proxy_pass http://ingest:3474;
-  }
-}
-```
-
-Bring it up:
+Register routes once, then run your normal dev servers on fixed ports.
 
 ```bash
-docker compose --profile domains up -d --build
+f domains add gen.localhost 127.0.0.1:5001
+f domains add linsa.localhost 127.0.0.1:3481
+f domains add myflow.localhost 127.0.0.1:3000
+f domains add api.myflow.localhost 127.0.0.1:8780
+
+f domains up
+f domains list
 ```
 
-## Flow Integration (`flow.toml`)
+`f domains up` ensures the shared proxy is running. `f domains list` shows the active route table.
 
-You can make this one-command via Flow tasks:
+## Flow Task Pattern (`flow.toml`)
+
+Use these task shapes in each repo:
 
 ```toml
 [[tasks]]
 name = "domains-up"
-command = "docker compose --profile domains up -d --build"
-description = "Start local domain proxy + app stack"
+command = """
+set -euo pipefail
+
+f domains add <repo>.localhost 127.0.0.1:<port>
+f domains up
+"""
 
 [[tasks]]
 name = "domains-down"
-command = "docker compose --profile domains down"
-description = "Stop local domain proxy + app stack"
+command = "sh -lc 'f domains rm <repo>.localhost || true'"
 
 [[tasks]]
 name = "domains-status"
-command = "docker compose --profile domains ps"
-description = "Show local domain stack health"
+command = "f domains doctor && f domains list"
 ```
 
-Then run:
+Example mappings used together safely:
 
 ```bash
-f domains-up
+gen.localhost           -> 127.0.0.1:5001
+linsa.localhost         -> 127.0.0.1:3481
+myflow.localhost        -> 127.0.0.1:3000
+api.myflow.localhost    -> 127.0.0.1:8780
 ```
 
-## Safety Notes (macOS)
+## Reliability Notes
 
-This approach does not rewrite your network stack.
+- Keep app ports fixed (`5001`, `3481`, `3000`, `8780`) and route hostnames to them.
+- Do not run per-repo proxy stacks in parallel with `f domains`; use one shared proxy owner.
+- Check health with:
 
-- It only binds local port `80` (inside Docker runtime).
-- If port `80` is busy, compose will fail fast.
-- Stopping the stack restores previous state.
+```bash
+f domains doctor
+```
 
-Check who owns `80`:
+## Troubleshooting
+
+- `ERR_CONNECTION_REFUSED` on `*.localhost`: run `f domains up`, then `f domains doctor`.
+- Wrong project opens on a hostname: route collision or stale mapping. Check `f domains list`, then `f domains rm <host>` and re-add.
+- Port `80` bind failure: another process owns port `80`. Find it with:
 
 ```bash
 lsof -nP -iTCP:80 -sTCP:LISTEN
 ```
 
-## Troubleshooting
+## Logs in myflow
 
-- `ERR_CONNECTION_REFUSED` on `*.localhost`: proxy is not running or port `80` failed to bind. Run `docker compose --profile domains ps`.
-- Proxy container is `Created` but not `Up`: a dependency is unhealthy. Check `docker compose logs`.
-- API healthcheck never passes: ensure healthcheck command exists in image (for example, do not depend on `curl` if not installed).
+If you use `myflow` as your local operations UI, open:
+
+- `http://myflow.localhost/processes` for process status and per-process log streams.
+- `http://myflow.localhost/logs` for focused live logs.
+
+Run `f lin` first so the Flow daemon is online for these pages.
+
+## Legacy Pattern (Not Recommended)
+
+Per-repo docker-compose proxies also work, but they are easier to conflict on port `80` and cause hostname drift across repos. Prefer shared `f domains` unless you have a strict repo-isolated requirement.
 
 ## Result
 
 You keep internal service ports explicit in config, but humans use stable names:
-- `http://maple.localhost`
-- `http://api.maple.localhost`
-- `http://ingest.maple.localhost`
+- `http://gen.localhost`
+- `http://linsa.localhost`
+- `http://myflow.localhost`

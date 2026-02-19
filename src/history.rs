@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config;
+use crate::secret_redact;
 
 #[derive(Serialize, Deserialize)]
 pub struct InvocationRecord {
@@ -58,6 +59,11 @@ impl InvocationRecord {
 }
 
 pub fn record(invocation: InvocationRecord) -> Result<()> {
+    let mut invocation = invocation;
+    invocation.command = secret_redact::redact_text(&invocation.command);
+    invocation.user_input = secret_redact::redact_text(&invocation.user_input);
+    invocation.output = secret_redact::redact_text(&invocation.output);
+
     let path = history_path();
     let _ = config::ensure_global_state_dir()
         .with_context(|| format!("failed to create history dir {}", path.display()))?;
@@ -102,8 +108,9 @@ pub fn print_last_record() -> Result<()> {
             println!("error (status: {status})");
         }
     } else {
-        print!("{}", rec.output);
-        if !rec.output.ends_with('\n') {
+        let output = secret_redact::redact_text(&rec.output);
+        print!("{}", output);
+        if !output.ends_with('\n') {
             println!();
         }
     }
@@ -125,7 +132,7 @@ pub fn print_last_record_full() -> Result<()> {
     };
 
     println!("task: {}", rec.task_name);
-    println!("command: {}", rec.command);
+    println!("command: {}", secret_redact::redact_text(&rec.command));
     println!("project: {}", rec.project_root);
     if let Some(name) = rec.project_name.as_deref() {
         println!("project_name: {name}");
@@ -141,7 +148,7 @@ pub fn print_last_record_full() -> Result<()> {
     println!("duration_ms: {}", rec.duration_ms);
     println!("flow_version: {}", rec.flow_version);
     println!("--- output ---");
-    print!("{}", rec.output);
+    print!("{}", secret_redact::redact_text(&rec.output));
     Ok(())
 }
 
