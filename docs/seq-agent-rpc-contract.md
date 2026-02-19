@@ -27,6 +27,7 @@ Do not insert shell wrappers in the hot path for OS actions.
 Allowed (required):
 - Rust: `seq_client::SeqClient` + `RpcRequest`.
 - Transport: Unix socket to `seqd` (`/tmp/seqd.sock` default).
+- Flow runtime bridge: `f seq-rpc ...` (internally uses native Rust socket RPC, no `seq rpc` subprocess).
 
 Forbidden for production OS-tool execution:
 - `bash -lc "seq ..."` inside tool loop.
@@ -108,11 +109,48 @@ fn call_open_app() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Flow native command bridge (`f seq-rpc`)
+
+For Flow-managed agent workloads, use `f seq-rpc` as the stable operator-facing interface.
+It keeps protocol framing in Rust and avoids ad-hoc shell parsing of `seq` output.
+
+Examples:
+
+```bash
+# Health
+f seq-rpc ping --request-id req-1 --run-id run-1 --tool-call-id tool-1
+
+# Open app
+f seq-rpc open-app "Safari" --request-id req-2 --run-id run-1 --tool-call-id tool-2
+
+# Raw op + JSON args
+f seq-rpc rpc open_app --args-json '{"name":"Google Chrome"}' --pretty
+```
+
+Default socket resolution order:
+
+1. `--socket <path>`
+2. `SEQ_SOCKET_PATH`
+3. `SEQD_SOCKET`
+4. `/tmp/seqd.sock`
+
+## Kimi smoke test (seq + agent workload)
+
+```bash
+AI_SERVER_URL=http://127.0.0.1:7331 \
+~/code/org/gen/new/ai/scripts/ai-task.sh \
+  --provider nvidia \
+  --model moonshotai/kimi-k2.5 \
+  --project-path ~/code/flow \
+  --max-steps 6 \
+  --prompt "Use bash tool once to run: f seq-rpc ping --request-id kimi-smoke --run-id run-smoke --tool-call-id tool-smoke; then summarize ok/op/dur_us."
+```
+
 ## Migration checklist
 
 1. Replace shell-based OS tools with `seq_client`.
-2. Ensure all OS tool calls include `request_id`, `run_id`, `tool_call_id`.
-3. Remove ad-hoc JSON parsing of CLI stdout.
-4. Keep `seq rpc` / `nc` only for manual debugging and smoke tests.
-5. Gate new OS tool additions on this contract.
-
+2. For Flow command surfaces, prefer `f seq-rpc` (native Rust path) instead of `seq rpc`.
+3. Ensure all OS tool calls include `request_id`, `run_id`, `tool_call_id`.
+4. Remove ad-hoc JSON parsing of CLI stdout.
+5. Keep `seq rpc` / `nc` only for manual debugging and smoke tests.
+6. Gate new OS tool additions on this contract.

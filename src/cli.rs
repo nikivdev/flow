@@ -416,9 +416,15 @@ pub enum Commands {
     )]
     Commits(CommitsCommand),
     #[command(
+        name = "seq-rpc",
+        about = "Call seqd RPC v1 via native Rust client.",
+        long_about = "Sends typed JSON RPC requests over Unix socket directly to seqd. Use this for OS-level automation integration without shelling out to `seq rpc`."
+    )]
+    SeqRpc(SeqRpcCommand),
+    #[command(
         name = "explain-commits",
         about = "Generate AI explanations for recent commits.",
-        long_about = "Uses AI to generate markdown summaries for git commits. Writes one file per commit to docs/commits/. Skips already-processed commits unless --force is used."
+        long_about = "Uses AI to generate markdown summaries for git commits. Writes one file per commit to docs/commits/ by default (local generated output). Skips already-processed commits unless --force is used."
     )]
     ExplainCommits(ExplainCommitsCommand),
     #[command(
@@ -3466,12 +3472,88 @@ pub struct CommitsOpts {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct SeqRpcCommand {
+    /// Path to seqd Unix socket (default: $SEQ_SOCKET_PATH, then /tmp/seqd.sock).
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+    /// Read/write timeout in milliseconds.
+    #[arg(long, default_value_t = 5000)]
+    pub timeout_ms: u64,
+    /// Pretty-print JSON response.
+    #[arg(long)]
+    pub pretty: bool,
+    #[command(subcommand)]
+    pub action: SeqRpcAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SeqRpcAction {
+    /// Health check.
+    Ping(SeqRpcIdOpts),
+    /// Current/previous foreground app snapshot.
+    AppState(SeqRpcIdOpts),
+    /// Daemon perf/rusage snapshot.
+    Perf(SeqRpcIdOpts),
+    /// Open application by name.
+    OpenApp(SeqRpcOpenAppOpts),
+    /// Toggle application by name.
+    OpenAppToggle(SeqRpcOpenAppOpts),
+    /// Save screenshot to path.
+    Screenshot(SeqRpcScreenshotOpts),
+    /// Raw operation and optional JSON args.
+    Rpc(SeqRpcRawOpts),
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct SeqRpcIdOpts {
+    /// Caller-owned id for request correlation.
+    #[arg(long)]
+    pub request_id: Option<String>,
+    /// Caller run id.
+    #[arg(long)]
+    pub run_id: Option<String>,
+    /// Caller tool call id.
+    #[arg(long)]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SeqRpcOpenAppOpts {
+    /// Application name (e.g., "Safari", "Google Chrome").
+    pub name: String,
+    #[command(flatten)]
+    pub ids: SeqRpcIdOpts,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SeqRpcScreenshotOpts {
+    /// Output file path.
+    pub path: String,
+    #[command(flatten)]
+    pub ids: SeqRpcIdOpts,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SeqRpcRawOpts {
+    /// Operation name (e.g., ping, open_app, click).
+    pub op: String,
+    /// Optional JSON args payload.
+    #[arg(long)]
+    pub args_json: Option<String>,
+    #[command(flatten)]
+    pub ids: SeqRpcIdOpts,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct ExplainCommitsCommand {
     /// Number of commits to explain (default: 1).
     pub count: Option<usize>,
     /// Re-explain even if already processed.
     #[arg(long)]
     pub force: bool,
+    /// Output directory (relative to repo root unless absolute).
+    #[arg(long)]
+    pub out_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]

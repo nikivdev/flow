@@ -78,6 +78,8 @@ pub mod repos;
 pub mod reviews_todo;
 pub mod running;
 pub mod secret_redact;
+pub mod seq_client;
+pub mod seq_rpc;
 pub mod services;
 pub mod setup;
 pub mod skills;
