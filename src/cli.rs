@@ -563,7 +563,7 @@ pub enum Commands {
     Proxy(ProxyCommand),
     #[command(
         about = "Manage shared local *.localhost routing on port 80.",
-        long_about = "Runs one shared nginx proxy (flow-local-domains-proxy) and manages host->target routes in ~/.config/flow/local-domains.",
+        long_about = "Manages shared local *.localhost routing (host->target) in ~/.config/flow/local-domains. Default engine uses docker+nginx; optional native engine uses a local domains daemon.",
         alias = "dom"
     )]
     Domains(DomainsCommand),
@@ -730,8 +730,18 @@ pub struct ProxyAddOpts {
 
 #[derive(Args, Debug, Clone)]
 pub struct DomainsCommand {
+    /// Routing engine to use (`docker` default, or `native` for experimental C++ daemon).
+    #[arg(long, value_enum)]
+    pub engine: Option<DomainsEngineArg>,
+
     #[command(subcommand)]
     pub action: Option<DomainsAction>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DomainsEngineArg {
+    Docker,
+    Native,
 }
 
 #[derive(Subcommand, Debug, Clone)]

@@ -9,6 +9,10 @@ It is fast and lightweight:
 - No system-wide DNS daemon required.
 - No VPN or packet filter changes.
 
+Experimental native path:
+- `f domains --engine native up` runs a local C++ daemon instead of docker/nginx.
+- Keep this opt-in for now; docker remains the default engine.
+
 ## Why `.localhost`
 
 Use `*.localhost` hostnames. They resolve to loopback by design, so traffic stays on your machine.
@@ -33,6 +37,20 @@ f domains list
 ```
 
 `f domains up` ensures the shared proxy is running. `f domains list` shows the active route table.
+
+Native engine (experimental):
+
+```bash
+f domains --engine native up
+f domains --engine native doctor
+f domains --engine native down
+```
+
+You can also set:
+
+```bash
+export FLOW_DOMAINS_ENGINE=native
+```
 
 ## Flow Task Pattern (`flow.toml`)
 
