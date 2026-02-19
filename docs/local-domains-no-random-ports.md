@@ -2,6 +2,8 @@
 
 This pattern gives you stable local URLs like `http://maple.localhost` instead of remembering `localhost:3471`, `localhost:3472`, etc.
 
+If you are on recent Flow, prefer shared ownership via `f domains` (see `docs/commands/domains.md`) so only one proxy binds port `80` across all repos.
+
 It is fast and lightweight:
 - One local reverse proxy process (nginx).
 - No system-wide DNS daemon required.

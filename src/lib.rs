@@ -26,6 +26,7 @@ pub mod deps;
 pub mod discover;
 pub mod docs;
 pub mod doctor;
+pub mod domains;
 pub mod env;
 pub mod env_setup;
 pub mod ext;
