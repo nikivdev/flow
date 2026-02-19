@@ -750,6 +750,7 @@ dependencies = [
  "rmp-serde",
  "rpassword",
  "rusqlite",
+ "seq_everruns_bridge",
  "serde",
  "serde_json",
  "sha1",
@@ -2236,6 +2237,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
+name = "seq_client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "seq_everruns_bridge"
+version = "0.1.0"
+dependencies = [
+ "seq_client",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3543,11 +3563,3 @@ dependencies = [
  "quote",
  "syn",
 ]
-
-[[patch.unused]]
-name = "groove"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "groove-rocksdb"
-version = "0.1.0"

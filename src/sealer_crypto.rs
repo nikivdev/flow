@@ -30,7 +30,11 @@ pub fn get_sealer_id(secret: &str) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("invalid sealer secret length"))?;
 
     let public = PublicKey::from(&StaticSecret::from(bytes)).to_bytes();
-    Ok(format!("{}{}", ID_PREFIX, bs58::encode(public).into_string()))
+    Ok(format!(
+        "{}{}",
+        ID_PREFIX,
+        bs58::encode(public).into_string()
+    ))
 }
 
 pub fn seal(

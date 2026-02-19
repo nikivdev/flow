@@ -139,6 +139,16 @@ pub enum Commands {
     )]
     Fast(FastRunOpts),
     #[command(
+        about = "Bring a project up using lifecycle conventions.",
+        long_about = "Runs optional local-domain setup from [lifecycle.domains], then runs the project up task. By default it tries task 'up', then falls back to 'dev'."
+    )]
+    Up(LifecycleRunOpts),
+    #[command(
+        about = "Bring a project down using lifecycle conventions.",
+        long_about = "Runs the project down task (default 'down'), then optional lifecycle domain teardown."
+    )]
+    Down(LifecycleRunOpts),
+    #[command(
         about = "Create a local AI scratch test file under .ai/test.",
         long_about = "Creates a gitignored test scaffold under .ai/test for fast AI-generated validation tests. Intended for local iteration without polluting tracked test suites."
     )]
@@ -1044,6 +1054,16 @@ pub struct TaskRunOpts {
     #[arg(value_name = "TASK")]
     pub name: String,
     /// Additional arguments passed to the task command.
+    #[arg(value_name = "ARGS", trailing_var_arg = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct LifecycleRunOpts {
+    /// Path to the project flow config (flow.toml).
+    #[arg(long, default_value = "flow.toml")]
+    pub config: PathBuf,
+    /// Additional arguments passed to the lifecycle task.
     #[arg(value_name = "ARGS", trailing_var_arg = true)]
     pub args: Vec<String>,
 }
@@ -2288,6 +2308,9 @@ pub enum AiAction {
         #[command(subcommand)]
         action: Option<ProviderAiAction>,
     },
+    /// Run a prompt through Everruns and bridge client-side tool calls to seqd.
+    #[command(alias = "er")]
+    Everruns(AiEverrunsOpts),
     /// Resume an AI session by name or ID.
     Resume {
         /// Session name or ID to resume.
@@ -2345,6 +2368,46 @@ pub enum AiAction {
         #[arg(default_value = "1")]
         count: usize,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AiEverrunsOpts {
+    /// Prompt to send as a user message.
+    #[arg(value_name = "PROMPT", trailing_var_arg = true)]
+    pub prompt: Vec<String>,
+    /// Reuse an existing Everruns session ID.
+    #[arg(long)]
+    pub session_id: Option<String>,
+    /// Agent ID to use when creating a new session.
+    #[arg(long)]
+    pub agent_id: Option<String>,
+    /// Harness ID to use when creating a new session.
+    #[arg(long)]
+    pub harness_id: Option<String>,
+    /// Model ID override when creating a new session.
+    #[arg(long)]
+    pub model_id: Option<String>,
+    /// Everruns API base URL (default: http://127.0.0.1:9300/api).
+    #[arg(long)]
+    pub base_url: Option<String>,
+    /// Everruns API key (Bearer token). Prefer env var when possible.
+    #[arg(long)]
+    pub api_key: Option<String>,
+    /// Poll interval for /events while waiting for completion.
+    #[arg(long, default_value_t = 250)]
+    pub poll_ms: u64,
+    /// Max seconds to wait for output/tool cycles before timing out.
+    #[arg(long, default_value_t = 120)]
+    pub wait_timeout_secs: u64,
+    /// Path to seqd Unix socket (default: $SEQ_SOCKET_PATH, then /tmp/seqd.sock).
+    #[arg(long)]
+    pub seq_socket: Option<PathBuf>,
+    /// Read/write timeout for seqd RPC calls in milliseconds.
+    #[arg(long, default_value_t = 5000)]
+    pub seq_timeout_ms: u64,
+    /// Do not inject seq client-side tool definitions when creating a new session.
+    #[arg(long)]
+    pub no_seq_tools: bool,
 }
 
 /// Provider-specific AI actions (for claude/codex subcommands).

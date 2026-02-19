@@ -147,6 +147,12 @@ command = "python3 ./scripts/bench-moonbit-rust-ffi.py $@"
 description = "Benchmark MoonBit <-> Rust FFI boundary ns/op overhead"
 
 [[tasks]]
+name = "myflow-commit-session-smoke"
+command = "bash ./scripts/myflow-commit-session-smoke.sh $@"
+description = "Verify commit sync to myflow and attached Claude/Codex sessions for a repo/commit."
+shortcuts = ["mcss"]
+
+[[tasks]]
 name = "install-ai-fast-client"
 command = "mkdir -p \"$HOME/.local/bin\" && cargo build --release --bin ai-taskd-client && install -m 755 ./target/release/ai-taskd-client \"$HOME/.local/bin/fai\""
 description = "Install low-latency ai-taskd client as ~/.local/bin/fai"

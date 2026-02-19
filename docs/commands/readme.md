@@ -17,6 +17,8 @@ Complete documentation for all `f` (flow) commands.
 | [`env`](env.md) | Sync project environment and manage env vars |
 | [`invariants`](invariants.md) | Validate project invariants from `flow.toml` |
 | [`fast`](fast.md) | Low-latency AI task invocation via fast client |
+| [`up`](up.md) | Bring a project up with lifecycle conventions |
+| [`down`](down.md) | Bring a project down with lifecycle conventions |
 | [`domains`](domains.md) | Shared local `*.localhost` route manager on port 80 |
 | [`tasks`](tasks.md) | List and run project tasks |
 | [`global`](global.md) | Run tasks from global flow config |
@@ -58,6 +60,8 @@ f commit --help
 
 - **[tasks](tasks.md)** - List project tasks
 - **[fast](fast.md)** - Run AI tasks through the low-latency fast client path
+- **[up](up.md)** - Start project lifecycle (`up`/`dev`) with optional domains setup
+- **[down](down.md)** - Stop project lifecycle with optional domains teardown
 - **[global](global.md)** - Run tasks from ~/.config/flow/flow.toml
 - **[setup](setup.md)** - Print aliases or run setup task
 - **[run](run.md)** - Run a specific task

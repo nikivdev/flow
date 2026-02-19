@@ -148,6 +148,38 @@ Runtime-path benchmark harness:
 f bench-ai-runtime --iterations 80 --warmup 10 --json-out /tmp/flow_ai_runtime_bench.json
 ```
 
+## Automated myflow Commit→Session Check
+
+You can automate the exact flow:
+
+1. Do real Claude/Codex work in a repo (for example `~/code/myflow`).
+2. Commit with sync (`f commit --sync ...`).
+3. Verify that commit is visible in myflow and has attached sessions.
+
+Flow task:
+
+```bash
+f myflow-commit-session-smoke --help
+```
+
+Common run for `~/code/myflow`:
+
+```bash
+f myflow-commit-session-smoke --repo-path ~/code/myflow --require-sessions
+```
+
+What it checks:
+
+- `GET /api/commits?repo=<owner>/<repo>` contains the target commit
+- commit has `sessionWindow` metadata
+- if `--require-sessions` is set, commit has `sessions.length > 0`
+- first session id is fetchable via `GET /api/sessions/:id` (unless `--skip-session-fetch`)
+
+Auth:
+
+- uses `MYFLOW_TOKEN` if set
+- otherwise falls back to `~/.config/flow/auth.toml` token
+
 ## Validation Commands
 
 ```bash
@@ -155,6 +187,7 @@ cargo check --all-targets
 cargo build --release --bin f
 f tasks list | rg '^ai:flow/'
 f ai:flow/regression-smoke
+f myflow-commit-session-smoke --repo-path ~/code/myflow --require-sessions
 ```
 
 ## Generated Artifact Hygiene
