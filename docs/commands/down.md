@@ -19,6 +19,8 @@ f down
 - If `[lifecycle.domains]` is configured, optional teardown is applied:
   - `remove_on_down = true` -> removes configured host route
   - `stop_proxy_on_down = true` -> stops shared local domains proxy
+- On macOS launchd-managed native domains, stopping native proxy is handled by:
+  - `sudo ./tools/domainsd-cpp/uninstall-macos-launchd.sh`
 
 If neither a down task nor lifecycle domain teardown is configured, command fails with guidance.
 

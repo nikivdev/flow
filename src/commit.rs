@@ -13065,6 +13065,43 @@ fn myflow_token(repo_root: &std::path::Path) -> Option<String> {
     None
 }
 
+fn post_myflow_sync_events(
+    client: &Client,
+    events_api_url: &str,
+    token: Option<&str>,
+    owner: &str,
+    repo: &str,
+    commit_sha: &str,
+    events: Vec<serde_json::Value>,
+) {
+    if events.is_empty() {
+        return;
+    }
+
+    let payload = json!({
+        "owner": owner,
+        "repo": repo,
+        "commit_sha": commit_sha,
+        "correlation_id": commit_sha,
+        "events": events,
+    });
+
+    let mut request = client.post(events_api_url).json(&payload);
+    if let Some(value) = token {
+        request = request.bearer_auth(value);
+    }
+
+    match request.send() {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            debug!("myflow sync-events failed: HTTP {}", resp.status());
+        }
+        Err(err) => {
+            debug!("myflow sync-events error: {}", err);
+        }
+    }
+}
+
 /// Sync commit data to myflow.sh, mirroring the gitedit sync pattern.
 /// Fire-and-forget: never fails the commit on sync error.
 fn sync_to_myflow(
@@ -13145,6 +13182,8 @@ fn sync_to_myflow(
     let base_url = myflow_api_url(repo_root);
     let base_url = base_url.trim_end_matches('/').to_string();
     let api_url = format!("{}/api/sync", base_url);
+    let events_api_url = format!("{}/api/sync/events", base_url);
+    let started_at_ms = chrono::Utc::now().timestamp_millis();
 
     // Build review data if present
     let review_json = review_data.map(|r| {
@@ -13206,6 +13245,22 @@ fn sync_to_myflow(
         "review": review_json,
         "features": if features_json.is_empty() { None } else { Some(features_json) },
         "skill_gate": skill_gate_json,
+        "sync_events": [
+            {
+                "correlation_id": commit_sha,
+                "commit_sha": commit_sha,
+                "event_type": "transport",
+                "tier": "client",
+                "direction": "outbound",
+                "status": "pending",
+                "at_ms": started_at_ms,
+                "details": {
+                    "phase": "request_start",
+                    "target": "api/sync",
+                    "source": "flow-cli",
+                },
+            }
+        ],
     });
 
     let client = match Client::builder().timeout(Duration::from_secs(10)).build() {
@@ -13213,12 +13268,68 @@ fn sync_to_myflow(
         Err(_) => return,
     };
 
+    let token = myflow_token(repo_root);
     let mut request = client.post(&api_url).json(&payload);
-    if let Some(token) = myflow_token(repo_root) {
-        request = request.bearer_auth(token);
+    if let Some(value) = token.as_deref() {
+        request = request.bearer_auth(value);
     }
     match request.send() {
         Ok(resp) if resp.status().is_success() => {
+            let finished_at_ms = chrono::Utc::now().timestamp_millis();
+            let latency_ms = std::cmp::max(0, finished_at_ms - started_at_ms);
+            post_myflow_sync_events(
+                &client,
+                &events_api_url,
+                token.as_deref(),
+                &owner,
+                &repo,
+                &commit_sha,
+                vec![
+                    json!({
+                        "correlation_id": commit_sha,
+                        "commit_sha": commit_sha,
+                        "event_type": "transport",
+                        "tier": "client",
+                        "direction": "outbound",
+                        "status": "ok",
+                        "latency_ms": latency_ms,
+                        "at_ms": finished_at_ms,
+                        "details": {
+                            "phase": "request_complete",
+                            "target": "api/sync",
+                        },
+                    }),
+                    json!({
+                        "correlation_id": commit_sha,
+                        "commit_sha": commit_sha,
+                        "event_type": "persistence_ack",
+                        "tier": "server",
+                        "direction": "inbound",
+                        "status": "ok",
+                        "latency_ms": latency_ms,
+                        "at_ms": finished_at_ms,
+                        "details": {
+                            "phase": "sync_ack",
+                            "target": "api/sync",
+                        },
+                    }),
+                    json!({
+                        "correlation_id": commit_sha,
+                        "commit_sha": commit_sha,
+                        "event_type": "query_settled",
+                        "tier": "client",
+                        "direction": "inbound",
+                        "status": "ok",
+                        "latency_ms": latency_ms,
+                        "at_ms": finished_at_ms,
+                        "details": {
+                            "phase": "ui_visible",
+                            "source": "flow-cli",
+                        },
+                    }),
+                ],
+            );
+
             if session_count > 0 {
                 println!(
                     "✓ Synced to myflow.sh ({} AI session{})",
@@ -13230,9 +13341,93 @@ fn sync_to_myflow(
             }
         }
         Ok(resp) => {
+            let finished_at_ms = chrono::Utc::now().timestamp_millis();
+            let latency_ms = std::cmp::max(0, finished_at_ms - started_at_ms);
+            let status_code = resp.status().as_u16();
+            post_myflow_sync_events(
+                &client,
+                &events_api_url,
+                token.as_deref(),
+                &owner,
+                &repo,
+                &commit_sha,
+                vec![
+                    json!({
+                        "correlation_id": commit_sha,
+                        "commit_sha": commit_sha,
+                        "event_type": "transport",
+                        "tier": "client",
+                        "direction": "outbound",
+                        "status": "error",
+                        "latency_ms": latency_ms,
+                        "error_code": format!("HTTP_{}", status_code),
+                        "at_ms": finished_at_ms,
+                        "details": {
+                            "phase": "request_failed",
+                            "target": "api/sync",
+                            "status_code": status_code,
+                        },
+                    }),
+                    json!({
+                        "correlation_id": commit_sha,
+                        "commit_sha": commit_sha,
+                        "event_type": "error",
+                        "tier": "client",
+                        "status": "error",
+                        "error_code": format!("HTTP_{}", status_code),
+                        "at_ms": finished_at_ms,
+                        "details": {
+                            "phase": "sync_error",
+                            "target": "api/sync",
+                            "status_code": status_code,
+                        },
+                    }),
+                ],
+            );
             debug!("myflow sync failed: HTTP {}", resp.status());
         }
         Err(e) => {
+            let finished_at_ms = chrono::Utc::now().timestamp_millis();
+            let latency_ms = std::cmp::max(0, finished_at_ms - started_at_ms);
+            post_myflow_sync_events(
+                &client,
+                &events_api_url,
+                token.as_deref(),
+                &owner,
+                &repo,
+                &commit_sha,
+                vec![
+                    json!({
+                        "correlation_id": commit_sha,
+                        "commit_sha": commit_sha,
+                        "event_type": "transport",
+                        "tier": "client",
+                        "direction": "outbound",
+                        "status": "error",
+                        "latency_ms": latency_ms,
+                        "error_code": "NETWORK_ERROR",
+                        "at_ms": finished_at_ms,
+                        "details": {
+                            "phase": "request_exception",
+                            "target": "api/sync",
+                            "error": e.to_string(),
+                        },
+                    }),
+                    json!({
+                        "correlation_id": commit_sha,
+                        "commit_sha": commit_sha,
+                        "event_type": "error",
+                        "tier": "client",
+                        "status": "error",
+                        "error_code": "NETWORK_ERROR",
+                        "at_ms": finished_at_ms,
+                        "details": {
+                            "phase": "sync_error",
+                            "target": "api/sync",
+                        },
+                    }),
+                ],
+            );
             debug!("myflow sync error: {}", e);
         }
     }

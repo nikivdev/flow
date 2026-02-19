@@ -128,8 +128,11 @@ Key points:
   - `seq_*` tool definitions injected into new sessions
   - tool-name normalization (`seq_open_app`, `seq.open_app`, `seq:open-app`)
   - request correlation IDs (`request_id`, `run_id`, `tool_call_id`)
+- Event transport is SSE-first (`/sse`) with automatic fallback to polling (`/events`) if SSE is unavailable.
+- Optional Maple telemetry export can dual-write runtime traces to local + hosted ingest endpoints when `SEQ_EVERRUNS_MAPLE_*` env vars are configured.
 - Existing Flow features remain unchanged (`f seq-rpc`, session resume/copy/context flows).
 
 Setup and validation details are documented in:
 
 - `docs/everruns-seq-bridge-integration.md`
+- `docs/everruns-maple-runbook.md`

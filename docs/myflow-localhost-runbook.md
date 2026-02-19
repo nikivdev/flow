@@ -13,6 +13,13 @@ No random ports to remember in daily browser use.
 - `clang++` installed (for native domains daemon build)
 - myflow repo at `~/code/myflow`
 
+If your mac blocks native bind to port `80`, install launchd socket mode once:
+
+```bash
+cd ~/code/flow
+sudo ./tools/domainsd-cpp/install-macos-launchd.sh
+```
+
 ## One-time route setup
 
 ```bash
@@ -139,4 +146,11 @@ VITE_API_URL=http://api.myflow.localhost
 
 ```bash
 f domains --engine native down
+```
+
+For launchd-managed native mode on macOS, use:
+
+```bash
+cd ~/code/flow
+sudo ./tools/domainsd-cpp/uninstall-macos-launchd.sh
 ```

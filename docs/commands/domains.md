@@ -69,6 +69,23 @@ f domains --engine native doctor
 - myflow-specific setup: `docs/myflow-localhost-runbook.md`.
 - Lifecycle integration: configure `[lifecycle.domains]` and use `f up` / `f down`.
 
+### macOS no-docker bind to :80
+
+If native startup fails with `Permission denied` on `127.0.0.1:80`, install launchd socket mode once:
+
+```bash
+cd ~/code/flow
+sudo ./tools/domainsd-cpp/install-macos-launchd.sh
+```
+
+Then run:
+
+```bash
+f domains --engine native up
+```
+
+This keeps routing fully native and avoids Docker overhead while still using port `80`.
+
 ### Native tuning envs
 
 You can tune the native daemon at startup via environment variables:

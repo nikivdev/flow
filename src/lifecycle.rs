@@ -136,6 +136,8 @@ fn ensure_domains_up(cfg: &LifecycleDomainsConfig) -> Result<()> {
         action: Some(DomainsAction::Up),
     })?;
 
+    println!("Lifecycle domains ready: http://{}", host);
+
     Ok(())
 }
 
