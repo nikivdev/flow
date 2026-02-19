@@ -2235,7 +2235,28 @@ fn git_commit_timestamp_iso(repo_root: &Path, rev: &str) -> Option<String> {
         .filter(|ts| !ts.is_empty())
 }
 
-fn collect_sync_sessions_for_commit(repo_root: &Path) -> Vec<ai::GitEditSessionData> {
+#[derive(Debug, Clone)]
+struct MyflowSessionWindow {
+    mode: String,
+    since_ts: Option<String>,
+    until_ts: Option<String>,
+    collected_at: String,
+}
+
+impl MyflowSessionWindow {
+    fn new(mode: &str, since_ts: Option<String>, until_ts: Option<String>) -> Self {
+        Self {
+            mode: mode.to_string(),
+            since_ts,
+            until_ts,
+            collected_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+fn collect_sync_sessions_for_commit_with_window(
+    repo_root: &Path,
+) -> (Vec<ai::GitEditSessionData>, MyflowSessionWindow) {
     let until_ts = git_commit_timestamp_iso(repo_root, "HEAD");
     let since_ts = git_commit_timestamp_iso(repo_root, "HEAD~1");
 
@@ -2245,7 +2266,12 @@ fn collect_sync_sessions_for_commit(repo_root: &Path) -> Vec<ai::GitEditSessionD
             since_ts.as_deref(),
             until_ts.as_deref(),
         ) {
-            Ok(sessions) => return sessions,
+            Ok(sessions) => {
+                return (
+                    sessions,
+                    MyflowSessionWindow::new("commit_window", since_ts, until_ts),
+                );
+            }
             Err(err) => {
                 debug!(
                     "failed to collect AI sessions in commit timestamp window (since={:?}, until={:?}): {}",
@@ -2256,18 +2282,26 @@ fn collect_sync_sessions_for_commit(repo_root: &Path) -> Vec<ai::GitEditSessionD
     }
 
     match ai::get_sessions_for_gitedit(&repo_root.to_path_buf()) {
-        Ok(sessions) => sessions,
+        Ok(sessions) => (
+            sessions,
+            MyflowSessionWindow::new("checkpoint_fallback", since_ts, until_ts),
+        ),
         Err(err) => {
             debug!(
                 "failed to collect AI sessions using checkpoint fallback: {}",
                 err
             );
-            Vec::new()
+            (
+                Vec::new(),
+                MyflowSessionWindow::new("checkpoint_fallback", since_ts, until_ts),
+            )
         }
     }
 }
 
-fn collect_sync_sessions_for_pending_commit(repo_root: &Path) -> Vec<ai::GitEditSessionData> {
+fn collect_sync_sessions_for_pending_commit_with_window(
+    repo_root: &Path,
+) -> (Vec<ai::GitEditSessionData>, MyflowSessionWindow) {
     // commit-with-check calls this before creating the new commit; use HEAD as the lower
     // bound and include everything after it so current-cycle AI exchanges are not dropped.
     let since_ts = git_commit_timestamp_iso(repo_root, "HEAD");
@@ -2278,7 +2312,12 @@ fn collect_sync_sessions_for_pending_commit(repo_root: &Path) -> Vec<ai::GitEdit
             since_ts.as_deref(),
             None,
         ) {
-            Ok(sessions) => return sessions,
+            Ok(sessions) => {
+                return (
+                    sessions,
+                    MyflowSessionWindow::new("pending_window", since_ts, None),
+                );
+            }
             Err(err) => {
                 debug!(
                     "failed to collect AI sessions for pending commit window (since={:?}): {}",
@@ -2289,13 +2328,19 @@ fn collect_sync_sessions_for_pending_commit(repo_root: &Path) -> Vec<ai::GitEdit
     }
 
     match ai::get_sessions_for_gitedit(&repo_root.to_path_buf()) {
-        Ok(sessions) => sessions,
+        Ok(sessions) => (
+            sessions,
+            MyflowSessionWindow::new("checkpoint_fallback", since_ts, None),
+        ),
         Err(err) => {
             debug!(
                 "failed to collect AI sessions using checkpoint fallback: {}",
                 err
             );
-            Vec::new()
+            (
+                Vec::new(),
+                MyflowSessionWindow::new("checkpoint_fallback", since_ts, None),
+            )
         }
     }
 }
@@ -2498,16 +2543,24 @@ pub fn run_sync(
     let cwd = std::env::current_dir().unwrap_or_default();
     let sync_gitedit = gitedit_globally_enabled() && gitedit_mirror_enabled_for_commit(&repo_root);
     let sync_myflow = myflow_mirror_enabled(&repo_root);
-    let sync_sessions = if sync_gitedit || sync_myflow {
-        collect_sync_sessions_for_commit(&repo_root)
+    let (sync_sessions, sync_window) = if sync_gitedit || sync_myflow {
+        let (sessions, window) = collect_sync_sessions_for_commit_with_window(&repo_root);
+        (sessions, Some(window))
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
     if sync_gitedit {
         sync_to_gitedit(&cwd, "commit", &sync_sessions, None, None);
     }
     if sync_myflow {
-        sync_to_myflow(&repo_root, "commit", &sync_sessions, None, None);
+        sync_to_myflow(
+            &repo_root,
+            "commit",
+            &sync_sessions,
+            sync_window.as_ref(),
+            None,
+            None,
+        );
     }
     save_commit_checkpoint_for_repo(&repo_root);
 
@@ -2658,16 +2711,24 @@ pub fn run_fast(
 
     let sync_gitedit = gitedit_globally_enabled() && gitedit_mirror_enabled();
     let sync_myflow = myflow_mirror_enabled(&repo_root);
-    let sync_sessions = if sync_gitedit || sync_myflow {
-        collect_sync_sessions_for_commit(&repo_root)
+    let (sync_sessions, sync_window) = if sync_gitedit || sync_myflow {
+        let (sessions, window) = collect_sync_sessions_for_commit_with_window(&repo_root);
+        (sessions, Some(window))
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
     if sync_gitedit {
         sync_to_gitedit(&cwd, "commit", &sync_sessions, None, None);
     }
     if sync_myflow {
-        sync_to_myflow(&repo_root, "commit", &sync_sessions, None, None);
+        sync_to_myflow(
+            &repo_root,
+            "commit",
+            &sync_sessions,
+            sync_window.as_ref(),
+            None,
+            None,
+        );
     }
     save_commit_checkpoint_for_repo(&repo_root);
 
@@ -4620,9 +4681,11 @@ pub fn run_with_check_sync(
     let gitedit_enabled = gitedit_globally_enabled() && gitedit_mirror_enabled;
     let unhash_enabled = include_unhash && unhash_capture_enabled();
     let mut unhash_sessions: Vec<ai::GitEditSessionData> = Vec::new();
+    let mut pending_sync_window: Option<MyflowSessionWindow> = None;
 
     if gitedit_enabled || unhash_enabled {
-        let sessions = collect_sync_sessions_for_pending_commit(&repo_root);
+        let (sessions, window) = collect_sync_sessions_for_pending_commit_with_window(&repo_root);
+        pending_sync_window = Some(window);
         if !sessions.is_empty() {
             if gitedit_enabled {
                 if let Some((owner, repo)) = get_gitedit_project(&repo_root) {
@@ -4930,6 +4993,7 @@ pub fn run_with_check_sync(
                 &repo_root,
                 "commit_with_check",
                 &gitedit_sessions,
+                pending_sync_window.as_ref(),
                 Some(&review_data),
                 Some(&skill_gate_report),
             );
@@ -4944,11 +5008,13 @@ pub fn run_with_check_sync(
             reviewer: Some(review_reviewer_label.to_string()),
         };
         // Get AI sessions for myflow even if gitedit didn't collect them
-        let myflow_sessions = collect_sync_sessions_for_commit(&repo_root);
+        let (myflow_sessions, myflow_window) =
+            collect_sync_sessions_for_commit_with_window(&repo_root);
         sync_to_myflow(
             &repo_root,
             "commit_with_check",
             &myflow_sessions,
+            Some(&myflow_window),
             Some(&review_data),
             Some(&skill_gate_report),
         );
@@ -8560,7 +8626,7 @@ fn maybe_sync_queue_review_to_mirrors(
         return;
     }
 
-    let sync_sessions = collect_sync_sessions_for_commit(repo_root);
+    let (sync_sessions, sync_window) = collect_sync_sessions_for_commit_with_window(repo_root);
     let review_data = GitEditReviewData {
         diff: Some(diff.to_string()),
         issues_found: review.issues_found,
@@ -8583,6 +8649,7 @@ fn maybe_sync_queue_review_to_mirrors(
             repo_root,
             "commit_queue_review",
             &sync_sessions,
+            Some(&sync_window),
             Some(&review_data),
             None,
         );
@@ -13004,6 +13071,7 @@ fn sync_to_myflow(
     repo_root: &std::path::Path,
     event: &str,
     ai_sessions: &[ai::GitEditSessionData],
+    session_window: Option<&MyflowSessionWindow>,
     review_data: Option<&GitEditReviewData>,
     skill_gate: Option<&SkillGateReport>,
 ) {
@@ -13129,6 +13197,12 @@ fn sync_to_myflow(
         "author_name": author_name,
         "author_email": author_email,
         "ai_sessions": ai_sessions_json,
+        "session_window": session_window.map(|window| json!({
+            "mode": window.mode,
+            "since_ts": window.since_ts,
+            "until_ts": window.until_ts,
+            "collected_at": window.collected_at,
+        })),
         "review": review_json,
         "features": if features_json.is_empty() { None } else { Some(features_json) },
         "skill_gate": skill_gate_json,
@@ -13252,13 +13326,6 @@ fn default_assistant_trace_roots() -> Vec<PathBuf> {
                 .join("org")
                 .join("1f")
                 .join("jazz2")
-                .join("assistant-traces"),
-        );
-        roots.push(
-            home.join("code")
-                .join("org")
-                .join("1f")
-                .join("jazz")
                 .join("assistant-traces"),
         );
     }

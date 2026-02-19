@@ -39,6 +39,9 @@ pub struct Config {
     /// Flow-specific settings (primary_task, etc.)
     #[serde(default)]
     pub flow: FlowSettings,
+    /// Project lifecycle orchestration for `f up` / `f down`.
+    #[serde(default)]
+    pub lifecycle: Option<LifecycleConfig>,
     #[serde(default)]
     pub options: OptionsConfig,
     #[serde(default, alias = "server", alias = "server-local")]
@@ -59,6 +62,9 @@ pub struct Config {
     /// Agent registry references (map format: [agents]).
     #[serde(default)]
     pub agents_registry: HashMap<String, String>,
+    /// Everruns runtime defaults for `f ai everruns`.
+    #[serde(default)]
+    pub everruns: Option<EverrunsConfig>,
     #[serde(default, alias = "deps")]
     pub dependencies: HashMap<String, DependencySpec>,
     #[serde(default, alias = "alias", deserialize_with = "deserialize_aliases")]
@@ -154,6 +160,44 @@ pub struct ExplainCommitsConfig {
     /// Max commits to explain per sync (default: 10).
     #[serde(default)]
     pub batch_size: Option<usize>,
+}
+
+/// Everruns AI runtime defaults.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct EverrunsConfig {
+    /// Everruns API base URL (for example: http://127.0.0.1:9300/api).
+    #[serde(default, alias = "base-url", alias = "baseUrl")]
+    pub base_url: Option<String>,
+    /// Env var name that contains the API key (default: EVERRUNS_API_KEY).
+    #[serde(
+        default,
+        rename = "api_key_env",
+        alias = "api-key-env",
+        alias = "apiKeyEnv"
+    )]
+    pub api_key_env: Option<String>,
+    /// Default session id to reuse.
+    #[serde(
+        default,
+        rename = "session_id",
+        alias = "session-id",
+        alias = "sessionId"
+    )]
+    pub session_id: Option<String>,
+    /// Default agent id for new sessions.
+    #[serde(default, rename = "agent_id", alias = "agent-id", alias = "agentId")]
+    pub agent_id: Option<String>,
+    /// Default harness id for new sessions.
+    #[serde(
+        default,
+        rename = "harness_id",
+        alias = "harness-id",
+        alias = "harnessId"
+    )]
+    pub harness_id: Option<String>,
+    /// Default model id override for new sessions.
+    #[serde(default, rename = "model_id", alias = "model-id", alias = "modelId")]
+    pub model_id: Option<String>,
 }
 
 /// macOS launchd service management config.
@@ -650,6 +694,7 @@ impl Default for Config {
             env_space: None,
             env_space_kind: None,
             flow: FlowSettings::default(),
+            lifecycle: None,
             options: OptionsConfig::default(),
             servers: Vec::new(),
             remote_servers: Vec::new(),
@@ -658,6 +703,7 @@ impl Default for Config {
             analytics: None,
             agents: Vec::new(),
             agents_registry: HashMap::new(),
+            everruns: None,
             dependencies: HashMap::new(),
             aliases: HashMap::new(),
             command_files: Vec::new(),
@@ -700,6 +746,50 @@ pub struct FlowSettings {
     /// Task to run when invoking `f deploy` with no subcommand.
     #[serde(default, rename = "deploy_task", alias = "deploy-task")]
     pub deploy_task: Option<String>,
+}
+
+/// Project lifecycle configuration for `f up` and `f down`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LifecycleConfig {
+    /// Task to run for `f up` (default fallback order: "up", then "dev").
+    #[serde(default, rename = "up_task", alias = "up-task", alias = "upTask")]
+    pub up_task: Option<String>,
+    /// Task to run for `f down` (default: "down").
+    #[serde(default, rename = "down_task", alias = "down-task", alias = "downTask")]
+    pub down_task: Option<String>,
+    /// Optional local-domain lifecycle behavior.
+    #[serde(default)]
+    pub domains: Option<LifecycleDomainsConfig>,
+}
+
+/// Optional local-domain automation used by lifecycle commands.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LifecycleDomainsConfig {
+    /// Hostname to map, for example: "myflow.localhost".
+    #[serde(default, alias = "domain")]
+    pub host: Option<String>,
+    /// Upstream target in host:port format, for example: "127.0.0.1:3000".
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Domains engine: "docker" or "native" (default uses Flow global default).
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// Remove configured host mapping on `f down` (default: false).
+    #[serde(
+        default,
+        rename = "remove_on_down",
+        alias = "remove-on-down",
+        alias = "removeOnDown"
+    )]
+    pub remove_on_down: Option<bool>,
+    /// Stop shared domains proxy on `f down` (default: false).
+    #[serde(
+        default,
+        rename = "stop_proxy_on_down",
+        alias = "stop-proxy-on-down",
+        alias = "stopProxyOnDown"
+    )]
+    pub stop_proxy_on_down: Option<bool>,
 }
 
 /// Skills enforcement configuration.
@@ -2028,6 +2118,9 @@ fn merge_config(base: &mut Config, other: Config) {
     }
     if base.jj.is_none() {
         base.jj = other.jj;
+    }
+    if base.everruns.is_none() {
+        base.everruns = other.everruns;
     }
     base.options.merge(other.options);
     base.servers.extend(other.servers);

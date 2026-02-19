@@ -111,3 +111,25 @@ f ai claude context - /path/to/repo 3
    `f commit`
 
 This keeps sessions, tasks, skills, and commit quality checks in one loop.
+
+## Everruns Bridge Mode
+
+Flow also supports running a prompt through Everruns while routing client-side
+`seq_*` tool calls to local `seqd`:
+
+```bash
+f ai everruns "open Safari and take a screenshot"
+```
+
+Key points:
+
+- This path is additive. It does not replace `f ai claude ...` or `f ai codex ...`.
+- Flow now reuses Seq's canonical Everruns bridge for:
+  - `seq_*` tool definitions injected into new sessions
+  - tool-name normalization (`seq_open_app`, `seq.open_app`, `seq:open-app`)
+  - request correlation IDs (`request_id`, `run_id`, `tool_call_id`)
+- Existing Flow features remain unchanged (`f seq-rpc`, session resume/copy/context flows).
+
+Setup and validation details are documented in:
+
+- `docs/everruns-seq-bridge-integration.md`

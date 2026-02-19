@@ -22,7 +22,7 @@ use crate::config;
 use crate::deploy;
 use crate::env_setup::{EnvSetupDefaults, run_env_setup};
 use crate::storage::{
-    create_jazz_worker_account, get_project_name as storage_project_name, sanitize_name,
+    create_jazz_app_credentials, get_project_name as storage_project_name, sanitize_name,
 };
 use uuid::Uuid;
 
@@ -1504,56 +1504,155 @@ fn bootstrap_cloudflare_secrets(project_root: &Path, cfg: &config::Config) -> Re
 
     let mut values = HashMap::new();
     let mut generated_env_token: Option<String> = None;
-    let needs_env_account = cf_cfg
-        .bootstrap_secrets
-        .iter()
-        .any(|key| key == "JAZZ_WORKER_ACCOUNT" || key == "JAZZ_WORKER_SECRET");
+    let needs_env_account = cf_cfg.bootstrap_secrets.iter().any(|key| {
+        key == "JAZZ_APP_ID"
+            || key == "JAZZ_BACKEND_SECRET"
+            || key == "JAZZ_ADMIN_SECRET"
+            || key == "JAZZ_WORKER_ACCOUNT"
+            || key == "JAZZ_WORKER_SECRET"
+    });
     let needs_auth_account = cf_cfg.bootstrap_secrets.iter().any(|key| {
-        key == "JAZZ_AUTH_WORKER_ACCOUNT_ID" || key == "JAZZ_AUTH_WORKER_ACCOUNT_SECRET"
+        key == "JAZZ_AUTH_APP_ID"
+            || key == "JAZZ_AUTH_BACKEND_SECRET"
+            || key == "JAZZ_AUTH_ADMIN_SECRET"
+            || key == "JAZZ_AUTH_WORKER_ACCOUNT_ID"
+            || key == "JAZZ_AUTH_WORKER_ACCOUNT_SECRET"
     });
 
     if needs_env_account || needs_auth_account {
         let project = storage_project_name()?;
-        let default_env_name = format!("{}-jazz-env", sanitize_name(&project));
-        let default_auth_name = format!("{}-jazz-auth", sanitize_name(&project));
-        let default_peer = "wss://cloud.jazz.tools/?key=cloud@myflow.sh";
+        let default_env_name = format!("{}-jazz2-env", sanitize_name(&project));
+        let default_auth_name = format!("{}-jazz2-auth", sanitize_name(&project));
+        let default_server = "https://cloud.jazz.tools";
 
         if needs_env_account {
-            if prompt_confirm("Generate a new Jazz env-store account now? (y/N): ")? {
-                println!("Creating Jazz env-store account...");
+            if prompt_confirm("Generate new Jazz2 env-store app credentials now? (y/N): ")? {
+                println!("Creating Jazz2 env-store app credentials...");
                 let name = cf_cfg
                     .bootstrap_jazz_name
                     .as_deref()
                     .unwrap_or(&default_env_name);
-                let peer = cf_cfg
+                let server = cf_cfg
                     .bootstrap_jazz_peer
                     .as_deref()
-                    .unwrap_or(default_peer);
-                let creds = create_jazz_worker_account(peer, name)?;
-                values.insert("JAZZ_WORKER_ACCOUNT".to_string(), creds.account_id);
-                values.insert("JAZZ_WORKER_SECRET".to_string(), creds.agent_secret);
-                println!("✓ Jazz env-store account created");
+                    .unwrap_or(default_server);
+                let creds = create_jazz_app_credentials(name)?;
+                if cf_cfg.bootstrap_secrets.iter().any(|k| k == "JAZZ_APP_ID") {
+                    values.insert("JAZZ_APP_ID".to_string(), creds.app_id.clone());
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_BACKEND_SECRET")
+                {
+                    values.insert(
+                        "JAZZ_BACKEND_SECRET".to_string(),
+                        creds.backend_secret.clone(),
+                    );
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_ADMIN_SECRET")
+                {
+                    values.insert("JAZZ_ADMIN_SECRET".to_string(), creds.admin_secret.clone());
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_WORKER_ACCOUNT")
+                {
+                    values.insert("JAZZ_WORKER_ACCOUNT".to_string(), creds.app_id);
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_WORKER_SECRET")
+                {
+                    values.insert("JAZZ_WORKER_SECRET".to_string(), creds.backend_secret);
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_SERVER_URL")
+                {
+                    values.insert("JAZZ_SERVER_URL".to_string(), server.to_string());
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_SYNC_SERVER")
+                {
+                    values.insert("JAZZ_SYNC_SERVER".to_string(), server.to_string());
+                }
+                println!("✓ Jazz2 env-store credentials created");
             }
         }
 
         if needs_auth_account {
-            if prompt_confirm("Generate a new Jazz auth account now? (y/N): ")? {
-                println!("Creating Jazz auth account...");
+            if prompt_confirm("Generate new Jazz2 auth app credentials now? (y/N): ")? {
+                println!("Creating Jazz2 auth app credentials...");
                 let name = cf_cfg
                     .bootstrap_jazz_auth_name
                     .as_deref()
                     .unwrap_or(&default_auth_name);
-                let peer = cf_cfg
+                let server = cf_cfg
                     .bootstrap_jazz_auth_peer
                     .as_deref()
-                    .unwrap_or(default_peer);
-                let creds = create_jazz_worker_account(peer, name)?;
-                values.insert("JAZZ_AUTH_WORKER_ACCOUNT_ID".to_string(), creds.account_id);
-                values.insert(
-                    "JAZZ_AUTH_WORKER_ACCOUNT_SECRET".to_string(),
-                    creds.agent_secret,
-                );
-                println!("✓ Jazz auth account created");
+                    .unwrap_or(default_server);
+                let creds = create_jazz_app_credentials(name)?;
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_AUTH_APP_ID")
+                {
+                    values.insert("JAZZ_AUTH_APP_ID".to_string(), creds.app_id.clone());
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_AUTH_BACKEND_SECRET")
+                {
+                    values.insert(
+                        "JAZZ_AUTH_BACKEND_SECRET".to_string(),
+                        creds.backend_secret.clone(),
+                    );
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_AUTH_ADMIN_SECRET")
+                {
+                    values.insert(
+                        "JAZZ_AUTH_ADMIN_SECRET".to_string(),
+                        creds.admin_secret.clone(),
+                    );
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_AUTH_WORKER_ACCOUNT_ID")
+                {
+                    values.insert("JAZZ_AUTH_WORKER_ACCOUNT_ID".to_string(), creds.app_id);
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_AUTH_WORKER_ACCOUNT_SECRET")
+                {
+                    values.insert(
+                        "JAZZ_AUTH_WORKER_ACCOUNT_SECRET".to_string(),
+                        creds.backend_secret,
+                    );
+                }
+                if cf_cfg
+                    .bootstrap_secrets
+                    .iter()
+                    .any(|k| k == "JAZZ_AUTH_SERVER_URL")
+                {
+                    values.insert("JAZZ_AUTH_SERVER_URL".to_string(), server.to_string());
+                }
+                println!("✓ Jazz2 auth credentials created");
             }
         }
     }

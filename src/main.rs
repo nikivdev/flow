@@ -12,7 +12,7 @@ use flowd::{
     },
     code, commit, commits, daemon, deploy, deps, docs, doctor, domains, env, explain_commits, ext,
     fish_install, fish_trace, fix, fixup, git_guard, gitignore_policy, hash, health, help_search,
-    history, hive, home, hub, info, init, init_tracing, install, invariants, jj, latest,
+    history, hive, home, hub, info, init, init_tracing, install, invariants, jj, latest, lifecycle,
     log_server, macos, notify, otp, palette, parallel, processes, projects, proxy, publish, push,
     recipe, registry, release, repos, reviews_todo, seq_rpc, services, setup, skills, ssh_keys,
     storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade, upstream,
@@ -98,6 +98,12 @@ fn main() -> Result<()> {
             }
             Some(Commands::Fast(opts)) => {
                 tasks::run_fast(opts)?;
+            }
+            Some(Commands::Up(opts)) => {
+                lifecycle::run_up(opts)?;
+            }
+            Some(Commands::Down(opts)) => {
+                lifecycle::run_down(opts)?;
             }
             Some(Commands::AiTestNew(opts)) => {
                 ai_test::run(opts)?;

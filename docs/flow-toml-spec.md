@@ -56,6 +56,16 @@ install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/sk
 # dev = "mobile"                            # route ambiguous task name -> scope
 # test = "root"
 
+[lifecycle]          # optional: `f up` / `f down` defaults
+# up_task = "dev"    # default fallback order: up -> dev
+# down_task = "stop" # default fallback: down
+[lifecycle.domains]  # optional: auto `f domains` wiring for `f up` / `f down`
+# host = "myflow.localhost"
+# target = "127.0.0.1:3000"
+# engine = "native"  # "native" | "docker"
+# remove_on_down = false
+# stop_proxy_on_down = false
+
 [options]            # optional: transport/runtime integrations
 # myflow_mirror = true         # mirror commit + queue review events to myflow
 # myflow_url = "https://myflow.sh"
@@ -123,6 +133,9 @@ fr = "f run"
 - `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
 - `[commit]`: optional commit workflow defaults; plain `f commit` uses fast commit + deferred Codex deep review by default. Set `quick-default = false` to make plain `f commit` run blocking review instead.
 - `[task_resolution]`: optional policy for nested task discovery (`f <scope>:<task>`, preferred scopes, and per-task routes when plain names collide).
+- `[lifecycle]`: optional project boot/shutdown orchestration for `f up` and `f down`; can auto-wire shared local domain routes via `[lifecycle.domains]`.
+  - `f up` task fallback order: `up`, then `dev` (unless `up_task` is set).
+  - `f down` task fallback: `down`; if missing and `down_task` is unset, Flow falls back to project-wide `f kill --all`.
 - `[options]`: optional integration/runtime toggles; use `myflow_mirror` for mirror sync and `codex_bin` to route review calls through a wrapper transport.
 - `[commit.testing]`: optional local testing gate evaluated during `f commit`; supports Bun-first strict mode plus optional AI scratch-test fallback (`.ai/test` by default).
 - `[commit.skill_gate]`: optional required-skill policy for `f commit`; can enforce presence and minimum skill versions.

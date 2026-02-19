@@ -220,6 +220,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 path,
             }) => copy_context(session, Provider::Codex, count, path)?,
         },
+        AiAction::Everruns(opts) => crate::ai_everruns::run(opts)?,
         AiAction::Resume { session } => resume_session(session, Provider::All)?,
         AiAction::Save { name, id } => save_session(&name, id)?,
         AiAction::Notes { session } => open_notes(&session)?,

@@ -421,7 +421,6 @@ fn repo_contains_package(project_root: &Path, needle: &str) -> bool {
 
 fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
     let legacy_roots = [
-        "/Users/nikiv/code/org/1f/jazz",
         "/Users/nikiv/code/org/1f/jazz2",
         "/Users/nikiv/repos/garden-co/jazz2",
     ];
@@ -463,10 +462,6 @@ fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
         })
         .or_else(|| {
             let candidate = dirs::home_dir()?.join("code/org/1f/jazz2");
-            candidate.exists().then_some(candidate)
-        })
-        .or_else(|| {
-            let candidate = dirs::home_dir()?.join("code/org/1f/jazz");
             candidate.exists().then_some(candidate)
         });
 

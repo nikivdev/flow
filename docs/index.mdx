@@ -13,6 +13,8 @@ High-signal docs for the Codex/Claude workflow:
 - [`commands/fast.md`](commands/fast.md): low-latency AI task dispatch (`f fast`) via fast daemon client path.
 - [`commands/seq-rpc.md`](commands/seq-rpc.md): native `seqd` RPC bridge (`f seq-rpc`) for OS-level agent actions.
 - [`commands/domains.md`](commands/domains.md): shared local `*.localhost` proxy ownership via `f domains` (prevents per-repo port-80 collisions).
+- [`commands/up.md`](commands/up.md): one-command project startup (`f up`) with optional lifecycle domain setup.
+- [`commands/down.md`](commands/down.md): one-command project shutdown (`f down`) with lifecycle teardown rules.
 - [`commands/reviews-todo.md`](commands/reviews-todo.md): fast-commit + deferred Codex deep-review backlog workflow.
 - [`fast-commit-deep-review-loop.md`](fast-commit-deep-review-loop.md): recommended speed-first workflow for `~/code/myflow` (GLM/Cerebras fast lane + batched Codex deep reviews).
 - [`how-to-use-flow-ai-to-manage-claude-code-sessions.md`](how-to-use-flow-ai-to-manage-claude-code-sessions.md): practical session workflow for Claude + Codex in one repo loop.
@@ -22,7 +24,9 @@ High-signal docs for the Codex/Claude workflow:
 - [`flow-toml-spec.md`](flow-toml-spec.md): complete config schema including `[skills.codex]`, `[commit.testing]`, and `[commit.skill_gate]`.
 - [`local-domains-no-random-ports.md`](local-domains-no-random-ports.md): stable `*.localhost` local domains via a lightweight proxy, plus `flow.toml` task wiring.
 - [`local-domains-domainsd-cpp-spec.md`](local-domains-domainsd-cpp-spec.md): native C++ `domainsd` architecture, rollout, and reliability constraints for low-latency localhost routing.
+- [`myflow-localhost-runbook.md`](myflow-localhost-runbook.md): exact commands to run `~/code/myflow` on `myflow.localhost` and use in-app `/processes` and `/logs` views.
 - [`seq-agent-rpc-contract.md`](seq-agent-rpc-contract.md): hard interface contract for agent OS actions through `seq_client -> seqd` RPC v1.
+- [`everruns-seq-bridge-integration.md`](everruns-seq-bridge-integration.md): why/how `f ai everruns` now reuses Seq's shared Everruns bridge to avoid duplicate tool mapping logic.
 - [`ascii-commit-visualization-pipeline.md`](ascii-commit-visualization-pipeline.md): end-to-end pipeline for commit analysis -> Flow API -> `box-of-rain` ASCII/SVG diagrams in myflow.
 - [`features.md`](features.md): practical command flows and examples.
 - [`moonbit-ai-tasks-implementation.md`](moonbit-ai-tasks-implementation.md): complete inventory of the task-centric MoonBit AI task runtime and Flow-local `.ai/tasks` pack.

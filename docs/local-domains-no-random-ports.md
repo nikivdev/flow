@@ -113,6 +113,9 @@ If you use `myflow` as your local operations UI, open:
 
 Run `f lin` first so the Flow daemon is online for these pages.
 
+For the full end-to-end setup (`f domains --engine native`, `f dev`, health checks, and troubleshooting), see:
+`docs/myflow-localhost-runbook.md`.
+
 ## Legacy Pattern (Not Recommended)
 
 Per-repo docker-compose proxies also work, but they are easier to conflict on port `80` and cause hostname drift across repos. Prefer shared `f domains` unless you have a strict repo-isolated requirement.

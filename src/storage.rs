@@ -22,12 +22,6 @@ const DEFAULT_JAZZ_SERVER_APP: &str = "https://cloud.jazz.tools";
 const DEFAULT_POSTGRES_PROJECT: &str = "~/org/la/la/server";
 
 #[derive(Debug, Clone)]
-pub(crate) struct JazzCreateOutput {
-    pub(crate) account_id: String,
-    pub(crate) agent_secret: String,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct JazzAppCredentials {
     pub(crate) app_id: String,
     pub(crate) backend_secret: String,
@@ -330,11 +324,7 @@ pub(crate) fn create_jazz_app_credentials(name: &str) -> Result<JazzAppCredentia
     );
 
     let output = if let Some(path) = find_in_path("jazz-tools") {
-        println!(
-            "Running: {} create app --name {}",
-            path.display(),
-            name
-        );
+        println!("Running: {} create app --name {}", path.display(), name);
         {
             let mut cmd = Command::new(path);
             cmd.args(["create", "app", "--name", name]);
@@ -376,14 +366,6 @@ pub(crate) fn create_jazz_app_credentials(name: &str) -> Result<JazzAppCredentia
         app_id,
         backend_secret: generate_secret("backend"),
         admin_secret: generate_secret("admin"),
-    })
-}
-
-pub(crate) fn create_jazz_worker_account(_peer: &str, name: &str) -> Result<JazzCreateOutput> {
-    let creds = create_jazz_app_credentials(name)?;
-    Ok(JazzCreateOutput {
-        account_id: creds.app_id,
-        agent_secret: creds.backend_secret,
     })
 }
 

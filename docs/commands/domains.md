@@ -66,6 +66,8 @@ f domains --engine native doctor
 - Native daemon has built-in overload shedding (`503`) and upstream timeout protection (`504` on connect timeout).
 - HTTP/2/TLS are not implemented yet.
 - See `docs/local-domains-domainsd-cpp-spec.md`.
+- myflow-specific setup: `docs/myflow-localhost-runbook.md`.
+- Lifecycle integration: configure `[lifecycle.domains]` and use `f up` / `f down`.
 
 ### Native tuning envs
 
@@ -81,7 +83,6 @@ FLOW_DOMAINS_NATIVE_POOL_MAX_IDLE_TOTAL=256
 FLOW_DOMAINS_NATIVE_POOL_IDLE_TIMEOUT_MS=15000
 FLOW_DOMAINS_NATIVE_POOL_MAX_AGE_MS=120000
 ```
-
 ## Recommended Repo Pattern
 
 Instead of per-repo docker proxy tasks:
