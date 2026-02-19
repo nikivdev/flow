@@ -7,7 +7,7 @@
 //! - Add notes to sessions
 //! - Copy session history to clipboard
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -649,54 +649,35 @@ fn get_session_exchanges_since(
         return Ok(vec![]);
     }
 
-    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
     let window = parse_timestamp_window(since_ts, until_ts);
 
     let mut exchanges: Vec<GitEditExchange> = Vec::new();
     let mut current_user: Option<String> = None;
     let mut current_ts: Option<String> = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(&session_file, |line| {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             let entry_ts = entry.timestamp.clone();
 
             // In bounded mode, require a timestamp and enforce window.
             if since_ts.is_some() || until_ts.is_some() {
                 let Some(ref ts) = entry_ts else {
-                    continue;
+                    return;
                 };
                 if !timestamp_in_window_cached(ts, &window) {
-                    continue;
+                    return;
                 }
             }
 
             if let Some(ref msg) = entry.message {
                 let role = msg.role.as_deref().unwrap_or("unknown");
 
-                let content_text = if let Some(ref content) = msg.content {
-                    match content {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Array(arr) => arr
-                            .iter()
-                            .filter_map(|v| {
-                                v.get("text")
-                                    .and_then(|t| t.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        _ => continue,
-                    }
-                } else {
-                    continue;
+                let Some(content_text) = msg.content.as_ref().and_then(extract_message_text) else {
+                    return;
                 };
 
-                if content_text.is_empty() {
-                    continue;
+                if content_text.trim().is_empty() {
+                    return;
                 }
 
                 match role {
@@ -707,7 +688,7 @@ fn get_session_exchanges_since(
                     "assistant" => {
                         let clean_text = strip_thinking_blocks(&content_text);
                         if clean_text.trim().is_empty() {
-                            continue;
+                            return;
                         }
                         if let Some(user_msg) = current_user.take() {
                             let ts = current_ts.take().or(entry_ts).unwrap_or_default();
@@ -722,7 +703,7 @@ fn get_session_exchanges_since(
                 }
             }
         }
-    }
+    })?;
 
     Ok(exchanges)
 }
@@ -2997,43 +2978,22 @@ fn read_last_context(
         bail!("Session file not found: {}", session_file.display());
     }
 
-    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
-
-    // Collect all exchanges (user + assistant pairs)
-    let mut exchanges: Vec<(String, String)> = Vec::new();
+    // Collect only the trailing `count` exchanges to bound memory usage for large sessions.
+    let keep = count.max(1);
+    let mut exchanges: VecDeque<(String, String)> = VecDeque::with_capacity(keep.min(64));
     let mut current_user: Option<String> = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(&session_file, |line| {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             if let Some(ref msg) = entry.message {
                 let role = msg.role.as_deref().unwrap_or("unknown");
 
-                let content_text = if let Some(ref content) = msg.content {
-                    match content {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Array(arr) => arr
-                            .iter()
-                            .filter_map(|v| {
-                                if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                                    Some(text.to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        _ => continue,
-                    }
-                } else {
-                    continue;
+                let Some(content_text) = msg.content.as_ref().and_then(extract_message_text) else {
+                    return;
                 };
 
-                if content_text.is_empty() {
-                    continue;
+                if content_text.trim().is_empty() {
+                    return;
                 }
 
                 match role {
@@ -3043,35 +3003,34 @@ fn read_last_context(
                     "assistant" => {
                         let clean_text = strip_thinking_blocks(&content_text);
                         if clean_text.trim().is_empty() {
-                            continue;
+                            return;
                         }
                         if let Some(user_msg) = current_user.take() {
-                            exchanges.push((user_msg, clean_text));
+                            if exchanges.len() == keep {
+                                exchanges.pop_front();
+                            }
+                            exchanges.push_back((user_msg, clean_text));
                         }
                     }
                     _ => {}
                 }
             }
         }
-    }
+    })?;
 
     if exchanges.is_empty() {
         bail!("No exchanges found in session");
     }
 
-    // Take the last N exchanges
-    let start = exchanges.len().saturating_sub(count);
-    let last_exchanges = &exchanges[start..];
-
     // Format the context
     let mut context = String::new();
 
-    for (user_msg, assistant_msg) in last_exchanges {
+    for (user_msg, assistant_msg) in exchanges {
         context.push_str("Human: ");
-        context.push_str(user_msg);
+        context.push_str(&user_msg);
         context.push_str("\n\n");
         context.push_str("Assistant: ");
-        context.push_str(assistant_msg);
+        context.push_str(&assistant_msg);
         context.push_str("\n\n");
     }
 

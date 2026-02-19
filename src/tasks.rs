@@ -2958,7 +2958,7 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
     let output_handle = thread::spawn(move || {
         let mut stdout = std::io::stdout();
         let mut buf = [0u8; 4096];
-        let mut line_buf = String::new();
+        let mut line_buf = String::with_capacity(2048);
         let preferred_url = lifecycle_preferred_url();
         let mut preferred_url_hint_emitted = false;
         loop {
@@ -2983,27 +2983,23 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
 
                     if let Some(ref ing) = ingester_clone {
                         line_buf.push_str(&text);
-                        while let Some(pos) = line_buf.find('\n') {
-                            let line = line_buf[..pos].to_string();
+                        for_each_complete_line(&mut line_buf, |line| {
                             maybe_emit_lifecycle_preferred_url_hint(
                                 &preferred_url,
-                                &line,
+                                line,
                                 &mut preferred_url_hint_emitted,
                             );
-                            ing.send(&line);
-                            line_buf = line_buf[pos + 1..].to_string();
-                        }
+                            ing.send(line);
+                        });
                     } else {
                         line_buf.push_str(&text);
-                        while let Some(pos) = line_buf.find('\n') {
-                            let line = line_buf[..pos].to_string();
+                        for_each_complete_line(&mut line_buf, |line| {
                             maybe_emit_lifecycle_preferred_url_hint(
                                 &preferred_url,
-                                &line,
+                                line,
                                 &mut preferred_url_hint_emitted,
                             );
-                            line_buf = line_buf[pos + 1..].to_string();
-                        }
+                        });
                     }
                 }
                 Err(_) => break,
@@ -3257,6 +3253,20 @@ fn maybe_emit_lifecycle_preferred_url_hint(
     *emitted = true;
 }
 
+fn for_each_complete_line(line_buf: &mut String, mut on_line: impl FnMut(&str)) {
+    let mut start = 0usize;
+    let mut drain_until = 0usize;
+    while let Some(relative) = line_buf[start..].find('\n') {
+        let end = start + relative;
+        on_line(&line_buf[start..end]);
+        start = end + 1;
+        drain_until = start;
+    }
+    if drain_until > 0 {
+        line_buf.drain(..drain_until);
+    }
+}
+
 fn tee_stream<R, W>(
     mut reader: R,
     mut writer: W,
@@ -3270,7 +3280,7 @@ where
 {
     thread::spawn(move || {
         let mut chunk = [0u8; 4096];
-        let mut line_buf = String::new();
+        let mut line_buf = String::with_capacity(2048);
         let preferred_url = lifecycle_preferred_url();
         let mut preferred_url_hint_emitted = false;
         loop {
@@ -3297,18 +3307,16 @@ where
             }
 
             line_buf.push_str(&text);
-            while let Some(pos) = line_buf.find('\n') {
-                let line = line_buf[..pos].to_string();
+            for_each_complete_line(&mut line_buf, |line| {
                 maybe_emit_lifecycle_preferred_url_hint(
                     &preferred_url,
-                    &line,
+                    line,
                     &mut preferred_url_hint_emitted,
                 );
                 if let Some(ref ing) = ingester {
-                    ing.send(&line);
+                    ing.send(line);
                 }
-                line_buf = line_buf[pos + 1..].to_string();
-            }
+            });
         }
         // Flush remaining partial line
         if !line_buf.is_empty() {
