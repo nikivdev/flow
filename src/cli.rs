@@ -251,7 +251,7 @@ pub enum Commands {
     ReviewsTodo(ReviewsTodoCommand),
     #[command(
         about = "Create a GitHub PR from current changes or a queued commit.",
-        long_about = "By default, stages and commits current changes (or only paths passed via --path) into the queue, then creates/updates a GitHub PR for the latest queued commit. Use --no-commit to skip committing and create a PR from an existing queued commit.\n\nSpecial:\n  `f pr open` opens the PR for the current branch (or falls back to the queued commit).\n  `f pr open edit` opens a local markdown editor file and syncs PR title/body on save."
+        long_about = "By default, stages and commits current changes (or only paths passed via --path) into the queue, then creates/updates a GitHub PR for the latest queued commit. Use --no-commit to skip committing and create a PR from an existing queued commit.\n\nSpecial:\n  `f pr open` opens the PR for the current branch (or falls back to the queued commit).\n  `f pr open edit` opens a local markdown editor file and syncs PR title/body on save.\n  `f pr feedback [<number|url>] [--todo]` fetches review comments/reviews and can store them as local todos."
     )]
     Pr(PrOpts),
     #[command(
@@ -1605,6 +1605,7 @@ pub struct PrOpts {
     /// Optional message to append to the AI-generated commit message, or subcommands like:
     ///   f pr open
     ///   f pr open edit
+    ///   f pr feedback [<number|url>] [--todo]
     #[arg(value_name = "ARGS", allow_hyphen_values = true)]
     pub args: Vec<String>,
     /// Base branch for the PR (default: main).

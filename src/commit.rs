@@ -15,11 +15,13 @@ use clap::ValueEnum;
 use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha1::{Digest, Sha1};
 use tempfile::{Builder as TempBuilder, NamedTempFile, TempDir};
 use tracing::{debug, info};
+use uuid::Uuid;
 
 use crate::ai;
 use crate::cli::{CommitQueueAction, CommitQueueCommand, DaemonAction, PrOpts};
@@ -9811,6 +9813,10 @@ pub fn run_pr(opts: PrOpts) -> Result<()> {
     ensure_commit_setup(&repo_root)?;
 
     let args = normalize_pr_args(&opts.args);
+    if let Some(feedback) = parse_pr_feedback_args(&args)? {
+        return run_pr_feedback(&repo_root, feedback);
+    }
+
     match args.as_slice() {
         // Convenience: `f pr open` opens the PR for the current branch (or queued commit) without
         // creating a new commit.
@@ -9932,6 +9938,490 @@ fn normalize_pr_args(args: &[String]) -> Vec<String> {
         }
     }
     normalized
+}
+
+#[derive(Debug, Clone)]
+struct PrFeedbackCommand {
+    selector: Option<String>,
+    record_todos: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PrFeedbackItem {
+    external_ref: String,
+    source: &'static str,
+    author: String,
+    body: String,
+    url: String,
+    path: Option<String>,
+    line: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhApiUser {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPrFeedbackSummary {
+    number: u64,
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhPrReviewComment {
+    id: u64,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    html_url: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<u64>,
+    #[serde(default)]
+    in_reply_to_id: Option<u64>,
+    user: GhApiUser,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhIssueComment {
+    id: u64,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    html_url: String,
+    user: GhApiUser,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhReview {
+    id: u64,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    html_url: String,
+    user: GhApiUser,
+}
+
+fn parse_pr_feedback_args(args: &[String]) -> Result<Option<PrFeedbackCommand>> {
+    if args.first().map(|s| s.as_str()) != Some("feedback") {
+        return Ok(None);
+    }
+
+    let mut selector: Option<String> = None;
+    let mut record_todos = false;
+    for token in args.iter().skip(1) {
+        match token.as_str() {
+            "--todo" | "todo" => record_todos = true,
+            "--help" | "-h" => {
+                return Ok(Some(PrFeedbackCommand {
+                    selector: Some("--help".to_string()),
+                    record_todos: false,
+                }));
+            }
+            _ if token.starts_with("--") => {
+                bail!("unknown `f pr feedback` option: {token}");
+            }
+            _ => {
+                if selector.is_some() {
+                    bail!("multiple PR selectors provided. Use exactly one selector.");
+                }
+                selector = Some(token.clone());
+            }
+        }
+    }
+
+    Ok(Some(PrFeedbackCommand {
+        selector,
+        record_todos,
+    }))
+}
+
+fn parse_github_pr_url(input: &str) -> Option<(String, u64)> {
+    let trimmed = input.trim().trim_end_matches('/');
+    let prefix = "https://github.com/";
+    let rest = trimmed.strip_prefix(prefix)?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    let kind = parts.next()?.trim();
+    let number = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || kind != "pull" {
+        return None;
+    }
+    let number = number.parse::<u64>().ok()?;
+    Some((format!("{owner}/{repo}"), number))
+}
+
+fn resolve_current_pr_for_feedback(repo_root: &Path, repo: &str) -> Result<(u64, String)> {
+    let branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".to_string())
+        .trim()
+        .to_string();
+    if !branch.is_empty() && branch != "HEAD" {
+        if let Some((number, url)) = gh_find_open_pr_by_head(repo_root, repo, &branch)? {
+            return Ok((number, url));
+        }
+    }
+
+    let out = gh_capture_in(
+        repo_root,
+        &["pr", "view", "--repo", repo, "--json", "number,url"],
+    )?;
+    let parsed: GhPrFeedbackSummary = serde_json::from_str(out.trim())
+        .context("failed to parse gh pr view output while resolving current PR")?;
+    Ok((parsed.number, parsed.url))
+}
+
+fn gh_api_json_in<T: DeserializeOwned>(repo_root: &Path, endpoint: &str) -> Result<T> {
+    let out = gh_capture_in(repo_root, &["api", endpoint])?;
+    serde_json::from_str(out.trim())
+        .with_context(|| format!("failed to parse GitHub API response for `{endpoint}`"))
+}
+
+fn pr_feedback_external_ref(repo: &str, pr_number: u64, source: &str, source_id: u64) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(repo.as_bytes());
+    hasher.update(b":");
+    hasher.update(pr_number.to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(source.as_bytes());
+    hasher.update(b":");
+    hasher.update(source_id.to_string().as_bytes());
+    let hex = hex::encode(hasher.finalize());
+    let short = hex.get(..12).unwrap_or(&hex);
+    format!("flow-pr-feedback-{short}")
+}
+
+fn compact_single_line(text: &str, max_chars: usize) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .replace('\t', " ");
+    if first.chars().count() <= max_chars {
+        return first;
+    }
+    let mut out = String::new();
+    for (idx, ch) in first.chars().enumerate() {
+        if idx >= max_chars.saturating_sub(3) {
+            out.push_str("...");
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn pr_feedback_todo_title(pr_number: u64, item: &PrFeedbackItem) -> String {
+    let snippet = compact_single_line(&item.body, 90);
+    let mut title = format!("PR #{pr_number} {}: {}", item.source, snippet);
+    if title.trim().is_empty() {
+        title = format!("PR #{pr_number} {} feedback", item.source);
+    }
+    title
+}
+
+fn feedback_location_label(item: &PrFeedbackItem) -> Option<String> {
+    match (item.path.as_deref(), item.line) {
+        (Some(path), Some(line)) => Some(format!("{path}:{line}")),
+        (Some(path), None) => Some(path.to_string()),
+        _ => None,
+    }
+}
+
+fn format_review_state_counts(reviews: &[GhReview]) -> String {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for review in reviews {
+        let key = if review.state.trim().is_empty() {
+            "UNKNOWN".to_string()
+        } else {
+            review.state.trim().to_ascii_uppercase()
+        };
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    if counts.is_empty() {
+        return "none".to_string();
+    }
+    let mut entries: Vec<(String, usize)> = counts.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .into_iter()
+        .map(|(state, count)| format!("{state}:{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn record_pr_feedback_todos(
+    repo_root: &Path,
+    repo: &str,
+    pr_number: u64,
+    items: &[PrFeedbackItem],
+) -> Result<Vec<String>> {
+    let (path, mut todos) = todo::load_items_at_root(repo_root)?;
+    let mut existing_refs = HashSet::new();
+    for todo_item in &todos {
+        if let Some(ext) = todo_item
+            .external_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            existing_refs.insert(ext.to_string());
+        }
+    }
+
+    let mut created = Vec::new();
+    let now = chrono::Utc::now().to_rfc3339();
+    for item in items {
+        if existing_refs.contains(&item.external_ref) {
+            continue;
+        }
+        let id = Uuid::new_v4().simple().to_string();
+        let mut note = String::new();
+        note.push_str("Source: GitHub PR feedback\n");
+        note.push_str("Repo: ");
+        note.push_str(repo);
+        note.push('\n');
+        note.push_str("PR: ");
+        note.push_str(&pr_number.to_string());
+        note.push('\n');
+        note.push_str("Type: ");
+        note.push_str(item.source);
+        note.push('\n');
+        note.push_str("Author: ");
+        note.push_str(&item.author);
+        note.push('\n');
+        if let Some(location) = feedback_location_label(item) {
+            note.push_str("Location: ");
+            note.push_str(&location);
+            note.push('\n');
+        }
+        note.push_str("Link: ");
+        note.push_str(&item.url);
+        note.push('\n');
+        note.push('\n');
+        note.push_str(item.body.trim());
+
+        todos.push(todo::TodoItem {
+            id: id.clone(),
+            title: pr_feedback_todo_title(pr_number, item),
+            status: "pending".to_string(),
+            created_at: now.clone(),
+            updated_at: None,
+            note: Some(note),
+            session: None,
+            external_ref: Some(item.external_ref.clone()),
+            priority: Some(todo::parse_priority_from_issue(&item.body)),
+        });
+        existing_refs.insert(item.external_ref.clone());
+        created.push(id);
+    }
+
+    if !created.is_empty() {
+        todo::save_items(&path, &todos)?;
+    }
+
+    Ok(created)
+}
+
+fn write_pr_feedback_snapshot(
+    repo_root: &Path,
+    repo: &str,
+    pr_number: u64,
+    pr_url: &str,
+    items: &[PrFeedbackItem],
+) -> Result<PathBuf> {
+    let dir = repo_root.join(".ai").join("reviews");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("pr-feedback-{pr_number}.md"));
+
+    let mut out = String::new();
+    out.push_str("# PR Feedback\n\n");
+    out.push_str("- Repo: `");
+    out.push_str(repo);
+    out.push_str("`\n");
+    out.push_str("- PR: #");
+    out.push_str(&pr_number.to_string());
+    out.push('\n');
+    out.push_str("- URL: ");
+    out.push_str(pr_url);
+    out.push('\n');
+    out.push_str("- Generated: ");
+    out.push_str(&chrono::Utc::now().to_rfc3339());
+    out.push('\n');
+    out.push('\n');
+
+    if items.is_empty() {
+        out.push_str("No actionable text feedback found.\n");
+    } else {
+        out.push_str("## Actionable Items\n\n");
+        for (idx, item) in items.iter().enumerate() {
+            out.push_str(&(idx + 1).to_string());
+            out.push_str(". [");
+            out.push_str(item.source);
+            out.push_str("] ");
+            out.push_str(&item.author);
+            if let Some(location) = feedback_location_label(item) {
+                out.push_str(" (");
+                out.push_str(&location);
+                out.push(')');
+            }
+            out.push('\n');
+            out.push_str("   ");
+            out.push_str(item.body.trim());
+            out.push('\n');
+            out.push_str("   ");
+            out.push_str(&item.url);
+            out.push('\n');
+        }
+    }
+
+    fs::write(&path, out)?;
+    Ok(path)
+}
+
+fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
+    ensure_gh_available()?;
+
+    if let Some(selector) = cmd.selector.as_deref() {
+        if selector == "--help" || selector == "-h" {
+            println!("Usage: f pr feedback [<pr-number|pr-url>] [--todo]");
+            println!("Examples:");
+            println!("  f pr feedback");
+            println!("  f pr feedback 8");
+            println!("  f pr feedback https://github.com/owner/repo/pull/8 --todo");
+            return Ok(());
+        }
+    }
+
+    let (repo, pr_number, pr_url) = if let Some(selector) = cmd.selector.as_deref() {
+        if let Some((repo, pr_number)) = parse_github_pr_url(selector) {
+            let pr_url = format!("https://github.com/{repo}/pull/{pr_number}");
+            (repo, pr_number, pr_url)
+        } else {
+            let trimmed = selector.trim().trim_start_matches('#');
+            let pr_number = trimmed.parse::<u64>().with_context(|| {
+                format!("invalid PR selector `{selector}`; expected number or URL")
+            })?;
+            let repo = resolve_github_repo(repo_root)?;
+            let pr_url = format!("https://github.com/{repo}/pull/{pr_number}");
+            (repo, pr_number, pr_url)
+        }
+    } else {
+        let repo = resolve_github_repo(repo_root)?;
+        let (pr_number, pr_url) = resolve_current_pr_for_feedback(repo_root, &repo).with_context(
+            || "failed to resolve current PR. Pass an explicit selector: `f pr feedback <number>`",
+        )?;
+        (repo, pr_number, pr_url)
+    };
+
+    let reviews_endpoint = format!("repos/{repo}/pulls/{pr_number}/reviews?per_page=100");
+    let review_comments_endpoint = format!("repos/{repo}/pulls/{pr_number}/comments?per_page=100");
+    let issue_comments_endpoint = format!("repos/{repo}/issues/{pr_number}/comments?per_page=100");
+
+    let reviews: Vec<GhReview> = gh_api_json_in(repo_root, &reviews_endpoint)?;
+    let review_comments: Vec<GhPrReviewComment> =
+        gh_api_json_in(repo_root, &review_comments_endpoint)?;
+    let issue_comments: Vec<GhIssueComment> = gh_api_json_in(repo_root, &issue_comments_endpoint)?;
+
+    let mut items: Vec<PrFeedbackItem> = Vec::new();
+    for comment in &review_comments {
+        if comment.in_reply_to_id.is_some() {
+            continue;
+        }
+        let body = comment.body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        items.push(PrFeedbackItem {
+            external_ref: pr_feedback_external_ref(&repo, pr_number, "review-comment", comment.id),
+            source: "review-comment",
+            author: comment.user.login.clone(),
+            body: body.to_string(),
+            url: comment.html_url.trim().to_string(),
+            path: comment.path.clone(),
+            line: comment.line,
+        });
+    }
+    for comment in &issue_comments {
+        let body = comment.body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        items.push(PrFeedbackItem {
+            external_ref: pr_feedback_external_ref(&repo, pr_number, "issue-comment", comment.id),
+            source: "issue-comment",
+            author: comment.user.login.clone(),
+            body: body.to_string(),
+            url: comment.html_url.trim().to_string(),
+            path: None,
+            line: None,
+        });
+    }
+    for review in &reviews {
+        let body = review.body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        items.push(PrFeedbackItem {
+            external_ref: pr_feedback_external_ref(&repo, pr_number, "review", review.id),
+            source: "review",
+            author: review.user.login.clone(),
+            body: body.to_string(),
+            url: review.html_url.trim().to_string(),
+            path: None,
+            line: None,
+        });
+    }
+
+    println!("PR feedback: {repo}#{pr_number}");
+    println!("URL: {pr_url}");
+    println!(
+        "Reviews: {} ({})",
+        reviews.len(),
+        format_review_state_counts(&reviews)
+    );
+    println!("Review comments: {}", review_comments.len());
+    println!("Issue comments: {}", issue_comments.len());
+
+    let snapshot_path = write_pr_feedback_snapshot(repo_root, &repo, pr_number, &pr_url, &items)?;
+    println!("Snapshot: {}", snapshot_path.display());
+
+    if items.is_empty() {
+        println!("No actionable text feedback found.");
+        return Ok(());
+    }
+
+    println!();
+    println!("Actionable items ({}):", items.len());
+    for (idx, item) in items.iter().enumerate() {
+        let preview = compact_single_line(&item.body, 120);
+        if let Some(location) = feedback_location_label(item) {
+            println!("{}. [{}] {} {}", idx + 1, item.source, location, preview);
+        } else {
+            println!("{}. [{}] {}", idx + 1, item.source, preview);
+        }
+        println!("   by {}  {}", item.author, item.url);
+    }
+
+    if cmd.record_todos {
+        let created = record_pr_feedback_todos(repo_root, &repo, pr_number, &items)?;
+        if created.is_empty() {
+            println!("Todos: no new todos created (all feedback already tracked).");
+        } else {
+            println!("Todos: created {} item(s).", created.len());
+            println!("Use `f todo list` to review them.");
+        }
+    } else {
+        println!("Tip: rerun with `--todo` to record these items into `.ai/todos/todos.json`.");
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

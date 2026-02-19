@@ -12,6 +12,7 @@ Complete documentation for all `f` (flow) commands.
 | [`install`](install.md) | Install a CLI/tool via registry, parm, or flox |
 | [`repos`](repos.md) | Clone repositories into ~/repos |
 | [`commit`](commit.md) | AI-powered commit with code review |
+| [`pr`](pr.md) | Create/open PRs and ingest GitHub feedback |
 | [`upstream`](upstream.md) | Manage upstream fork workflow |
 | [`env`](env.md) | Sync project environment and manage env vars |
 | [`invariants`](invariants.md) | Validate project invariants from `flow.toml` |
@@ -47,6 +48,7 @@ f commit --help
 ### Version Control
 
 - **[commit](commit.md)** - AI-powered commits with review
+- **[pr](pr.md)** - PR creation/editing plus review feedback ingestion
 - **[repos](repos.md)** - Clone repos into a structured directory
 - **[upstream](upstream.md)** - Fork management and sync
 - **[fixup](fixup.md)** - Fix common TOML syntax errors
