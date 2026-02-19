@@ -31,6 +31,11 @@ f pr --no-commit --base main
 f pr open edit
 ```
 
+Important formatting rule:
+
+- Do not pass multi-line PR body text as a quoted CLI string with escaped `\n`.
+- Use file-based markdown editing (`f pr open edit`) or `gh pr edit --body-file <file>`.
+
 ## Update loop for follow-up commits
 
 ```bash
