@@ -18,13 +18,17 @@ f sync
 # 3) Try Flow-native switch first
 f switch <branch-name> --remote origin
 
-# 4) If branch does not exist locally/remotely yet, create from current HEAD
+# 4) If Flow says "Branch '<name>' not found locally or on remotes", create from current HEAD
 git switch -c <branch-name>
 
-# 5) Verify
+# 5) Verify branch, upstream, and base commit
 git rev-parse --abbrev-ref HEAD
-git status --short
+git for-each-ref --format='%(refname:short) %(upstream:short)' refs/heads/<branch-name>
+git status --short --branch
 git log -1 --oneline
+
+# 6) Optional: publish branch and set tracking now
+git push -u origin <branch-name>
 ```
 
 ## Reusable AI context template
@@ -36,8 +40,8 @@ Use Flow-native branch creation in this repo:
 1. Run `f sync`.
 2. Try `f switch <branch-name> --remote origin`.
 3. If Flow says branch is not found locally/remotely, run `git switch -c <branch-name>`.
-4. Verify branch name, upstream/tracking, and clean working tree.
-5. Report exact commands run and final branch/HEAD.
+4. Verify branch name, upstream/tracking, and clean working tree (`git status --short --branch`).
+5. Report exact commands run, final branch, and HEAD commit.
 
 Constraints:
 - Keep unrelated local changes untouched.
@@ -48,6 +52,8 @@ Constraints:
 ## Notes
 
 - `f switch` preserves safety snapshots and stashes by default.
+- `f switch` may create `f-switch-save/<branch>-<timestamp>` even when it fails to find the target branch; this is expected safety behavior.
 - Today, `f switch` may fail for a brand-new local-only branch name; use the documented fallback.
 - If you intentionally need a different base, switch to that base first, then run `f switch <branch-name>`.
 - If your default trunk is `upstream/main`, use `--remote upstream`.
+- If you plan to open a PR soon, run `git push -u origin <branch-name>` right after creation so tracking is set.

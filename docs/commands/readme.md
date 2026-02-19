@@ -17,6 +17,7 @@ Complete documentation for all `f` (flow) commands.
 | [`env`](env.md) | Sync project environment and manage env vars |
 | [`invariants`](invariants.md) | Validate project invariants from `flow.toml` |
 | [`fast`](fast.md) | Low-latency AI task invocation via fast client |
+| [`domains`](domains.md) | Shared local `*.localhost` route manager on port 80 |
 | [`tasks`](tasks.md) | List and run project tasks |
 | [`global`](global.md) | Run tasks from global flow config |
 | [`setup`](setup.md) | Print aliases or run setup task |
@@ -82,6 +83,7 @@ f commit --help
 
 - **[env](env.md)** - Manage environment variables
 - **[invariants](invariants.md)** - Validate invariant policies in `flow.toml`
+- **[domains](domains.md)** - Shared local domain proxy ownership and route management
 - **[init](init.md)** - Scaffold a new flow.toml
 - **[doctor](doctor.md)** - Verify tools and integrations
 

@@ -549,6 +549,12 @@ pub enum Commands {
         alias = "px"
     )]
     Proxy(ProxyCommand),
+    #[command(
+        about = "Manage shared local *.localhost routing on port 80.",
+        long_about = "Runs one shared nginx proxy (flow-local-domains-proxy) and manages host->target routes in ~/.config/flow/local-domains.",
+        alias = "dom"
+    )]
+    Domains(DomainsCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -708,6 +714,46 @@ pub struct ProxyAddOpts {
     /// Path prefix routing.
     #[arg(long)]
     pub path: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DomainsCommand {
+    #[command(subcommand)]
+    pub action: Option<DomainsAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DomainsAction {
+    /// Start the shared local-domain proxy on port 80.
+    Up,
+    /// Stop the shared local-domain proxy.
+    Down,
+    /// List configured host -> target routes.
+    List,
+    /// Add a localhost route (for example: linsa.localhost -> 127.0.0.1:3481).
+    Add(DomainsAddOpts),
+    /// Remove a localhost route.
+    #[command(alias = "remove", alias = "delete")]
+    Rm(DomainsRmOpts),
+    /// Show proxy ownership, port 80 conflicts, and route summary.
+    Doctor,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DomainsAddOpts {
+    /// Host name ending in .localhost.
+    pub host: String,
+    /// Upstream target in host:port format.
+    pub target: String,
+    /// Replace existing route target for this host.
+    #[arg(long)]
+    pub replace: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DomainsRmOpts {
+    /// Host name ending in .localhost.
+    pub host: String,
 }
 
 #[derive(Args, Debug, Clone)]
