@@ -420,8 +420,11 @@ fn repo_contains_package(project_root: &Path, needle: &str) -> bool {
 }
 
 fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
-    let old_root = "/Users/nikiv/code/org/1f/jazz";
-    let link_old = format!("link:{}", old_root);
+    let legacy_roots = [
+        "/Users/nikiv/code/org/1f/jazz",
+        "/Users/nikiv/code/org/1f/jazz2",
+        "/Users/nikiv/repos/garden-co/jazz2",
+    ];
     let files = [
         project_root.join("packages/web/package.json"),
         project_root.join("packages/web/tsconfig.json"),
@@ -435,7 +438,10 @@ fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
             continue;
         }
         let text = fs::read_to_string(file).unwrap_or_default();
-        if text.contains(old_root) || text.contains(&link_old) {
+        if legacy_roots
+            .iter()
+            .any(|root| text.contains(root) || text.contains(&format!("link:{root}")))
+        {
             needs_rewrite = true;
             break;
         }
@@ -452,29 +458,33 @@ fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
     let mut target_root = env_root
         .map(PathBuf::from)
         .or_else(|| {
-            let candidate = dirs::home_dir()?.join("code/org/1f/jazz");
+            let candidate = dirs::home_dir()?.join("repos/garden-co/jazz2");
             candidate.exists().then_some(candidate)
         })
         .or_else(|| {
             let candidate = dirs::home_dir()?.join("code/org/1f/jazz2");
+            candidate.exists().then_some(candidate)
+        })
+        .or_else(|| {
+            let candidate = dirs::home_dir()?.join("code/org/1f/jazz");
             candidate.exists().then_some(candidate)
         });
 
     if target_root.is_none() {
         let candidate = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("~"))
-            .join("code/org/1f/jazz");
+            .join("repos/garden-co/jazz2");
         if let Some(parent) = candidate.parent() {
             let _ = fs::create_dir_all(parent);
         }
         println!(
-            "Jazz repo not found; attempting to clone to {}...",
+            "Jazz2 repo not found; attempting to clone to {}...",
             candidate.display()
         );
         let status = Command::new("git")
             .args([
                 "clone",
-                "https://github.com/garden-co/jazz",
+                "https://github.com/garden-co/jazz2",
                 candidate.to_str().unwrap_or(""),
             ])
             .stdin(Stdio::inherit())
@@ -485,7 +495,7 @@ fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
             if status.success() {
                 target_root = Some(candidate);
             } else {
-                println!("Failed to clone jazz; update paths manually.");
+                println!("Failed to clone jazz2; update paths manually.");
             }
         }
     }
@@ -506,46 +516,18 @@ fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
         }
         let mut text = fs::read_to_string(file)
             .with_context(|| format!("failed to read {}", file.display()))?;
-        if !text.contains(old_root) && !text.contains(&link_old) {
+        let had_rewrites = legacy_roots
+            .iter()
+            .any(|root| text.contains(root) || text.contains(&format!("link:{root}")));
+        if !had_rewrites {
             continue;
         }
-        text = text.replace(old_root, &target_root_str);
-        text = text.replace(&link_old, &link_new);
+        for root in legacy_roots {
+            text = text.replace(root, &target_root_str);
+            text = text.replace(&format!("link:{root}"), &link_new);
+        }
         fs::write(file, text).with_context(|| format!("failed to write {}", file.display()))?;
         println!("Rewrote Jazz paths in {}", file.display());
-    }
-
-    let groove_wasm = target_root.join("crates/groove-wasm/pkg/groove_wasm.js");
-    if groove_wasm.exists() {
-        return Ok(());
-    }
-
-    println!("Building groove-wasm...");
-    if which::which("wasm-pack").is_err() {
-        if brew_available() {
-            println!("Installing wasm-pack...");
-            let _ = Command::new("brew")
-                .args(["install", "wasm-pack"])
-                .stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status();
-        } else {
-            println!("wasm-pack not found; install it to build groove-wasm.");
-            return Ok(());
-        }
-    }
-
-    let status = Command::new("wasm-pack")
-        .args(["build", "--target", "web"])
-        .current_dir(target_root.join("crates/groove-wasm"))
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to run wasm-pack")?;
-    if !status.success() {
-        println!("groove-wasm build failed; run it manually if needed.");
     }
 
     Ok(())

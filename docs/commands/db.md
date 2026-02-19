@@ -10,7 +10,7 @@ f db <provider> <action>
 
 ## Jazz
 
-Create Jazz worker accounts and populate env vars for the current project.
+Create Jazz2 app credentials and populate env vars for the current project.
 
 ```bash
 f db jazz new --kind mirror --name gitedit-mirror

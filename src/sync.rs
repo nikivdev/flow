@@ -3589,7 +3589,8 @@ fn sync_log_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join("code").join("org").join("linsa").join("base"));
-        dirs.push(home.join("code").join("org").join("1f").join("jazz"));
+        dirs.push(home.join("repos").join("garden-co").join("jazz2"));
+        dirs.push(home.join("code").join("org").join("1f").join("jazz2"));
     }
     dirs
 }

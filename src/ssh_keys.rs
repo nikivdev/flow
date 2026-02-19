@@ -7,11 +7,11 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bs58;
 use chrono::{DateTime, Local, TimeZone, Utc};
-use cojson_core::crypto::{get_sealer_id, new_x25519_private_key, seal, unseal};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::cli::SshAction;
+use crate::sealer_crypto::{get_sealer_id, new_x25519_private_key, seal, unseal};
 use crate::{config, env, ssh};
 
 const DEFAULT_TTL_HOURS: u64 = 24;
@@ -706,7 +706,7 @@ fn unseal_private_key(
         &nonce_material,
     )
     .context("failed to unseal SSH private key")?;
-    Ok(unsealed.into())
+    Ok(unsealed)
 }
 
 fn add_key_to_agent(private_key: &[u8], sock: &Path, ttl_hours: u64) -> Result<()> {

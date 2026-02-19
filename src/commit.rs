@@ -13238,6 +13238,33 @@ fn capture_unhash_bundle(
 
 const UNHASH_TRACE_DEFAULT_BYTES: u64 = 64 * 1024;
 
+fn default_assistant_trace_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(
+            home.join("repos")
+                .join("garden-co")
+                .join("jazz2")
+                .join("assistant-traces"),
+        );
+        roots.push(
+            home.join("code")
+                .join("org")
+                .join("1f")
+                .join("jazz2")
+                .join("assistant-traces"),
+        );
+        roots.push(
+            home.join("code")
+                .join("org")
+                .join("1f")
+                .join("jazz")
+                .join("assistant-traces"),
+        );
+    }
+    roots
+}
+
 fn assistant_traces_root() -> Option<std::path::PathBuf> {
     if let Ok(value) = env::var("UNHASH_TRACE_DIR") {
         let trimmed = value.trim();
@@ -13245,13 +13272,10 @@ fn assistant_traces_root() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(trimmed));
         }
     }
-    dirs::home_dir().map(|home| {
-        home.join("code")
-            .join("org")
-            .join("1f")
-            .join("jazz")
-            .join("assistant-traces")
-    })
+    default_assistant_trace_roots()
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .or_else(|| default_assistant_trace_roots().into_iter().next())
 }
 
 fn unhash_trace_max_bytes() -> u64 {
@@ -13646,13 +13670,10 @@ fn jazz_assistant_traces_root() -> Option<PathBuf> {
             return Some(PathBuf::from(trimmed));
         }
     }
-    dirs::home_dir().map(|home| {
-        home.join("code")
-            .join("org")
-            .join("1f")
-            .join("jazz")
-            .join("assistant-traces")
-    })
+    default_assistant_trace_roots()
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .or_else(|| default_assistant_trace_roots().into_iter().next())
 }
 
 fn try_capture_unhash_bundle(
