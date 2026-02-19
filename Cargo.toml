@@ -67,6 +67,7 @@ blake3 = "1"
 crypto_secretbox = "0.1"
 rand = "0.8"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+simd-json = { version = "0.14", optional = true }
 seq_everruns_bridge = { path = "../seq/api/rust/seq_everruns_bridge" }
 
 [target.'cfg(unix)'.dependencies]
@@ -78,3 +79,4 @@ tempfile = "3"
 
 [features]
 default = []
+linux-host-simd-json = ["dep:simd-json"]

@@ -656,7 +656,7 @@ fn get_session_exchanges_since(
     let mut current_ts: Option<String> = None;
 
     for_each_nonempty_jsonl_line(&session_file, |line| {
-        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+        if let Ok(entry) = crate::json_parse::parse_json_line::<JsonlEntry>(line) {
             let entry_ts = entry.timestamp.clone();
 
             // In bounded mode, require a timestamp and enforce window.
@@ -771,7 +771,7 @@ fn get_session_last_timestamp(
 
     let mut last_ts: Option<String> = None;
     for_each_nonempty_jsonl_line(&session_file, |line| {
-        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+        if let Ok(entry) = crate::json_parse::parse_json_line::<JsonlEntry>(line) {
             if let Some(ts) = entry.timestamp {
                 last_ts = Some(ts);
             }
@@ -818,7 +818,7 @@ fn read_context_since(
     let mut last_ts: Option<String> = None;
 
     for_each_nonempty_jsonl_line(&session_file, |line| {
-        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+        if let Ok(entry) = crate::json_parse::parse_json_line::<JsonlEntry>(line) {
             let entry_ts = entry.timestamp.clone();
 
             // Skip entries before checkpoint
@@ -1059,7 +1059,7 @@ fn read_codex_exchanges(
     let mut last_ts: Option<String> = None;
 
     for_each_nonempty_jsonl_line(session_file, |line| {
-        let entry: CodexEntry = match serde_json::from_str(line) {
+        let entry: CodexEntry = match crate::json_parse::parse_json_line(line) {
             Ok(v) => v,
             Err(_) => return,
         };
@@ -1179,7 +1179,7 @@ fn get_codex_last_timestamp(session_file: &PathBuf) -> Result<Option<String>> {
     let mut last_ts: Option<String> = None;
 
     for_each_nonempty_jsonl_line(session_file, |line| {
-        let entry: CodexEntry = match serde_json::from_str(line) {
+        let entry: CodexEntry = match crate::json_parse::parse_json_line(line) {
             Ok(v) => v,
             Err(_) => return,
         };
@@ -1415,7 +1415,7 @@ fn read_claude_messages_for_path(project_path: &Path, session_id: &str) -> Resul
     let mut last_message_at: Option<String> = None;
 
     for_each_nonempty_jsonl_line(&session_file, |line| {
-        let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) else {
+        let Ok(entry) = crate::json_parse::parse_json_line::<JsonlEntry>(line) else {
             return;
         };
         let Some(ref msg) = entry.message else {
@@ -1456,7 +1456,7 @@ fn read_codex_messages(session_id: &str) -> Result<SessionMessages> {
     let mut last_message_at: Option<String> = None;
 
     for_each_nonempty_jsonl_line(&session_file, |line| {
-        let entry: CodexEntry = match serde_json::from_str(line) {
+        let entry: CodexEntry = match crate::json_parse::parse_json_line(line) {
             Ok(v) => v,
             Err(_) => return,
         };
@@ -1757,7 +1757,7 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
     let mut error_summary = None;
 
     for_each_nonempty_jsonl_line(path, |line| {
-        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+        if let Ok(entry) = crate::json_parse::parse_json_line::<JsonlEntry>(line) {
             // Get timestamp from first entry
             if timestamp.is_none() {
                 timestamp = entry.timestamp.clone();
@@ -1837,7 +1837,7 @@ fn parse_codex_session_file(
     let mut cwd = None;
 
     for_each_nonempty_jsonl_line(path, |line| {
-        let entry: CodexEntry = match serde_json::from_str(line) {
+        let entry: CodexEntry = match crate::json_parse::parse_json_line(line) {
             Ok(v) => v,
             Err(_) => return,
         };
@@ -2984,7 +2984,7 @@ fn read_last_context(
     let mut current_user: Option<String> = None;
 
     for_each_nonempty_jsonl_line(&session_file, |line| {
-        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+        if let Ok(entry) = crate::json_parse::parse_json_line::<JsonlEntry>(line) {
             if let Some(ref msg) = entry.message {
                 let role = msg.role.as_deref().unwrap_or("unknown");
 
@@ -4717,7 +4717,7 @@ fn read_cross_project_context(
     let mut last_ts: Option<String> = None;
 
     for_each_nonempty_jsonl_line(&session_file, |line| {
-        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+        if let Ok(entry) = crate::json_parse::parse_json_line::<JsonlEntry>(line) {
             let entry_ts = entry.timestamp.clone();
 
             // Skip entries before checkpoint
@@ -4973,7 +4973,7 @@ fn get_session_last_timestamp_for_path(
 
     let mut last_ts: Option<String> = None;
     for_each_nonempty_jsonl_line(&session_file, |line| {
-        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
+        if let Ok(entry) = crate::json_parse::parse_json_line::<JsonlEntry>(line) {
             if let Some(ts) = entry.timestamp {
                 last_ts = Some(ts);
             }
