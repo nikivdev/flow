@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 use std::time::Duration;
@@ -13,6 +13,7 @@ use crate::cli::{DomainsAction, DomainsAddOpts, DomainsCommand, DomainsEngineArg
 
 const PROXY_CONTAINER_NAME: &str = "flow-local-domains-proxy";
 const NATIVE_PROXY_HEADER: &str = "x-flow-domainsd: 1";
+const MACOS_DOMAINSD_LABEL: &str = "dev.flow.domainsd";
 
 const COMPOSE_FILE: &str = r#"services:
   proxy:
@@ -577,6 +578,20 @@ fn run_up_native(paths: &DomainsPaths) -> Result<()> {
 
 fn run_down_native(paths: &DomainsPaths) -> Result<()> {
     ensure_layout(paths)?;
+    if cfg!(target_os = "macos") {
+        let launchd_plist = macos_launchd_plist_path();
+        if launchd_plist.exists() {
+            println!(
+                "Native local domains appears launchd-managed: {}",
+                launchd_plist.display()
+            );
+            println!(
+                "To stop/uninstall launchd mode, run:\n  sudo {}",
+                macos_launchd_uninstall_script_path().display()
+            );
+            return Ok(());
+        }
+    }
     let Some(pid) = read_native_pid(paths)? else {
         println!("Native local domains proxy is not running.");
         return Ok(());
@@ -660,6 +675,33 @@ fn native_source_path() -> PathBuf {
         .join("tools")
         .join("domainsd-cpp")
         .join("domainsd.cpp")
+}
+
+fn domainsd_tools_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tools")
+        .join("domainsd-cpp")
+}
+
+fn macos_launchd_install_script_path() -> PathBuf {
+    domainsd_tools_dir().join("install-macos-launchd.sh")
+}
+
+fn macos_launchd_uninstall_script_path() -> PathBuf {
+    domainsd_tools_dir().join("uninstall-macos-launchd.sh")
+}
+
+fn macos_launchd_plist_path() -> PathBuf {
+    PathBuf::from("/Library/LaunchDaemons").join(format!("{MACOS_DOMAINSD_LABEL}.plist"))
+}
+
+fn log_contains_permission_denied(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read native log {}", path.display()))?;
+    Ok(content.contains("Permission denied"))
 }
 
 fn ensure_native_binary(paths: &DomainsPaths) -> Result<()> {
@@ -766,6 +808,17 @@ fn start_native_proxy(paths: &DomainsPaths) -> Result<()> {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
+    }
+    if cfg!(target_os = "macos") && log_contains_permission_denied(&paths.native_log)? {
+        bail!(
+            "Native local domains proxy failed to bind port 80 (permission denied).\n\
+macOS requires privileged socket ownership for :80 in native mode.\n\
+Run once:\n  sudo {}\n\
+Then retry: f domains --engine native up\n\
+Log: {}",
+            macos_launchd_install_script_path().display(),
+            paths.native_log.display()
+        );
     }
     bail!(
         "Native local domains proxy failed to become healthy (pid {}). Check logs: {}",

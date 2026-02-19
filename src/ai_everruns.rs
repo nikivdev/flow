@@ -1,14 +1,16 @@
 use std::collections::HashSet;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::{Client, RequestBuilder};
 use seq_everruns_bridge::{
     ToolCall as BridgeToolCall, build_request as bridge_build_request,
-    client_side_tool_definitions as bridge_tool_definitions, parse_tool_call_requested,
+    client_side_tool_definitions as bridge_tool_definitions,
+    maple::{MapleSpan, MapleTraceExporter},
+    parse_tool_call_requested,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -76,6 +78,190 @@ fn wait_for_completion(
     poll_ms: u64,
     wait_timeout_secs: u64,
 ) -> Result<()> {
+    match wait_for_completion_sse(
+        api,
+        seq_bridge,
+        session_id,
+        input_message_id,
+        poll_ms,
+        wait_timeout_secs,
+    ) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if is_sse_unavailable_error(&err) {
+                eprintln!(
+                    "note: Everruns SSE endpoint unavailable, falling back to /events polling"
+                );
+                return wait_for_completion_poll(
+                    api,
+                    seq_bridge,
+                    session_id,
+                    input_message_id,
+                    poll_ms,
+                    wait_timeout_secs,
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+fn wait_for_completion_sse(
+    api: &EverrunsApi,
+    seq_bridge: &SeqBridge,
+    session_id: &str,
+    input_message_id: &str,
+    poll_ms: u64,
+    wait_timeout_secs: u64,
+) -> Result<()> {
+    let started = Instant::now();
+    let timeout = Duration::from_secs(wait_timeout_secs.max(1));
+    let mut since_id: Option<String> = None;
+    let mut handled_tool_calls = HashSet::new();
+    let mut saw_stream = false;
+
+    loop {
+        if started.elapsed() > timeout {
+            bail!(
+                "timed out waiting for Everruns output after {}s",
+                wait_timeout_secs
+            );
+        }
+
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let stream_timeout = remaining
+            .min(Duration::from_secs(70))
+            .max(Duration::from_secs(1));
+
+        let batch = match api.read_sse_batch(session_id, since_id.as_deref(), stream_timeout) {
+            Ok(batch) => {
+                saw_stream = true;
+                batch
+            }
+            Err(err) => {
+                if !saw_stream && is_sse_unavailable_error(&err) {
+                    return Err(err);
+                }
+                thread::sleep(Duration::from_millis(poll_ms.max(25)));
+                continue;
+            }
+        };
+
+        let mut did_work = false;
+        for event in batch.events {
+            let event_started = Instant::now();
+            let event_start_ns = unix_time_nanos_now();
+            since_id = Some(event.id.clone());
+
+            if let Some(ref event_input_id) = event.context.input_message_id
+                && event_input_id != input_message_id
+            {
+                continue;
+            }
+
+            match event.event_type.as_str() {
+                "tool.call_requested" => {
+                    let requested_calls =
+                        parse_tool_call_requested(&event.data).with_context(|| {
+                            format!(
+                                "failed to parse tool.call_requested payload for event {}",
+                                event.id
+                            )
+                        })?;
+
+                    let requested_count = requested_calls.len();
+                    let mut tool_results = Vec::new();
+                    for call in requested_calls {
+                        if !handled_tool_calls.insert(call.id.clone()) {
+                            continue;
+                        }
+                        tool_results
+                            .push(seq_bridge.execute_tool_call(session_id, &event.id, call));
+                    }
+
+                    if !tool_results.is_empty() {
+                        api.submit_tool_results(session_id, tool_results)?;
+                        did_work = true;
+                    }
+                    seq_bridge.emit_runtime_event(
+                        session_id,
+                        &event.id,
+                        "tool_call_requested",
+                        true,
+                        None,
+                        event_start_ns,
+                        end_unix_nanos(event_start_ns, event_started),
+                        vec![(
+                            "tool_calls.requested".to_string(),
+                            requested_count.to_string(),
+                        )],
+                    );
+                }
+                "output.message.completed" => {
+                    if let Some(text) = extract_output_text(&event.data) {
+                        println!("{}", text);
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&event.data)?);
+                    }
+                    seq_bridge.emit_runtime_event(
+                        session_id,
+                        &event.id,
+                        "output_message_completed",
+                        true,
+                        None,
+                        event_start_ns,
+                        end_unix_nanos(event_start_ns, event_started),
+                        vec![],
+                    );
+                    return Ok(());
+                }
+                "turn.failed" => {
+                    let error = event
+                        .data
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown turn failure");
+                    seq_bridge.emit_runtime_event(
+                        session_id,
+                        &event.id,
+                        "turn_failed",
+                        false,
+                        Some(error),
+                        event_start_ns,
+                        end_unix_nanos(event_start_ns, event_started),
+                        vec![],
+                    );
+                    bail!("everruns turn failed: {}", error);
+                }
+                _ => {
+                    seq_bridge.emit_runtime_event(
+                        session_id,
+                        &event.id,
+                        &format!("event_{}", event.event_type.replace(['.', '-', ' '], "_")),
+                        true,
+                        None,
+                        event_start_ns,
+                        end_unix_nanos(event_start_ns, event_started),
+                        vec![],
+                    );
+                }
+            }
+        }
+
+        if !did_work && !batch.saw_disconnect {
+            thread::sleep(Duration::from_millis(poll_ms.max(25)));
+        }
+    }
+}
+
+fn wait_for_completion_poll(
+    api: &EverrunsApi,
+    seq_bridge: &SeqBridge,
+    session_id: &str,
+    input_message_id: &str,
+    poll_ms: u64,
+    wait_timeout_secs: u64,
+) -> Result<()> {
     let started = Instant::now();
     let mut since_id: Option<String> = None;
     let mut handled_tool_calls = HashSet::new();
@@ -95,6 +281,8 @@ fn wait_for_completion(
 
         let mut did_work = false;
         for event in events {
+            let event_started = Instant::now();
+            let event_start_ns = unix_time_nanos_now();
             if let Some(ref event_input_id) = event.context.input_message_id
                 && event_input_id != input_message_id
             {
@@ -111,6 +299,7 @@ fn wait_for_completion(
                             )
                         })?;
 
+                    let requested_count = requested_calls.len();
                     let mut tool_results = Vec::new();
                     for call in requested_calls {
                         if !handled_tool_calls.insert(call.id.clone()) {
@@ -124,6 +313,19 @@ fn wait_for_completion(
                         api.submit_tool_results(session_id, tool_results)?;
                         did_work = true;
                     }
+                    seq_bridge.emit_runtime_event(
+                        session_id,
+                        &event.id,
+                        "tool_call_requested",
+                        true,
+                        None,
+                        event_start_ns,
+                        end_unix_nanos(event_start_ns, event_started),
+                        vec![(
+                            "tool_calls.requested".to_string(),
+                            requested_count.to_string(),
+                        )],
+                    );
                 }
                 "output.message.completed" => {
                     if let Some(text) = extract_output_text(&event.data) {
@@ -131,6 +333,16 @@ fn wait_for_completion(
                     } else {
                         println!("{}", serde_json::to_string_pretty(&event.data)?);
                     }
+                    seq_bridge.emit_runtime_event(
+                        session_id,
+                        &event.id,
+                        "output_message_completed",
+                        true,
+                        None,
+                        event_start_ns,
+                        end_unix_nanos(event_start_ns, event_started),
+                        vec![],
+                    );
                     return Ok(());
                 }
                 "turn.failed" => {
@@ -139,9 +351,30 @@ fn wait_for_completion(
                         .get("error")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown turn failure");
+                    seq_bridge.emit_runtime_event(
+                        session_id,
+                        &event.id,
+                        "turn_failed",
+                        false,
+                        Some(error),
+                        event_start_ns,
+                        end_unix_nanos(event_start_ns, event_started),
+                        vec![],
+                    );
                     bail!("everruns turn failed: {}", error);
                 }
-                _ => {}
+                _ => {
+                    seq_bridge.emit_runtime_event(
+                        session_id,
+                        &event.id,
+                        &format!("event_{}", event.event_type.replace(['.', '-', ' '], "_")),
+                        true,
+                        None,
+                        event_start_ns,
+                        end_unix_nanos(event_start_ns, event_started),
+                        vec![],
+                    );
+                }
             }
         }
 
@@ -149,6 +382,11 @@ fn wait_for_completion(
             thread::sleep(Duration::from_millis(poll_ms.max(25)));
         }
     }
+}
+
+fn is_sse_unavailable_error(err: &anyhow::Error) -> bool {
+    let text = err.to_string().to_ascii_lowercase();
+    text.contains("sse endpoint unavailable")
 }
 
 fn extract_output_text(data: &Value) -> Option<String> {
@@ -365,6 +603,7 @@ fn env_non_empty(name: &str) -> Option<String> {
 #[derive(Clone)]
 struct EverrunsApi {
     client: Client,
+    sse_client: Client,
     base_url: String,
     api_key: Option<String>,
 }
@@ -375,8 +614,13 @@ impl EverrunsApi {
             .timeout(Duration::from_secs(30))
             .build()
             .context("failed to build Everruns HTTP client")?;
+        let sse_client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .context("failed to build Everruns SSE HTTP client")?;
         Ok(Self {
             client,
+            sse_client,
             base_url,
             api_key,
         })
@@ -457,6 +701,103 @@ impl EverrunsApi {
         Ok(())
     }
 
+    fn read_sse_batch(
+        &self,
+        session_id: &str,
+        since_id: Option<&str>,
+        timeout: Duration,
+    ) -> Result<SseBatch> {
+        let path = format!("/v1/sessions/{}/sse", session_id);
+        let url = format!("{}{}", self.base_url, path);
+        let mut query: Vec<(&str, String)> = vec![
+            ("exclude", "output.message.delta".to_string()),
+            ("exclude", "reason.thinking.delta".to_string()),
+        ];
+        if let Some(since_id) = since_id {
+            query.push(("since_id", since_id.to_string()));
+        }
+
+        let request = self
+            .with_auth(self.sse_client.get(url))
+            .query(&query)
+            .header("accept", "text/event-stream")
+            .timeout(timeout);
+        let response = request
+            .send()
+            .with_context(|| format!("Everruns API GET {} request failed", path))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            if status.as_u16() == 404 || status.as_u16() == 405 || status.as_u16() == 501 {
+                bail!(
+                    "sse endpoint unavailable: Everruns API GET {} returned {}: {}",
+                    path,
+                    status,
+                    body
+                );
+            }
+            bail!("Everruns API GET {} returned {}: {}", path, status, body);
+        }
+
+        let mut reader = BufReader::new(response);
+        let mut line = String::new();
+        let mut current_event = String::new();
+        let mut current_data: Vec<String> = Vec::new();
+        let mut out = Vec::new();
+        let mut saw_disconnect = false;
+
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .with_context(|| format!("failed to read Everruns SSE line from {}", path))?;
+            if n == 0 {
+                break;
+            }
+
+            let raw = line.trim_end_matches(&['\r', '\n'][..]);
+            if raw.is_empty() {
+                match decode_sse_frame(&current_event, &current_data.join("\n"))? {
+                    SseFrame::Event(event) => out.push(event),
+                    SseFrame::Disconnecting => {
+                        saw_disconnect = true;
+                        break;
+                    }
+                    SseFrame::Ignore => {}
+                }
+                current_event.clear();
+                current_data.clear();
+                continue;
+            }
+            if raw.starts_with(':') {
+                continue;
+            }
+            if let Some(rest) = raw.strip_prefix("event:") {
+                current_event = rest.trim().to_string();
+                continue;
+            }
+            if let Some(rest) = raw.strip_prefix("data:") {
+                current_data.push(rest.trim_start().to_string());
+                continue;
+            }
+        }
+
+        if !current_event.is_empty() || !current_data.is_empty() {
+            match decode_sse_frame(&current_event, &current_data.join("\n"))? {
+                SseFrame::Event(event) => out.push(event),
+                SseFrame::Disconnecting => {
+                    saw_disconnect = true;
+                }
+                SseFrame::Ignore => {}
+            }
+        }
+
+        Ok(SseBatch {
+            events: out,
+            saw_disconnect,
+        })
+    }
+
     fn get_json(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
         let request = self.with_auth(self.client.get(url)).query(query);
@@ -508,6 +849,7 @@ impl EverrunsApi {
 
 struct SeqBridge {
     client: std::sync::Mutex<SeqClient>,
+    maple_exporter: Option<MapleTraceExporter>,
 }
 
 impl SeqBridge {
@@ -520,8 +862,14 @@ impl SeqBridge {
                     settings.seq_socket.display()
                 )
             })?;
+        let maple_exporter =
+            MapleTraceExporter::from_env().context("invalid SEQ_EVERRUNS_MAPLE_* configuration")?;
+        if maple_exporter.is_some() {
+            eprintln!("maple dual-ingest telemetry enabled");
+        }
         Ok(Self {
             client: std::sync::Mutex::new(client),
+            maple_exporter,
         })
     }
 
@@ -531,68 +879,124 @@ impl SeqBridge {
         event_id: &str,
         call: BridgeToolCall,
     ) -> SubmitToolResult {
-        let call_id = call.id.clone();
-        let ext_req = match bridge_build_request(session_id, event_id, &call) {
-            Ok(req) => req,
-            Err(err) => {
-                return SubmitToolResult {
-                    tool_call_id: call_id,
-                    result: None,
-                    error: Some(err.to_string()),
+        let started = Instant::now();
+        let start_unix_nano = unix_time_nanos_now();
+        let mut seq_op = "unknown".to_string();
+
+        let result = match bridge_build_request(session_id, event_id, &call) {
+            Ok(ext_req) => {
+                seq_op = ext_req.op.clone();
+                let req = RpcRequest {
+                    op: ext_req.op,
+                    args: ext_req.args,
+                    request_id: ext_req.request_id,
+                    run_id: ext_req.run_id,
+                    tool_call_id: ext_req.tool_call_id,
                 };
-            }
-        };
-        let op_name = ext_req.op.clone();
-        let req = RpcRequest {
-            op: ext_req.op,
-            args: ext_req.args,
-            request_id: ext_req.request_id,
-            run_id: ext_req.run_id,
-            tool_call_id: ext_req.tool_call_id,
-        };
 
-        let result_call_id = req
-            .tool_call_id
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| call.id.clone());
+                let result_call_id = req
+                    .tool_call_id
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| call.id.clone());
 
-        let mut client = match self.client.lock() {
-            Ok(client) => client,
-            Err(_) => {
-                return SubmitToolResult {
-                    tool_call_id: result_call_id,
-                    result: None,
-                    error: Some("seq client mutex poisoned".to_string()),
-                };
-            }
-        };
-
-        match client.call(&req) {
-            Ok(resp) => {
-                if resp.ok {
-                    SubmitToolResult {
-                        tool_call_id: result_call_id,
-                        result: Some(resp.result.unwrap_or_else(|| json!({}))),
-                        error: None,
-                    }
-                } else {
-                    SubmitToolResult {
+                match self.client.lock() {
+                    Ok(mut client) => match client.call(&req) {
+                        Ok(resp) => {
+                            if resp.ok {
+                                SubmitToolResult {
+                                    tool_call_id: result_call_id,
+                                    result: Some(resp.result.unwrap_or_else(|| json!({}))),
+                                    error: None,
+                                }
+                            } else {
+                                SubmitToolResult {
+                                    tool_call_id: result_call_id,
+                                    result: None,
+                                    error: Some(resp.error.unwrap_or_else(|| {
+                                        format!("seq {} failed with unknown error", seq_op)
+                                    })),
+                                }
+                            }
+                        }
+                        Err(error) => SubmitToolResult {
+                            tool_call_id: result_call_id,
+                            result: None,
+                            error: Some(format!("seq {} call failed: {}", seq_op, error)),
+                        },
+                    },
+                    Err(_) => SubmitToolResult {
                         tool_call_id: result_call_id,
                         result: None,
-                        error: Some(resp.error.unwrap_or_else(|| {
-                            format!("seq {} failed with unknown error", op_name)
-                        })),
-                    }
+                        error: Some("seq client mutex poisoned".to_string()),
+                    },
                 }
             }
-            Err(error) => SubmitToolResult {
-                tool_call_id: result_call_id,
+            Err(err) => SubmitToolResult {
+                tool_call_id: call.id.clone(),
                 result: None,
-                error: Some(format!("seq {} call failed: {}", op_name, error)),
+                error: Some(err.to_string()),
             },
+        };
+
+        if let Some(exporter) = self.maple_exporter.as_ref() {
+            let elapsed = started.elapsed();
+            let duration_ms = elapsed.as_millis() as u64;
+            let end_unix_nano = start_unix_nano.saturating_add(elapsed.as_nanos() as u64);
+            let span = MapleSpan::for_tool_call(
+                session_id,
+                event_id,
+                &result.tool_call_id,
+                &call.name,
+                &seq_op,
+                result.error.is_none(),
+                result.error.as_deref(),
+                start_unix_nano,
+                end_unix_nano,
+                duration_ms,
+            );
+            exporter.emit_span(span);
+        }
+
+        result
+    }
+
+    fn emit_runtime_event(
+        &self,
+        session_id: &str,
+        event_id: &str,
+        stage: &str,
+        ok: bool,
+        error: Option<&str>,
+        start_unix_nano: u64,
+        end_unix_nano: u64,
+        extra_attributes: Vec<(String, String)>,
+    ) {
+        if let Some(exporter) = self.maple_exporter.as_ref() {
+            let span = MapleSpan::for_runtime_event(
+                session_id,
+                event_id,
+                stage,
+                ok,
+                error,
+                start_unix_nano,
+                end_unix_nano,
+                extra_attributes,
+            );
+            exporter.emit_span(span);
         }
     }
+}
+
+fn unix_time_nanos_now() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(dur) => dur.as_nanos() as u64,
+        Err(_) => 0,
+    }
+}
+
+fn end_unix_nanos(start_unix_nano: u64, started: Instant) -> u64 {
+    start_unix_nano.saturating_add(started.elapsed().as_nanos() as u64)
 }
 
 #[derive(Debug, Deserialize)]
@@ -636,4 +1040,40 @@ struct SubmitToolResult {
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+struct SseBatch {
+    events: Vec<EverrunsEvent>,
+    saw_disconnect: bool,
+}
+
+enum SseFrame {
+    Event(EverrunsEvent),
+    Disconnecting,
+    Ignore,
+}
+
+fn decode_sse_frame(event_type: &str, data: &str) -> Result<SseFrame> {
+    if event_type.is_empty() {
+        return Ok(SseFrame::Ignore);
+    }
+
+    let normalized = event_type.trim().to_ascii_lowercase();
+    if normalized == "connected" {
+        return Ok(SseFrame::Ignore);
+    }
+    if normalized == "disconnecting" {
+        return Ok(SseFrame::Disconnecting);
+    }
+    if data.trim().is_empty() {
+        return Ok(SseFrame::Ignore);
+    }
+
+    let parsed: EverrunsEvent = serde_json::from_str(data).with_context(|| {
+        format!(
+            "failed to decode Everruns SSE event '{}' payload as JSON",
+            event_type
+        )
+    })?;
+    Ok(SseFrame::Event(parsed))
 }

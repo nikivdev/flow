@@ -46,6 +46,13 @@ f domains --engine native doctor
 f domains --engine native down
 ```
 
+On macOS, if native bind to `:80` is denied, install launchd socket mode once:
+
+```bash
+cd ~/code/flow
+sudo ./tools/domainsd-cpp/install-macos-launchd.sh
+```
+
 You can also set:
 
 ```bash

@@ -21,10 +21,11 @@ Phase 1 (implemented now):
 - bounded active handler slots with overload shedding (`503`)
 - upstream connect/read/write timeouts (`504` for upstream connect timeout)
 - health endpoint: `/_flow/domains/health`
+- macOS launchd socket-activation installer for native privileged `:80` bind without Docker
 
 Phase 2:
 - better connection pooling and backpressure controls
-- optional launchd service management
+- optional HTTP/2/TLS frontend mode
 
 Phase 3:
 - optional HTTPS + HTTP/2
@@ -63,6 +64,7 @@ Native runtime artifacts:
 - pid: `~/.config/flow/local-domains/domainsd.pid`
 - log: `~/.config/flow/local-domains/domainsd.log`
 - built daemon binary: `~/.config/flow/local-domains/domainsd-cpp`
+- macOS launchd plist (optional): `/Library/LaunchDaemons/dev.flow.domainsd.plist`
 
 Native tuning env vars (read by `f domains --engine native up` and passed to daemon):
 - `FLOW_DOMAINS_NATIVE_MAX_ACTIVE_CLIENTS` (default `128`)
@@ -78,6 +80,10 @@ Native tuning env vars (read by `f domains --engine native up` and passed to dae
 
 Listen address:
 - `127.0.0.1:80`
+
+macOS launchd mode:
+- daemon can be started with `--launchd-socket domainsd` (socket inherited from launchd)
+- launchd owns privileged bind; daemon runs as local user
 
 Routing:
 - Read `Host` header (strip `:port`)
@@ -112,10 +118,11 @@ Errors:
 
 ```bash
 f domains add myflow.localhost 127.0.0.1:3000
+sudo ./tools/domainsd-cpp/install-macos-launchd.sh   # macOS when direct bind is denied
 f domains --engine native up
 f domains --engine native doctor
 curl -H 'Host: myflow.localhost' http://127.0.0.1/
-f domains --engine native down
+sudo ./tools/domainsd-cpp/uninstall-macos-launchd.sh # optional teardown
 ```
 
 ## Next implementation work

@@ -1,5 +1,8 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
+#ifdef __APPLE__
+#include <launch.h>
+#endif
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -15,6 +18,7 @@
 #include <chrono>
 #include <cctype>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +29,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -44,6 +49,7 @@ constexpr int kDefaultUpstreamConnectTimeoutMs = 10'000;
 constexpr int kDefaultUpstreamIoTimeoutMs = 15'000;
 constexpr int kDefaultClientIoTimeoutMs = 30'000;
 constexpr int kDefaultMaxActiveClients = 128;
+constexpr int kDefaultRouteReloadCheckIntervalMs = 100;
 
 std::atomic<bool> g_running{true};
 int g_listen_fd = -1;
@@ -152,8 +158,50 @@ struct Request {
   std::unordered_map<std::string, std::string> headers_lc;
   std::string body;
   std::string leftover;
+  std::string normalized_host;
   bool chunked = false;
+  bool client_wants_keepalive = false;
 };
+
+bool iequals_ascii(std::string_view a, std::string_view b) {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.size(); ++i) {
+    const unsigned char ac = static_cast<unsigned char>(a[i]);
+    const unsigned char bc = static_cast<unsigned char>(b[i]);
+    if (std::tolower(ac) != std::tolower(bc)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool should_skip_forward_header(std::string_view key) {
+  return iequals_ascii(key, "host") || iequals_ascii(key, "connection") ||
+         iequals_ascii(key, "proxy-connection") || iequals_ascii(key, "x-forwarded-for") ||
+         iequals_ascii(key, "x-forwarded-host") || iequals_ascii(key, "x-forwarded-proto") ||
+         iequals_ascii(key, "content-length") || iequals_ascii(key, "transfer-encoding");
+}
+
+bool request_wants_keepalive(const Request& req) {
+  bool connection_close = false;
+  bool connection_keepalive = false;
+  if (auto it = req.headers_lc.find("connection"); it != req.headers_lc.end()) {
+    const std::string connection = to_lower(it->second);
+    connection_close = connection.find("close") != std::string::npos;
+    connection_keepalive = connection.find("keep-alive") != std::string::npos;
+  }
+
+  const std::string version = to_lower(req.version);
+  if (version == "http/1.1") {
+    return !connection_close;
+  }
+  if (version == "http/1.0") {
+    return connection_keepalive;
+  }
+  return false;
+}
 
 bool recv_append(int fd, std::string& buf, std::string& error) {
   char tmp[kIoBufferSize];
@@ -247,9 +295,13 @@ bool decode_chunked_body(int fd, std::string initial, std::string& out_body, std
   }
 }
 
-bool read_request(int client_fd, Request& req, std::string& error) {
-  std::string buf;
-  buf.reserve(8192);
+bool read_request(int client_fd, std::string& pending, Request& req, std::string& error) {
+  req = Request{};
+  std::string buf = std::move(pending);
+  pending.clear();
+  if (buf.capacity() < 8192) {
+    buf.reserve(8192);
+  }
 
   char tmp[kIoBufferSize];
   size_t header_end = std::string::npos;
@@ -317,6 +369,10 @@ bool read_request(int client_fd, Request& req, std::string& error) {
     req.headers_lc[to_lower(key)] = val;
   }
 
+  if (auto host_it = req.headers_lc.find("host"); host_it != req.headers_lc.end()) {
+    req.normalized_host = to_lower(strip_port_from_host(trim(host_it->second)));
+  }
+
   bool chunked = false;
   size_t content_length = 0;
   if (auto it = req.headers_lc.find("content-length"); it != req.headers_lc.end()) {
@@ -337,12 +393,19 @@ bool read_request(int client_fd, Request& req, std::string& error) {
 
   std::string initial = buf.substr(headers_len);
   if (chunked) {
-    return decode_chunked_body(client_fd, std::move(initial), req.body, req.leftover, error);
+    const bool ok = decode_chunked_body(client_fd, std::move(initial), req.body, req.leftover, error);
+    if (ok) {
+      req.client_wants_keepalive = request_wants_keepalive(req);
+      pending = req.leftover;
+    }
+    return ok;
   }
 
   if (initial.size() >= content_length) {
     req.body = initial.substr(0, content_length);
     req.leftover = initial.substr(content_length);
+    req.client_wants_keepalive = request_wants_keepalive(req);
+    pending = req.leftover;
     return true;
   }
 
@@ -363,6 +426,8 @@ bool read_request(int client_fd, Request& req, std::string& error) {
     req.leftover = req.body.substr(content_length);
     req.body.resize(content_length);
   }
+  req.client_wants_keepalive = request_wants_keepalive(req);
+  pending = req.leftover;
   return true;
 }
 
@@ -388,6 +453,17 @@ class RouteTable {
 
  private:
   void reload_if_needed() {
+    const auto now = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (loaded_ &&
+          now - last_reload_check_ <
+              std::chrono::milliseconds(kDefaultRouteReloadCheckIntervalMs)) {
+        return;
+      }
+      last_reload_check_ = now;
+    }
+
     std::error_code ec;
     auto current = std::filesystem::last_write_time(routes_path_, ec);
     if (ec) {
@@ -432,6 +508,7 @@ class RouteTable {
   std::string routes_path_;
   std::unordered_map<std::string, std::string> routes_;
   std::filesystem::file_time_type mtime_{};
+  std::chrono::steady_clock::time_point last_reload_check_{};
   bool loaded_ = false;
   std::mutex mu_;
 };
@@ -688,37 +765,35 @@ bool is_upgrade_request(const Request& req) {
 }
 
 std::string build_upstream_request(const Request& req, const std::string& host_header,
-                                   bool tunnel_upgrade) {
-  std::ostringstream out;
-  out << req.method << " " << req.path << " " << req.version << "\r\n";
+                                   bool tunnel_upgrade, bool keepalive_upstream) {
+  std::string out;
+  out.reserve(512 + req.method.size() + req.path.size() + req.version.size() + req.body.size());
+  out.append(req.method).append(" ").append(req.path).append(" ").append(req.version).append("\r\n");
 
   for (const auto& [key, value] : req.headers) {
-    const std::string lk = to_lower(key);
-    if (lk == "host" || lk == "connection" || lk == "proxy-connection" || lk == "x-forwarded-for" ||
-        lk == "x-forwarded-host" || lk == "x-forwarded-proto" || lk == "content-length" ||
-        lk == "transfer-encoding") {
+    if (should_skip_forward_header(key)) {
       continue;
     }
-    out << key << ": " << value << "\r\n";
+    out.append(key).append(": ").append(value).append("\r\n");
   }
 
-  out << "Host: " << host_header << "\r\n";
+  out.append("Host: ").append(host_header).append("\r\n");
   auto host_it = req.headers_lc.find("host");
   std::string original_host = host_it == req.headers_lc.end() ? host_header : host_it->second;
-  out << "X-Forwarded-Host: " << original_host << "\r\n";
-  out << "X-Forwarded-Proto: http\r\n";
+  out.append("X-Forwarded-Host: ").append(original_host).append("\r\n");
+  out.append("X-Forwarded-Proto: http\r\n");
   if (tunnel_upgrade) {
     auto up_it = req.headers_lc.find("upgrade");
     std::string up = up_it == req.headers_lc.end() ? "websocket" : up_it->second;
-    out << "Connection: Upgrade\r\n";
-    out << "Upgrade: " << up << "\r\n";
-    out << "\r\n";
+    out.append("Connection: Upgrade\r\n");
+    out.append("Upgrade: ").append(up).append("\r\n");
+    out.append("\r\n");
   } else {
-    out << "Connection: close\r\n";
-    out << "Content-Length: " << req.body.size() << "\r\n\r\n";
-    out << req.body;
+    out.append("Connection: ").append(keepalive_upstream ? "keep-alive" : "close").append("\r\n");
+    out.append("Content-Length: ").append(std::to_string(req.body.size())).append("\r\n\r\n");
+    out.append(req.body);
   }
-  return out.str();
+  return out;
 }
 
 void shutdown_quiet(int fd, int how) {
@@ -930,7 +1005,12 @@ bool relay_chunked_body(int upstream_fd, int client_fd, std::string buf) {
   }
 }
 
-bool relay_response_and_decide_reuse(int upstream_fd, int client_fd, const std::string& req_method) {
+struct RelayOutcome {
+  bool upstream_reusable = false;
+  bool client_can_keepalive = false;
+};
+
+RelayOutcome relay_response_and_decide_reuse(int upstream_fd, int client_fd, const std::string& req_method) {
   std::string buf;
   buf.reserve(8192);
   size_t header_end = std::string::npos;
@@ -940,10 +1020,10 @@ bool relay_response_and_decide_reuse(int upstream_fd, int client_fd, const std::
       break;
     }
     if (!recv_append_upstream(upstream_fd, buf)) {
-      return false;
+      return {};
     }
     if (buf.size() > kMaxHeaderBytes) {
-      return false;
+      return {};
     }
   }
 
@@ -951,36 +1031,47 @@ bool relay_response_and_decide_reuse(int upstream_fd, int client_fd, const std::
   const std::string raw_headers = buf.substr(0, hdr_len);
   ResponseMeta meta;
   if (!parse_response_headers(raw_headers, req_method, meta)) {
-    return false;
+    return {};
   }
   if (!send_all(client_fd, raw_headers)) {
-    return false;
+    return {};
   }
 
   std::string body_buf = buf.substr(hdr_len);
   if (meta.no_body) {
     if (!body_buf.empty()) {
       if (!send_all(client_fd, body_buf)) {
-        return false;
+        return {};
       }
-      return false;
+      return {};
     }
-    return !meta.connection_close;
+    return {
+        .upstream_reusable = !meta.connection_close,
+        .client_can_keepalive = !meta.connection_close,
+    };
   }
 
   if (meta.chunked) {
     bool complete = relay_chunked_body(upstream_fd, client_fd, std::move(body_buf));
-    return complete && !meta.connection_close;
+    const bool keepalive = complete && !meta.connection_close;
+    return {
+        .upstream_reusable = keepalive,
+        .client_can_keepalive = keepalive,
+    };
   }
 
   if (meta.content_length.has_value()) {
     bool ok = relay_body_with_length(upstream_fd, client_fd, std::move(body_buf), *meta.content_length);
-    return ok && !meta.connection_close;
+    const bool keepalive = ok && !meta.connection_close;
+    return {
+        .upstream_reusable = keepalive,
+        .client_can_keepalive = keepalive,
+    };
   }
 
   // Unknown body framing: read until close and do not reuse socket.
   if (!body_buf.empty() && !send_all(client_fd, body_buf)) {
-    return false;
+    return {};
   }
   char tmp[kIoBufferSize];
   while (true) {
@@ -992,123 +1083,179 @@ bool relay_response_and_decide_reuse(int upstream_fd, int client_fd, const std::
       if (errno == EINTR) {
         continue;
       }
-      return false;
+      return {};
     }
     if (!send_all(client_fd, tmp, static_cast<size_t>(n))) {
-      return false;
+      return {};
     }
   }
-  return false;
+  return {};
 }
 
 void handle_client(int client_fd, RouteTable& routes) {
-  Request req;
-  std::string parse_error;
-  if (!read_request(client_fd, req, parse_error)) {
-    if (!parse_error.empty()) {
-      send_simple_response(client_fd, 400, "Bad Request", parse_error + "\n");
+  std::string pending;
+  int cached_upstream_fd = -1;
+  std::string cached_upstream_key;
+  auto discard_cached = [&]() {
+    if (cached_upstream_fd >= 0) {
+      g_upstream_pool.discard(cached_upstream_fd);
+      cached_upstream_fd = -1;
+      cached_upstream_key.clear();
     }
-    close(client_fd);
-    return;
-  }
-
-  if (req.path == "/_flow/domains/health") {
-    std::ostringstream body;
-    body << "ok active_clients=" << g_active_clients.load(std::memory_order_relaxed)
-         << " overload_rejections=" << g_overload_rejections.load(std::memory_order_relaxed)
-         << " max_active_clients=" << g_max_active_clients
-         << " upstream_connect_timeout_ms=" << g_upstream_connect_timeout_ms
-         << " upstream_io_timeout_ms=" << g_upstream_io_timeout_ms
-         << " client_io_timeout_ms=" << g_client_io_timeout_ms
-         << " pool_max_idle_per_key=" << g_pool_max_idle_per_key
-         << " pool_max_idle_total=" << g_pool_max_idle_total
-         << " pool_idle_timeout_ms=" << g_pool_idle_timeout.count()
-         << " pool_max_age_ms=" << g_pool_max_age.count()
-         << "\n";
-    const auto body_s = body.str();
-    std::ostringstream out;
-    out << "HTTP/1.1 200 OK\r\n"
-        << kHeaderName << ": " << kHeaderValue << "\r\n"
-        << "Content-Type: text/plain; charset=utf-8\r\n"
-        << "Content-Length: " << body_s.size() << "\r\n"
-        << "Connection: close\r\n\r\n"
-        << body_s;
-    (void)send_all(client_fd, out.str());
-    close(client_fd);
-    return;
-  }
-
-  auto host_it = req.headers_lc.find("host");
-  if (host_it == req.headers_lc.end()) {
-    send_simple_response(client_fd, 400, "Bad Request", "Missing Host header\n");
-    close(client_fd);
-    return;
-  }
-
-  const std::string req_host = to_lower(strip_port_from_host(trim(host_it->second)));
-  auto target = routes.lookup(req_host);
-  if (!target.has_value()) {
-    std::ostringstream body;
-    body << "No local route configured for " << req_host << "\n";
-    send_simple_response(client_fd, 404, "Not Found", body.str());
-    close(client_fd);
-    return;
-  }
-
-  std::string upstream_host;
-  int upstream_port = 0;
-  if (!parse_host_port(*target, upstream_host, upstream_port)) {
-    send_simple_response(client_fd, 502, "Bad Gateway", "Invalid target route\n");
-    close(client_fd);
-    return;
-  }
-
-  const bool upgrade = is_upgrade_request(req);
-  const std::string upstream_key = upstream_host + ":" + std::to_string(upstream_port);
-  int upstream_fd =
-      upgrade ? connect_upstream(upstream_host, upstream_port)
-              : g_upstream_pool.acquire(upstream_key, upstream_host, upstream_port);
-  if (upstream_fd < 0) {
-    if (errno == ETIMEDOUT) {
-      send_simple_response(client_fd, 504, "Gateway Timeout", "Upstream connect timed out\n");
-    } else {
-      send_simple_response(client_fd, 502, "Bad Gateway", "Upstream connection failed\n");
+  };
+  auto release_cached = [&]() {
+    if (cached_upstream_fd >= 0 && !cached_upstream_key.empty()) {
+      g_upstream_pool.release(cached_upstream_key, cached_upstream_fd);
+      cached_upstream_fd = -1;
+      cached_upstream_key.clear();
     }
-    close(client_fd);
-    return;
-  }
+  };
 
-  std::string host_header = (upstream_host == "127.0.0.1" || upstream_host == "::1") ? "localhost" : upstream_host;
-  std::string upstream_req = build_upstream_request(req, host_header, upgrade);
-  if (!send_all(upstream_fd, upstream_req)) {
+  while (g_running.load(std::memory_order_relaxed)) {
+    Request req;
+    std::string parse_error;
+    if (!read_request(client_fd, pending, req, parse_error)) {
+      if (!parse_error.empty() && parse_error != "client closed before request" &&
+          parse_error != "client closed connection") {
+        send_simple_response(client_fd, 400, "Bad Request", parse_error + "\n");
+      }
+      break;
+    }
+
+    if (req.path == "/_flow/domains/health") {
+      std::ostringstream body;
+      body << "ok active_clients=" << g_active_clients.load(std::memory_order_relaxed)
+           << " overload_rejections=" << g_overload_rejections.load(std::memory_order_relaxed)
+           << " max_active_clients=" << g_max_active_clients
+           << " upstream_connect_timeout_ms=" << g_upstream_connect_timeout_ms
+           << " upstream_io_timeout_ms=" << g_upstream_io_timeout_ms
+           << " client_io_timeout_ms=" << g_client_io_timeout_ms
+           << " pool_max_idle_per_key=" << g_pool_max_idle_per_key
+           << " pool_max_idle_total=" << g_pool_max_idle_total
+           << " pool_idle_timeout_ms=" << g_pool_idle_timeout.count()
+           << " pool_max_age_ms=" << g_pool_max_age.count()
+           << "\n";
+      const auto body_s = body.str();
+      std::ostringstream out;
+      out << "HTTP/1.1 200 OK\r\n"
+          << kHeaderName << ": " << kHeaderValue << "\r\n"
+          << "Content-Type: text/plain; charset=utf-8\r\n"
+          << "Content-Length: " << body_s.size() << "\r\n"
+          << "Connection: " << (req.client_wants_keepalive ? "keep-alive" : "close")
+          << "\r\n\r\n"
+          << body_s;
+      if (!send_all(client_fd, out.str()) || !req.client_wants_keepalive) {
+        break;
+      }
+      continue;
+    }
+
+    if (req.normalized_host.empty()) {
+      send_simple_response(client_fd, 400, "Bad Request", "Missing Host header\n");
+      break;
+    }
+
+    const std::string& req_host = req.normalized_host;
+    auto target = routes.lookup(req_host);
+    if (!target.has_value()) {
+      std::ostringstream body;
+      body << "No local route configured for " << req_host << "\n";
+      send_simple_response(client_fd, 404, "Not Found", body.str());
+      break;
+    }
+
+    std::string upstream_host;
+    int upstream_port = 0;
+    if (!parse_host_port(*target, upstream_host, upstream_port)) {
+      send_simple_response(client_fd, 502, "Bad Gateway", "Invalid target route\n");
+      break;
+    }
+
+    const bool upgrade = is_upgrade_request(req);
+    const std::string upstream_key = upstream_host + ":" + std::to_string(upstream_port);
     if (upgrade) {
+      // Upgrade tunnels are one-shot; keepalive cache is irrelevant.
+      release_cached();
+    }
+
+    bool used_cached = false;
+    int upstream_fd = -1;
+    if (!upgrade && cached_upstream_fd >= 0 && cached_upstream_key == upstream_key) {
+      upstream_fd = cached_upstream_fd;
+      used_cached = true;
+    } else {
+      if (!upgrade) {
+        release_cached();
+      }
+      upstream_fd =
+          upgrade ? connect_upstream(upstream_host, upstream_port)
+                  : g_upstream_pool.acquire(upstream_key, upstream_host, upstream_port);
+    }
+
+    if (upstream_fd < 0) {
+      if (errno == ETIMEDOUT) {
+        send_simple_response(client_fd, 504, "Gateway Timeout", "Upstream connect timed out\n");
+      } else {
+        send_simple_response(client_fd, 502, "Bad Gateway", "Upstream connection failed\n");
+      }
+      break;
+    }
+
+    std::string host_header =
+        (upstream_host == "127.0.0.1" || upstream_host == "::1") ? "localhost" : upstream_host;
+    std::string upstream_req = build_upstream_request(req, host_header, upgrade, true);
+    if (!send_all(upstream_fd, upstream_req)) {
+      // Stale keepalive sockets can fail first write; retry once with fresh socket.
+      if (!upgrade && used_cached) {
+        discard_cached();
+        upstream_fd = g_upstream_pool.acquire(upstream_key, upstream_host, upstream_port);
+        if (upstream_fd >= 0 && send_all(upstream_fd, upstream_req)) {
+          used_cached = false;
+        } else if (upstream_fd >= 0) {
+          g_upstream_pool.discard(upstream_fd);
+          upstream_fd = -1;
+        }
+      } else if (upgrade) {
+        close(upstream_fd);
+        upstream_fd = -1;
+      } else {
+        g_upstream_pool.discard(upstream_fd);
+        upstream_fd = -1;
+      }
+
+      if (upstream_fd < 0) {
+        send_simple_response(client_fd, 502, "Bad Gateway", "Failed to forward request\n");
+        break;
+      }
+    }
+
+    if (upgrade) {
+      if (!req.leftover.empty() && !send_all(upstream_fd, req.leftover)) {
+        close(upstream_fd);
+        break;
+      }
+      tunnel_bidirectional(client_fd, upstream_fd);
       close(upstream_fd);
+      break;
+    }
+
+    RelayOutcome relay = relay_response_and_decide_reuse(upstream_fd, client_fd, req.method);
+    if (relay.upstream_reusable) {
+      cached_upstream_fd = upstream_fd;
+      cached_upstream_key = upstream_key;
     } else {
       g_upstream_pool.discard(upstream_fd);
+      if (used_cached) {
+        cached_upstream_fd = -1;
+        cached_upstream_key.clear();
+      }
     }
-    send_simple_response(client_fd, 502, "Bad Gateway", "Failed to forward request\n");
-    close(client_fd);
-    return;
-  }
 
-  if (upgrade) {
-    if (!req.leftover.empty() && !send_all(upstream_fd, req.leftover)) {
-      close(upstream_fd);
-      close(client_fd);
-      return;
+    if (!(req.client_wants_keepalive && relay.client_can_keepalive)) {
+      break;
     }
-    tunnel_bidirectional(client_fd, upstream_fd);
-    close(upstream_fd);
-    close(client_fd);
-    return;
   }
-
-  bool reusable = relay_response_and_decide_reuse(upstream_fd, client_fd, req.method);
-  if (reusable) {
-    g_upstream_pool.release(upstream_key, upstream_fd);
-  } else {
-    g_upstream_pool.discard(upstream_fd);
-  }
+  release_cached();
   close(client_fd);
 }
 
@@ -1196,10 +1343,39 @@ int start_listener(const std::string& host, int port) {
   return fd;
 }
 
+int start_listener_from_launchd_socket(const std::string& socket_name) {
+#ifdef __APPLE__
+  int* fds = nullptr;
+  size_t count = 0;
+  const int rc = launch_activate_socket(socket_name.c_str(), &fds, &count);
+  if (rc != 0) {
+    errno = rc;
+    return -1;
+  }
+  if (count == 0 || fds == nullptr) {
+    errno = ENOENT;
+    return -1;
+  }
+  int fd = fds[0];
+  for (size_t i = 1; i < count; ++i) {
+    if (fds[i] >= 0) {
+      close(fds[i]);
+    }
+  }
+  std::free(fds);
+  return fd;
+#else
+  (void)socket_name;
+  errno = ENOTSUP;
+  return -1;
+#endif
+}
+
 void print_usage(const char* argv0) {
   std::cerr << "Usage: " << argv0
             << " --listen 127.0.0.1:80 --routes <routes.json> --pidfile <domainsd.pid> [options]\n"
             << "Options:\n"
+            << "  --launchd-socket <name> (macOS only)\n"
             << "  --max-active-clients <n>\n"
             << "  --upstream-connect-timeout-ms <ms>\n"
             << "  --upstream-io-timeout-ms <ms>\n"
@@ -1216,6 +1392,7 @@ int main(int argc, char** argv) {
   std::string listen = "127.0.0.1:80";
   std::string routes_path;
   std::string pidfile;
+  std::string launchd_socket_name;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -1233,6 +1410,10 @@ int main(int argc, char** argv) {
     }
     if (arg == "--pidfile" && i + 1 < argc) {
       pidfile = argv[++i];
+      continue;
+    }
+    if (arg == "--launchd-socket" && i + 1 < argc) {
+      launchd_socket_name = argv[++i];
       continue;
     }
     if (arg == "--max-active-clients" && i + 1 < argc) {
@@ -1329,15 +1510,28 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
 
-  g_listen_fd = start_listener(listen_host, listen_port);
+  if (!launchd_socket_name.empty()) {
+    g_listen_fd = start_listener_from_launchd_socket(launchd_socket_name);
+  } else {
+    g_listen_fd = start_listener(listen_host, listen_port);
+  }
   if (g_listen_fd < 0) {
     cleanup_pidfile();
-    std::cerr << "Failed to bind " << listen_host << ":" << listen_port << " ("
-              << std::strerror(errno) << ")\n";
+    if (!launchd_socket_name.empty()) {
+      std::cerr << "Failed to activate launchd socket '" << launchd_socket_name << "' ("
+                << std::strerror(errno) << ")\n";
+    } else {
+      std::cerr << "Failed to bind " << listen_host << ":" << listen_port << " ("
+                << std::strerror(errno) << ")\n";
+    }
     return 1;
   }
 
-  std::cerr << "domainsd-cpp listening on " << listen_host << ":" << listen_port << "\n";
+  if (!launchd_socket_name.empty()) {
+    std::cerr << "domainsd-cpp listening via launchd socket '" << launchd_socket_name << "'\n";
+  } else {
+    std::cerr << "domainsd-cpp listening on " << listen_host << ":" << listen_port << "\n";
+  }
 
   RouteTable routes(routes_path);
   while (g_running.load()) {

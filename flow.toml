@@ -269,3 +269,29 @@ description = "Build + run the Linsa C++ assistant proxy server"
 name = "linsa-assistant-stream"
 command = "bash -c 'curl -N -X POST http://127.0.0.1:8788/api/assistant/chat/stream -H \"Content-Type: application/json\" -d \"{\\\"message\\\":\\\"hello\\\"}\"'"
 description = "Stream assistant response via SSE from the local proxy"
+
+[skills]
+sync_tasks = true
+install = ["quality-bun-feature-delivery"]
+
+[skills.codex]
+generate_openai_yaml = true
+force_reload_after_sync = true
+task_skill_allow_implicit_invocation = false
+
+[commit.skill_gate]
+mode = "block"
+required = ["quality-bun-feature-delivery"]
+
+[commit.skill_gate.min_version]
+quality-bun-feature-delivery = 2
+
+[commit.testing]
+mode = "block"
+runner = "bun"
+bun_repo_strict = true
+require_related_tests = true
+ai_scratch_test_dir = ".ai/test"
+run_ai_scratch_tests = true
+allow_ai_scratch_to_satisfy_gate = false
+max_local_gate_seconds = 20
