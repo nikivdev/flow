@@ -204,19 +204,20 @@ fn parse_ask_response(
         bail!("AI returned an empty response.");
     }
 
-    if let Some(rest) = cleaned.strip_prefix("task:") {
-        let task_name = extract_task_name(rest.trim(), tasks)?;
-        return Ok(AskSelection::Task { name: task_name });
+    if let Some(selection) = parse_structured_line(cleaned, tasks, valid_subcommands)? {
+        return Ok(selection);
     }
 
-    if let Some(rest) = cleaned.strip_prefix("cmd:") {
-        let command = normalize_command(rest, valid_subcommands)?;
-        return Ok(AskSelection::Command { command });
-    }
-
-    if let Some(rest) = cleaned.strip_prefix("command:") {
-        let command = normalize_command(rest, valid_subcommands)?;
-        return Ok(AskSelection::Command { command });
+    // Some models emit reasoning wrappers (e.g. <think>...</think>) before the
+    // final machine-readable answer. Scan lines and parse the first valid one.
+    for line in cleaned.lines() {
+        let candidate = line.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if let Some(selection) = parse_structured_line(candidate, tasks, valid_subcommands)? {
+            return Ok(selection);
+        }
     }
 
     if cleaned.starts_with("f ") || cleaned.starts_with("flow ") {
@@ -234,6 +235,26 @@ fn parse_ask_response(
     }
 
     bail!("Could not parse AI response: '{}'", cleaned);
+}
+
+fn parse_structured_line(
+    raw: &str,
+    tasks: &[DiscoveredTask],
+    valid_subcommands: &HashSet<String>,
+) -> Result<Option<AskSelection>> {
+    if let Some(rest) = raw.strip_prefix("task:") {
+        let task_name = extract_task_name(rest.trim(), tasks)?;
+        return Ok(Some(AskSelection::Task { name: task_name }));
+    }
+    if let Some(rest) = raw.strip_prefix("cmd:") {
+        let command = normalize_command(rest, valid_subcommands)?;
+        return Ok(Some(AskSelection::Command { command }));
+    }
+    if let Some(rest) = raw.strip_prefix("command:") {
+        let command = normalize_command(rest, valid_subcommands)?;
+        return Ok(Some(AskSelection::Command { command }));
+    }
+    Ok(None)
 }
 
 fn normalize_command(raw: &str, valid_subcommands: &HashSet<String>) -> Result<String> {

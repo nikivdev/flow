@@ -322,5 +322,7 @@ fn print_help() {
     println!("Examples:");
     println!("  ai-taskd-client ai:flow/noop");
     println!("  ai-taskd-client --protocol msgpack --timings ai:flow/noop");
-    println!("  printf 'ai:flow/noop\\nai:flow/dev-check -- --quick\\n' | ai-taskd-client --batch-stdin");
+    println!(
+        "  printf 'ai:flow/noop\\nai:flow/dev-check -- --quick\\n' | ai-taskd-client --batch-stdin"
+    );
 }
