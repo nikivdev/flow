@@ -349,15 +349,24 @@ fn split_ai_response(text: &str) -> (String, String) {
     }
 }
 
-fn resolve_output_dir_name(repo_root: &Path) -> String {
+fn resolve_output_dir_name(repo_root: &Path, output_dir_override: Option<&Path>) -> String {
+    if let Some(path) = output_dir_override {
+        return path.display().to_string();
+    }
     let cfg = load_explain_config(repo_root);
     cfg.as_ref()
         .and_then(|c| c.output_dir.clone())
         .unwrap_or_else(|| DEFAULT_OUTPUT_DIR.to_string())
 }
 
-fn resolve_output_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(resolve_output_dir_name(repo_root))
+fn resolve_output_dir(repo_root: &Path, output_dir_override: Option<&Path>) -> PathBuf {
+    if let Some(path) = output_dir_override {
+        if path.is_absolute() {
+            return path.to_path_buf();
+        }
+        return repo_root.join(path);
+    }
+    repo_root.join(resolve_output_dir_name(repo_root, None))
 }
 
 fn resolve_explain_target(_repo_root: &Path) -> (String, String) {
@@ -523,7 +532,7 @@ pub fn list_explained_commits(
     repo_root: &Path,
     limit: Option<usize>,
 ) -> Result<Vec<ExplainedCommit>> {
-    let output_dir = resolve_output_dir(repo_root);
+    let output_dir = resolve_output_dir(repo_root, None);
     if !output_dir.exists() {
         return Ok(Vec::new());
     }
@@ -584,13 +593,13 @@ pub fn explain_new_commits_since(repo_root: &Path, head_before: &str) -> Result<
     }
 
     let cfg = load_explain_config(repo_root);
-    let output_dir_name = resolve_output_dir_name(repo_root);
+    let output_dir_name = resolve_output_dir_name(repo_root, None);
     let batch_size = cfg
         .as_ref()
         .and_then(|c| c.batch_size)
         .unwrap_or(DEFAULT_BATCH_SIZE);
 
-    let output_dir = resolve_output_dir(repo_root);
+    let output_dir = resolve_output_dir(repo_root, None);
     fs::create_dir_all(&output_dir)?;
     let (provider, model) = resolve_explain_target(repo_root);
 
@@ -665,9 +674,14 @@ pub fn explain_new_commits_since(repo_root: &Path, head_before: &str) -> Result<
 }
 
 /// Explain last N commits (CLI entry point).
-pub fn explain_last_n_commits(repo_root: &Path, n: usize, force: bool) -> Result<()> {
-    let output_dir_name = resolve_output_dir_name(repo_root);
-    let output_dir = resolve_output_dir(repo_root);
+pub fn explain_last_n_commits(
+    repo_root: &Path,
+    n: usize,
+    force: bool,
+    output_dir_override: Option<&Path>,
+) -> Result<()> {
+    let output_dir_name = resolve_output_dir_name(repo_root, output_dir_override);
+    let output_dir = resolve_output_dir(repo_root, output_dir_override);
     fs::create_dir_all(&output_dir)?;
     let (provider, model) = resolve_explain_target(repo_root);
     println!("using provider={provider} model={model}");
@@ -763,5 +777,5 @@ pub fn run_cli(cmd: ExplainCommitsCommand) -> Result<()> {
     maybe_register_project(&repo_root);
 
     let n = cmd.count.unwrap_or(1);
-    explain_last_n_commits(&repo_root, n, cmd.force)
+    explain_last_n_commits(&repo_root, n, cmd.force, cmd.out_dir.as_deref())
 }

@@ -14,8 +14,9 @@ use flowd::{
     fish_install, fish_trace, fix, fixup, git_guard, gitignore_policy, hash, health, help_search,
     history, hive, home, hub, info, init, init_tracing, install, invariants, jj, latest,
     log_server, macos, notify, otp, palette, parallel, processes, projects, proxy, publish, push,
-    recipe, registry, release, repos, reviews_todo, services, setup, skills, ssh_keys, storage,
-    supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade, upstream, usage, web,
+    recipe, registry, release, repos, reviews_todo, seq_rpc, services, setup, skills, ssh_keys,
+    storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade, upstream,
+    usage, web,
 };
 
 fn main() -> Result<()> {
@@ -490,6 +491,9 @@ fn main() -> Result<()> {
             }
             Some(Commands::Commits(cmd)) => {
                 commits::run(cmd)?;
+            }
+            Some(Commands::SeqRpc(cmd)) => {
+                seq_rpc::run(cmd)?;
             }
             Some(Commands::ExplainCommits(cmd)) => {
                 explain_commits::run_cli(cmd)?;
