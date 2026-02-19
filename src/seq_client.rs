@@ -100,7 +100,7 @@ impl SeqClient {
             bail!("seqd rpc response exceeded 1MB line limit");
         }
 
-        let resp: RpcResponse = serde_json::from_slice(&self.read_buf)
+        let resp: RpcResponse = crate::json_parse::parse_json_bytes_in_place(&mut self.read_buf)
             .context("failed to decode seqd rpc response json")?;
         Ok(resp)
     }

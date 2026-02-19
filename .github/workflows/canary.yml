@@ -40,6 +40,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout seq dependency repo
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/../seq/.git" ]; then
+            git -C "$GITHUB_WORKSPACE/../seq" fetch --depth 1 origin main
+            git -C "$GITHUB_WORKSPACE/../seq" reset --hard origin/main
+          else
+            git clone --depth 1 https://github.com/nikivdev/seq.git "$GITHUB_WORKSPACE/../seq"
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -85,6 +94,46 @@ jobs:
         with:
           name: flow-${{ matrix.target }}
           path: dist/flow-${{ matrix.target }}.tar.gz
+
+  build-linux-host-simd:
+    if: ${{ vars.FLOW_LINUX_HOST_RUNNER_LABELS != '' }}
+    runs-on: ${{ fromJson(vars.FLOW_LINUX_HOST_RUNNER_LABELS) }}
+    env:
+      RUSTFLAGS: -C target-cpu=native
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout seq dependency repo
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/../seq/.git" ]; then
+            git -C "$GITHUB_WORKSPACE/../seq" fetch --depth 1 origin main
+            git -C "$GITHUB_WORKSPACE/../seq" reset --hard origin/main
+          else
+            git clone --depth 1 https://github.com/nikivdev/seq.git "$GITHUB_WORKSPACE/../seq"
+          fi
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build (Linux host SIMD)
+        run: cargo build --release --target x86_64-unknown-linux-gnu --features linux-host-simd-json
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-gnu/release/f dist/
+          cd dist
+          tar -czvf flow-x86_64-unknown-linux-gnu-linux-host-simd.tar.gz f
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flow-x86_64-unknown-linux-gnu-linux-host-simd
+          path: dist/flow-x86_64-unknown-linux-gnu-linux-host-simd.tar.gz
 
   release:
     needs: build

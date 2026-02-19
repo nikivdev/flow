@@ -55,6 +55,7 @@ pub mod invariants;
 #[path = "jazz_state_stub.rs"]
 pub mod jazz_state;
 pub mod jj;
+pub mod json_parse;
 pub mod latest;
 pub mod lifecycle;
 pub mod lmstudio;
