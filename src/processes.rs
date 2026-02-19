@@ -225,7 +225,7 @@ fn log_dir() -> PathBuf {
 }
 
 fn sanitize_component(raw: &str) -> String {
-    let mut s = String::new();
+    let mut s = String::with_capacity(raw.len());
     for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
             s.push(ch);
@@ -242,22 +242,26 @@ fn short_hash(input: &str) -> String {
     format!("{:x}", hasher.finish())
 }
 
+fn project_slug(project_root: &Path, project_name: Option<&str>) -> String {
+    let project_root_key = project_root.display().to_string();
+    let project_root_hash = short_hash(&project_root_key);
+    match project_name {
+        Some(name) => {
+            let clean = sanitize_component(name);
+            if clean.is_empty() {
+                format!("proj-{project_root_hash}")
+            } else {
+                format!("{clean}-{project_root_hash}")
+            }
+        }
+        None => format!("proj-{project_root_hash}"),
+    }
+}
+
 /// Get the log path for a project/task
 fn get_log_path(project_root: &Path, project_name: Option<&str>, task_name: &str) -> PathBuf {
     let base = log_dir();
-    let slug = if let Some(name) = project_name {
-        let clean = sanitize_component(name);
-        if clean.is_empty() {
-            format!("proj-{}", short_hash(&project_root.display().to_string()))
-        } else {
-            format!(
-                "{clean}-{}",
-                short_hash(&project_root.display().to_string())
-            )
-        }
-    } else {
-        format!("proj-{}", short_hash(&project_root.display().to_string()))
-    };
+    let slug = project_slug(project_root, project_name);
 
     let task = {
         let clean = sanitize_component(task_name);
@@ -501,19 +505,7 @@ fn format_relative_time(seconds: u64) -> String {
 /// Get list of task names that have log files for a project
 fn get_project_log_files(project_root: &Path, project_name: Option<&str>) -> Vec<String> {
     let base = log_dir();
-    let slug = if let Some(name) = project_name {
-        let clean = sanitize_component(name);
-        if clean.is_empty() {
-            format!("proj-{}", short_hash(&project_root.display().to_string()))
-        } else {
-            format!(
-                "{clean}-{}",
-                short_hash(&project_root.display().to_string())
-            )
-        }
-    } else {
-        format!("proj-{}", short_hash(&project_root.display().to_string()))
-    };
+    let slug = project_slug(project_root, project_name);
 
     let project_log_dir = base.join(&slug);
     if !project_log_dir.exists() {

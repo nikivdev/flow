@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, hash_map::DefaultHasher},
     env,
     fs::{self, File, OpenOptions},
@@ -1532,7 +1533,7 @@ fn log_dir() -> PathBuf {
 }
 
 fn sanitize_component(raw: &str) -> String {
-    let mut s = String::new();
+    let mut s = String::with_capacity(raw.len());
     for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
             s.push(ch);
@@ -1551,24 +1552,17 @@ fn short_hash(input: &str) -> String {
 
 fn task_log_path(ctx: &TaskContext) -> Option<PathBuf> {
     let base = log_dir();
+    let project_root_key = ctx.project_root.display().to_string();
+    let project_root_hash = short_hash(&project_root_key);
     let slug = if let Some(name) = ctx.project_name.as_deref() {
         let clean = sanitize_component(name);
         if clean.is_empty() {
-            format!(
-                "proj-{}",
-                short_hash(&ctx.project_root.display().to_string())
-            )
+            format!("proj-{project_root_hash}")
         } else {
-            format!(
-                "{clean}-{}",
-                short_hash(&ctx.project_root.display().to_string())
-            )
+            format!("{clean}-{project_root_hash}")
         }
     } else {
-        format!(
-            "proj-{}",
-            short_hash(&ctx.project_root.display().to_string())
-        )
+        format!("proj-{project_root_hash}")
     };
 
     let task = {
@@ -3228,7 +3222,11 @@ fn lifecycle_preferred_url() -> Option<String> {
 }
 
 fn is_service_ready_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
+    let lower: Cow<'_, str> = if line.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(line.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(line)
+    };
     (lower.contains("local:") && lower.contains("http://"))
         || lower.contains("ready on http://")
         || lower.contains("listening on http://")
