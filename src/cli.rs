@@ -1380,7 +1380,7 @@ pub struct DbCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum DbAction {
-    /// Jazz worker accounts and env wiring.
+    /// Jazz2 app credentials and env wiring.
     Jazz(JazzStorageCommand),
     /// Postgres workflows (migrations/generation).
     Postgres(PostgresCommand),
@@ -1394,18 +1394,18 @@ pub struct JazzStorageCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum JazzStorageAction {
-    /// Create a new Jazz worker account and store env vars.
+    /// Create a new Jazz2 app credential set and store env vars.
     New {
-        /// What the worker account will be used for.
+        /// What the app credentials will be used for.
         #[arg(long, value_enum, default_value = "mirror")]
         kind: JazzStorageKind,
-        /// Optional name for the worker account.
+        /// Optional name for the app.
         #[arg(long)]
         name: Option<String>,
-        /// Optional sync server (peer) URL.
+        /// Optional sync server URL (ws/wss urls are normalized to http/https).
         #[arg(long)]
         peer: Option<String>,
-        /// Optional Jazz API key (used when constructing the default peer).
+        /// Optional Jazz API key (for hosted cloud routing).
         #[arg(long)]
         api_key: Option<String>,
         /// Environment to store in (dev, staging, production).
@@ -1416,11 +1416,11 @@ pub enum JazzStorageAction {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum JazzStorageKind {
-    /// Mirror worker account (gitedit-style mirror sync).
+    /// Mirror app credentials (gitedit-style mirror sync).
     Mirror,
-    /// Env store worker account (cloud env store).
+    /// Env store app credentials (cloud env store).
     EnvStore,
-    /// App data worker account (cloud app store).
+    /// App data app credentials (cloud app store).
     AppStore,
 }
 
