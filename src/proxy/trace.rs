@@ -53,7 +53,7 @@ pub enum Method {
 
 impl From<&str> for Method {
     fn from(s: &str) -> Self {
-        match s.to_uppercase().as_str() {
+        match s {
             "GET" => Method::Get,
             "POST" => Method::Post,
             "PUT" => Method::Put,
@@ -63,6 +63,15 @@ impl From<&str> for Method {
             "OPTIONS" => Method::Options,
             "CONNECT" => Method::Connect,
             "TRACE" => Method::Trace,
+            _ if s.eq_ignore_ascii_case("GET") => Method::Get,
+            _ if s.eq_ignore_ascii_case("POST") => Method::Post,
+            _ if s.eq_ignore_ascii_case("PUT") => Method::Put,
+            _ if s.eq_ignore_ascii_case("DELETE") => Method::Delete,
+            _ if s.eq_ignore_ascii_case("PATCH") => Method::Patch,
+            _ if s.eq_ignore_ascii_case("HEAD") => Method::Head,
+            _ if s.eq_ignore_ascii_case("OPTIONS") => Method::Options,
+            _ if s.eq_ignore_ascii_case("CONNECT") => Method::Connect,
+            _ if s.eq_ignore_ascii_case("TRACE") => Method::Trace,
             _ => Method::Unknown,
         }
     }

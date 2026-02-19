@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -249,6 +249,27 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             count,
             path,
         } => copy_context(session, Provider::All, count, path)?,
+    }
+
+    Ok(())
+}
+
+fn for_each_nonempty_jsonl_line(path: &Path, mut on_line: impl FnMut(&str)) -> Result<()> {
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut line = String::with_capacity(1024);
+
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let line = line.trim_end_matches(['\n', '\r']);
+        if line.trim().is_empty() {
+            continue;
+        }
+        on_line(line);
     }
 
     Ok(())
@@ -629,6 +650,7 @@ fn get_session_exchanges_since(
     }
 
     let content = fs::read_to_string(&session_file).context("failed to read session file")?;
+    let window = parse_timestamp_window(since_ts, until_ts);
 
     let mut exchanges: Vec<GitEditExchange> = Vec::new();
     let mut current_user: Option<String> = None;
@@ -647,7 +669,7 @@ fn get_session_exchanges_since(
                 let Some(ref ts) = entry_ts else {
                     continue;
                 };
-                if !timestamp_in_window(ts, since_ts, until_ts) {
+                if !timestamp_in_window_cached(ts, &window) {
                     continue;
                 }
             }
@@ -766,19 +788,14 @@ fn get_session_last_timestamp(
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
-
     let mut last_ts: Option<String> = None;
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
+    for_each_nonempty_jsonl_line(&session_file, |line| {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             if let Some(ts) = entry.timestamp {
                 last_ts = Some(ts);
             }
         }
-    }
+    })?;
 
     Ok(last_ts)
 }
@@ -813,26 +830,20 @@ fn read_context_since(
         bail!("Session file not found: {}", session_file.display());
     }
 
-    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
-
     // Collect exchanges after the checkpoint timestamp
     let mut exchanges: Vec<(String, String, String)> = Vec::new(); // (user_msg, assistant_msg, timestamp)
     let mut current_user: Option<String> = None;
     let mut current_ts: Option<String> = None;
     let mut last_ts: Option<String> = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(&session_file, |line| {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             let entry_ts = entry.timestamp.clone();
 
             // Skip entries before checkpoint
             if let (Some(since), Some(ts)) = (since_ts, &entry_ts) {
                 if ts.as_str() <= since {
-                    continue;
+                    return;
                 }
             }
 
@@ -853,14 +864,14 @@ fn read_context_since(
                             })
                             .collect::<Vec<_>>()
                             .join("\n"),
-                        _ => continue,
+                        _ => return,
                     }
                 } else {
-                    continue;
+                    return;
                 };
 
                 if content_text.is_empty() {
-                    continue;
+                    return;
                 }
 
                 match role {
@@ -871,7 +882,7 @@ fn read_context_since(
                     "assistant" => {
                         let clean_text = strip_thinking_blocks(&content_text);
                         if clean_text.trim().is_empty() {
-                            continue;
+                            return;
                         }
                         if let Some(user_msg) = current_user.take() {
                             let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
@@ -887,7 +898,7 @@ fn read_context_since(
                 last_ts = entry_ts;
             }
         }
-    }
+    })?;
 
     if exchanges.is_empty() {
         return Ok((String::new(), last_ts));
@@ -1060,36 +1071,31 @@ fn read_codex_exchanges(
     since_ts: Option<&str>,
     until_ts: Option<&str>,
 ) -> Result<(Vec<(String, String, String)>, Option<String>)> {
-    let content = fs::read_to_string(session_file).context("failed to read session file")?;
-
+    let window = parse_timestamp_window(since_ts, until_ts);
     let mut exchanges: Vec<(String, String, String)> = Vec::new();
     let mut current_user: Option<String> = None;
     let mut current_ts: Option<String> = None;
     let mut last_ts: Option<String> = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(session_file, |line| {
         let entry: CodexEntry = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         let entry_ts = entry.timestamp.clone();
         if since_ts.is_some() || until_ts.is_some() {
             let Some(ts) = entry_ts.as_deref() else {
-                continue;
+                return;
             };
-            if !timestamp_in_window(ts, since_ts, until_ts) {
-                continue;
+            if !timestamp_in_window_cached(ts, &window) {
+                return;
             }
         }
 
         if let Some((role, text)) = extract_codex_message(&entry) {
             if text.trim().is_empty() {
-                continue;
+                return;
             }
 
             match role.as_str() {
@@ -1100,7 +1106,7 @@ fn read_codex_exchanges(
                 "assistant" => {
                     let clean_text = strip_thinking_blocks(&text);
                     if clean_text.trim().is_empty() {
-                        continue;
+                        return;
                     }
                     if let Some(user_msg) = current_user.take() {
                         let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
@@ -1115,7 +1121,7 @@ fn read_codex_exchanges(
         if entry_ts.is_some() {
             last_ts = entry_ts;
         }
-    }
+    })?;
 
     Ok((exchanges, last_ts))
 }
@@ -1130,27 +1136,44 @@ fn parse_timestamp_for_compare(ts: &str) -> Option<chrono::DateTime<chrono::Utc>
         .ok()
 }
 
-fn timestamp_in_window(ts: &str, since_ts: Option<&str>, until_ts: Option<&str>) -> bool {
+struct TimestampWindow<'a> {
+    since_raw: Option<&'a str>,
+    until_raw: Option<&'a str>,
+    since_dt: Option<chrono::DateTime<chrono::Utc>>,
+    until_dt: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn parse_timestamp_window<'a>(
+    since_ts: Option<&'a str>,
+    until_ts: Option<&'a str>,
+) -> TimestampWindow<'a> {
+    TimestampWindow {
+        since_raw: since_ts,
+        until_raw: until_ts,
+        since_dt: since_ts.and_then(parse_timestamp_for_compare),
+        until_dt: until_ts.and_then(parse_timestamp_for_compare),
+    }
+}
+
+fn timestamp_in_window_cached(ts: &str, window: &TimestampWindow<'_>) -> bool {
     let ts_dt = parse_timestamp_for_compare(ts);
-    let since_dt = since_ts.and_then(parse_timestamp_for_compare);
-    let until_dt = until_ts.and_then(parse_timestamp_for_compare);
 
     if let Some(entry_dt) = ts_dt {
-        if let Some(lower) = since_dt {
+        if let Some(lower) = window.since_dt {
             if entry_dt <= lower {
                 return false;
             }
-        } else if let Some(lower_raw) = since_ts {
+        } else if let Some(lower_raw) = window.since_raw {
             if ts <= lower_raw {
                 return false;
             }
         }
 
-        if let Some(upper) = until_dt {
+        if let Some(upper) = window.until_dt {
             if entry_dt > upper {
                 return false;
             }
-        } else if let Some(upper_raw) = until_ts {
+        } else if let Some(upper_raw) = window.until_raw {
             if ts > upper_raw {
                 return false;
             }
@@ -1158,12 +1181,12 @@ fn timestamp_in_window(ts: &str, since_ts: Option<&str>, until_ts: Option<&str>)
         return true;
     }
 
-    if let Some(lower_raw) = since_ts {
+    if let Some(lower_raw) = window.since_raw {
         if ts <= lower_raw {
             return false;
         }
     }
-    if let Some(upper_raw) = until_ts {
+    if let Some(upper_raw) = window.until_raw {
         if ts > upper_raw {
             return false;
         }
@@ -1172,22 +1195,17 @@ fn timestamp_in_window(ts: &str, since_ts: Option<&str>, until_ts: Option<&str>)
 }
 
 fn get_codex_last_timestamp(session_file: &PathBuf) -> Result<Option<String>> {
-    let content = fs::read_to_string(session_file).context("failed to read session file")?;
     let mut last_ts: Option<String> = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(session_file, |line| {
         let entry: CodexEntry = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         if let Some(ts) = entry.timestamp {
             last_ts = Some(ts);
-            continue;
+            return;
         }
 
         if let Some(payload_ts) = entry
@@ -1198,7 +1216,7 @@ fn get_codex_last_timestamp(session_file: &PathBuf) -> Result<Option<String>> {
         {
             last_ts = Some(payload_ts.to_string());
         }
-    }
+    })?;
 
     Ok(last_ts)
 }
@@ -1411,31 +1429,27 @@ fn read_claude_messages_for_path(project_path: &Path, session_id: &str) -> Resul
         bail!("Session file not found: {}", session_file.display());
     }
 
-    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
     let mut messages = Vec::new();
     let mut started_at: Option<String> = None;
     let mut last_message_at: Option<String> = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
+    for_each_nonempty_jsonl_line(&session_file, |line| {
         let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) else {
-            continue;
+            return;
         };
         let Some(ref msg) = entry.message else {
-            continue;
+            return;
         };
         let role = msg.role.as_deref().unwrap_or("unknown");
         if role != "user" && role != "assistant" {
-            continue;
+            return;
         }
         let content_text = msg.content.as_ref().and_then(extract_message_text);
         let Some(content_text) = content_text else {
-            continue;
+            return;
         };
         if content_text.trim().is_empty() {
-            continue;
+            return;
         }
         push_message(&mut messages, role, &content_text);
         if let Some(ts) = entry.timestamp.clone() {
@@ -1444,7 +1458,7 @@ fn read_claude_messages_for_path(project_path: &Path, session_id: &str) -> Resul
             }
             last_message_at = Some(ts);
         }
-    }
+    })?;
 
     Ok(SessionMessages {
         messages,
@@ -1456,23 +1470,18 @@ fn read_claude_messages_for_path(project_path: &Path, session_id: &str) -> Resul
 fn read_codex_messages(session_id: &str) -> Result<SessionMessages> {
     let session_file = find_codex_session_file(session_id)
         .ok_or_else(|| anyhow::anyhow!("Codex session file not found"))?;
-    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
     let mut messages = Vec::new();
     let mut started_at: Option<String> = None;
     let mut last_message_at: Option<String> = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(&session_file, |line| {
         let entry: CodexEntry = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         let Some((role, text)) = extract_codex_message(&entry) else {
-            continue;
+            return;
         };
         let clean_text = if role == "assistant" {
             strip_thinking_blocks(&text)
@@ -1480,7 +1489,7 @@ fn read_codex_messages(session_id: &str) -> Result<SessionMessages> {
             text
         };
         if clean_text.trim().is_empty() {
-            continue;
+            return;
         }
         push_message(&mut messages, &role, &clean_text);
         if let Some(ts) = extract_codex_timestamp(&entry) {
@@ -1489,7 +1498,7 @@ fn read_codex_messages(session_id: &str) -> Result<SessionMessages> {
             }
             last_message_at = Some(ts);
         }
-    }
+    })?;
 
     Ok(SessionMessages {
         messages,
@@ -1760,19 +1769,13 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
         return Some(session);
     }
 
-    let content = fs::read_to_string(path).ok()?;
-
     let mut timestamp = None;
     let mut last_message_at = None;
     let mut last_message = None;
     let mut first_message = None;
     let mut error_summary = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(path, |line| {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             // Get timestamp from first entry
             if timestamp.is_none() {
@@ -1826,7 +1829,8 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
                 error_summary = extract_error_summary(&entry);
             }
         }
-    }
+    })
+    .ok()?;
 
     Some(AiSession {
         session_id: session_id.to_string(),
@@ -1843,8 +1847,6 @@ fn parse_codex_session_file(
     path: &PathBuf,
     fallback_id: &str,
 ) -> Option<(AiSession, Option<PathBuf>)> {
-    let content = fs::read_to_string(path).ok()?;
-
     let mut timestamp = None;
     let mut last_message_at = None;
     let mut last_message = None;
@@ -1853,14 +1855,10 @@ fn parse_codex_session_file(
     let mut session_id = None;
     let mut cwd = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(path, |line| {
         let entry: CodexEntry = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => return,
         };
 
         if timestamp.is_none() {
@@ -1915,7 +1913,8 @@ fn parse_codex_session_file(
                 error_summary = Some(summary);
             }
         }
-    }
+    })
+    .ok()?;
 
     let session = AiSession {
         session_id: session_id.unwrap_or_else(|| fallback_id.to_string()),
@@ -2644,17 +2643,11 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
         bail!("Session file not found: {}", session_file.display());
     }
 
-    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
-
     let mut history = String::new();
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(&session_file, |line| {
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
+            return;
         };
 
         // Try Claude format first (entry.message.role + entry.message.content)
@@ -2674,7 +2667,7 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
             if !cleaned.is_empty() && !is_session_boilerplate(&cleaned) {
                 history.push_str(&format!("{}: {}\n\n", role_label, cleaned));
             }
-            continue;
+            return;
         }
 
         // Try Codex format (type: response_item, payload.type: message)
@@ -2699,7 +2692,7 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
                 }
             }
         }
-    }
+    })?;
 
     Ok(history)
 }
@@ -4758,26 +4751,20 @@ fn read_cross_project_context(
         bail!("Session file not found: {}", session_file.display());
     }
 
-    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
-
     // Collect exchanges after the checkpoint timestamp
     let mut exchanges: Vec<(String, String, String)> = Vec::new();
     let mut current_user: Option<String> = None;
     let mut current_ts: Option<String> = None;
     let mut last_ts: Option<String> = None;
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
+    for_each_nonempty_jsonl_line(&session_file, |line| {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             let entry_ts = entry.timestamp.clone();
 
             // Skip entries before checkpoint
             if let (Some(since), Some(ts)) = (since_ts, &entry_ts) {
                 if ts.as_str() <= since {
-                    continue;
+                    return;
                 }
             }
 
@@ -4798,14 +4785,14 @@ fn read_cross_project_context(
                             })
                             .collect::<Vec<_>>()
                             .join("\n"),
-                        _ => continue,
+                        _ => return,
                     }
                 } else {
-                    continue;
+                    return;
                 };
 
                 if content_text.is_empty() {
-                    continue;
+                    return;
                 }
 
                 match role {
@@ -4816,7 +4803,7 @@ fn read_cross_project_context(
                     "assistant" => {
                         let clean_text = strip_thinking_blocks(&content_text);
                         if clean_text.trim().is_empty() {
-                            continue;
+                            return;
                         }
                         if let Some(user_msg) = current_user.take() {
                             let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
@@ -4832,7 +4819,7 @@ fn read_cross_project_context(
                 last_ts = entry_ts;
             }
         }
-    }
+    })?;
 
     if exchanges.is_empty() {
         return Ok((String::new(), last_ts));
@@ -4877,10 +4864,23 @@ fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
         return None;
     }
 
-    for path in collect_codex_session_files(&root) {
-        let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if filename.contains(session_id) {
-            return Some(path);
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if filename.contains(session_id) {
+                    return Some(path);
+                }
+            }
         }
     }
 
@@ -5012,19 +5012,14 @@ fn get_session_last_timestamp_for_path(
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&session_file).context("failed to read session file")?;
-
     let mut last_ts: Option<String> = None;
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
+    for_each_nonempty_jsonl_line(&session_file, |line| {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(line) {
             if let Some(ts) = entry.timestamp {
                 last_ts = Some(ts);
             }
         }
-    }
+    })?;
 
     Ok(last_ts)
 }

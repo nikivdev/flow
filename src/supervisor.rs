@@ -603,14 +603,14 @@ fn xml_escape(input: &str) -> String {
 #[cfg(unix)]
 fn handle_client(stream: std::os::unix::net::UnixStream, state: &SharedState) -> Result<()> {
     let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-
-    if line.trim().is_empty() {
+    let mut line = Vec::with_capacity(512);
+    reader.read_until(b'\n', &mut line)?;
+    let trimmed = trim_ascii_whitespace(&line);
+    if trimmed.is_empty() {
         return Ok(());
     }
 
-    let request: IpcRequest = serde_json::from_str(line.trim())?;
+    let request: IpcRequest = serde_json::from_slice(trimmed)?;
     let response = handle_request(request, state)?;
 
     let mut writer = &stream;
@@ -1184,6 +1184,19 @@ fn print_list_views(daemons: &[DaemonStatusView]) {
     }
 }
 
+#[inline]
+fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &bytes[start..end]
+}
+
 pub fn send_request(socket_path: &Path, request: &IpcRequest) -> Result<IpcResponse> {
     #[cfg(unix)]
     {
@@ -1194,9 +1207,10 @@ pub fn send_request(socket_path: &Path, request: &IpcRequest) -> Result<IpcRespo
         stream.flush()?;
 
         let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let response: IpcResponse = serde_json::from_str(line.trim())?;
+        let mut line = Vec::with_capacity(512);
+        reader.read_until(b'\n', &mut line)?;
+        let trimmed = trim_ascii_whitespace(&line);
+        let response: IpcResponse = serde_json::from_slice(trimmed)?;
         Ok(response)
     }
     #[cfg(not(unix))]

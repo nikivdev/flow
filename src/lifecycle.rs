@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 
@@ -12,9 +13,13 @@ use crate::{
     domains, processes, tasks,
 };
 
+static RUNTIME_PREFERRED_URL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
 pub fn run_up(opts: LifecycleRunOpts) -> Result<()> {
     let project = resolve_project_config(&opts.config)?;
     let lifecycle = project.config.lifecycle.clone().unwrap_or_default();
+    let preferred_url = lifecycle.domains.as_ref().and_then(lifecycle_preferred_url);
+    let _preferred_url_guard = ScopedPreferredUrl::set(preferred_url);
 
     if let Some(domains_cfg) = lifecycle.domains.as_ref() {
         ensure_domains_up(domains_cfg)?;
@@ -141,6 +146,15 @@ fn ensure_domains_up(cfg: &LifecycleDomainsConfig) -> Result<()> {
     Ok(())
 }
 
+fn lifecycle_preferred_url(cfg: &LifecycleDomainsConfig) -> Option<String> {
+    let host = cfg
+        .host
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?;
+    Some(format!("http://{}", host))
+}
+
 fn run_domains_down(cfg: &LifecycleDomainsConfig) -> Result<bool> {
     let mut changed = false;
     let engine = parse_domains_engine(cfg.engine.as_deref())?;
@@ -239,6 +253,41 @@ fn find_flow_toml_upwards(start: &Path) -> Option<PathBuf> {
 fn is_task_not_found(err: &anyhow::Error) -> bool {
     let msg = err.to_string().to_ascii_lowercase();
     msg.contains("task '") && msg.contains("not found")
+}
+
+pub(crate) fn runtime_preferred_url() -> Option<String> {
+    preferred_url_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+fn preferred_url_slot() -> &'static Mutex<Option<String>> {
+    RUNTIME_PREFERRED_URL.get_or_init(|| Mutex::new(None))
+}
+
+struct ScopedPreferredUrl {
+    prev: Option<String>,
+}
+
+impl ScopedPreferredUrl {
+    fn set(value: Option<String>) -> Self {
+        let mut guard = preferred_url_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = guard.clone();
+        *guard = value;
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedPreferredUrl {
+    fn drop(&mut self) {
+        let mut guard = preferred_url_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = self.prev.clone();
+    }
 }
 
 struct ProjectConfig {

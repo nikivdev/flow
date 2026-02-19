@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -53,7 +53,8 @@ pub struct RpcResponse {
 
 #[cfg(unix)]
 pub struct SeqClient {
-    stream: std::os::unix::net::UnixStream,
+    reader: BufReader<std::os::unix::net::UnixStream>,
+    read_buf: Vec<u8>,
 }
 
 #[cfg(unix)]
@@ -68,45 +69,39 @@ impl SeqClient {
         stream
             .set_write_timeout(Some(timeout))
             .context("failed to set seqd socket write timeout")?;
-        Ok(Self { stream })
+        Ok(Self {
+            reader: BufReader::new(stream),
+            read_buf: Vec::with_capacity(1024),
+        })
     }
 
     pub fn call(&mut self, req: &RpcRequest) -> Result<RpcResponse> {
         let mut encoded = serde_json::to_vec(req).context("failed to encode seqd rpc request")?;
         encoded.push(b'\n');
-        self.stream
+        let stream = self.reader.get_mut();
+        stream
             .write_all(&encoded)
             .context("failed to write seqd rpc request")?;
-        self.stream
-            .flush()
-            .context("failed to flush seqd rpc request")?;
+        stream.flush().context("failed to flush seqd rpc request")?;
 
-        let mut line = Vec::with_capacity(1024);
-        let mut byte = [0u8; 1];
-        loop {
-            let n = self
-                .stream
-                .read(&mut byte)
-                .context("failed to read seqd rpc response")?;
-            if n == 0 {
-                break;
-            }
-            if byte[0] == b'\n' {
-                break;
-            }
-            line.push(byte[0]);
-            if line.len() > 1_000_000 {
-                bail!("seqd rpc response exceeded 1MB line limit");
-            }
+        self.read_buf.clear();
+        self.reader
+            .read_until(b'\n', &mut self.read_buf)
+            .context("failed to read seqd rpc response")?;
+
+        if self.read_buf.last() == Some(&b'\n') {
+            self.read_buf.pop();
         }
 
-        if line.is_empty() {
+        if self.read_buf.is_empty() {
             bail!("empty response from seqd");
         }
+        if self.read_buf.len() > 1_000_000 {
+            bail!("seqd rpc response exceeded 1MB line limit");
+        }
 
-        let text = String::from_utf8(line).context("seqd rpc response was not UTF-8")?;
-        let resp: RpcResponse =
-            serde_json::from_str(&text).context("failed to decode seqd rpc response json")?;
+        let resp: RpcResponse = serde_json::from_slice(&self.read_buf)
+            .context("failed to decode seqd rpc response json")?;
         Ok(resp)
     }
 }
@@ -132,6 +127,7 @@ impl SeqClient {
 #[cfg(unix)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::thread;
     use tempfile::tempdir;
