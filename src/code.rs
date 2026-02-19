@@ -1031,7 +1031,7 @@ fn copy_codex_sessions(from: &Path, to: &Path, dry_run: bool) -> Result<CodexCop
     let to_str = to.to_string_lossy().to_string();
     let mut copied_files = 0;
 
-    for file_path in collect_codex_session_files(&root) {
+    try_for_each_codex_session_file(&root, |file_path| {
         if let Some(copy_path) = copy_codex_session_file(&file_path, &from_str, &to_str, dry_run)? {
             copied_files += 1;
             if dry_run {
@@ -1042,7 +1042,8 @@ fn copy_codex_sessions(from: &Path, to: &Path, dry_run: bool) -> Result<CodexCop
                 );
             }
         }
-    }
+        Ok(())
+    })?;
 
     Ok(CodexCopySummary { copied_files })
 }
@@ -1068,6 +1069,10 @@ fn copy_codex_session_file(
     for line in content.lines() {
         if line.trim().is_empty() {
             parsed_lines.push((String::new(), None));
+            continue;
+        }
+        if !line.contains("\"session_meta\"") {
+            parsed_lines.push((line.to_string(), None));
             continue;
         }
 
@@ -1201,7 +1206,7 @@ fn update_codex_sessions(from: &Path, to: &Path, dry_run: bool) -> Result<CodexU
     let mut updated_files = 0;
     let mut remaining_files = Vec::new();
 
-    for file_path in collect_codex_session_files(&root) {
+    try_for_each_codex_session_file(&root, |file_path| {
         let result = update_codex_session_file(&file_path, &from_str, &to_str, dry_run)?;
         if result.updated {
             updated_files += 1;
@@ -1209,7 +1214,8 @@ fn update_codex_sessions(from: &Path, to: &Path, dry_run: bool) -> Result<CodexU
         if result.remaining {
             remaining_files.push(file_path);
         }
-    }
+        Ok(())
+    })?;
 
     Ok(CodexUpdateSummary {
         updated_files,
@@ -1217,8 +1223,10 @@ fn update_codex_sessions(from: &Path, to: &Path, dry_run: bool) -> Result<CodexU
     })
 }
 
-fn collect_codex_session_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+fn try_for_each_codex_session_file(
+    root: &Path,
+    mut visit: impl FnMut(PathBuf) -> Result<()>,
+) -> Result<()> {
     let mut stack = vec![root.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
@@ -1232,12 +1240,12 @@ fn collect_codex_session_files(root: &Path) -> Vec<PathBuf> {
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                out.push(path);
+                visit(path)?;
             }
         }
     }
 
-    out
+    Ok(())
 }
 
 struct CodexFileUpdate {
@@ -1261,6 +1269,10 @@ fn update_codex_session_file(
     for line in content.lines() {
         if line.trim().is_empty() {
             lines.push(String::new());
+            continue;
+        }
+        if !line.contains("\"session_meta\"") {
+            lines.push(line.to_string());
             continue;
         }
 
@@ -1334,6 +1346,9 @@ fn file_has_session_meta_cwd(path: &Path, from: &str) -> Result<bool> {
 
 fn session_meta_cwd_matches(line: &str, from: &str) -> bool {
     if line.trim().is_empty() {
+        return false;
+    }
+    if !line.contains("\"session_meta\"") {
         return false;
     }
     let Ok(value) = serde_json::from_str::<Value>(line) else {

@@ -2959,6 +2959,8 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
         let mut stdout = std::io::stdout();
         let mut buf = [0u8; 4096];
         let mut line_buf = String::new();
+        let preferred_url = lifecycle_preferred_url();
+        let mut preferred_url_hint_emitted = false;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
@@ -2983,7 +2985,23 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
                         line_buf.push_str(&text);
                         while let Some(pos) = line_buf.find('\n') {
                             let line = line_buf[..pos].to_string();
+                            maybe_emit_lifecycle_preferred_url_hint(
+                                &preferred_url,
+                                &line,
+                                &mut preferred_url_hint_emitted,
+                            );
                             ing.send(&line);
+                            line_buf = line_buf[pos + 1..].to_string();
+                        }
+                    } else {
+                        line_buf.push_str(&text);
+                        while let Some(pos) = line_buf.find('\n') {
+                            let line = line_buf[..pos].to_string();
+                            maybe_emit_lifecycle_preferred_url_hint(
+                                &preferred_url,
+                                &line,
+                                &mut preferred_url_hint_emitted,
+                            );
                             line_buf = line_buf[pos + 1..].to_string();
                         }
                     }
@@ -2992,8 +3010,13 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
             }
         }
         // Flush remaining partial line
-        if let Some(ref ing) = ingester_clone {
-            if !line_buf.is_empty() {
+        if !line_buf.is_empty() {
+            maybe_emit_lifecycle_preferred_url_hint(
+                &preferred_url,
+                &line_buf,
+                &mut preferred_url_hint_emitted,
+            );
+            if let Some(ref ing) = ingester_clone {
                 ing.send(&line_buf);
             }
         }
@@ -3204,6 +3227,36 @@ fn run_command_with_pipes(
     Ok((status, collected))
 }
 
+fn lifecycle_preferred_url() -> Option<String> {
+    crate::lifecycle::runtime_preferred_url()
+}
+
+fn is_service_ready_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    (lower.contains("local:") && lower.contains("http://"))
+        || lower.contains("ready on http://")
+        || lower.contains("listening on http://")
+        || lower.contains("listening at http://")
+}
+
+fn maybe_emit_lifecycle_preferred_url_hint(
+    preferred_url: &Option<String>,
+    line: &str,
+    emitted: &mut bool,
+) {
+    if *emitted {
+        return;
+    }
+    if !is_service_ready_line(line) {
+        return;
+    }
+    let Some(url) = preferred_url.as_deref() else {
+        return;
+    };
+    println!("[flow][up] preferred URL: {url}");
+    *emitted = true;
+}
+
 fn tee_stream<R, W>(
     mut reader: R,
     mut writer: W,
@@ -3218,6 +3271,8 @@ where
     thread::spawn(move || {
         let mut chunk = [0u8; 4096];
         let mut line_buf = String::new();
+        let preferred_url = lifecycle_preferred_url();
+        let mut preferred_url_hint_emitted = false;
         loop {
             let read = match reader.read(&mut chunk) {
                 Ok(0) => break,
@@ -3241,18 +3296,28 @@ where
                 buf.push_str(&text);
             }
 
-            if let Some(ref ing) = ingester {
-                line_buf.push_str(&text);
-                while let Some(pos) = line_buf.find('\n') {
-                    let line = line_buf[..pos].to_string();
+            line_buf.push_str(&text);
+            while let Some(pos) = line_buf.find('\n') {
+                let line = line_buf[..pos].to_string();
+                maybe_emit_lifecycle_preferred_url_hint(
+                    &preferred_url,
+                    &line,
+                    &mut preferred_url_hint_emitted,
+                );
+                if let Some(ref ing) = ingester {
                     ing.send(&line);
-                    line_buf = line_buf[pos + 1..].to_string();
                 }
+                line_buf = line_buf[pos + 1..].to_string();
             }
         }
         // Flush remaining partial line
-        if let Some(ref ing) = ingester {
-            if !line_buf.is_empty() {
+        if !line_buf.is_empty() {
+            maybe_emit_lifecycle_preferred_url_hint(
+                &preferred_url,
+                &line_buf,
+                &mut preferred_url_hint_emitted,
+            );
+            if let Some(ref ing) = ingester {
                 ing.send(&line_buf);
             }
         }
