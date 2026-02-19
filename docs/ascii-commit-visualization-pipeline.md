@@ -106,6 +106,45 @@ Theme/options:
   - mono font
   - light/dark foreground colors
 
+### 5.1 What `box-of-rain` actually does
+
+`box-of-rain` has two explicit stages:
+
+1. layout stage: `render(nodeDef)`  
+   Input is a graph description (`NodeDef` + `connections`).  
+   Output is a multiline ASCII canvas (boxes, borders, arrows, connectors).
+2. paint stage: `renderSvg(ascii, svgOptions)`  
+   Input is the ASCII text grid.  
+   Output is an SVG string where each character is positioned with fixed-width metrics.
+
+Important: layout and paint are separate.  
+If shape/connectors are wrong, the bug is in `NodeDef`/connections.  
+If colors/spacing/fonts are wrong, the bug is in `SvgOptions`.
+
+Core graph primitives used in myflow:
+
+- `id`: stable node identifier for edge wiring.
+- `children`: lines rendered inside a box.
+- `border`: visual style (`rounded`, `bold`).
+- `childDirection`: relative arrangement (`horizontal`).
+- `connections`: explicit edges, each with:
+  - `from`, `to`
+  - `fromSide`, `toSide` (`left|right|top|bottom`).
+
+Timeline shape (conceptual):
+
+```text
+c0 ──> c1 ──> c2
+```
+
+Files impact shape (conceptual):
+
+```text
+commit ──> dirA
+commit ──> dirB
+commit ──> dirC
+```
+
 ### Timeline diagram
 
 File:
@@ -124,6 +163,19 @@ Algorithm:
    - `render(nodeDef)` -> ASCII layout
    - `renderSvg(ascii, DIAGRAM_SVG_OPTIONS)` -> SVG
 6. inject SVG into DOM with `dangerouslySetInnerHTML`
+
+Conceptual `NodeDef` sketch:
+
+```ts
+{
+  children: [
+    { id: "c0", border: "rounded", children: ["2daa3fd", "feat: sub-agent"] },
+    { id: "c1", border: "rounded", children: ["f298c48", "memories rollout"] },
+  ],
+  childDirection: "horizontal",
+  connections: [{ from: "c0", to: "c1", fromSide: "right", toSide: "left" }],
+}
+```
 
 Mounted at:
 
@@ -146,6 +198,19 @@ Algorithm:
    - `+N more` overflow line
 4. connect `commit -> each_dir`
 5. render ASCII then SVG with same theme options
+
+Conceptual `NodeDef` sketch:
+
+```ts
+{
+  children: [
+    { id: "commit", border: "bold", children: ["2daa3fd", "feat: sub-agent"] },
+    { id: "d0", border: "rounded", children: ["codex-rs/core/", "  agent.rs", "  mod.rs"] },
+  ],
+  childDirection: "horizontal",
+  connections: [{ from: "commit", to: "d0", fromSide: "right", toSide: "left" }],
+}
+```
 
 Mounted at:
 
