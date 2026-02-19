@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::env as flow_env;
 
 const DEFAULT_URL: &str = "http://127.0.0.1:7331";
+const MAX_RETRIES: usize = 3;
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -87,40 +89,68 @@ pub fn quick_prompt(
         temperature: 0.1,
     };
 
-    let mut req = client.post(&endpoint).json(&body);
-    if let Some(token) = cfg.token.as_deref() {
-        req = req.bearer_auth(token);
+    let mut last_error: Option<anyhow::Error> = None;
+    for attempt in 1..=MAX_RETRIES {
+        let mut req = client.post(&endpoint).json(&body);
+        if let Some(token) = cfg.token.as_deref() {
+            req = req.bearer_auth(token);
+        }
+
+        let resp = match req
+            .send()
+            .with_context(|| format!("failed to connect to AI server at {}", cfg.base_url))
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                let retryable = attempt < MAX_RETRIES;
+                if retryable {
+                    thread::sleep(Duration::from_millis(300 * attempt as u64));
+                    last_error = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            let retryable_status = status.is_server_error() || status.as_u16() == 429;
+            if retryable_status && attempt < MAX_RETRIES {
+                thread::sleep(Duration::from_millis(300 * attempt as u64));
+                last_error = Some(anyhow::anyhow!(
+                    "AI server returned retryable status {}: {}",
+                    status,
+                    body
+                ));
+                continue;
+            }
+            bail!("AI server returned status {}: {}", status, body);
+        }
+
+        let text_body = resp.text().context("failed to read AI server response")?;
+        let parsed: ChatResponse =
+            serde_json::from_str(&text_body).context("failed to parse AI server response")?;
+
+        let text = parsed
+            .choices
+            .first()
+            .and_then(|c| {
+                c.message
+                    .as_ref()
+                    .map(|m| m.content.clone())
+                    .or(c.text.clone())
+            })
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
+
+        return Ok(text);
     }
 
-    let resp = req
-        .send()
-        .with_context(|| format!("failed to connect to AI server at {}", cfg.base_url))?;
-
-    if !resp.status().is_success() {
-        bail!(
-            "AI server returned status {}: {}",
-            resp.status(),
-            resp.text().unwrap_or_default()
-        );
+    if let Some(err) = last_error {
+        return Err(err);
     }
-
-    let text_body = resp.text().context("failed to read AI server response")?;
-    let parsed: ChatResponse =
-        serde_json::from_str(&text_body).context("failed to parse AI server response")?;
-
-    let text = parsed
-        .choices
-        .first()
-        .and_then(|c| {
-            c.message
-                .as_ref()
-                .map(|m| m.content.clone())
-                .or(c.text.clone())
-        })
-        .map(|t| t.trim().to_string())
-        .unwrap_or_default();
-
-    Ok(text)
+    bail!("AI request failed unexpectedly without a captured error.")
 }
 
 fn resolve_ai_config(

@@ -15,11 +15,12 @@ use uuid::Uuid;
 
 use crate::config;
 
-const DEFAULT_ANALYTICS_ENDPOINT: &str = "http://127.0.0.1:7331/v1/trace";
+const DEFAULT_ANALYTICS_ENDPOINT: &str = "https://api.myflow.sh/api/telemetry/flow";
 const QUEUE_FILE_NAME: &str = "usage-queue.jsonl";
 const STATE_FILE_NAME: &str = "analytics.toml";
 const MAX_QUEUE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_BATCH_SIZE: usize = 100;
+const ANON_ROTATION_DAYS: u64 = 30;
 
 static FLUSH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
@@ -171,13 +172,15 @@ pub fn record_command_result(capture: &CommandCapture, duration: Duration, resul
     }
 
     let event = json!({
-        "type": "flow.command",
+        "type": "flow.command.v1",
+        "schema_version": 1,
+        "event_id": Uuid::new_v4().to_string(),
         "name": capture.command_path,
         "ok": result.is_ok(),
         "at": capture.at_ms,
         "source": "flow-cli",
         "payload": {
-            "install_id": state.install_id,
+            "anon_user_id": rotating_anon_user_id(&state, capture.at_ms),
             "command_path": capture.command_path,
             "success": result.is_ok(),
             "exit_code": Option::<i32>::None,
@@ -188,7 +191,7 @@ pub fn record_command_result(capture: &CommandCapture, duration: Duration, resul
             "arch": capture.arch,
             "interactive": capture.interactive,
             "ci": capture.ci,
-            "project_fingerprint": project_fingerprint(&state.local_secret),
+            "project_fingerprint": project_fingerprint(&state.local_secret, capture.at_ms),
         }
     });
 
@@ -410,7 +413,20 @@ fn extract_flags(raw_args: &[String]) -> Vec<String> {
     set.into_iter().collect()
 }
 
-fn project_fingerprint(secret: &str) -> Option<String> {
+fn rotating_anon_user_id(state: &AnalyticsState, at_ms: u64) -> Option<String> {
+    if state.local_secret.is_empty() || state.install_id.is_empty() {
+        return None;
+    }
+    let mut mac = HmacSha256::new_from_slice(state.local_secret.as_bytes()).ok()?;
+    mac.update(state.install_id.as_bytes());
+    mac.update(b":");
+    mac.update(rotation_bucket(at_ms).to_string().as_bytes());
+    let bytes = mac.finalize().into_bytes();
+    let full = hex::encode(bytes);
+    Some(full.chars().take(24).collect())
+}
+
+fn project_fingerprint(secret: &str, at_ms: u64) -> Option<String> {
     if secret.is_empty() {
         return None;
     }
@@ -418,9 +434,23 @@ fn project_fingerprint(secret: &str) -> Option<String> {
     let canonical = cwd.canonicalize().unwrap_or(cwd);
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
     mac.update(canonical.to_string_lossy().as_bytes());
+    mac.update(b":");
+    mac.update(rotation_bucket(at_ms).to_string().as_bytes());
     let bytes = mac.finalize().into_bytes();
     let full = hex::encode(bytes);
     Some(full.chars().take(16).collect())
+}
+
+fn rotation_bucket(at_ms: u64) -> u64 {
+    let window = ANON_ROTATION_DAYS
+        .saturating_mul(24)
+        .saturating_mul(60)
+        .saturating_mul(60)
+        .saturating_mul(1000);
+    if window == 0 {
+        return 0;
+    }
+    at_ms / window
 }
 
 fn should_capture(state: &AnalyticsState, runtime: &AnalyticsRuntimeConfig) -> bool {
@@ -701,5 +731,34 @@ mod tests {
             "3000".to_string(),
         ];
         assert_eq!(command_path(&args), "task-shortcut");
+    }
+
+    #[test]
+    fn rotating_anon_id_is_deterministic_within_bucket() {
+        let state = AnalyticsState {
+            consent: AnalyticsConsent::Enabled,
+            install_id: "install-123".to_string(),
+            local_secret: "local-test-key".to_string(), // flow:secret:ignore
+            prompted_at_ms: None,
+            updated_at_ms: 0,
+        };
+        let a = rotating_anon_user_id(&state, 1000).expect("anon id");
+        let b = rotating_anon_user_id(&state, 2000).expect("anon id");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn rotating_anon_id_changes_after_rotation_window() {
+        let state = AnalyticsState {
+            consent: AnalyticsConsent::Enabled,
+            install_id: "install-123".to_string(),
+            local_secret: "local-test-key".to_string(), // flow:secret:ignore
+            prompted_at_ms: None,
+            updated_at_ms: 0,
+        };
+        let window = ANON_ROTATION_DAYS * 24 * 60 * 60 * 1000;
+        let a = rotating_anon_user_id(&state, 1000).expect("anon id");
+        let b = rotating_anon_user_id(&state, 1000 + window).expect("anon id");
+        assert_ne!(a, b);
     }
 }

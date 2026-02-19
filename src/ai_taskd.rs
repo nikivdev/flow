@@ -301,14 +301,7 @@ fn handle_request(request: &TaskdRequest, state: &mut TaskdState) -> TaskdRespon
             include_timings,
         } => {
             let root = PathBuf::from(project_root);
-            match run_request(
-                state,
-                &root,
-                selector,
-                args,
-                *no_cache,
-                *capture_output,
-            ) {
+            match run_request(state, &root, selector, args, *no_cache, *capture_output) {
                 Ok(result) => {
                     if (*include_timings || timings_log_enabled())
                         && let Some(timings) = result.timings.as_ref()
@@ -658,14 +651,10 @@ fn encode_response(response: &TaskdResponse, encoding: WireEncoding) -> Result<V
 
 fn decode_response(payload: &[u8]) -> Result<TaskdResponse> {
     match infer_encoding_from_payload(payload) {
-        WireEncoding::Msgpack => {
-            rmp_serde::from_slice::<TaskdResponse>(&payload[1..])
-                .context("failed to decode ai-taskd msgpack response")
-        }
-        WireEncoding::Json => {
-            serde_json::from_slice::<TaskdResponse>(payload)
-                .context("failed to decode ai-taskd json response")
-        }
+        WireEncoding::Msgpack => rmp_serde::from_slice::<TaskdResponse>(&payload[1..])
+            .context("failed to decode ai-taskd msgpack response"),
+        WireEncoding::Json => serde_json::from_slice::<TaskdResponse>(payload)
+            .context("failed to decode ai-taskd json response"),
     }
 }
 
