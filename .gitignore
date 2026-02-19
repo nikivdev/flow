@@ -12,6 +12,9 @@
 !.ai/skills/quality-bun-feature-delivery/
 .ai/skills/quality-bun-feature-delivery/*
 !.ai/skills/quality-bun-feature-delivery/skill.md
+!.ai/skills/pr-markdown-body-file/
+.ai/skills/pr-markdown-body-file/*
+!.ai/skills/pr-markdown-body-file/skill.md
 .ai/todos/*.bike
 .claude/
 .codex/

@@ -59,6 +59,20 @@ force_reload_after_sync = true
 task_skill_allow_implicit_invocation = false
 ```
 
+## Built-in Default Skills
+
+Flow auto-materializes a small baseline set of project-local skills in `.ai/skills/`:
+
+- `env`
+- `quality-bun-feature-delivery`
+- `pr-markdown-body-file`
+
+These are symlinked into `.codex/skills` and `.claude/skills` and can be reloaded with:
+
+```bash
+f skills reload
+```
+
 ### `skills.codex` fields
 
 - `generate_openai_yaml`: writes `.ai/skills/<task>/agents/openai.yaml` for task-synced skills.

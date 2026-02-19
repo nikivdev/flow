@@ -18,6 +18,8 @@ use crate::start;
 const DEFAULT_ENV_SKILL: &str = include_str!("../.ai/skills/env/skill.md");
 const DEFAULT_QUALITY_BUN_FEATURE_DELIVERY_SKILL: &str =
     include_str!("../.ai/skills/quality-bun-feature-delivery/skill.md");
+const DEFAULT_PR_MARKDOWN_BODY_FILE_SKILL: &str =
+    include_str!("../.ai/skills/pr-markdown-body-file/skill.md");
 
 #[derive(Debug, Default)]
 pub struct SkillsEnforceSummary {
@@ -1374,6 +1376,20 @@ pub fn ensure_default_skills_at(project_root: &Path) -> Result<()> {
     }
     let _ = normalize_single_skill_file(&quality_dir)?;
 
+    let pr_markdown_dir = skills_dir.join("pr-markdown-body-file");
+    let pr_markdown_file = skill_file_upper(&pr_markdown_dir);
+    let should_write_pr_markdown = if pr_markdown_file.exists() {
+        let content = fs::read_to_string(&pr_markdown_file).unwrap_or_default();
+        content.contains("source: flow-default")
+    } else {
+        true
+    };
+    if should_write_pr_markdown {
+        fs::create_dir_all(&pr_markdown_dir)?;
+        fs::write(&pr_markdown_file, DEFAULT_PR_MARKDOWN_BODY_FILE_SKILL)?;
+    }
+    let _ = normalize_single_skill_file(&pr_markdown_dir)?;
+
     ensure_symlinks_at(project_root)?;
 
     Ok(())
@@ -1488,14 +1504,25 @@ mod tests {
         let quality = dir
             .path()
             .join(".ai/skills/quality-bun-feature-delivery/SKILL.md");
+        let pr_markdown = dir.path().join(".ai/skills/pr-markdown-body-file/SKILL.md");
 
         assert!(env.exists(), "env default skill should exist");
         assert!(quality.exists(), "quality skill should exist");
+        assert!(
+            pr_markdown.exists(),
+            "pr markdown default skill should exist"
+        );
 
         let quality_content = fs::read_to_string(&quality).expect("quality skill readable");
         assert!(quality_content.contains("name: quality-bun-feature-delivery"));
         assert!(quality_content.contains("version: 2"));
         assert!(quality_content.contains("source: flow-default"));
+
+        let pr_markdown_content =
+            fs::read_to_string(&pr_markdown).expect("pr markdown skill readable");
+        assert!(pr_markdown_content.contains("name: pr-markdown-body-file"));
+        assert!(pr_markdown_content.contains("version: 1"));
+        assert!(pr_markdown_content.contains("source: flow-default"));
     }
 
     #[test]
