@@ -124,6 +124,21 @@ command = "bash -c 'tarball=$(ls -t dist/flow_*_darwin_arm64.tar.gz | head -n1) 
 description = "Upload the latest darwin/arm64 release tarball to the release host"
 
 [[tasks]]
+name = "ci-blacksmith-status"
+command = "python3 ./scripts/ci_blacksmith.py status"
+description = "Show CI runner mode for canary/release workflows (github or blacksmith)"
+
+[[tasks]]
+name = "ci-blacksmith-enable"
+command = "python3 ./scripts/ci_blacksmith.py enable"
+description = "Switch Linux CI lanes to Blacksmith runners and enable Linux host SIMD job"
+
+[[tasks]]
+name = "ci-blacksmith-disable"
+command = "python3 ./scripts/ci_blacksmith.py disable"
+description = "Switch CI back to GitHub-hosted Linux runners and disable Linux host SIMD job"
+
+[[tasks]]
 name = "test-flow-task-tracing"
 command = "bun i-run.ts"
 
