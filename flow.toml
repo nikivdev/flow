@@ -99,6 +99,41 @@ command = "FLOW_PROFILE=release ./scripts/deploy.sh"
 description = "Deploy CLI with traces updates (f traces)"
 
 [[tasks]]
+name = "rl-signals-tail"
+command = "sh -lc \"mkdir -p out/logs && touch ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl} && tail -f ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl}\""
+description = "Follow structured RL signal events emitted by flow runtime."
+
+[[tasks]]
+name = "rl-signals-summary"
+command = "python3 ./scripts/rl_signal_summary.py ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl} $@"
+description = "Summarize RL signal counts, errors, and latency percentiles."
+
+[[tasks]]
+name = "rl-dataset-build"
+command = "python3 ./scripts/build_rl_runtime_dataset.py --harbor-dir ${HARBOR_DIR:-$HOME/repos/laude-institute/harbor} --flow-signals ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl} --seq-mem ${SEQ_CH_MEM_PATH:-$HOME/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl} --write-latest $@"
+description = "Build Harbor-ready RL dataset snapshot from flow+seq runtime signals."
+
+[[tasks]]
+name = "rl-dataset-validate"
+command = "python3 -c \"import json, os, pathlib, sys; root = pathlib.Path(os.path.expanduser(os.environ.get('HARBOR_DIR', '~/repos/laude-institute/harbor'))); p = root / 'data' / 'flow_runtime_prepared' / 'latest' / 'validation_report.json'; (print(f'missing validation report: {p}') or sys.exit(1)) if not p.exists() else None; obj = json.loads(p.read_text(encoding='utf-8')); print(json.dumps(obj, indent=2)); sys.exit(0 if obj.get('ok') else 1)\""
+description = "Print and enforce latest RL dataset validation report."
+
+[[tasks]]
+name = "rl-capture-on-all"
+command = "sh -lc \"cd $HOME/code/seq && f rl-capture-on && f agent-qa-capture-on && f agent-qa-capture-status\""
+description = "Enable seq low-latency capture + always-on Claude/Codex Q/A ingest."
+
+[[tasks]]
+name = "rl-capture-status"
+command = "sh -lc \"cd $HOME/code/seq && f agent-qa-capture-status && f rl-signal-summary --last ${LAST:-5000}\""
+description = "Show seq Q/A ingest status and current high-signal event density."
+
+[[tasks]]
+name = "rl-capture-logs"
+command = "sh -lc \"cd $HOME/code/seq && f agent-qa-capture-logs\""
+description = "Tail background Claude/Codex Q/A ingest daemon logs from seq."
+
+[[tasks]]
 name = "deploy-with-hub-reload"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh && f hub stop && FLOW_DOCS_FOCUS=1 f hub"
 description = "Deploy and restart hub daemons (lin + docs)"
@@ -269,6 +304,12 @@ variables = [
   { key = "DATABASE_URL", default = "" },
   { key = "OPENAI_API_KEY", default = "" },
   { key = "ANTHROPIC_API_KEY", default = "" },
+  { key = "FLOW_RL_SIGNALS", default = "true" },
+  { key = "FLOW_RL_SIGNALS_PATH", default = "out/logs/flow_rl_signals.jsonl" },
+  { key = "FLOW_RL_SIGNAL_TEXT", default = "snippet" },
+  { key = "FLOW_RL_SIGNAL_MAX_CHARS", default = "4000" },
+  { key = "SEQ_CH_MEM_PATH", default = "~/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl" },
+  { key = "HARBOR_DIR", default = "~/repos/laude-institute/harbor" },
 ]
 
 # ============================================================================

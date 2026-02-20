@@ -78,6 +78,7 @@ pub mod registry;
 pub mod release;
 pub mod release_signing;
 pub mod repos;
+pub mod rl_signals;
 pub mod reviews_todo;
 pub mod running;
 pub mod sealer_crypto;
