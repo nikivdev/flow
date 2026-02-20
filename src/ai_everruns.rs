@@ -246,7 +246,10 @@ fn wait_for_completion_sse(
                         event_start_ns,
                         end_unix_nanos(event_start_ns, event_started),
                         vec![
-                            ("tool_calls.requested".to_string(), requested_count.to_string()),
+                            (
+                                "tool_calls.requested".to_string(),
+                                requested_count.to_string(),
+                            ),
                             ("tool_calls.unique".to_string(), unique_count.to_string()),
                             (
                                 "tool_calls.duplicates_filtered".to_string(),
@@ -395,7 +398,10 @@ fn wait_for_completion_poll(
                         event_start_ns,
                         end_unix_nanos(event_start_ns, event_started),
                         vec![
-                            ("tool_calls.requested".to_string(), requested_count.to_string()),
+                            (
+                                "tool_calls.requested".to_string(),
+                                requested_count.to_string(),
+                            ),
                             ("tool_calls.unique".to_string(), unique_count.to_string()),
                             (
                                 "tool_calls.duplicates_filtered".to_string(),
