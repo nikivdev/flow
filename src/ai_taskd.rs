@@ -8,8 +8,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use uuid::Uuid;
 
 use crate::ai_tasks;
+use crate::rl_signals;
 
 const MSGPACK_WIRE_PREFIX: u8 = 0xFF;
 
@@ -51,6 +54,10 @@ enum TaskdRequest {
         capture_output: bool,
         #[serde(default)]
         include_timings: bool,
+        #[serde(default)]
+        suggested_task: Option<String>,
+        #[serde(default)]
+        override_reason: Option<String>,
     },
 }
 
@@ -176,6 +183,8 @@ pub fn run_via_daemon(
         no_cache,
         capture_output: true,
         include_timings: false,
+        suggested_task: read_optional_env("FLOW_ROUTER_SUGGESTED_TASK"),
+        override_reason: read_optional_env("FLOW_ROUTER_OVERRIDE_REASON"),
     };
 
     let response = send_request(&request, WireEncoding::Json)?;
@@ -299,9 +308,20 @@ fn handle_request(request: &TaskdRequest, state: &mut TaskdState) -> TaskdRespon
             no_cache,
             capture_output,
             include_timings,
+            suggested_task,
+            override_reason,
         } => {
             let root = PathBuf::from(project_root);
-            match run_request(state, &root, selector, args, *no_cache, *capture_output) {
+            match run_request(
+                state,
+                &root,
+                selector,
+                args,
+                *no_cache,
+                *capture_output,
+                suggested_task.as_deref(),
+                override_reason.as_deref(),
+            ) {
                 Ok(result) => {
                     if (*include_timings || timings_log_enabled())
                         && let Some(timings) = result.timings.as_ref()
@@ -404,6 +424,8 @@ fn run_request(
     args: &[String],
     no_cache: bool,
     capture_output: bool,
+    suggested_task: Option<&str>,
+    override_reason: Option<&str>,
 ) -> Result<RunRequestOutcome> {
     let started = Instant::now();
     let resolve_started = Instant::now();
@@ -421,31 +443,117 @@ fn run_request(
     }
     let task = selected.with_context(|| format!("AI task '{}' not found", selector))?;
     let resolve_selector_us = resolve_started.elapsed().as_micros() as u64;
+    let decision_id = Uuid::new_v4().simple().to_string();
+    let session_id = router_session_id(project_root);
+    let context_path = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .display()
+        .to_string();
+
+    emit_router_decision(
+        &decision_id,
+        &session_id,
+        selector,
+        &task.id,
+        &context_path,
+        args,
+        no_cache,
+        capture_output,
+        used_fast_selector,
+        resolve_selector_us,
+    );
+    if let Some(suggested) = suggested_task
+        && !same_task_selector(suggested, &task.id)
+    {
+        emit_router_override(
+            &decision_id,
+            &session_id,
+            suggested,
+            &task.id,
+            override_reason.unwrap_or("manual_selector_override"),
+        );
+    }
 
     let run_started = Instant::now();
     let used_cache = !no_cache;
     if !capture_output && !no_cache {
-        let status = run_cached_task_status_hot(state, project_root, &task, args)?;
-        let run_task_us = run_started.elapsed().as_micros() as u64;
-        let total_us = started.elapsed().as_micros() as u64;
-        return Ok(RunRequestOutcome {
-            code: status.code().unwrap_or(1),
-            stdout: String::new(),
-            stderr: String::new(),
-            timings: Some(RequestTimings {
-                resolve_selector_us,
-                run_task_us,
-                total_us,
-                used_fast_selector,
-                used_cache,
-            }),
-        });
+        let status = run_cached_task_status_hot(state, project_root, &task, args);
+        match status {
+            Ok(status) => {
+                let run_task_us = run_started.elapsed().as_micros() as u64;
+                let total_us = started.elapsed().as_micros() as u64;
+                let code = status.code().unwrap_or(1);
+                emit_router_outcome(
+                    &decision_id,
+                    &session_id,
+                    &task.id,
+                    code,
+                    (run_task_us / 1000) as u64,
+                    "",
+                    used_cache,
+                    used_fast_selector,
+                    resolve_selector_us,
+                    run_task_us,
+                    total_us,
+                );
+                return Ok(RunRequestOutcome {
+                    code,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    timings: Some(RequestTimings {
+                        resolve_selector_us,
+                        run_task_us,
+                        total_us,
+                        used_fast_selector,
+                        used_cache,
+                    }),
+                });
+            }
+            Err(err) => {
+                let run_task_us = run_started.elapsed().as_micros() as u64;
+                emit_router_outcome(
+                    &decision_id,
+                    &session_id,
+                    &task.id,
+                    1,
+                    (run_task_us / 1000) as u64,
+                    &classify_error(&err.to_string()),
+                    used_cache,
+                    used_fast_selector,
+                    resolve_selector_us,
+                    run_task_us,
+                    started.elapsed().as_micros() as u64,
+                );
+                return Err(err);
+            }
+        }
     }
 
     let output = if no_cache {
-        ai_tasks::run_task_via_moon_output(&task, project_root, args)?
+        ai_tasks::run_task_via_moon_output(&task, project_root, args)
     } else {
-        run_cached_task_output_hot(state, project_root, &task, args)?
+        run_cached_task_output_hot(state, project_root, &task, args)
+    };
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            let run_task_us = run_started.elapsed().as_micros() as u64;
+            emit_router_outcome(
+                &decision_id,
+                &session_id,
+                &task.id,
+                1,
+                (run_task_us / 1000) as u64,
+                &classify_error(&err.to_string()),
+                used_cache,
+                used_fast_selector,
+                resolve_selector_us,
+                run_task_us,
+                started.elapsed().as_micros() as u64,
+            );
+            return Err(err);
+        }
     };
 
     let code = output.status.code().unwrap_or(1);
@@ -453,6 +561,19 @@ fn run_request(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let run_task_us = run_started.elapsed().as_micros() as u64;
     let total_us = started.elapsed().as_micros() as u64;
+    emit_router_outcome(
+        &decision_id,
+        &session_id,
+        &task.id,
+        code,
+        (run_task_us / 1000) as u64,
+        "",
+        used_cache,
+        used_fast_selector,
+        resolve_selector_us,
+        run_task_us,
+        total_us,
+    );
     Ok(RunRequestOutcome {
         code,
         stdout,
@@ -465,6 +586,176 @@ fn run_request(
             used_cache,
         }),
     })
+}
+
+fn router_session_id(project_root: &Path) -> String {
+    if let Ok(raw) = std::env::var("FLOW_ROUTER_SESSION_ID") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let root_name = project_root
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "flow".to_string());
+    format!("ai-taskd-{}-{}", std::process::id(), root_name)
+}
+
+fn emit_router_decision(
+    decision_id: &str,
+    session_id: &str,
+    selector: &str,
+    chosen_task: &str,
+    project_path: &str,
+    args: &[String],
+    no_cache: bool,
+    capture_output: bool,
+    used_fast_selector: bool,
+    resolve_selector_us: u64,
+) {
+    rl_signals::emit(json!({
+        "event_type": "flow.router.decision.v1",
+        "runtime": "flow-router",
+        "source": "flow.ai_taskd",
+        "session_id": session_id,
+        "event_id": format!("decision-{}", decision_id),
+        "decision_id": decision_id,
+        "ok": true,
+        "subject": {
+            "schema_version": "flow_router_decision_v1",
+            "decision_id": decision_id,
+            "source": "flow.ai_taskd",
+            "session_id": session_id,
+            "project_path": project_path,
+            "project_fingerprint": project_path,
+            "chosen_task": chosen_task,
+            "confidence": 1.0,
+            "user_intent": selector,
+            "candidates": [{
+                "task": chosen_task,
+                "score": 1.0,
+            }],
+            "context": {
+                "args": args,
+                "no_cache": no_cache,
+                "capture_output": capture_output,
+                "used_fast_selector": used_fast_selector,
+                "resolve_selector_us": resolve_selector_us,
+            }
+        }
+    }));
+}
+
+fn emit_router_override(
+    decision_id: &str,
+    session_id: &str,
+    original_task: &str,
+    override_task: &str,
+    reason: &str,
+) {
+    rl_signals::emit(json!({
+        "event_type": "flow.router.override.v1",
+        "runtime": "flow-router",
+        "source": "flow.ai_taskd",
+        "session_id": session_id,
+        "event_id": format!("override-{}", decision_id),
+        "decision_id": decision_id,
+        "ok": true,
+        "subject": {
+            "schema_version": "flow_router_override_v1",
+            "decision_id": decision_id,
+            "source": "flow.ai_taskd",
+            "session_id": session_id,
+            "original_task": original_task,
+            "override_task": override_task,
+            "reason": reason,
+        }
+    }));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_router_outcome(
+    decision_id: &str,
+    session_id: &str,
+    task_executed: &str,
+    exit_code: i32,
+    time_to_resolution_ms: u64,
+    error_kind: &str,
+    used_cache: bool,
+    used_fast_selector: bool,
+    resolve_selector_us: u64,
+    run_task_us: u64,
+    total_us: u64,
+) {
+    let outcome = if exit_code == 0 { "success" } else { "failure" };
+    rl_signals::emit(json!({
+        "event_type": "flow.router.outcome.v1",
+        "runtime": "flow-router",
+        "source": "flow.ai_taskd",
+        "session_id": session_id,
+        "event_id": format!("outcome-{}", decision_id),
+        "decision_id": decision_id,
+        "ok": exit_code == 0,
+        "subject": {
+            "schema_version": "flow_router_outcome_v1",
+            "decision_id": decision_id,
+            "source": "flow.ai_taskd",
+            "session_id": session_id,
+            "outcome": outcome,
+            "task_executed": task_executed,
+            "time_to_resolution_ms": time_to_resolution_ms,
+            "manual_override_task": "",
+            "error_kind": error_kind,
+            "extra": {
+                "exit_code": exit_code,
+                "used_cache": used_cache,
+                "used_fast_selector": used_fast_selector,
+                "resolve_selector_us": resolve_selector_us,
+                "run_task_us": run_task_us,
+                "total_us": total_us,
+            }
+        }
+    }));
+}
+
+fn classify_error(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("not found") {
+        return "not_found".to_string();
+    }
+    if lower.contains("timeout") {
+        return "timeout".to_string();
+    }
+    if lower.contains("permission denied") {
+        return "permission_denied".to_string();
+    }
+    if lower.contains("connection refused") || lower.contains("failed to connect") {
+        return "connection_error".to_string();
+    }
+    "runtime_error".to_string()
+}
+
+fn read_optional_env(key: &str) -> Option<String> {
+    let raw = std::env::var(key).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn normalize_selector_for_compare(value: &str) -> String {
+    let mut out = value.trim().to_ascii_lowercase();
+    if let Some(stripped) = out.strip_prefix("ai:") {
+        out = stripped.to_string();
+    }
+    out
+}
+
+fn same_task_selector(a: &str, b: &str) -> bool {
+    normalize_selector_for_compare(a) == normalize_selector_for_compare(b)
 }
 
 fn run_cached_task_output_hot(
@@ -712,4 +1003,16 @@ fn timings_log_enabled() -> bool {
             .as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_task_selector;
+
+    #[test]
+    fn selector_compare_handles_ai_prefix() {
+        assert!(same_task_selector("ai:flow/dev-check", "flow/dev-check"));
+        assert!(same_task_selector("flow/dev-check", "AI:FLOW/DEV-CHECK"));
+        assert!(!same_task_selector("ai:flow/noop", "ai:flow/dev-check"));
+    }
 }

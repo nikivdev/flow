@@ -24,6 +24,8 @@ enum TaskdRequest {
         no_cache: bool,
         capture_output: bool,
         include_timings: bool,
+        suggested_task: Option<String>,
+        override_reason: Option<String>,
     },
 }
 
@@ -231,6 +233,8 @@ fn run_once(
         no_cache,
         capture_output,
         include_timings,
+        suggested_task: read_optional_env("FLOW_ROUTER_SUGGESTED_TASK"),
+        override_reason: read_optional_env("FLOW_ROUTER_OVERRIDE_REASON"),
     };
     send_request(socket, protocol, &req)
 }
@@ -307,6 +311,15 @@ fn default_socket_path() -> PathBuf {
         .join(".flow")
         .join("run")
         .join("ai-taskd.sock")
+}
+
+fn read_optional_env(key: &str) -> Option<String> {
+    let raw = env::var(key).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn print_help() {
