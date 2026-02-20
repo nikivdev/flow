@@ -184,6 +184,11 @@ command = "python3 ./scripts/ci_host_runner.py install --repo nikivdev/flow && p
 description = "Install ci-1focus runner, switch workflows to host SIMD mode, then commit and push workflow updates"
 
 [[tasks]]
+name = "ci-host-setup"
+command = "bash ./scripts/ci_host_setup.sh $@"
+description = "One command to set up ci.1focus.ai runner and switch workflows to host mode (optionally pass user@ip)"
+
+[[tasks]]
 name = "test-flow-task-tracing"
 command = "bun i-run.ts"
 

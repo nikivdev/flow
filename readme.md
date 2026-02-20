@@ -105,6 +105,8 @@ Set up `ci.1focus.ai` host runner (painless path):
 Or run all in one command:
 
 - `f ci-host-bootstrap-apply`
+- `f ci-host-setup`
+- `f ci-host-setup root@77.42.83.38` (if host is not configured yet)
 
 Notes:
 
