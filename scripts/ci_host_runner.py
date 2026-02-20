@@ -193,6 +193,12 @@ if [ ! -x ./config.sh ] || [ "$CURRENT_VERSION" != "$VERSION" ]; then
   $SUDO chown -R gha-runner:gha-runner "$RUNNER_DIR"
 fi
 
+# Ensure re-install is idempotent: service must be removed before reconfiguration.
+if [ -x ./svc.sh ]; then
+  ./svc.sh stop || true
+  ./svc.sh uninstall || true
+fi
+
 if [ -f .runner ]; then
   $RUNNER_USER_CMD env RUNNER_DIR="$RUNNER_DIR" REMOVE_TOKEN="$REMOVE_TOKEN" \
     bash -lc 'cd "$RUNNER_DIR" && ./config.sh remove --token "$REMOVE_TOKEN" || true'
