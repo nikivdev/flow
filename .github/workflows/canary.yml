@@ -87,8 +87,8 @@ jobs:
           path: dist/flow-${{ matrix.target }}.tar.gz
 
   build-linux-host-simd:
-    if: ${{ vars.FLOW_LINUX_HOST_RUNNER_LABELS != '' }}
-    runs-on: ${{ fromJson(vars.FLOW_LINUX_HOST_RUNNER_LABELS) }}
+    if: ${{ false }}
+    runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -C target-cpu=native
     steps:

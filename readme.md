@@ -89,13 +89,18 @@ Canary releases are published automatically on every push to `main` via
 
 Optional Linux host SIMD lane:
 
-- Both release workflows support an additional self-hosted Linux build lane that
-  enables `--features linux-host-simd-json` and `RUSTFLAGS=-C target-cpu=native`.
-- To enable it, set a repository variable named `FLOW_LINUX_HOST_RUNNER_LABELS`
-  to a JSON array of runner labels, for example:
-  `["self-hosted","linux","x64","flow-linux"]`.
-- This lane is additive (it does not replace default hosted artifacts), so CI/CD
-  stays reliable if the self-hosted runner is offline.
+- Flow has first-class tasks for CI runner mode (no GitHub env/repo vars needed):
+  - `f ci-blacksmith-status`
+  - `f ci-blacksmith-enable`
+  - `f ci-blacksmith-disable`
+- `ci-blacksmith-enable` switches Linux jobs to Blacksmith runners and enables
+  the Linux host SIMD build job (`--features linux-host-simd-json` with
+  `RUSTFLAGS=-C target-cpu=native`).
+- `ci-blacksmith-disable` reverts to GitHub-hosted Linux runners and keeps the
+  SIMD lane disabled by default for reliability.
+- Blacksmith setup and runner tags:
+  - https://docs.blacksmith.sh/github-actions/quickstart
+  - https://docs.blacksmith.sh/github-actions/runner-tags
 
 ## Local Build (macOS, Flow + Jazz/Groove)
 
