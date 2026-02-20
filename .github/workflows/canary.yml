@@ -94,9 +94,8 @@ jobs:
           path: dist/flow-${{ matrix.target }}.tar.gz
 
   build-linux-host-simd:
-    if: ${{ false }}
     timeout-minutes: 40
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ci-1focus]
     env:
       RUSTFLAGS: -C target-cpu=native
     steps:
