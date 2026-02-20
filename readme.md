@@ -92,12 +92,15 @@ Optional Linux host SIMD lane:
 - Flow has first-class tasks for CI runner mode (no GitHub env/repo vars needed):
   - `f ci-blacksmith-status`
   - `f ci-blacksmith-enable`
+  - `f ci-blacksmith-enable-apply`
   - `f ci-blacksmith-disable`
+  - `f ci-blacksmith-disable-apply`
 - `ci-blacksmith-enable` switches Linux jobs to Blacksmith runners and enables
   the Linux host SIMD build job (`--features linux-host-simd-json` with
   `RUSTFLAGS=-C target-cpu=native`).
 - `ci-blacksmith-disable` reverts to GitHub-hosted Linux runners and keeps the
   SIMD lane disabled by default for reliability.
+- `*-apply` variants also commit and push workflow changes in one command.
 - Blacksmith setup and runner tags:
   - https://docs.blacksmith.sh/github-actions/quickstart
   - https://docs.blacksmith.sh/github-actions/runner-tags
