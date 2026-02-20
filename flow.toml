@@ -134,9 +134,19 @@ command = "python3 ./scripts/ci_blacksmith.py enable"
 description = "Switch Linux CI lanes to Blacksmith runners and enable Linux host SIMD job"
 
 [[tasks]]
+name = "ci-blacksmith-enable-apply"
+command = "python3 ./scripts/ci_blacksmith.py enable --commit --push"
+description = "Enable Blacksmith CI mode, commit workflow updates, and push"
+
+[[tasks]]
 name = "ci-blacksmith-disable"
 command = "python3 ./scripts/ci_blacksmith.py disable"
 description = "Switch CI back to GitHub-hosted Linux runners and disable Linux host SIMD job"
+
+[[tasks]]
+name = "ci-blacksmith-disable-apply"
+command = "python3 ./scripts/ci_blacksmith.py disable --commit --push"
+description = "Disable Blacksmith CI mode, commit workflow updates, and push"
 
 [[tasks]]
 name = "test-flow-task-tracing"

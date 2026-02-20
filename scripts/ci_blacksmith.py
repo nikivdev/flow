@@ -5,6 +5,7 @@ Toggle CI workflows between GitHub-hosted and Blacksmith runner profiles.
 Usage:
   python3 scripts/ci_blacksmith.py status
   python3 scripts/ci_blacksmith.py enable
+  python3 scripts/ci_blacksmith.py enable --commit --push
   python3 scripts/ci_blacksmith.py disable
 """
 
@@ -12,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +25,14 @@ WORKFLOWS = [
 
 GITHUB_X64 = "ubuntu-latest"
 GITHUB_ARM = "ubuntu-latest"
-BLACKSMITH_X64 = "blacksmith-4vcpu-ubuntu-2404"
-BLACKSMITH_ARM = "blacksmith-4vcpu-ubuntu-2404-arm"
+BLACKSMITH_X64 = "blacksmith-2vcpu-ubuntu-2404"
+BLACKSMITH_ARM = "blacksmith-2vcpu-ubuntu-2404-arm"
+BLACKSMITH_SIMD = "blacksmith-4vcpu-ubuntu-2404"
+
+WORKFLOW_REL_PATHS = [
+    ".github/workflows/canary.yml",
+    ".github/workflows/release.yml",
+]
 
 
 def rewrite_workflow(path: Path, enable: bool) -> bool:
@@ -32,7 +41,7 @@ def rewrite_workflow(path: Path, enable: bool) -> bool:
 
     linux_x64 = BLACKSMITH_X64 if enable else GITHUB_X64
     linux_arm = BLACKSMITH_ARM if enable else GITHUB_ARM
-    simd_runs_on = "blacksmith-8vcpu-ubuntu-2404" if enable else "ubuntu-latest"
+    simd_runs_on = BLACKSMITH_SIMD if enable else "ubuntu-latest"
     simd_if_line = "" if enable else "    if: ${{ false }}\n"
 
     content = re.sub(
@@ -85,7 +94,47 @@ def status() -> int:
     return 0
 
 
-def set_mode(enable: bool) -> int:
+def run_cmd(args: list[str]) -> None:
+    subprocess.run(args, cwd=ROOT, check=True)
+
+
+def has_staged_workflow_changes() -> bool:
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--quiet", "--", *WORKFLOW_REL_PATHS],
+        cwd=ROOT,
+        check=False,
+    )
+    return result.returncode != 0
+
+
+def maybe_commit_and_push(mode: str, commit: bool, push: bool) -> int:
+    if push and not commit:
+        print("--push requires --commit", file=sys.stderr)
+        return 2
+
+    if not commit:
+        return 0
+
+    run_cmd(["git", "add", *WORKFLOW_REL_PATHS])
+    if not has_staged_workflow_changes():
+        print("No workflow changes to commit.")
+        return 0
+
+    run_cmd(["git", "commit", "-m", f"ci: switch workflows to {mode} runners"])
+    print("Committed workflow changes.")
+
+    if push:
+        run_cmd(["git", "push", "origin", "HEAD"])
+        print("Pushed commit.")
+
+    return 0
+
+
+def set_mode(enable: bool, commit: bool, push: bool) -> int:
+    if push and not commit:
+        print("--push requires --commit", file=sys.stderr)
+        return 2
+
     changed_any = False
     for wf in WORKFLOWS:
         changed = rewrite_workflow(wf, enable)
@@ -98,7 +147,7 @@ def set_mode(enable: bool) -> int:
         print(f"CI runner mode set to: {mode}")
     else:
         print(f"CI runner mode already set to: {mode}")
-    return 0
+    return maybe_commit_and_push(mode=mode, commit=commit, push=push)
 
 
 def main() -> int:
@@ -108,14 +157,24 @@ def main() -> int:
         choices=["status", "enable", "disable"],
         help="status | enable (Blacksmith) | disable (GitHub-hosted)",
     )
+    parser.add_argument(
+        "--commit",
+        action="store_true",
+        help="Commit workflow changes after rewriting files",
+    )
+    parser.add_argument(
+        "--push",
+        action="store_true",
+        help="Push the commit (requires --commit)",
+    )
     args = parser.parse_args()
 
     if args.command == "status":
         return status()
     if args.command == "enable":
-        return set_mode(enable=True)
+        return set_mode(enable=True, commit=args.commit, push=args.push)
     if args.command == "disable":
-        return set_mode(enable=False)
+        return set_mode(enable=False, commit=args.commit, push=args.push)
     return 2
 
 
