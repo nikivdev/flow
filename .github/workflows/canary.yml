@@ -18,6 +18,7 @@ env:
 
 jobs:
   build:
+    timeout-minutes: 40
     env:
       # Don't reference `secrets.*` in `if:` expressions; GitHub rejects that at workflow-parse time.
       MACOS_SIGN_P12_B64: ${{ secrets.MACOS_SIGN_P12_B64 }}
@@ -44,6 +45,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
 
       - name: Install cross-compilation tools (Linux ARM)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -88,6 +95,7 @@ jobs:
 
   build-linux-host-simd:
     if: ${{ false }}
+    timeout-minutes: 40
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -C target-cpu=native
@@ -99,6 +107,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
 
       - name: Build (Linux host SIMD)
         run: cargo build --release --target x86_64-unknown-linux-gnu --features linux-host-simd-json
@@ -119,6 +133,7 @@ jobs:
 
   release:
     needs: build
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

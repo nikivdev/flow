@@ -87,20 +87,28 @@ Stable releases are cut by pushing a git tag that starts with `v`:
 Canary releases are published automatically on every push to `main` via
 `.github/workflows/canary.yml` (GitHub release tag: `canary`).
 
-Optional Linux host SIMD lane:
+CI runner modes (no workflow env var toggles):
 
-- Flow has first-class tasks for CI runner mode (no GitHub env/repo vars needed):
-  - `f ci-blacksmith-status`
-  - `f ci-blacksmith-enable`
-  - `f ci-blacksmith-enable-apply`
-  - `f ci-blacksmith-disable`
-  - `f ci-blacksmith-disable-apply`
-- `ci-blacksmith-enable` switches Linux jobs to Blacksmith runners and enables
-  the Linux host SIMD build job (`--features linux-host-simd-json` with
-  `RUSTFLAGS=-C target-cpu=native`).
-- `ci-blacksmith-disable` reverts to GitHub-hosted Linux runners and keeps the
-  SIMD lane disabled by default for reliability.
-- `*-apply` variants also commit and push workflow changes in one command.
+- `f ci-blacksmith-status` shows the active mode (`github`, `blacksmith`, or `host`).
+- `f ci-blacksmith-enable` / `f ci-blacksmith-enable-apply` switch Linux lanes to Blacksmith runners and enable the SIMD lane.
+- `f ci-host-enable` / `f ci-host-enable-apply` keep normal Linux lanes on GitHub-hosted runners, but run the SIMD lane on `ci-1focus` self-hosted runner.
+- `f ci-blacksmith-disable` / `f ci-blacksmith-disable-apply` revert to default GitHub mode with SIMD lane disabled.
+
+Set up `ci.1focus.ai` host runner (painless path):
+
+1. Point infra to your Linux host: `infra host set <user@ip>`
+2. Make sure GitHub CLI auth is ready: `gh auth status`
+3. Install/register runner on host: `f ci-host-runner-install`
+4. Verify runner service + registration: `f ci-host-runner-status`
+5. Switch workflows to host SIMD mode: `f ci-host-enable-apply`
+
+Or run all in one command:
+
+- `f ci-host-bootstrap-apply`
+
+Notes:
+
+- Host mode is a compile-time balance: expensive SIMD builds run on your Linux host, while default Linux matrix jobs stay on GitHub-hosted runners for throughput.
 - Blacksmith setup and runner tags:
   - https://docs.blacksmith.sh/github-actions/quickstart
   - https://docs.blacksmith.sh/github-actions/runner-tags

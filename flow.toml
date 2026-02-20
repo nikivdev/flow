@@ -126,7 +126,7 @@ description = "Upload the latest darwin/arm64 release tarball to the release hos
 [[tasks]]
 name = "ci-blacksmith-status"
 command = "python3 ./scripts/ci_blacksmith.py status"
-description = "Show CI runner mode for canary/release workflows (github or blacksmith)"
+description = "Show CI runner mode for canary/release workflows (github, blacksmith, or host)"
 
 [[tasks]]
 name = "ci-blacksmith-enable"
@@ -147,6 +147,41 @@ description = "Switch CI back to GitHub-hosted Linux runners and disable Linux h
 name = "ci-blacksmith-disable-apply"
 command = "python3 ./scripts/ci_blacksmith.py disable --commit --push"
 description = "Disable Blacksmith CI mode, commit workflow updates, and push"
+
+[[tasks]]
+name = "ci-host-enable"
+command = "python3 ./scripts/ci_blacksmith.py host"
+description = "Keep standard Linux CI lanes on GitHub runners, but enable Linux host SIMD build on ci-1focus self-hosted runner"
+
+[[tasks]]
+name = "ci-host-enable-apply"
+command = "python3 ./scripts/ci_blacksmith.py host --commit --push"
+description = "Enable host SIMD CI mode, commit workflow updates, and push"
+
+[[tasks]]
+name = "ci-host-runner-status"
+command = "python3 ./scripts/ci_host_runner.py status --repo nikivdev/flow"
+description = "Show ci-1focus runner service status on infra host and GitHub runner registration state"
+
+[[tasks]]
+name = "ci-host-runner-install"
+command = "python3 ./scripts/ci_host_runner.py install --repo nikivdev/flow"
+description = "Install/register self-hosted GitHub runner on configured infra Linux host (label: ci-1focus)"
+
+[[tasks]]
+name = "ci-host-runner-remove"
+command = "python3 ./scripts/ci_host_runner.py remove --repo nikivdev/flow"
+description = "Unregister ci-1focus self-hosted GitHub runner and remove runner service on infra host"
+
+[[tasks]]
+name = "ci-host-bootstrap"
+command = "python3 ./scripts/ci_host_runner.py install --repo nikivdev/flow && python3 ./scripts/ci_blacksmith.py host"
+description = "One-command setup: install ci-1focus runner on infra host and switch workflows to host SIMD mode"
+
+[[tasks]]
+name = "ci-host-bootstrap-apply"
+command = "python3 ./scripts/ci_host_runner.py install --repo nikivdev/flow && python3 ./scripts/ci_blacksmith.py host --commit --push"
+description = "Install ci-1focus runner, switch workflows to host SIMD mode, then commit and push workflow updates"
 
 [[tasks]]
 name = "test-flow-task-tracing"
