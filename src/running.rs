@@ -1,13 +1,16 @@
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// A process started by flow
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,8 +48,148 @@ pub fn running_processes_path() -> PathBuf {
     crate::config::global_state_dir().join("running.json")
 }
 
-/// Load running processes, validating that PIDs are still alive
-pub fn load_running_processes() -> Result<RunningProcesses> {
+struct RunningProcessesLock {
+    path: PathBuf,
+}
+
+impl Drop for RunningProcessesLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn lock_path() -> PathBuf {
+    crate::config::global_state_dir().join("running.json.lock")
+}
+
+fn lock_owner_pid(path: &Path) -> Option<u32> {
+    let raw = fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("pid=") {
+            if let Ok(pid) = value.trim().parse::<u32>() {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+fn lock_is_stale(path: &Path, max_age: Duration) -> bool {
+    if let Some(owner_pid) = lock_owner_pid(path) {
+        if !process_alive(owner_pid) {
+            return true;
+        }
+    }
+
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(elapsed) = modified.elapsed() else {
+        return false;
+    };
+    elapsed > max_age
+}
+
+fn acquire_running_processes_lock() -> Result<RunningProcessesLock> {
+    let _ = crate::config::ensure_global_state_dir()
+        .with_context(|| "failed to create flow global state dir")?;
+
+    let path = lock_path();
+    let timeout = Duration::from_secs(5);
+    let stale_after = Duration::from_secs(120);
+    let start = Instant::now();
+
+    loop {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let _ = writeln!(file, "pid={}", std::process::id());
+                return Ok(RunningProcessesLock { path });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if lock_is_stale(&path, stale_after) {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                if start.elapsed() >= timeout {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "timed out acquiring running-process lock at {}",
+                            path.display()
+                        )
+                    });
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to open lock {}", path.display()));
+            }
+        }
+    }
+}
+
+fn parse_running_processes(contents: &str, path: &Path) -> Result<(RunningProcesses, bool)> {
+    match serde_json::from_str::<RunningProcesses>(contents) {
+        Ok(processes) => Ok((processes, false)),
+        Err(primary_err) => {
+            // Recovery path: accept the first valid JSON value and ignore trailing garbage.
+            // This handles cases like a valid object followed by stray braces due to interrupted writes.
+            let mut de = serde_json::Deserializer::from_str(contents);
+            match RunningProcesses::deserialize(&mut de) {
+                Ok(processes) => {
+                    warn!(
+                        path = %path.display(),
+                        error = %primary_err,
+                        "running.json contained trailing/invalid suffix; recovered first JSON value"
+                    );
+                    Ok((processes, true))
+                }
+                Err(_) => {
+                    Err(primary_err).with_context(|| format!("failed to parse {}", path.display()))
+                }
+            }
+        }
+    }
+}
+
+fn save_running_processes_unlocked(processes: &RunningProcesses) -> Result<()> {
+    let path = running_processes_path();
+    let _ = crate::config::ensure_global_state_dir()
+        .with_context(|| format!("failed to create {}", path.display()))?;
+
+    let temp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let contents = serde_json::to_string_pretty(processes)?;
+
+    {
+        let mut file = fs::File::create(&temp_path)
+            .with_context(|| format!("failed to create {}", temp_path.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", temp_path.display()))?;
+    }
+
+    fs::rename(&temp_path, &path).with_context(|| {
+        format!(
+            "failed to replace running state {} from {}",
+            path.display(),
+            temp_path.display()
+        )
+    })?;
+
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
+    Ok(())
+}
+
+fn load_running_processes_unlocked() -> Result<RunningProcesses> {
     let path = running_processes_path();
     if !path.exists() {
         return Ok(RunningProcesses::default());
@@ -54,11 +197,10 @@ pub fn load_running_processes() -> Result<RunningProcesses> {
 
     let contents =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut processes: RunningProcesses = serde_json::from_str(&contents)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let (mut processes, recovered) = parse_running_processes(&contents, &path)?;
 
     // Validate and clean up dead processes
-    let mut changed = false;
+    let mut changed = recovered;
     for procs in processes.projects.values_mut() {
         let before = procs.len();
         procs.retain(|p| process_alive(p.pid));
@@ -69,42 +211,42 @@ pub fn load_running_processes() -> Result<RunningProcesses> {
     processes.projects.retain(|_, v| !v.is_empty());
 
     if changed {
-        save_running_processes(&processes)?;
+        save_running_processes_unlocked(&processes)?;
     }
 
     Ok(processes)
 }
 
+/// Load running processes, validating that PIDs are still alive
+pub fn load_running_processes() -> Result<RunningProcesses> {
+    let _lock = acquire_running_processes_lock()?;
+    load_running_processes_unlocked()
+}
+
 /// Atomically save running processes (write to temp, then rename)
 pub fn save_running_processes(processes: &RunningProcesses) -> Result<()> {
-    let path = running_processes_path();
-    let _ = crate::config::ensure_global_state_dir()
-        .with_context(|| format!("failed to create {}", path.display()))?;
-
-    let temp_path = path.with_extension("json.tmp");
-    let contents = serde_json::to_string_pretty(processes)?;
-    fs::write(&temp_path, contents)?;
-    fs::rename(&temp_path, &path)?;
-
-    Ok(())
+    let _lock = acquire_running_processes_lock()?;
+    save_running_processes_unlocked(processes)
 }
 
 /// Register a new running process
 pub fn register_process(entry: RunningProcess) -> Result<()> {
-    let mut processes = load_running_processes()?;
+    let _lock = acquire_running_processes_lock()?;
+    let mut processes = load_running_processes_unlocked()?;
     let key = entry.config_path.display().to_string();
     processes.projects.entry(key).or_default().push(entry);
-    save_running_processes(&processes)
+    save_running_processes_unlocked(&processes)
 }
 
 /// Unregister a process by PID
 pub fn unregister_process(pid: u32) -> Result<()> {
-    let mut processes = load_running_processes()?;
+    let _lock = acquire_running_processes_lock()?;
+    let mut processes = load_running_processes_unlocked()?;
     for procs in processes.projects.values_mut() {
         procs.retain(|p| p.pid != pid);
     }
     processes.projects.retain(|_, v| !v.is_empty());
-    save_running_processes(&processes)
+    save_running_processes_unlocked(&processes)
 }
 
 /// Get processes for a specific project
@@ -163,4 +305,35 @@ pub fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn parse_running_processes_recovers_from_trailing_garbage() {
+        let raw = "{\n  \"projects\": {}\n}\n}  }\n";
+        let (parsed, recovered) =
+            parse_running_processes(raw, Path::new("running.json")).expect("recover parse");
+        assert!(recovered);
+        assert!(parsed.projects.is_empty());
+    }
+
+    #[test]
+    fn lock_owner_pid_parses_pid_line() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("running.json.lock");
+        fs::write(&path, "pid=12345\n").expect("write lock");
+        assert_eq!(lock_owner_pid(&path), Some(12345));
+    }
+
+    #[test]
+    fn lock_owner_pid_ignores_invalid_content() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("running.json.lock");
+        fs::write(&path, "oops\npid=abc\n").expect("write lock");
+        assert_eq!(lock_owner_pid(&path), None);
+    }
 }
