@@ -279,20 +279,21 @@ fi
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage ci.1focus.ai host GitHub runner")
-    parser.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repo in owner/name format")
-
     sub = parser.add_subparsers(dest="command", required=True)
 
     status = sub.add_parser("status", help="Show remote service status + GitHub runner status")
+    status.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repo in owner/name format")
     status.set_defaults(handler=cmd_status)
 
     install = sub.add_parser("install", help="Install/register runner on configured infra Linux host")
+    install.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repo in owner/name format")
     install.add_argument("--runner-name", default="", help="Runner name override")
     install.add_argument("--labels", default=DEFAULT_LABELS, help="Comma-separated runner labels")
     install.add_argument("--version", default="", help="actions/runner version (default: latest)")
     install.set_defaults(handler=cmd_install)
 
     remove = sub.add_parser("remove", help="Unregister runner and remove service")
+    remove.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repo in owner/name format")
     remove.add_argument("--purge", action="store_true", help="Also delete runner files and gha-runner user")
     remove.set_defaults(handler=cmd_remove)
 
