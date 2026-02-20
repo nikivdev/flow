@@ -156,12 +156,14 @@ set -euo pipefail
 
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
+  RUNNER_USER_CMD="runuser -u gha-runner --"
 else
   if ! command -v sudo >/dev/null 2>&1; then
     echo "sudo is required for non-root execution on the host" >&2
     exit 1
   fi
   SUDO="sudo"
+  RUNNER_USER_CMD="sudo -u gha-runner"
 fi
 
 if command -v apt-get >/dev/null 2>&1; then
@@ -192,11 +194,11 @@ if [ ! -x ./config.sh ] || [ "$CURRENT_VERSION" != "$VERSION" ]; then
 fi
 
 if [ -f .runner ]; then
-  $SUDO -u gha-runner env RUNNER_DIR="$RUNNER_DIR" REMOVE_TOKEN="$REMOVE_TOKEN" \
+  $RUNNER_USER_CMD env RUNNER_DIR="$RUNNER_DIR" REMOVE_TOKEN="$REMOVE_TOKEN" \
     bash -lc 'cd "$RUNNER_DIR" && ./config.sh remove --token "$REMOVE_TOKEN" || true'
 fi
 
-$SUDO -u gha-runner env RUNNER_DIR="$RUNNER_DIR" REPO="$REPO" REGISTRATION_TOKEN="$REGISTRATION_TOKEN" RUNNER_NAME="$RUNNER_NAME" LABELS="$LABELS" \
+$RUNNER_USER_CMD env RUNNER_DIR="$RUNNER_DIR" REPO="$REPO" REGISTRATION_TOKEN="$REGISTRATION_TOKEN" RUNNER_NAME="$RUNNER_NAME" LABELS="$LABELS" \
   bash -lc 'cd "$RUNNER_DIR" && ./config.sh --url "https://github.com/$REPO" --token "$REGISTRATION_TOKEN" --name "$RUNNER_NAME" --labels "$LABELS" --work _work --unattended --replace'
 
 cd "$RUNNER_DIR"
@@ -235,12 +237,14 @@ set -euo pipefail
 
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
+  RUNNER_USER_CMD="runuser -u gha-runner --"
 else
   if ! command -v sudo >/dev/null 2>&1; then
     echo "sudo is required for non-root execution on the host" >&2
     exit 1
   fi
   SUDO="sudo"
+  RUNNER_USER_CMD="sudo -u gha-runner"
 fi
 
 if [ ! -d "$RUNNER_DIR" ]; then
@@ -254,7 +258,7 @@ if [ -x ./svc.sh ]; then
 fi
 
 if [ -f .runner ] && [ -x ./config.sh ]; then
-  $SUDO -u gha-runner env RUNNER_DIR="$RUNNER_DIR" REMOVE_TOKEN="$REMOVE_TOKEN" \
+  $RUNNER_USER_CMD env RUNNER_DIR="$RUNNER_DIR" REMOVE_TOKEN="$REMOVE_TOKEN" \
     bash -lc 'cd "$RUNNER_DIR" && ./config.sh remove --token "$REMOVE_TOKEN" || true'
 fi
 
