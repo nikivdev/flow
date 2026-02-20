@@ -15,10 +15,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
 DEFAULT_REPO = "nikivdev/flow"
@@ -69,6 +71,11 @@ def gh_api(path: str, *, method: str = "GET", jq: str | None = None) -> str:
     return run_capture(cmd)
 
 
+def gh_api_json(path: str, *, method: str = "GET") -> dict:
+    out = gh_api(path, method=method)
+    return json.loads(out) if out else {}
+
+
 def ssh_script(host: HostTriplet, script: str) -> None:
     ssh_target = f"{host.user}@{host.host}"
     cmd = [
@@ -86,6 +93,31 @@ def ssh_script(host: HostTriplet, script: str) -> None:
     run_stream(cmd, input_text=script)
 
 
+def ssh_capture(host: HostTriplet, script: str) -> str:
+    ssh_target = f"{host.user}@{host.host}"
+    cmd = [
+        "ssh",
+        "-p",
+        host.port,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        ssh_target,
+        "bash",
+        "-s",
+    ]
+    result = subprocess.run(
+        cmd,
+        check=True,
+        text=True,
+        input=script,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
 def shell_assign(name: str, value: str) -> str:
     return f"{name}={shlex.quote(value)}"
 
@@ -95,14 +127,40 @@ def default_runner_name(host: HostTriplet) -> str:
     return f"ci-1focus-{safe_host}"
 
 
+def github_runner_state(repo: str, runner_name: str) -> tuple[str, bool | None]:
+    payload = gh_api_json(f"repos/{repo}/actions/runners")
+    for runner in payload.get("runners", []):
+        if runner.get("name") == runner_name:
+            return str(runner.get("status", "unknown")), bool(runner.get("busy", False))
+    return "missing", None
+
+
+def host_service_state(host: HostTriplet) -> str:
+    script = r'''
+set -euo pipefail
+state="$(systemctl is-active 'actions.runner.*' 2>/dev/null || true)"
+if echo "$state" | grep -q '^active$'; then
+  echo "active"
+elif echo "$state" | grep -Eq '^(inactive|failed|activating|deactivating)$'; then
+  echo "${state%%$'\n'*}"
+elif systemctl list-unit-files 'actions.runner.*' 2>/dev/null | grep -q 'actions.runner.'; then
+  echo "inactive"
+else
+  echo "missing"
+fi
+'''
+    return ssh_capture(host, script).strip()
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     host = load_host_triplet()
     print(f"Host: {host.user}@{host.host}:{host.port}")
 
     remote_status = r'''
 set -euo pipefail
-if systemctl list-units --full -all 'actions.runner.*' | grep -q 'actions.runner.'; then
-  systemctl --no-pager --full status 'actions.runner.*' | sed -n '1,60p'
+status_out="$(systemctl --no-pager --full status 'actions.runner.*' 2>/dev/null || true)"
+if [[ -n "${status_out}" ]]; then
+  printf '%s\n' "${status_out}" | sed -n '1,60p'
 else
   echo "No GitHub Actions runner service is installed on this host."
 fi
@@ -120,6 +178,42 @@ fi
     else:
         print("No runners with label ci-1focus found.")
     return 0
+
+
+def cmd_health(args: argparse.Namespace) -> int:
+    host = load_host_triplet()
+    runner_name = args.runner_name or default_runner_name(host)
+    service = host_service_state(host)
+    gh_status, busy = github_runner_state(args.repo, runner_name)
+    busy_str = "n/a" if busy is None else ("true" if busy else "false")
+    print(
+        f"runner={runner_name} host_service={service} github_status={gh_status} busy={busy_str}"
+    )
+    return 0 if service == "active" and gh_status == "online" else 1
+
+
+def cmd_wait_online(args: argparse.Namespace) -> int:
+    host = load_host_triplet()
+    runner_name = args.runner_name or default_runner_name(host)
+    deadline = time.time() + max(1, args.timeout_secs)
+    interval = max(1, args.interval_secs)
+
+    while time.time() <= deadline:
+        service = host_service_state(host)
+        gh_status, busy = github_runner_state(args.repo, runner_name)
+        busy_str = "n/a" if busy is None else ("true" if busy else "false")
+        print(
+            f"waiting: runner={runner_name} host_service={service} github_status={gh_status} busy={busy_str}"
+        )
+        if service == "active" and gh_status == "online":
+            return 0
+        time.sleep(interval)
+
+    print(
+        f"Timed out waiting for runner to become online: {runner_name}",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -306,6 +400,18 @@ def build_parser() -> argparse.ArgumentParser:
     remove.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repo in owner/name format")
     remove.add_argument("--purge", action="store_true", help="Also delete runner files and gha-runner user")
     remove.set_defaults(handler=cmd_remove)
+
+    health = sub.add_parser("health", help="Machine-friendly runner health check")
+    health.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repo in owner/name format")
+    health.add_argument("--runner-name", default="", help="Runner name override")
+    health.set_defaults(handler=cmd_health)
+
+    wait_online = sub.add_parser("wait-online", help="Wait until runner is active and GitHub reports online")
+    wait_online.add_argument("--repo", default=DEFAULT_REPO, help="GitHub repo in owner/name format")
+    wait_online.add_argument("--runner-name", default="", help="Runner name override")
+    wait_online.add_argument("--timeout-secs", type=int, default=120, help="Maximum wait time")
+    wait_online.add_argument("--interval-secs", type=int, default=5, help="Polling interval")
+    wait_online.set_defaults(handler=cmd_wait_online)
 
     return parser
 

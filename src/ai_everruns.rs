@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 
 use crate::cli::AiEverrunsOpts;
 use crate::config::{self, EverrunsConfig};
+use crate::rl_signals;
 use crate::seq_client::{RpcRequest, SeqClient};
 
 const DEFAULT_EVERRUNS_BASE_URL: &str = "http://127.0.0.1:9300/api";
@@ -36,14 +37,52 @@ pub fn run(opts: AiEverrunsOpts) -> Result<()> {
     let message_id = api.post_message(&session_id, &prompt)?;
     eprintln!("message_id: {}", message_id);
 
-    wait_for_completion(
+    rl_signals::emit(json!({
+        "event_type": "everruns.run_started",
+        "runtime": "everruns",
+        "session_id": session_id,
+        "input_message_id": message_id,
+        "prompt_chars": prompt.chars().count(),
+        "prompt_text": text_signal_payload(&prompt),
+        "poll_interval_ms": resolved.poll_ms,
+        "timeout_secs": resolved.wait_timeout_secs,
+        "seq_socket": resolved.seq_socket.display().to_string(),
+        "no_seq_tools": resolved.no_seq_tools,
+    }));
+
+    let run_started = Instant::now();
+    let result = wait_for_completion(
         &api,
         &seq_bridge,
         &session_id,
         &message_id,
+        &prompt,
         resolved.poll_ms,
         resolved.wait_timeout_secs,
-    )
+    );
+
+    let runtime_ms = run_started.elapsed().as_millis() as u64;
+    match &result {
+        Ok(_) => rl_signals::emit(json!({
+            "event_type": "everruns.run_completed",
+            "runtime": "everruns",
+            "session_id": session_id,
+            "input_message_id": message_id,
+            "ok": true,
+            "runtime_ms": runtime_ms,
+        })),
+        Err(err) => rl_signals::emit(json!({
+            "event_type": "everruns.run_failed",
+            "runtime": "everruns",
+            "session_id": session_id,
+            "input_message_id": message_id,
+            "ok": false,
+            "runtime_ms": runtime_ms,
+            "error": err.to_string(),
+            "error_class": classify_error_text(&err.to_string()),
+        })),
+    }
+    result
 }
 
 fn resolve_prompt(opts: &AiEverrunsOpts) -> Result<String> {
@@ -75,6 +114,7 @@ fn wait_for_completion(
     seq_bridge: &SeqBridge,
     session_id: &str,
     input_message_id: &str,
+    prompt: &str,
     poll_ms: u64,
     wait_timeout_secs: u64,
 ) -> Result<()> {
@@ -83,6 +123,7 @@ fn wait_for_completion(
         seq_bridge,
         session_id,
         input_message_id,
+        prompt,
         poll_ms,
         wait_timeout_secs,
     ) {
@@ -92,11 +133,21 @@ fn wait_for_completion(
                 eprintln!(
                     "note: Everruns SSE endpoint unavailable, falling back to /events polling"
                 );
+                rl_signals::emit(json!({
+                    "event_type": "everruns.transport_fallback",
+                    "runtime": "everruns",
+                    "session_id": session_id,
+                    "input_message_id": input_message_id,
+                    "from": "sse",
+                    "to": "poll",
+                    "reason": err.to_string(),
+                }));
                 return wait_for_completion_poll(
                     api,
                     seq_bridge,
                     session_id,
                     input_message_id,
+                    prompt,
                     poll_ms,
                     wait_timeout_secs,
                 );
@@ -111,6 +162,7 @@ fn wait_for_completion_sse(
     seq_bridge: &SeqBridge,
     session_id: &str,
     input_message_id: &str,
+    prompt: &str,
     poll_ms: u64,
     wait_timeout_secs: u64,
 ) -> Result<()> {
@@ -178,6 +230,8 @@ fn wait_for_completion_sse(
                         tool_results
                             .push(seq_bridge.execute_tool_call(session_id, &event.id, call));
                     }
+                    let unique_count = tool_results.len();
+                    let duplicate_count = requested_count.saturating_sub(unique_count);
 
                     if !tool_results.is_empty() {
                         api.submit_tool_results(session_id, tool_results)?;
@@ -191,18 +245,24 @@ fn wait_for_completion_sse(
                         None,
                         event_start_ns,
                         end_unix_nanos(event_start_ns, event_started),
-                        vec![(
-                            "tool_calls.requested".to_string(),
-                            requested_count.to_string(),
-                        )],
+                        vec![
+                            ("tool_calls.requested".to_string(), requested_count.to_string()),
+                            ("tool_calls.unique".to_string(), unique_count.to_string()),
+                            (
+                                "tool_calls.duplicates_filtered".to_string(),
+                                duplicate_count.to_string(),
+                            ),
+                        ],
                     );
                 }
                 "output.message.completed" => {
-                    if let Some(text) = extract_output_text(&event.data) {
+                    let output_text = extract_output_text(&event.data);
+                    if let Some(text) = output_text.as_ref() {
                         println!("{}", text);
                     } else {
                         println!("{}", serde_json::to_string_pretty(&event.data)?);
                     }
+                    let output_chars = output_text.as_ref().map(|t| t.chars().count()).unwrap_or(0);
                     seq_bridge.emit_runtime_event(
                         session_id,
                         &event.id,
@@ -211,7 +271,14 @@ fn wait_for_completion_sse(
                         None,
                         event_start_ns,
                         end_unix_nanos(event_start_ns, event_started),
-                        vec![],
+                        vec![("output_chars".to_string(), output_chars.to_string())],
+                    );
+                    emit_qa_pair_signal(
+                        session_id,
+                        input_message_id,
+                        &event.id,
+                        prompt,
+                        output_text.as_deref().unwrap_or(""),
                     );
                     return Ok(());
                 }
@@ -229,7 +296,10 @@ fn wait_for_completion_sse(
                         Some(error),
                         event_start_ns,
                         end_unix_nanos(event_start_ns, event_started),
-                        vec![],
+                        vec![(
+                            "error_class".to_string(),
+                            classify_error_text(error).to_string(),
+                        )],
                     );
                     bail!("everruns turn failed: {}", error);
                 }
@@ -259,6 +329,7 @@ fn wait_for_completion_poll(
     seq_bridge: &SeqBridge,
     session_id: &str,
     input_message_id: &str,
+    prompt: &str,
     poll_ms: u64,
     wait_timeout_secs: u64,
 ) -> Result<()> {
@@ -308,6 +379,8 @@ fn wait_for_completion_poll(
                         tool_results
                             .push(seq_bridge.execute_tool_call(session_id, &event.id, call));
                     }
+                    let unique_count = tool_results.len();
+                    let duplicate_count = requested_count.saturating_sub(unique_count);
 
                     if !tool_results.is_empty() {
                         api.submit_tool_results(session_id, tool_results)?;
@@ -321,18 +394,24 @@ fn wait_for_completion_poll(
                         None,
                         event_start_ns,
                         end_unix_nanos(event_start_ns, event_started),
-                        vec![(
-                            "tool_calls.requested".to_string(),
-                            requested_count.to_string(),
-                        )],
+                        vec![
+                            ("tool_calls.requested".to_string(), requested_count.to_string()),
+                            ("tool_calls.unique".to_string(), unique_count.to_string()),
+                            (
+                                "tool_calls.duplicates_filtered".to_string(),
+                                duplicate_count.to_string(),
+                            ),
+                        ],
                     );
                 }
                 "output.message.completed" => {
-                    if let Some(text) = extract_output_text(&event.data) {
+                    let output_text = extract_output_text(&event.data);
+                    if let Some(text) = output_text.as_ref() {
                         println!("{}", text);
                     } else {
                         println!("{}", serde_json::to_string_pretty(&event.data)?);
                     }
+                    let output_chars = output_text.as_ref().map(|t| t.chars().count()).unwrap_or(0);
                     seq_bridge.emit_runtime_event(
                         session_id,
                         &event.id,
@@ -341,7 +420,14 @@ fn wait_for_completion_poll(
                         None,
                         event_start_ns,
                         end_unix_nanos(event_start_ns, event_started),
-                        vec![],
+                        vec![("output_chars".to_string(), output_chars.to_string())],
+                    );
+                    emit_qa_pair_signal(
+                        session_id,
+                        input_message_id,
+                        &event.id,
+                        prompt,
+                        output_text.as_deref().unwrap_or(""),
                     );
                     return Ok(());
                 }
@@ -359,7 +445,10 @@ fn wait_for_completion_poll(
                         Some(error),
                         event_start_ns,
                         end_unix_nanos(event_start_ns, event_started),
-                        vec![],
+                        vec![(
+                            "error_class".to_string(),
+                            classify_error_text(error).to_string(),
+                        )],
                     );
                     bail!("everruns turn failed: {}", error);
                 }
@@ -387,6 +476,101 @@ fn wait_for_completion_poll(
 fn is_sse_unavailable_error(err: &anyhow::Error) -> bool {
     let text = err.to_string().to_ascii_lowercase();
     text.contains("sse endpoint unavailable")
+}
+
+fn classify_error_text(err: &str) -> &'static str {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return "timeout";
+    }
+    if lower.contains("failed to connect") || lower.contains("unreachable") {
+        return "connectivity";
+    }
+    if lower.contains("mutex poisoned") {
+        return "concurrency";
+    }
+    if lower.contains("failed to parse") || lower.contains("invalid json") {
+        return "parse";
+    }
+    if lower.contains("unsupported") {
+        return "unsupported";
+    }
+    if lower.contains("turn failed") {
+        return "turn_failed";
+    }
+    "runtime_error"
+}
+
+fn emit_qa_pair_signal(
+    session_id: &str,
+    input_message_id: &str,
+    event_id: &str,
+    prompt: &str,
+    output: &str,
+) {
+    rl_signals::emit(json!({
+        "event_type": "everruns.qa_pair",
+        "runtime": "everruns",
+        "session_id": session_id,
+        "input_message_id": input_message_id,
+        "event_id": event_id,
+        "ok": !output.trim().is_empty(),
+        "prompt_text": text_signal_payload(prompt),
+        "response_text": text_signal_payload(output),
+    }));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SignalTextMode {
+    Off,
+    Snippet,
+    Full,
+}
+
+fn signal_text_mode() -> SignalTextMode {
+    let raw = std::env::var("FLOW_RL_SIGNAL_TEXT")
+        .unwrap_or_else(|_| "snippet".to_string())
+        .to_ascii_lowercase();
+    match raw.as_str() {
+        "0" | "off" | "none" | "false" => SignalTextMode::Off,
+        "full" | "all" => SignalTextMode::Full,
+        _ => SignalTextMode::Snippet,
+    }
+}
+
+fn signal_text_max_chars() -> usize {
+    std::env::var("FLOW_RL_SIGNAL_MAX_CHARS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(4000)
+        .clamp(256, 100_000)
+}
+
+fn text_signal_payload(text: &str) -> Value {
+    let trimmed = text.trim();
+    let chars = trimmed.chars().count();
+    let max_chars = signal_text_max_chars();
+    match signal_text_mode() {
+        SignalTextMode::Off => json!({
+            "chars": chars,
+            "captured": false,
+        }),
+        SignalTextMode::Snippet => {
+            let snippet: String = trimmed.chars().take(max_chars).collect();
+            json!({
+                "chars": chars,
+                "captured": true,
+                "truncated": chars > max_chars,
+                "text": snippet,
+            })
+        }
+        SignalTextMode::Full => json!({
+            "chars": chars,
+            "captured": true,
+            "truncated": false,
+            "text": trimmed,
+        }),
+    }
 }
 
 fn extract_output_text(data: &Value) -> Option<String> {
@@ -938,11 +1122,25 @@ impl SeqBridge {
                 error: Some(err.to_string()),
             },
         };
+        let elapsed = started.elapsed();
+        let duration_ms = elapsed.as_millis() as u64;
+        let end_unix_nano = start_unix_nano.saturating_add(elapsed.as_nanos() as u64);
+
+        rl_signals::emit(json!({
+            "event_type": "everruns.tool_call_result",
+            "runtime": "everruns",
+            "session_id": session_id,
+            "event_id": event_id,
+            "tool_call_id": result.tool_call_id,
+            "tool_name": call.name,
+            "seq_op": seq_op,
+            "ok": result.error.is_none(),
+            "error": result.error,
+            "error_class": result.error.as_deref().map(classify_error_text),
+            "duration_ms": duration_ms,
+        }));
 
         if let Some(exporter) = self.maple_exporter.as_ref() {
-            let elapsed = started.elapsed();
-            let duration_ms = elapsed.as_millis() as u64;
-            let end_unix_nano = start_unix_nano.saturating_add(elapsed.as_nanos() as u64);
             let span = MapleSpan::for_tool_call(
                 session_id,
                 event_id,
@@ -972,6 +1170,21 @@ impl SeqBridge {
         end_unix_nano: u64,
         extra_attributes: Vec<(String, String)>,
     ) {
+        let duration_ms = (end_unix_nano.saturating_sub(start_unix_nano)) / 1_000_000;
+        let attrs_obj = rl_signals::attrs_to_object(extra_attributes.clone());
+        rl_signals::emit(json!({
+            "event_type": "everruns.runtime_event",
+            "runtime": "everruns",
+            "session_id": session_id,
+            "event_id": event_id,
+            "stage": stage,
+            "ok": ok,
+            "error": error,
+            "error_class": error.map(classify_error_text),
+            "duration_ms": duration_ms,
+            "attrs": attrs_obj,
+        }));
+
         if let Some(exporter) = self.maple_exporter.as_ref() {
             let span = MapleSpan::for_runtime_event(
                 session_id,
