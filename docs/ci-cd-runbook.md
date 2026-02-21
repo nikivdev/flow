@@ -7,6 +7,9 @@ This runbook documents how Flow CI/CD is wired today and how to debug it quickly
 - Workflows:
   - `.github/workflows/canary.yml`: runs on every push to `main`, publishes/updates the `canary` release/tag.
   - `.github/workflows/release.yml`: runs on tag pushes matching `v*`, publishes stable releases.
+- Trigger optimization:
+  - Canary `push` skips docs-only changes (`docs/**`, `**/*.md`).
+  - Use `workflow_dispatch` to force a Canary run when needed after docs-only changes.
 - Vendored deps bootstrap:
   - Both workflows run `scripts/vendor/vendor-repo.sh hydrate` immediately after checkout in each build job.
   - This materializes `lib/vendor/*` from the pinned commit in `vendor.lock.toml` before Cargo builds.
