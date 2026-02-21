@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
-lock_file="${FLOW_VENDOR_LOCK_FILE:-vendor.lock.toml}"
+lock_file="${VENDOR_LOCK_FILE_PATH:-vendor.lock.toml}"
 
 usage() {
   cat <<'USAGE'
@@ -21,7 +21,7 @@ Commands:
   push                 Push checkout HEAD to origin/<branch>
 
 Environment:
-  FLOW_VENDOR_LOCK_FILE  Override lock file path (default: vendor.lock.toml)
+  VENDOR_LOCK_FILE_PATH  Override lock file path (default: vendor.lock.toml)
 USAGE
 }
 
@@ -38,12 +38,28 @@ if [[ ! -f "$lock_file" ]]; then
   exit 1
 fi
 
+detect_lock_section() {
+  awk '
+    /^\[vendor\]$/ { print "vendor"; found_vendor = 1; exit }
+    /^\[flow_vendor\]$/ { found_legacy = 1 }
+    END {
+      if (!found_vendor && found_legacy) {
+        print "flow_vendor"
+      } else if (!found_vendor) {
+        print "vendor"
+      }
+    }
+  ' "$lock_file"
+}
+
+lock_section_name="$(detect_lock_section)"
+
 read_lock_value() {
   local key="$1"
-  awk -F'"' -v key="$key" '
+  awk -F'"' -v key="$key" -v lock_section_name="$lock_section_name" '
     /^\/\// { next }
     /^\[/ { section = $0; next }
-    section == "[flow_vendor]" && $1 ~ ("^" key " = ") { print $2; exit }
+    section == ("[" lock_section_name "]") && $1 ~ ("^" key " = ") { print $2; exit }
   ' "$lock_file"
 }
 
@@ -89,9 +105,18 @@ set_lock_value() {
   local new_value="$2"
   local tmp
   tmp="$(mktemp)"
-  awk -v key="$key" -v new_value="$new_value" '
-    BEGIN { in_vendor = 0; replaced = 0 }
-    /^\[flow_vendor\]$/ { in_vendor = 1; print; next }
+  awk -v key="$key" -v new_value="$new_value" -v lock_section_name="$lock_section_name" '
+    BEGIN {
+      in_vendor = 0
+      replaced = 0
+      saw_section = 0
+    }
+    $0 == "[" lock_section_name "]" {
+      in_vendor = 1
+      saw_section = 1
+      print
+      next
+    }
     /^\[/ {
       if (in_vendor == 1 && replaced == 0) {
         print key " = \"" new_value "\""
@@ -108,6 +133,12 @@ set_lock_value() {
     END {
       if (in_vendor == 1 && replaced == 0) {
         print key " = \"" new_value "\""
+        replaced = 1
+      }
+      if (saw_section == 0) {
+        print ""
+        print "[" lock_section_name "]"
+        print key " = \"" new_value "\""
       }
     }
   ' "$lock_file" >"$tmp"
@@ -121,7 +152,7 @@ ensure_checkout() {
   checkout="$(read_lock_value checkout)"
 
   if [[ -z "$repo_url" || -z "$branch" || -z "$checkout" ]]; then
-    echo "error: lock file missing repo/branch/checkout in [flow_vendor]"
+    echo "error: lock file missing repo/branch/checkout in [${lock_section_name}]"
     exit 1
   fi
 
@@ -182,22 +213,22 @@ ensure_repo_layout() {
 
   if [[ ! -f "$checkout/readme.md" ]]; then
     cat > "$checkout/readme.md" <<'README'
-# flow-vendor
+# vendor-repo
 
-Canonical vendored dependency source for `nikivdev/flow`.
+Canonical vendored dependency source for this project.
 
-- `crates/<crate>/`: vendored source trees used by Flow.
+- `crates/<crate>/`: vendored source trees used by the project.
 - `manifests/<crate>.toml`: upstream/version metadata per crate.
-- `profiles/flow.toml`: crate list used by Flow hydration.
+- `profiles/default.toml`: crate list used by hydration.
 README
   fi
 }
 
-generate_flow_profile() {
+generate_default_profile() {
   local output_file="$1"
   {
     echo "[profile]"
-    echo "name = \"flow\""
+    echo "name = \"default\""
     echo "generated_by = \"scripts/vendor/vendor-repo.sh\""
     echo
     while IFS=$'\t' read -r name repo_path manifest_path _materialized_path; do
@@ -215,14 +246,30 @@ cmd_init() {
   local checkout
   checkout="$(ensure_checkout)"
   ensure_repo_layout "$checkout"
-  generate_flow_profile "$checkout/profiles/flow.toml"
+  generate_default_profile "$checkout/profiles/default.toml"
   echo "vendor checkout ready: $checkout"
 }
 
 cmd_create_remote() {
   local checkout slug ssh_url
   checkout="$(ensure_checkout)"
-  slug="${1:-nikivdev/flow-vendor}"
+  slug="${1:-}"
+  if [[ -z "$slug" ]]; then
+    local origin_url owner repo_name
+    origin_url="$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)"
+    if [[ "$origin_url" =~ ^git@github\.com:([^/]+)/(.+)\.git$ ]]; then
+      owner="${BASH_REMATCH[1]}"
+      repo_name="${BASH_REMATCH[2]}"
+      slug="${owner}/${repo_name}-vendor"
+    elif [[ "$origin_url" =~ ^https://github\.com/([^/]+)/(.+)\.git$ ]]; then
+      owner="${BASH_REMATCH[1]}"
+      repo_name="${BASH_REMATCH[2]}"
+      slug="${owner}/${repo_name}-vendor"
+    else
+      slug="CHANGE_ME/$(basename "$repo_root")-vendor"
+      echo "warning: could not infer GitHub slug from origin; using ${slug}" >&2
+    fi
+  fi
   ssh_url="git@github.com:${slug}.git"
 
   if ! command -v gh >/dev/null 2>&1; then
@@ -277,13 +324,13 @@ cmd_import_local() {
     fi
   done < <(list_crates)
 
-  generate_flow_profile "$checkout/profiles/flow.toml"
+  generate_default_profile "$checkout/profiles/default.toml"
 
   git -C "$checkout" add -A
   if git -C "$checkout" diff --cached --quiet; then
     echo "no changes to import into vendor repo"
   else
-    git -C "$checkout" commit -m "vendor(flow): import local materialized crates" >/dev/null
+    git -C "$checkout" commit -m "vendor: import local materialized crates" >/dev/null
     echo "committed vendor repo import"
   fi
 
