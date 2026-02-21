@@ -254,7 +254,7 @@ shortcuts = ["mcss"]
 
 [[tasks]]
 name = "install-ai-fast-client"
-command = "mkdir -p \"$HOME/.local/bin\" && cargo build --release --bin ai-taskd-client && install -m 755 ./target/release/ai-taskd-client \"$HOME/.local/bin/fai\""
+command = "mkdir -p \"$HOME/.local/bin\" && cargo build --release -p ai-taskd-client --bin ai-taskd-client && install -m 755 ./target/release/ai-taskd-client \"$HOME/.local/bin/fai\""
 description = "Install low-latency ai-taskd client as ~/.local/bin/fai"
 
 [[tasks]]

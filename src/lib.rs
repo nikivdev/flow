@@ -47,6 +47,7 @@ pub mod help_search;
 pub mod history;
 pub mod hive;
 pub mod home;
+pub mod http_client;
 pub mod hub;
 pub mod info;
 pub mod init;

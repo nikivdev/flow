@@ -3,6 +3,18 @@ name = "flowd"
 version = "0.1.1"
 edition = "2024"
 repository = "https://github.com/nikivdev/flow"
+autobins = false
+
+[workspace]
+members = [
+  ".",
+  "crates/ai_taskd_client",
+  "crates/opentui-lite",
+  "crates/seq_client",
+  "crates/seq_everruns_bridge",
+]
+default-members = ["."]
+resolver = "2"
 
 [[bin]]
 name = "f"
@@ -15,10 +27,6 @@ path = "src/main.rs"
 [[bin]]
 name = "lin"
 path = "src/bin/lin.rs"
-
-[[bin]]
-name = "ai-taskd-client"
-path = "src/bin/ai_taskd_client.rs"
 
 [dependencies]
 axum = "0.8"

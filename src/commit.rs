@@ -8,6 +8,7 @@ use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -394,6 +395,16 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
     ),
 ];
 
+fn compiled_secret_patterns() -> &'static Vec<(&'static str, Regex)> {
+    static COMPILED: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
+    COMPILED.get_or_init(|| {
+        SECRET_PATTERNS
+            .iter()
+            .filter_map(|(name, pattern)| Regex::new(pattern).ok().map(|re| (*name, re)))
+            .collect()
+    })
+}
+
 const SECRET_SCAN_IGNORE_MARKERS: &[&str] = &[
     "flow:secret:ignore",
     "flow-secret-ignore",
@@ -525,11 +536,7 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
     let mut current_line: usize = 0;
     let mut ignore_next_added_line = false;
 
-    // Compile regexes
-    let patterns: Vec<(&str, regex::Regex)> = SECRET_PATTERNS
-        .iter()
-        .filter_map(|(name, pattern)| regex::Regex::new(pattern).ok().map(|re| (*name, re)))
-        .collect();
+    let patterns = compiled_secret_patterns();
 
     for line in diff.lines() {
         // Track current file
@@ -581,7 +588,7 @@ fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String
                 continue;
             }
 
-            for (name, re) in &patterns {
+            for (name, re) in patterns {
                 if let Some(m) = re.find(content) {
                     let matched = m.as_str();
                     let matched_lower = matched.to_lowercase();
