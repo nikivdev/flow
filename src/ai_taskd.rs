@@ -382,39 +382,32 @@ fn artifact_ttl() -> Duration {
     Duration::from_millis(ms)
 }
 
-fn get_discovered_tasks(
-    state: &mut TaskdState,
-    project_root: &Path,
-) -> Result<(Vec<ai_tasks::DiscoveredAiTask>, bool)> {
-    let key = project_root
+fn discovery_key(project_root: &Path) -> PathBuf {
+    project_root
         .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
-    if let Some(entry) = state.discoveries.get(&key)
-        && entry.refreshed_at.elapsed() <= discovery_ttl()
-    {
-        return Ok((entry.tasks.clone(), true));
-    }
-
-    let tasks = refresh_discovery(state, &key)?;
-    Ok((tasks, false))
+        .unwrap_or_else(|_| project_root.to_path_buf())
 }
 
-fn refresh_discovery(
-    state: &mut TaskdState,
-    project_root: &Path,
-) -> Result<Vec<ai_tasks::DiscoveredAiTask>> {
-    let key = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
-    let tasks = ai_tasks::discover_tasks(&key)?;
+fn ensure_discovery_fresh(state: &mut TaskdState, key: &Path) -> Result<bool> {
+    if let Some(entry) = state.discoveries.get(key)
+        && entry.refreshed_at.elapsed() <= discovery_ttl()
+    {
+        return Ok(true);
+    }
+    refresh_discovery(state, key)?;
+    Ok(false)
+}
+
+fn refresh_discovery(state: &mut TaskdState, key: &Path) -> Result<()> {
+    let tasks = ai_tasks::discover_tasks(key)?;
     state.discoveries.insert(
-        key,
+        key.to_path_buf(),
         CachedDiscovery {
-            tasks: tasks.clone(),
+            tasks,
             refreshed_at: Instant::now(),
         },
     );
-    Ok(tasks)
+    Ok(())
 }
 
 fn run_request(
@@ -433,12 +426,23 @@ fn run_request(
     let mut selected = ai_tasks::resolve_task_fast(project_root, selector)?;
     if selected.is_none() {
         used_fast_selector = false;
-        let (tasks, from_cache) = get_discovered_tasks(state, project_root)?;
-        selected = ai_tasks::select_task(&tasks, selector)?.cloned();
+        let key = discovery_key(project_root);
+        let from_cache = ensure_discovery_fresh(state, &key)?;
+        let tasks = state
+            .discoveries
+            .get(&key)
+            .map(|entry| entry.tasks.as_slice())
+            .unwrap_or(&[]);
+        selected = ai_tasks::select_task(tasks, selector)?.cloned();
         if selected.is_none() && from_cache {
             // If cache was stale, refresh once and retry task selection.
-            let fresh = refresh_discovery(state, project_root)?;
-            selected = ai_tasks::select_task(&fresh, selector)?.cloned();
+            refresh_discovery(state, &key)?;
+            let fresh = state
+                .discoveries
+                .get(&key)
+                .map(|entry| entry.tasks.as_slice())
+                .unwrap_or(&[]);
+            selected = ai_tasks::select_task(fresh, selector)?.cloned();
         }
     }
     let task = selected.with_context(|| format!("AI task '{}' not found", selector))?;
