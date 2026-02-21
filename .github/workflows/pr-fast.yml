@@ -1,0 +1,57 @@
+name: PR Fast Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-fast-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache vendored deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vendor/flow-vendor
+            lib/vendor
+            lib/vendor-manifest
+          key: ${{ runner.os }}-${{ runner.arch }}-vendor-${{ hashFiles('vendor.lock.toml') }}
+
+      - name: Hydrate vendored deps
+        run: scripts/vendor/vendor-repo.sh hydrate
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-on-failure: true
+
+      - name: Check flowd
+        run: cargo check -p flowd
+
+      - name: Check flowd SIMD feature lane
+        run: cargo check -p flowd --features linux-host-simd-json
+
+      - name: Check seq bridge
+        run: cargo check -p seq_everruns_bridge
