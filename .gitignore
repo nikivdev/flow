@@ -21,6 +21,11 @@
 .flox/
 .flow/
 .flow_diff_review.tmp
+.vendor/
+lib/vendor/
+lib/vendor-history/
+!lib/vendor-manifest/
+!lib/vendor-manifest/**
 
 # core
 .DS_Store

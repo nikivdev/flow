@@ -1,0 +1,17 @@
+[flow_vendor]
+repo = "git@github.com:nikivdev/flow-vendor.git"
+branch = "main"
+checkout = ".vendor/flow-vendor"
+commit = "9d75fb5a114e33676e9dda9f2347fecc6ca2dc55"
+
+[[crate]]
+name = "axum"
+repo_path = "crates/axum"
+manifest_path = "manifests/axum.toml"
+materialized_path = "lib/vendor/axum"
+
+[[crate]]
+name = "reqwest"
+repo_path = "crates/reqwest"
+manifest_path = "manifests/reqwest.toml"
+materialized_path = "lib/vendor/reqwest"

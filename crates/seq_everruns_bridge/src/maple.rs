@@ -1,3 +1,4 @@
+use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
@@ -232,7 +233,7 @@ struct MapleExporterStatsAtomic {
 struct WorkerTarget {
     traces_endpoint: String,
     ingest_key: String,
-    agent: ureq::Agent,
+    client: Client,
 }
 
 pub struct MapleTraceExporter {
@@ -285,11 +286,11 @@ fn worker_main(
         .map(|target| WorkerTarget {
             traces_endpoint: target.traces_endpoint.clone(),
             ingest_key: target.ingest_key.clone(),
-            agent: ureq::AgentBuilder::new()
-                .timeout_connect(config.connect_timeout)
-                .timeout_read(config.request_timeout)
-                .timeout_write(config.request_timeout)
-                .build(),
+            client: Client::builder()
+                .connect_timeout(config.connect_timeout)
+                .timeout(config.request_timeout)
+                .build()
+                .expect("failed to build maple exporter HTTP client"),
         })
         .collect();
 
@@ -350,14 +351,15 @@ fn flush_batch(
     let body = payload.to_string();
     for target in worker_targets {
         let sent = target
-            .agent
+            .client
             .post(&target.traces_endpoint)
-            .set("content-type", "application/json")
-            .set("x-maple-ingest-key", &target.ingest_key)
-            .send_string(&body);
+            .header("content-type", "application/json")
+            .header("x-maple-ingest-key", &target.ingest_key)
+            .body(body.clone())
+            .send();
 
         match sent {
-            Ok(resp) if (200..300).contains(&resp.status()) => {
+            Ok(resp) if resp.status().is_success() => {
                 stats.sent.fetch_add(spans.len() as u64, Ordering::Relaxed);
             }
             Ok(_) | Err(_) => {

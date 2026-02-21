@@ -30,7 +30,7 @@ name = "lin"
 path = "src/bin/lin.rs"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 tower-http = { version = "0.6", features = ["cors"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -90,3 +90,7 @@ tempfile = "3"
 [features]
 default = []
 linux-host-simd-json = ["dep:simd-json"]
+
+[patch.crates-io]
+axum = { path = "lib/vendor/axum" }
+reqwest = { path = "lib/vendor/reqwest" }
