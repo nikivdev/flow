@@ -16,6 +16,7 @@ This runbook documents how Flow CI/CD is wired today and how to debug it quickly
 - Build jobs in both workflows:
   - Matrix build: macOS + Linux targets.
   - SIMD build: `build-linux-host-simd` (Linux x64 with `--features linux-host-simd-json`).
+  - CI builds `--bin f` only (release artifacts package `f`; avoids duplicate `flow` alias build cost).
 - Release jobs:
   - Gather all build artifacts.
   - Publish release assets (and in Canary, force-move `canary` tag to current `main` commit).
