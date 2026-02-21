@@ -762,6 +762,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "flow_commit_scan"
+version = "0.1.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "flowd"
 version = "0.1.1"
 dependencies = [
@@ -778,6 +785,7 @@ dependencies = [
  "ctrlc",
  "data-encoding",
  "dirs",
+ "flow_commit_scan",
  "futures",
  "hex",
  "hmac",

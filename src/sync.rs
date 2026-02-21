@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
+use std::{cell::RefCell, collections::HashMap};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -282,6 +283,8 @@ fn check_review_todo_push_gate(
 
 /// Run the sync command.
 pub fn run(cmd: SyncCommand) -> Result<()> {
+    let _git_capture_cache_scope = GitCaptureCacheScope::begin();
+
     // Check we're in a git repo
     if git_capture(&["rev-parse", "--git-dir"]).is_err() {
         bail!("Not a git repository");
@@ -839,6 +842,8 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
 
 /// Switch to a branch and align upstream/jj state for flow workflows.
 pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
+    let _git_capture_cache_scope = GitCaptureCacheScope::begin();
+
     if git_capture(&["rev-parse", "--git-dir"]).is_err() {
         bail!("Not a git repository");
     }
@@ -1115,6 +1120,8 @@ fn resolve_pr_head_branch(repo_root: &Path, number: &str, repo: Option<&str>) ->
 
 /// Checkout a GitHub PR safely while preserving local changes.
 pub fn run_checkout(cmd: CheckoutCommand) -> Result<()> {
+    let _git_capture_cache_scope = GitCaptureCacheScope::begin();
+
     if git_capture(&["rev-parse", "--git-dir"]).is_err() {
         bail!("Not a git repository");
     }
@@ -3262,8 +3269,87 @@ fn normalize_git_url(url: &str) -> String {
     url.trim_end_matches(".git").to_lowercase()
 }
 
+#[derive(Default)]
+struct GitCaptureCacheState {
+    depth: usize,
+    entries: HashMap<String, String>,
+}
+
+thread_local! {
+    static GIT_CAPTURE_CACHE: RefCell<GitCaptureCacheState> = RefCell::new(GitCaptureCacheState::default());
+}
+
+struct GitCaptureCacheScope;
+
+impl GitCaptureCacheScope {
+    fn begin() -> Self {
+        GIT_CAPTURE_CACHE.with(|state| {
+            let mut state = state.borrow_mut();
+            if state.depth == 0 {
+                state.entries.clear();
+            }
+            state.depth += 1;
+        });
+        Self
+    }
+}
+
+impl Drop for GitCaptureCacheScope {
+    fn drop(&mut self) {
+        GIT_CAPTURE_CACHE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.depth = state.depth.saturating_sub(1);
+            if state.depth == 0 {
+                state.entries.clear();
+            }
+        });
+    }
+}
+
+fn git_capture_cacheable(args: &[&str]) -> bool {
+    args == ["rev-parse", "--show-toplevel"]
+        || args == ["rev-parse", "--git-dir"]
+        || (args.len() == 3 && args[0] == "remote" && args[1] == "get-url")
+}
+
+fn git_capture_cache_key(repo_root: Option<&Path>, args: &[&str]) -> Option<String> {
+    if !git_capture_cacheable(args) {
+        return None;
+    }
+
+    let cwd = repo_root
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(format!("{cwd}|{}", args.join("\x1f")))
+}
+
+fn git_capture_cached_lookup(key: &str) -> Option<String> {
+    GIT_CAPTURE_CACHE.with(|state| {
+        let state = state.borrow();
+        if state.depth == 0 {
+            return None;
+        }
+        state.entries.get(key).cloned()
+    })
+}
+
+fn git_capture_cached_store(key: String, value: String) {
+    GIT_CAPTURE_CACHE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.depth > 0 {
+            state.entries.insert(key, value);
+        }
+    });
+}
+
 /// Run a git command and capture stdout.
 fn git_capture(args: &[&str]) -> Result<String> {
+    if let Some(key) = git_capture_cache_key(None, args) {
+        if let Some(cached) = git_capture_cached_lookup(&key) {
+            return Ok(cached);
+        }
+    }
+
     let output = Command::new("git")
         .args(args)
         .output()
@@ -3274,11 +3360,21 @@ fn git_capture(args: &[&str]) -> Result<String> {
         bail!("git {} failed: {}", args.join(" "), stderr.trim());
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let out = String::from_utf8_lossy(&output.stdout).to_string();
+    if let Some(key) = git_capture_cache_key(None, args) {
+        git_capture_cached_store(key, out.clone());
+    }
+    Ok(out)
 }
 
 /// Run a git command in a specific repository and capture stdout.
 fn git_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+    if let Some(key) = git_capture_cache_key(Some(repo_root), args) {
+        if let Some(cached) = git_capture_cached_lookup(&key) {
+            return Ok(cached);
+        }
+    }
+
     let output = Command::new("git")
         .current_dir(repo_root)
         .args(args)
@@ -3290,7 +3386,11 @@ fn git_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
         bail!("git {} failed: {}", args.join(" "), stderr.trim());
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let out = String::from_utf8_lossy(&output.stdout).to_string();
+    if let Some(key) = git_capture_cache_key(Some(repo_root), args) {
+        git_capture_cached_store(key, out.clone());
+    }
+    Ok(out)
 }
 
 /// Run a git command with inherited stdio.

@@ -12,9 +12,9 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::debug;
@@ -3483,9 +3483,7 @@ chapters: array of 3-8 items, each with title (3-8 words) and summary (1-2 sente
         truncate_for_summary(context)
     );
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
+    let client = crate::http_client::blocking_with_timeout(Duration::from_secs(30))
         .context("failed to create HTTP client")?;
 
     let url = format!(
@@ -3561,9 +3559,7 @@ Keep it brief (<= 12 lines). No preamble.\n\
         truncate_for_handoff(context)
     );
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
+    let client = crate::http_client::blocking_with_timeout(Duration::from_secs(30))
         .context("failed to create HTTP client")?;
 
     let url = format!(

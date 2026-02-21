@@ -1,5 +1,6 @@
 //! AI-powered git commit command using OpenAI.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::env;
 use std::fs;
@@ -8,11 +9,11 @@ use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
+use flow_commit_scan::scan_diff_for_secrets;
 use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
@@ -313,335 +314,6 @@ fn warn_sensitive_files(files: &[String]) -> Result<()> {
     println!();
 
     bail!("Refusing to commit sensitive files. Set FLOW_ALLOW_SENSITIVE_COMMIT=1 to override.")
-}
-
-/// Common secret patterns to detect in diff content.
-/// Each tuple is (pattern_name, regex_pattern).
-const SECRET_PATTERNS: &[(&str, &str)] = &[
-    // API Keys with known prefixes
-    ("AWS Access Key", r"AKIA[0-9A-Z]{16}"),
-    (
-        "AWS Secret Key",
-        r#"(?i)aws.{0,20}secret.{0,20}['"][0-9a-zA-Z/+]{40}['"]"#,
-    ),
-    ("GitHub Token", r"ghp_[0-9a-zA-Z]{36}"),
-    ("GitHub OAuth", r"gho_[0-9a-zA-Z]{36}"),
-    ("GitHub App Token", r"ghu_[0-9a-zA-Z]{36}"),
-    ("GitHub Refresh Token", r"ghr_[0-9a-zA-Z]{36}"),
-    ("GitLab Token", r"glpat-[0-9a-zA-Z\-_]{20,}"),
-    ("Slack Token", r"xox[baprs]-[0-9a-zA-Z]{10,48}"),
-    (
-        "Slack Webhook",
-        r"https://hooks\.slack\.com/services/T[0-9A-Z]{8,}/B[0-9A-Z]{8,}/[0-9a-zA-Z]{24}",
-    ),
-    (
-        "Discord Webhook",
-        r"https://discord(?:app)?\.com/api/webhooks/[0-9]{17,}/[0-9a-zA-Z_-]{60,}",
-    ),
-    ("Stripe Key", r"sk_live_[0-9a-zA-Z]{24,}"),
-    ("Stripe Restricted", r"rk_live_[0-9a-zA-Z]{24,}"),
-    // OpenAI keys - multiple formats (legacy, project, service account)
-    ("OpenAI Key (Legacy)", r"sk-[a-zA-Z0-9]{32,}"),
-    ("OpenAI Key (Project)", r"sk-proj-[a-zA-Z0-9\-_]{20,}"),
-    ("OpenAI Key (Service)", r"sk-svcacct-[a-zA-Z0-9\-_]{20,}"),
-    ("Anthropic Key", r"sk-ant-[0-9a-zA-Z\-_]{90,}"),
-    ("Google API Key", r"AIza[0-9A-Za-z\-_]{35}"),
-    ("Groq API Key", r"gsk_[0-9a-zA-Z]{50,}"),
-    (
-        "Mistral API Key",
-        r#"(?i)mistral.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{32,}["']"#,
-    ),
-    (
-        "Cohere API Key",
-        r#"(?i)cohere.{0,10}(api[_-]?key|key).{0,5}[=:].{0,5}["'][0-9a-zA-Z]{40,}["']"#,
-    ),
-    (
-        "Heroku API Key",
-        r"(?i)heroku.{0,20}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    ),
-    ("NPM Token", r"npm_[0-9a-zA-Z]{36}"),
-    ("PyPI Token", r"pypi-[0-9a-zA-Z_-]{50,}"),
-    ("Telegram Bot Token", r"[0-9]{8,10}:[0-9A-Za-z_-]{35}"),
-    ("Twilio Key", r"SK[0-9a-fA-F]{32}"),
-    ("SendGrid Key", r"SG\.[0-9a-zA-Z_-]{22}\.[0-9a-zA-Z_-]{43}"),
-    ("Mailgun Key", r"key-[0-9a-zA-Z]{32}"),
-    (
-        "Private Key",
-        r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
-    ),
-    (
-        "Supabase Key",
-        r"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[0-9a-zA-Z_-]{50,}",
-    ),
-    (
-        "Firebase Key",
-        r#"(?i)firebase.{0,20}["'][A-Za-z0-9_-]{30,}["']"#,
-    ),
-    // Generic patterns (higher false positive risk, but catch common mistakes)
-    (
-        "Generic API Key Assignment",
-        r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*['"][0-9a-zA-Z\-_]{20,}['"]"#,
-    ),
-    (
-        "Generic Secret Assignment",
-        r#"(?i)(secret|password|passwd|pwd)\s*[:=]\s*['"][^'"]{8,}['"]"#,
-    ),
-    ("Bearer Token", r"(?i)bearer\s+[0-9a-zA-Z\-_.]{20,}"),
-    ("Basic Auth", r"(?i)basic\s+[A-Za-z0-9+/=]{20,}"),
-    // High-entropy strings that look like secrets (env var assignments)
-    (
-        "Env Var Secret",
-        r#"(?i)(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[_A-Z]*\s*=\s*['"]?[0-9a-zA-Z\-_/+=]{32,}['"]?"#,
-    ),
-];
-
-fn compiled_secret_patterns() -> &'static Vec<(&'static str, Regex)> {
-    static COMPILED: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
-    COMPILED.get_or_init(|| {
-        SECRET_PATTERNS
-            .iter()
-            .filter_map(|(name, pattern)| Regex::new(pattern).ok().map(|re| (*name, re)))
-            .collect()
-    })
-}
-
-const SECRET_SCAN_IGNORE_MARKERS: &[&str] = &[
-    "flow:secret:ignore",
-    "flow-secret-ignore",
-    "flow:secret-scan:ignore",
-    "gitleaks:allow",
-];
-
-fn should_ignore_secret_scan_line(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    SECRET_SCAN_IGNORE_MARKERS
-        .iter()
-        .any(|m| lower.contains(&m.to_lowercase()))
-}
-
-fn extract_first_quoted_value(s: &str) -> Option<&str> {
-    let (qpos, qch) = s.char_indices().find(|(_, c)| *c == '"' || *c == '\'')?;
-    let end = s.rfind(qch)?;
-    if end <= qpos {
-        return None;
-    }
-    Some(&s[qpos + 1..end])
-}
-
-fn looks_like_identifier_reference(value: &str) -> bool {
-    let v = value.trim();
-    // Common false positive: secret *names* (env var identifiers), not secret *values*.
-    // Require underscore to avoid skipping high-entropy base32-ish strings.
-    !v.is_empty()
-        && v.len() >= 8
-        && v.contains('_')
-        && v.chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == '.')
-}
-
-fn looks_like_secret_lookup(value: &str) -> bool {
-    let v = value.trim();
-
-    if v.starts_with("${") && v.ends_with('}') {
-        // ${VAR} is dynamic (not hardcoded). Defaults like ${VAR:-literal} are not treated as safe.
-        let inner = &v[2..v.len() - 1];
-        return !inner.contains(":-")
-            && !inner.contains("-")
-            && inner
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-    }
-
-    if !(v.starts_with("$(") && v.ends_with(')')) {
-        return false;
-    }
-    let inner = v[2..v.len() - 1].trim();
-    // If the substitution contains quotes, assume it might embed a hardcoded secret.
-    if inner.contains('"') || inner.contains('\'') || inner.contains('`') {
-        return false;
-    }
-    let inner_lc = inner.to_lowercase();
-    // Allowlist common secret lookups (dynamic, not hardcoded).
-    inner_lc.starts_with("get_env ")
-        || inner_lc.starts_with("getenv ")
-        || inner_lc.starts_with("printenv ")
-        || inner_lc.starts_with("op read ")
-        || inner_lc.starts_with("pass show ")
-        || inner_lc.starts_with("security find-generic-password")
-        || inner_lc.starts_with("aws ssm get-parameter")
-        || inner_lc.starts_with("vault kv get")
-        || inner_lc.starts_with("bw get")
-        || inner_lc.starts_with("gcloud secrets versions access")
-}
-
-fn generic_secret_assignment_is_false_positive(content: &str, matched: &str) -> bool {
-    // Only apply these heuristics to the broad "Generic Secret Assignment" rule.
-    // If the value is an identifier or a dynamic lookup, it's not a hardcoded secret.
-    if let Some((_, rhs)) = matched.split_once('=') {
-        let rhs = rhs.trim_start();
-        // e.g. SECRET="$(printf "%s" "$output" | ...)" is dynamic; the literal match happens because
-        // the regex stops at the first inner quote. This should not block commits.
-        if rhs.starts_with("\"$(") || rhs.starts_with("'$(") || rhs.starts_with("`") {
-            return true;
-        }
-        // Dynamic references like "$VAR" or "${VAR}" are not hardcoded secrets.
-        if rhs.starts_with("\"$") || rhs.starts_with("'$") {
-            return true;
-        }
-    } else if let Some((_, rhs)) = matched.split_once(':') {
-        let rhs = rhs.trim_start();
-        if rhs.starts_with("\"$(") || rhs.starts_with("'$(") || rhs.starts_with("`") {
-            return true;
-        }
-        if rhs.starts_with("\"$") || rhs.starts_with("'$") {
-            return true;
-        }
-    }
-
-    if let Some(val) = extract_first_quoted_value(matched) {
-        let v = val.trim();
-        if looks_like_identifier_reference(v) {
-            return true;
-        }
-        if looks_like_secret_lookup(v) {
-            return true;
-        }
-    }
-
-    // If the whole line is clearly a dynamic lookup, treat as non-hardcoded.
-    // This catches cases where the regex match boundaries don't capture the full value cleanly.
-    let lc = content.to_lowercase();
-    lc.contains("$(get_env ")
-}
-
-/// Scan staged diff content for hardcoded secrets.
-/// Returns list of (file, line_num, pattern_name, matched_text) for detected secrets.
-fn scan_diff_for_secrets(repo_root: &Path) -> Vec<(String, usize, String, String)> {
-    let output = Command::new("git")
-        .args(["diff", "--cached", "-U0"])
-        .current_dir(repo_root)
-        .output();
-
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-
-    if !output.status.success() {
-        return Vec::new();
-    }
-
-    let diff = String::from_utf8_lossy(&output.stdout);
-    let mut findings: Vec<(String, usize, String, String)> = Vec::new();
-    let mut current_file = String::new();
-    let mut current_line: usize = 0;
-    let mut ignore_next_added_line = false;
-
-    let patterns = compiled_secret_patterns();
-
-    for line in diff.lines() {
-        // Track current file
-        if line.starts_with("+++ b/") {
-            current_file = line.strip_prefix("+++ b/").unwrap_or("").to_string();
-            ignore_next_added_line = false;
-            continue;
-        }
-
-        // Track line numbers from hunk headers: @@ -old,count +new,count @@
-        if line.starts_with("@@") {
-            if let Some(plus_pos) = line.find('+') {
-                let after_plus = &line[plus_pos + 1..];
-                let num_str: String = after_plus
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                current_line = num_str.parse().unwrap_or(0);
-            }
-            ignore_next_added_line = false;
-            continue;
-        }
-
-        // Only scan added lines (start with +, but not +++)
-        if line.starts_with('+') && !line.starts_with("+++") {
-            let content = &line[1..]; // Remove leading +
-
-            if ignore_next_added_line {
-                ignore_next_added_line = false;
-                current_line += 1;
-                continue;
-            }
-            // If a comment line contains the ignore marker, treat it as applying to the next line.
-            // This matches common tooling conventions and makes auto-fix more reliable.
-            let trimmed = content.trim_start();
-            if trimmed.starts_with('#') && should_ignore_secret_scan_line(trimmed) {
-                ignore_next_added_line = true;
-                current_line += 1;
-                continue;
-            }
-            if should_ignore_secret_scan_line(content) {
-                // One-line escape hatch. Prefer `# flow:secret:ignore` inline on the line being flagged.
-                current_line += 1;
-                continue;
-            }
-            if content.to_lowercase().contains("flow:secret:ignore-next") {
-                ignore_next_added_line = true;
-                current_line += 1;
-                continue;
-            }
-
-            for (name, re) in patterns {
-                if let Some(m) = re.find(content) {
-                    let matched = m.as_str();
-                    let matched_lower = matched.to_lowercase();
-
-                    // Skip only if the matched secret VALUE itself looks like a placeholder
-                    // Don't skip based on surrounding context - real secrets can be on lines with comments
-                    if matched_lower.contains("xxx")
-                        || matched_lower.contains("your")
-                        || matched_lower.contains("example")
-                        || matched_lower.contains("placeholder")
-                        || matched_lower.contains("replace")
-                        || matched_lower.contains("insert")
-                        || matched_lower.contains("todo")
-                        || matched_lower.contains("fixme")
-                        || matched == "sk-..."
-                        || matched == "sk-xxxx"
-                        || matched
-                            .chars()
-                            .all(|c| c == 'x' || c == 'X' || c == '.' || c == '-' || c == '_')
-                    {
-                        continue;
-                    }
-
-                    if *name == "Generic Secret Assignment"
-                        && generic_secret_assignment_is_false_positive(content, matched)
-                    {
-                        continue;
-                    }
-
-                    // Redact the middle of the matched secret for display
-                    let redacted = if matched.len() > 12 {
-                        format!("{}...{}", &matched[..6], &matched[matched.len() - 4..])
-                    } else {
-                        matched.to_string()
-                    };
-                    findings.push((
-                        current_file.clone(),
-                        current_line,
-                        name.to_string(),
-                        redacted,
-                    ));
-                    break; // One finding per line is enough
-                }
-            }
-            current_line += 1;
-        } else if !line.starts_with('-') && !line.starts_with("\\") {
-            // Context line (no prefix) - still increment line counter
-            current_line += 1;
-            ignore_next_added_line = false;
-        }
-    }
-
-    findings
 }
 
 /// Warn about secrets found in diff and optionally abort.
@@ -2196,6 +1868,8 @@ pub fn run(
     include_unhash: bool,
     stage_paths: &[String],
 ) -> Result<()> {
+    let _git_capture_cache_scope = GitCaptureCacheScope::begin();
+
     // Check if hub is running - if so, delegate
     if hub::hub_healthy(HUB_HOST, HUB_PORT) {
         ensure_git_repo()?;
@@ -2359,6 +2033,8 @@ pub fn run_sync(
     include_unhash: bool,
     stage_paths: &[String],
 ) -> Result<()> {
+    let _git_capture_cache_scope = GitCaptureCacheScope::begin();
+
     let queue_enabled = queue.enabled;
     let push = push && !queue_enabled;
     info!(
@@ -2837,6 +2513,8 @@ pub fn run_with_check(
     stage_paths: &[String],
     gate_overrides: CommitGateOverrides,
 ) -> Result<()> {
+    let _git_capture_cache_scope = GitCaptureCacheScope::begin();
+
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
         ensure_git_repo()?;
         let repo_root = git_root_or_cwd();
@@ -2896,6 +2574,8 @@ pub fn run_with_check_with_gitedit(
     stage_paths: &[String],
     gate_overrides: CommitGateOverrides,
 ) -> Result<()> {
+    let _git_capture_cache_scope = GitCaptureCacheScope::begin();
+
     let force_gitedit = gitedit_globally_enabled();
     if commit_with_check_async_enabled() && hub::hub_healthy(HUB_HOST, HUB_PORT) {
         ensure_git_repo()?;
@@ -4267,6 +3947,8 @@ pub fn run_with_check_sync(
     stage_paths: &[String],
     gate_overrides: CommitGateOverrides,
 ) -> Result<()> {
+    let _git_capture_cache_scope = GitCaptureCacheScope::begin();
+
     let push_requested = push;
     let mut queue_enabled = queue.enabled;
     let prefer_codex_over_openrouter =
@@ -5806,10 +5488,10 @@ fn run_remote_claude_review(
         review_instructions: review_instructions.map(|v| v.to_string()),
     };
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(commit_with_check_timeout_secs()))
-        .build()
-        .context("failed to create HTTP client for remote review")?;
+    let client = crate::http_client::blocking_with_timeout(Duration::from_secs(
+        commit_with_check_timeout_secs(),
+    ))
+    .context("failed to create HTTP client for remote review")?;
 
     let mut request = client.post(&review_url).json(&payload);
     if let Some(token) = commit_with_check_review_token() {
@@ -6817,9 +6499,7 @@ fn run_rise_review(
         prompt.push_str(&format!("\n\nContext:\n{}", context));
     }
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(120))
         .context("failed to create HTTP client")?;
 
     let body = ChatRequest {
@@ -11474,7 +11154,86 @@ fn git_try_in(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct GitCaptureCacheState {
+    depth: usize,
+    entries: HashMap<String, String>,
+}
+
+thread_local! {
+    static GIT_CAPTURE_CACHE: RefCell<GitCaptureCacheState> = RefCell::new(GitCaptureCacheState::default());
+}
+
+struct GitCaptureCacheScope;
+
+impl GitCaptureCacheScope {
+    fn begin() -> Self {
+        GIT_CAPTURE_CACHE.with(|state| {
+            let mut state = state.borrow_mut();
+            if state.depth == 0 {
+                state.entries.clear();
+            }
+            state.depth += 1;
+        });
+        Self
+    }
+}
+
+impl Drop for GitCaptureCacheScope {
+    fn drop(&mut self) {
+        GIT_CAPTURE_CACHE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.depth = state.depth.saturating_sub(1);
+            if state.depth == 0 {
+                state.entries.clear();
+            }
+        });
+    }
+}
+
+fn git_capture_cacheable(args: &[&str]) -> bool {
+    args == ["rev-parse", "--show-toplevel"]
+        || args == ["rev-parse", "--git-dir"]
+        || (args.len() == 3 && args[0] == "remote" && args[1] == "get-url")
+}
+
+fn git_capture_cache_key(workdir: Option<&std::path::Path>, args: &[&str]) -> Option<String> {
+    if !git_capture_cacheable(args) {
+        return None;
+    }
+
+    let cwd = workdir
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(format!("{cwd}|{}", args.join("\x1f")))
+}
+
+fn git_capture_cached_lookup(key: &str) -> Option<String> {
+    GIT_CAPTURE_CACHE.with(|state| {
+        let state = state.borrow();
+        if state.depth == 0 {
+            return None;
+        }
+        state.entries.get(key).cloned()
+    })
+}
+
+fn git_capture_cached_store(key: String, value: String) {
+    GIT_CAPTURE_CACHE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.depth > 0 {
+            state.entries.insert(key, value);
+        }
+    });
+}
+
 fn git_capture(args: &[&str]) -> Result<String> {
+    if let Some(key) = git_capture_cache_key(None, args) {
+        if let Some(cached) = git_capture_cached_lookup(&key) {
+            return Ok(cached);
+        }
+    }
+
     let output = Command::new("git")
         .args(args)
         .output()
@@ -11484,10 +11243,20 @@ fn git_capture(args: &[&str]) -> Result<String> {
         bail!("git {} failed", args.join(" "));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let out = String::from_utf8_lossy(&output.stdout).to_string();
+    if let Some(key) = git_capture_cache_key(None, args) {
+        git_capture_cached_store(key, out.clone());
+    }
+    Ok(out)
 }
 
 fn git_capture_in(workdir: &std::path::Path, args: &[&str]) -> Result<String> {
+    if let Some(key) = git_capture_cache_key(Some(workdir), args) {
+        if let Some(cached) = git_capture_cached_lookup(&key) {
+            return Ok(cached);
+        }
+    }
+
     let output = Command::new("git")
         .current_dir(workdir)
         .args(args)
@@ -11498,7 +11267,11 @@ fn git_capture_in(workdir: &std::path::Path, args: &[&str]) -> Result<String> {
         bail!("git {} failed", args.join(" "));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let out = String::from_utf8_lossy(&output.stdout).to_string();
+    if let Some(key) = git_capture_cache_key(Some(workdir), args) {
+        git_capture_cached_store(key, out.clone());
+    }
+    Ok(out)
 }
 
 /// Find the largest valid UTF-8 char boundary at or before `pos`.
@@ -11700,9 +11473,7 @@ fn generate_commit_message_rise(
         user_prompt.push_str(status);
     }
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(120))
         .context("failed to create HTTP client")?;
 
     let body = ChatRequest {
@@ -11818,9 +11589,7 @@ fn generate_commit_message(
         user_prompt.push_str(status);
     }
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(60))
         .context("failed to create HTTP client")?;
 
     let body = ChatRequest {
@@ -11909,10 +11678,10 @@ fn generate_commit_message_remote(
     let trimmed = api_url.trim().trim_end_matches('/');
     let url = format!("{}/api/ai/commit-message", trimmed);
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(commit_with_check_timeout_secs()))
-        .build()
-        .context("failed to create HTTP client for remote commit message")?;
+    let client = crate::http_client::blocking_with_timeout(Duration::from_secs(
+        commit_with_check_timeout_secs(),
+    ))
+    .context("failed to create HTTP client for remote commit message")?;
 
     let payload = json!({
         "diff": diff,
@@ -12646,7 +12415,7 @@ fn send_to_cloud(project_path: &std::path::Path, issues: &[String], summary: Opt
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
 
-    let client = match Client::builder().timeout(Duration::from_secs(2)).build() {
+    let client = match crate::http_client::blocking_with_timeout(Duration::from_secs(2)) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -12914,7 +12683,7 @@ fn sync_to_gitedit(
         "review": review_json,
     });
 
-    let client = match Client::builder().timeout(Duration::from_secs(10)).build() {
+    let client = match crate::http_client::blocking_with_timeout(Duration::from_secs(10)) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -13270,7 +13039,7 @@ fn sync_to_myflow(
         ],
     });
 
-    let client = match Client::builder().timeout(Duration::from_secs(10)).build() {
+    let client = match crate::http_client::blocking_with_timeout(Duration::from_secs(10)) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -14204,9 +13973,7 @@ fn delegate_to_hub(
     );
 
     let url = format!("http://{}:{}/tasks/run", HUB_HOST, HUB_PORT);
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
+    let client = crate::http_client::blocking_with_timeout(Duration::from_secs(5))
         .context("failed to create HTTP client")?;
 
     let payload = json!({
@@ -14321,9 +14088,7 @@ fn delegate_to_hub_with_check(
     );
 
     let url = format!("http://{}:{}/tasks/run", HUB_HOST, HUB_PORT);
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
+    let client = crate::http_client::blocking_with_timeout(Duration::from_secs(5))
         .context("failed to create HTTP client")?;
 
     let payload = json!({

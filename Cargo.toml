@@ -9,6 +9,7 @@ autobins = false
 members = [
   ".",
   "crates/ai_taskd_client",
+  "crates/flow_commit_scan",
   "crates/opentui-lite",
   "crates/seq_client",
   "crates/seq_everruns_bridge",
@@ -77,6 +78,7 @@ rand = "0.8"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 simd-json = { version = "0.14", optional = true }
 seq_everruns_bridge = { path = "crates/seq_everruns_bridge" }
+flow_commit_scan = { path = "crates/flow_commit_scan" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
