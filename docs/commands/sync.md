@@ -53,7 +53,7 @@ f sync -r --push
 Pulls from the tracking remote/branch (e.g. `origin/main`). If the branch has no tracking info but the push remote has a matching branch, auto-configures tracking.
 
 - With `--rebase`: runs `git pull --rebase`
-- Without: runs `git pull --no-rebase` (merge)
+- Without: runs `git pull --no-rebase --no-edit` (merge without opening an editor)
 - Auto-resolves conflicts when `--fix` is enabled
 
 ### Step 3: Sync upstream

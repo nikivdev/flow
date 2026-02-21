@@ -619,6 +619,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                         &[
                             "pull",
                             "--no-rebase",
+                            "--no-edit",
                             tracking_remote.as_str(),
                             tracking_branch.as_str(),
                         ],
