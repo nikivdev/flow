@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STD};
-use reqwest;
 
 use crate::cli::HealthOpts;
 use crate::config;
 use crate::doctor;
 use crate::env as flow_env;
+use crate::http_client;
 use crate::setup::add_gitignore_entry;
 
 pub fn run(_opts: HealthOpts) -> Result<()> {
@@ -109,9 +109,7 @@ fn ensure_ai_server() -> Result<()> {
     }
 
     let base = base_ai_url(&url);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(800))
-        .build()
+    let client = http_client::blocking_with_timeout(Duration::from_millis(800))
         .context("failed to create http client")?;
 
     let health_url = format!("{}/health", base);
@@ -280,9 +278,7 @@ fn ensure_zerg_ai_health() -> Result<()> {
         .unwrap_or_else(|| "http://127.0.0.1:7331".to_string());
 
     let base = base_ai_url(&url);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(800))
-        .build()
+    let client = http_client::blocking_with_timeout(Duration::from_millis(800))
         .context("failed to create http client")?;
 
     let health_url = format!("{}/health", base);

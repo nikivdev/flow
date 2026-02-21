@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, hash_map::DefaultHasher},
+    collections::{BTreeMap, HashMap, hash_map::DefaultHasher},
     env,
     fs::{self, File, OpenOptions},
     hash::{Hash, Hasher},
@@ -53,7 +53,7 @@ impl LogIngester {
         let project = project.to_string();
         let service = service.to_string();
         thread::spawn(move || {
-            let client = match Client::builder().timeout(Duration::from_secs(2)).build() {
+            let client = match crate::http_client::blocking_with_timeout(Duration::from_secs(2)) {
                 Ok(c) => c,
                 Err(_) => return,
             };
@@ -1938,43 +1938,23 @@ pub(crate) fn find_task<'a>(cfg: &'a Config, needle: &str) -> Option<&'a TaskCon
         return None;
     }
 
-    if let Some(task) = cfg
-        .tasks
-        .iter()
-        .find(|task| task.name.eq_ignore_ascii_case(normalized))
-    {
-        return Some(task);
+    let index = lookup_index_for(cfg);
+    let normalized = normalized.to_ascii_lowercase();
+
+    if let Some(idx) = index.by_name.get(&normalized).copied() {
+        return cfg.tasks.get(idx);
     }
 
-    if let Some(task) = cfg.tasks.iter().find(|task| {
-        task.shortcuts
-            .iter()
-            .any(|alias| alias.eq_ignore_ascii_case(normalized))
-    }) {
-        return Some(task);
+    if let Some(idx) = index.by_shortcut.get(&normalized).copied() {
+        return cfg.tasks.get(idx);
     }
 
-    resolve_by_abbreviation(&cfg.tasks, normalized)
-}
-
-fn resolve_by_abbreviation<'a>(tasks: &'a [TaskConfig], alias: &str) -> Option<&'a TaskConfig> {
-    let alias = alias.trim().to_ascii_lowercase();
-    if alias.len() < 2 {
+    if normalized.len() < 2 {
         return None;
     }
 
-    let mut matches = tasks.iter().filter(|task| {
-        generate_abbreviation(&task.name)
-            .map(|abbr| abbr == alias)
-            .unwrap_or(false)
-    });
-
-    let first = matches.next()?;
-    if matches.next().is_some() {
-        None
-    } else {
-        Some(first)
-    }
+    let maybe_idx = index.by_abbreviation.get(&normalized).copied().flatten()?;
+    cfg.tasks.get(maybe_idx)
 }
 
 fn generate_abbreviation(name: &str) -> Option<String> {
@@ -1992,6 +1972,89 @@ fn generate_abbreviation(name: &str) -> Option<String> {
     }
 
     if abbr.len() >= 2 { Some(abbr) } else { None }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TaskLookupIndex {
+    task_count: usize,
+    first_name: String,
+    last_name: String,
+    by_name: HashMap<String, usize>,
+    by_shortcut: HashMap<String, usize>,
+    by_abbreviation: HashMap<String, Option<usize>>,
+}
+
+impl TaskLookupIndex {
+    fn build(tasks: &[TaskConfig]) -> Self {
+        let mut by_name = HashMap::with_capacity(tasks.len());
+        let mut by_shortcut = HashMap::new();
+        let mut by_abbreviation = HashMap::new();
+
+        for (idx, task) in tasks.iter().enumerate() {
+            by_name.entry(task.name.to_ascii_lowercase()).or_insert(idx);
+
+            for alias in &task.shortcuts {
+                let normalized = alias.trim().to_ascii_lowercase();
+                if !normalized.is_empty() {
+                    by_shortcut.entry(normalized).or_insert(idx);
+                }
+            }
+
+            if let Some(abbr) = generate_abbreviation(&task.name) {
+                match by_abbreviation.entry(abbr) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(Some(idx));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        entry.insert(None);
+                    }
+                }
+            }
+        }
+
+        Self {
+            task_count: tasks.len(),
+            first_name: tasks.first().map(|t| t.name.clone()).unwrap_or_default(),
+            last_name: tasks.last().map(|t| t.name.clone()).unwrap_or_default(),
+            by_name,
+            by_shortcut,
+            by_abbreviation,
+        }
+    }
+
+    fn looks_like(&self, tasks: &[TaskConfig]) -> bool {
+        if self.task_count != tasks.len() {
+            return false;
+        }
+        let first = tasks.first().map(|t| t.name.as_str()).unwrap_or_default();
+        let last = tasks.last().map(|t| t.name.as_str()).unwrap_or_default();
+        self.first_name == first && self.last_name == last
+    }
+}
+
+fn task_lookup_cache() -> &'static Mutex<HashMap<usize, TaskLookupIndex>> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<usize, TaskLookupIndex>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lookup_index_for(cfg: &Config) -> TaskLookupIndex {
+    let cache_key = cfg as *const Config as usize;
+    let tasks = &cfg.tasks;
+
+    let Ok(mut cache) = task_lookup_cache().lock() else {
+        return TaskLookupIndex::build(tasks);
+    };
+
+    if let Some(existing) = cache.get(&cache_key)
+        && existing.looks_like(tasks)
+    {
+        return existing.clone();
+    }
+
+    let index = TaskLookupIndex::build(tasks);
+    cache.insert(cache_key, index.clone());
+    index
 }
 
 /// Check if command already references shell positional args ($@, $*, $1, etc.)

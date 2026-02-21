@@ -7,13 +7,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::config;
+use crate::http_client;
 
 const DEFAULT_ANALYTICS_ENDPOINT: &str = "https://api.myflow.sh/api/telemetry/flow";
 const QUEUE_FILE_NAME: &str = "usage-queue.jsonl";
@@ -628,9 +628,7 @@ fn flush_queue(endpoint: &str) -> Result<()> {
         return Ok(());
     }
 
-    let client = Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
+    let client = http_client::blocking_with_timeout(Duration::from_millis(500))
         .context("failed to build analytics HTTP client")?;
 
     let mut sent = 0usize;

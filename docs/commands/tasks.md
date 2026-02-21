@@ -22,7 +22,7 @@ f tasks daemon status
 f tasks daemon stop
 f ai-taskd-launchd-install
 f ai-taskd-launchd-status
-cargo build --release --bin ai-taskd-client
+cargo build --release -p ai-taskd-client --bin ai-taskd-client
 ./target/release/ai-taskd-client ai:flow/dev-check
 f install-ai-fast-client
 f fast ai:flow/dev-check
@@ -69,7 +69,7 @@ f ai:project/release-flow
 - Set `FLOW_AI_TASK_MODE=js` to run with JS target.
 - `f tasks daemon` runs a lightweight local `ai-taskd` over Unix socket for warm repeated runs.
 - For lowest invocation overhead, use the tiny client binary against the daemon:
-  - `cargo build --release --bin ai-taskd-client`
+- `cargo build --release -p ai-taskd-client --bin ai-taskd-client`
   - `./target/release/ai-taskd-client ai:<selector>`
   - or `f install-ai-fast-client` then use `fai ai:<selector>`
   - This bypasses full `f` startup for hot-loop calls.
