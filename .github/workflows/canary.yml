@@ -41,6 +41,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Hydrate vendored deps
+        run: scripts/vendor/vendor-repo.sh hydrate
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -102,6 +105,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Hydrate vendored deps
+        run: scripts/vendor/vendor-repo.sh hydrate
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -131,7 +137,7 @@ jobs:
           path: dist/flow-x86_64-unknown-linux-gnu-linux-host-simd.tar.gz
 
   release:
-    needs: build
+    needs: [build, build-linux-host-simd]
     timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
