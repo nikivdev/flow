@@ -174,8 +174,14 @@ ensure_repo_layout() {
   local checkout="$1"
   mkdir -p "$checkout/crates" "$checkout/manifests" "$checkout/profiles"
 
-  if [[ ! -f "$checkout/README.md" ]]; then
-    cat > "$checkout/README.md" <<'README'
+  # Enforce lowercase readme naming in vendor repo root.
+  if [[ -f "$checkout/README.md" && ! -f "$checkout/readme.md" ]]; then
+    mv "$checkout/README.md" "$checkout/readme.md"
+  fi
+  rm -f "$checkout/README.md"
+
+  if [[ ! -f "$checkout/readme.md" ]]; then
+    cat > "$checkout/readme.md" <<'README'
 # flow-vendor
 
 Canonical vendored dependency source for `nikivdev/flow`.

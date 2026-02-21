@@ -26,6 +26,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate readme casing
+        run: scripts/ci/check-readme-case.sh
+
       - name: Cache vendored deps
         uses: actions/cache@v4
         with:
@@ -55,3 +58,6 @@ jobs:
 
       - name: Check seq bridge
         run: cargo check -p seq_everruns_bridge
+
+      - name: Compile seq bridge tests
+        run: cargo test -p seq_everruns_bridge --no-run
