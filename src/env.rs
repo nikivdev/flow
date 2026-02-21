@@ -12,7 +12,6 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use reqwest::Url;
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use which::which;
 
@@ -774,9 +773,7 @@ pub fn get_personal_env_var(key: &str) -> Result<Option<String>> {
         }
     }
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(15))?;
 
     let resp = client
         .get(url)
@@ -1140,9 +1137,7 @@ pub(crate) fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
     }
 
     let api_url = get_api_url(&auth);
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
 
     let target = resolve_personal_target()?;
     let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
@@ -1182,9 +1177,7 @@ fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
     }
 
     let api_url = get_api_url(&auth);
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
     let target = resolve_env_target()?;
 
     let url = match &target {
@@ -1369,9 +1362,7 @@ fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
         environment
     );
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
 
     let url = match &target {
         EnvTarget::Personal { space } => {
@@ -2051,9 +2042,7 @@ fn list(environment: &str) -> Result<()> {
     require_env_read_unlock()?;
 
     let api_url = get_api_url(&auth);
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
 
     let url = match &target {
         EnvTarget::Personal { space } => {
@@ -2181,9 +2170,7 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
 
     let api_url = get_api_url(&auth);
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
 
     let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
     if let EnvTarget::Personal { ref space } = target {
@@ -2297,9 +2284,7 @@ fn set_project_env_var_internal(
     let api_url = get_api_url(&auth);
     let resolved_value = value.to_string();
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
 
     let url = match &target {
         EnvTarget::Personal { space } => {
@@ -2490,9 +2475,7 @@ fn fetch_env_vars(
     require_env_read_unlock()?;
 
     let api_url = get_api_url(&auth);
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
 
     let mut url = match target {
         EnvTarget::Personal { space } => {
@@ -2710,9 +2693,7 @@ fn token_create(name: Option<&str>, permissions: &str) -> Result<()> {
 
     println!("Creating service token for '{}'...", project);
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
 
     let url = format!("{}/api/env/tokens", api_url);
     let body = serde_json::json!({
@@ -2774,9 +2755,7 @@ fn token_list() -> Result<()> {
 
     let api_url = get_api_url(&auth);
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
 
     let url = format!("{}/api/env/tokens", api_url);
 
@@ -2839,9 +2818,7 @@ fn token_revoke(name: &str) -> Result<()> {
 
     println!("Revoking token '{}' for project '{}'...", name, project);
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
 
     let url = format!("{}/api/env/tokens", api_url);
     let body = serde_json::json!({
