@@ -32,6 +32,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate readme casing
+        run: scripts/ci/check-readme-case.sh
+
       - name: Cache vendored deps
         uses: actions/cache@v4
         with:
@@ -76,6 +79,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate readme casing
+        run: scripts/ci/check-readme-case.sh
 
       - name: Cache vendored deps
         uses: actions/cache@v4

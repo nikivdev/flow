@@ -16,6 +16,8 @@ This runbook documents how Flow CI/CD is wired today and how to debug it quickly
   - Both workflows run `scripts/vendor/vendor-repo.sh hydrate` immediately after checkout in each build job.
   - This materializes `lib/vendor/*` from the pinned commit in `vendor.lock.toml` before Cargo builds.
   - Build jobs cache vendor checkout/materialization (`.vendor/flow-vendor`, `lib/vendor`, `lib/vendor-manifest`) keyed by `vendor.lock.toml`.
+- Repository policy checks:
+  - CI enforces lowercase `readme.md` naming via `scripts/ci/check-readme-case.sh`.
 - Build jobs in both workflows:
   - Matrix build: macOS + Linux targets.
   - SIMD build: `build-linux-host-simd` (Linux x64 with `--features linux-host-simd-json`).
@@ -95,7 +97,7 @@ Canary flow:
 PR flow:
 
 1. Open/refresh PR to `main`.
-2. Watch `PR Fast Check`.
+2. Watch `PR Fast Check` (`cargo check` + `cargo test --no-run` shard).
 3. Merge only after fast check passes.
 
 ## Debug Playbook

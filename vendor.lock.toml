@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "9d75fb5a114e33676e9dda9f2347fecc6ca2dc55"
+commit = "6b151fffc36df796e514297421dd92eae0da229c"
 
 [[crate]]
 name = "axum"
