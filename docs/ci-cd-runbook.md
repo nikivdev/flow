@@ -7,12 +7,16 @@ This runbook documents how Flow CI/CD is wired today and how to debug it quickly
 - Workflows:
   - `.github/workflows/canary.yml`: runs on every push to `main`, publishes/updates the `canary` release/tag.
   - `.github/workflows/release.yml`: runs on tag pushes matching `v*`, publishes stable releases.
+- Vendored deps bootstrap:
+  - Both workflows run `scripts/vendor/vendor-repo.sh hydrate` immediately after checkout in each build job.
+  - This materializes `lib/vendor/*` from the pinned commit in `vendor.lock.toml` before Cargo builds.
 - Build jobs in both workflows:
   - Matrix build: macOS + Linux targets.
   - SIMD build: `build-linux-host-simd` (Linux x64 with `--features linux-host-simd-json`).
 - Release jobs:
   - Gather all build artifacts.
   - Publish release assets (and in Canary, force-move `canary` tag to current `main` commit).
+  - `release` waits for both `build` and `build-linux-host-simd`.
 
 ## Runner Modes
 
@@ -92,6 +96,14 @@ gh run view <run-id> --log-failed
 gh run watch <run-id>
 ```
 
+If failure shows:
+
+- `failed to load source for dependency 'axum'`
+- `Unable to update .../lib/vendor/axum`
+- `No such file or directory (os error 2)`
+
+then vendored deps were not hydrated before build.
+
 ### 2) SIMD lane queued forever
 
 Usually means self-hosted runner routing issue.
@@ -130,6 +142,25 @@ f ci-blacksmith-enable-apply
 # or:
 f ci-blacksmith-disable-apply
 ```
+
+### 3b) Vendored repo hydrate issues
+
+Hydration depends on `vendor.lock.toml` pin and vendor repo availability.
+
+Quick checks:
+
+```bash
+scripts/vendor/vendor-repo.sh status
+scripts/vendor/vendor-repo.sh hydrate
+```
+
+Expected:
+
+- pinned commit in `vendor.lock.toml` is non-empty,
+- hydrate logs `hydrated <crate> -> lib/vendor/<crate>`,
+- `lib/vendor/axum/Cargo.toml` and `lib/vendor/reqwest/Cargo.toml` exist after hydrate.
+
+If CI cannot clone SSH URL from lock, `vendor-repo.sh` now falls back to HTTPS clone for GitHub URLs.
 
 ### 4) `curl ... install.sh` does not fetch expected fresh build
 

@@ -134,11 +134,21 @@ ensure_checkout() {
   if git clone "$repo_url" "$checkout" >/dev/null 2>&1; then
     echo "cloned $repo_url -> $checkout" >&2
   else
-    echo "warning: failed to clone $repo_url" >&2
-    echo "initializing local checkout at $checkout (set remote for later push)" >&2
-    git init "$checkout" >/dev/null
-    git -C "$checkout" checkout -q -B "$branch"
-    git -C "$checkout" remote add origin "$repo_url"
+    https_url=""
+    if [[ "$repo_url" =~ ^git@github\.com:(.+)\.git$ ]]; then
+      https_url="https://github.com/${BASH_REMATCH[1]}.git"
+    fi
+
+    if [[ -n "$https_url" ]] && git clone "$https_url" "$checkout" >/dev/null 2>&1; then
+      echo "cloned $https_url -> $checkout (fallback from SSH URL)" >&2
+      git -C "$checkout" remote set-url origin "$repo_url" >/dev/null 2>&1 || true
+    else
+      echo "warning: failed to clone $repo_url" >&2
+      echo "initializing local checkout at $checkout (set remote for later push)" >&2
+      git init "$checkout" >/dev/null
+      git -C "$checkout" checkout -q -B "$branch"
+      git -C "$checkout" remote add origin "$repo_url"
+    fi
   fi
 
   if ! git -C "$checkout" rev-parse --verify "$branch" >/dev/null 2>&1; then
@@ -357,8 +367,11 @@ cmd_status() {
 
   if [[ -d "$checkout/.git" ]]; then
     local head_sha
-    head_sha="$(git -C "$checkout" rev-parse HEAD)"
-    echo "head:      $head_sha"
+    if head_sha="$(git -C "$checkout" rev-parse --verify HEAD 2>/dev/null)"; then
+      echo "head:      $head_sha"
+    else
+      echo "head:      <no commits yet>"
+    fi
 
     if git -C "$checkout" remote get-url origin >/dev/null 2>&1; then
       if git -C "$checkout" fetch -q origin "$branch" >/dev/null 2>&1; then
