@@ -5,7 +5,9 @@ This runbook documents how Flow CI/CD is wired today and how to debug it quickly
 ## Architecture
 
 - Workflows:
+  - `.github/workflows/pr-fast.yml`: fast PR gate (Linux) using vendored hydrate + `cargo check`.
   - `.github/workflows/canary.yml`: runs on every push to `main`, publishes/updates the `canary` release/tag.
+  - `.github/workflows/nightly-validation.yml`: scheduled full cross-target validation (plus host SIMD) without publishing.
   - `.github/workflows/release.yml`: runs on tag pushes matching `v*`, publishes stable releases.
 - Trigger optimization:
   - Canary `push` skips docs-only changes (`docs/**`, `**/*.md`).
@@ -13,6 +15,7 @@ This runbook documents how Flow CI/CD is wired today and how to debug it quickly
 - Vendored deps bootstrap:
   - Both workflows run `scripts/vendor/vendor-repo.sh hydrate` immediately after checkout in each build job.
   - This materializes `lib/vendor/*` from the pinned commit in `vendor.lock.toml` before Cargo builds.
+  - Build jobs cache vendor checkout/materialization (`.vendor/flow-vendor`, `lib/vendor`, `lib/vendor-manifest`) keyed by `vendor.lock.toml`.
 - Build jobs in both workflows:
   - Matrix build: macOS + Linux targets.
   - SIMD build: `build-linux-host-simd` (Linux x64 with `--features linux-host-simd-json`).
@@ -88,6 +91,12 @@ Canary flow:
 1. Push to `main`.
 2. Watch `Canary` workflow.
 3. Confirm `canary` tag moved and release assets updated.
+
+PR flow:
+
+1. Open/refresh PR to `main`.
+2. Watch `PR Fast Check`.
+3. Merge only after fast check passes.
 
 ## Debug Playbook
 

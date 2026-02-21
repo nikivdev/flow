@@ -44,6 +44,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache vendored deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vendor/flow-vendor
+            lib/vendor
+            lib/vendor-manifest
+          key: ${{ runner.os }}-${{ runner.arch }}-vendor-${{ hashFiles('vendor.lock.toml') }}
+
       - name: Hydrate vendored deps
         run: scripts/vendor/vendor-repo.sh hydrate
 
@@ -107,6 +116,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Cache vendored deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vendor/flow-vendor
+            lib/vendor
+            lib/vendor-manifest
+          key: ${{ runner.os }}-${{ runner.arch }}-vendor-${{ hashFiles('vendor.lock.toml') }}
 
       - name: Hydrate vendored deps
         run: scripts/vendor/vendor-repo.sh hydrate
