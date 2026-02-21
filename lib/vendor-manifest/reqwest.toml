@@ -1,0 +1,8 @@
+crate = "reqwest"
+version = "0.12.24"
+source = "crates.io"
+synced_at_utc = "2026-02-21T11:05:36Z"
+history_repo = "lib/vendor-history/reqwest.git"
+history_head = "56bcafa2abed8a94d87bafa8c310cc26715bcb48"
+materialized_path = "lib/vendor/reqwest"
+sync_cmd = "scripts/vendor/inhouse-crate.sh reqwest 0.12.24"
