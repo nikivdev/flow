@@ -6,3 +6,4 @@ url
 crypto_secretbox
 portable-pty
 tokio-stream
+tracing-subscriber
