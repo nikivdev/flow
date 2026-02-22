@@ -103,3 +103,4 @@ tokio-stream = { path = "lib/vendor/tokio-stream" }
 tracing-subscriber = { path = "lib/vendor/tracing-subscriber" }
 futures = { path = "lib/vendor/futures" }
 sha1 = { path = "lib/vendor/sha1" }
+sha2 = { path = "lib/vendor/sha2" }

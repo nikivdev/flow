@@ -9,3 +9,4 @@ tokio-stream
 tracing-subscriber
 futures
 sha1
+sha2
