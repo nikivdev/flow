@@ -107,3 +107,4 @@ sha2 = { path = "lib/vendor/sha2" }
 tokio = { path = "lib/vendor/tokio" }
 crossterm = { path = "lib/vendor/crossterm" }
 hmac = { path = "lib/vendor/hmac" }
+toml = { path = "lib/vendor/toml" }

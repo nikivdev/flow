@@ -1,0 +1,8 @@
+crate = "toml"
+version = "0.8.23"
+source = "crates.io"
+synced_at_utc = "2026-02-22T19:30:48Z"
+history_repo = "lib/vendor-history/toml.git"
+history_head = "b1685fb8963a8dd4517cd43f0f9acd7a673e60a0"
+materialized_path = "lib/vendor/toml"
+sync_cmd = "scripts/vendor/inhouse-crate.sh toml 0.8.23"
