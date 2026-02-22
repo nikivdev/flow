@@ -1,3 +1,4 @@
 reqwest
 axum
 tower-http
+ratatui
