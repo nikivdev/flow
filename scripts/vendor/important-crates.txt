@@ -3,3 +3,4 @@ axum
 tower-http
 ratatui
 url
+crypto_secretbox
