@@ -94,3 +94,4 @@ linux-host-simd-json = ["dep:simd-json"]
 [patch.crates-io]
 axum = { path = "lib/vendor/axum" }
 reqwest = { path = "lib/vendor/reqwest" }
+tower-http = { path = "lib/vendor/tower-http" }
