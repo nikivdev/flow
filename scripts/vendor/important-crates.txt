@@ -13,3 +13,4 @@ sha2
 tokio
 crossterm
 hmac
+toml
