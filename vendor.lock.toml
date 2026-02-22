@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "5939ef2dc057f3f397b4a4484d6e1fab99cbac9c"
+commit = "08c3b3d2cce26c2b54267be153d74ea885f0a215"
 
 [[crate]]
 name = "axum"
@@ -69,3 +69,9 @@ name = "sha1"
 repo_path = "crates/sha1"
 manifest_path = "manifests/sha1.toml"
 materialized_path = "lib/vendor/sha1"
+
+[[crate]]
+name = "sha2"
+repo_path = "crates/sha2"
+manifest_path = "manifests/sha2.toml"
+materialized_path = "lib/vendor/sha2"
