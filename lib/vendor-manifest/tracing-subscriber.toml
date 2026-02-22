@@ -1,0 +1,8 @@
+crate = "tracing-subscriber"
+version = "0.3.22"
+source = "crates.io"
+synced_at_utc = "2026-02-22T18:36:56Z"
+history_repo = "lib/vendor-history/tracing-subscriber.git"
+history_head = "a201388c2788499ee8681d87d5080f0b5f2e2cec"
+materialized_path = "lib/vendor/tracing-subscriber"
+sync_cmd = "scripts/vendor/inhouse-crate.sh tracing-subscriber 0.3.22"

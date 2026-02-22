@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "29eeaa49c3e304c96d440176e642c3cb6e80f43a"
+commit = "5d4d1476b77724dfb280398eef232e75a7ff3211"
 
 [[crate]]
 name = "axum"
@@ -51,3 +51,9 @@ name = "tokio-stream"
 repo_path = "crates/tokio-stream"
 manifest_path = "manifests/tokio-stream.toml"
 materialized_path = "lib/vendor/tokio-stream"
+
+[[crate]]
+name = "tracing-subscriber"
+repo_path = "crates/tracing-subscriber"
+manifest_path = "manifests/tracing-subscriber.toml"
+materialized_path = "lib/vendor/tracing-subscriber"
