@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "280b864d50cdfd8455bb3768115074d316b531fd"
+commit = "d954c99a2c3cf94853fd4ed678839b2005f22e42"
 
 [[crate]]
 name = "axum"
@@ -39,3 +39,9 @@ name = "crypto_secretbox"
 repo_path = "crates/crypto_secretbox"
 manifest_path = "manifests/crypto_secretbox.toml"
 materialized_path = "lib/vendor/crypto_secretbox"
+
+[[crate]]
+name = "portable-pty"
+repo_path = "crates/portable-pty"
+manifest_path = "manifests/portable-pty.toml"
+materialized_path = "lib/vendor/portable-pty"

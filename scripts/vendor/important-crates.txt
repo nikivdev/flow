@@ -4,3 +4,4 @@ tower-http
 ratatui
 url
 crypto_secretbox
+portable-pty
