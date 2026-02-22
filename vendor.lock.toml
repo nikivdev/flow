@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "f2521bf3990ad39d76cf9edeed7f913f4441018d"
+commit = "721e1d4f00d993e184b3e98902b7c09f92fcd777"
 
 [[crate]]
 name = "axum"
@@ -105,3 +105,9 @@ name = "clap"
 repo_path = "crates/clap"
 manifest_path = "manifests/clap.toml"
 materialized_path = "lib/vendor/clap"
+
+[[crate]]
+name = "notify-debouncer-mini"
+repo_path = "crates/notify-debouncer-mini"
+manifest_path = "manifests/notify-debouncer-mini.toml"
+materialized_path = "lib/vendor/notify-debouncer-mini"

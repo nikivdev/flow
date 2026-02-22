@@ -109,3 +109,4 @@ crossterm = { path = "lib/vendor/crossterm" }
 hmac = { path = "lib/vendor/hmac" }
 toml = { path = "lib/vendor/toml" }
 clap = { path = "lib/vendor/clap" }
+notify-debouncer-mini = { path = "lib/vendor/notify-debouncer-mini" }

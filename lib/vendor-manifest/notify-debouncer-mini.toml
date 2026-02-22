@@ -1,0 +1,8 @@
+crate = "notify-debouncer-mini"
+version = "0.7.0"
+source = "crates.io"
+synced_at_utc = "2026-02-22T19:37:32Z"
+history_repo = "lib/vendor-history/notify-debouncer-mini.git"
+history_head = "9ef9af7ca1216d1c855d9b34bf8e7faebc73c5ba"
+materialized_path = "lib/vendor/notify-debouncer-mini"
+sync_cmd = "scripts/vendor/inhouse-crate.sh notify-debouncer-mini 0.7.0"
