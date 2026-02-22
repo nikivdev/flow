@@ -1,0 +1,8 @@
+crate = "url"
+version = "2.5.8"
+source = "crates.io"
+synced_at_utc = "2026-02-22T18:25:03Z"
+history_repo = "lib/vendor-history/url.git"
+history_head = "42e98d5f89b624f6d1bb7d3e57f887c74461aed2"
+materialized_path = "lib/vendor/url"
+sync_cmd = "scripts/vendor/inhouse-crate.sh url 2.5.8"

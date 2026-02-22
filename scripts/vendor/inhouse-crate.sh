@@ -38,6 +38,30 @@ vendor_root="lib/vendor"
 history_root="lib/vendor-history"
 manifest_root="lib/vendor-manifest"
 
+find_cached_src_dir() {
+  find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name "${crate}-${version}" 2>/dev/null \
+    | head -n 1
+}
+
+fetch_into_cache() {
+  local fetch_tmp
+  fetch_tmp="$(mktemp -d)"
+  cat > "${fetch_tmp}/Cargo.toml" <<EOF
+[package]
+name = "vendor-fetch-${crate}"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+${crate} = "= ${version}"
+EOF
+  mkdir -p "${fetch_tmp}/src"
+  printf '%s\n' 'fn main() {}' > "${fetch_tmp}/src/main.rs"
+
+  cargo fetch --manifest-path "${fetch_tmp}/Cargo.toml" >/dev/null 2>&1 || true
+  rm -rf "$fetch_tmp"
+}
+
 resolve_version_from_lock() {
   awk -v crate="$crate" '
     BEGIN { name = ""; version = ""; source = "" }
@@ -93,15 +117,16 @@ if [[ -z "$version" ]]; then
   exit 1
 fi
 
-src_dir="$({
-  find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name "${crate}-${version}" 2>/dev/null \
-    | head -n 1
-} || true)"
+src_dir="$(find_cached_src_dir || true)"
 
 if [[ -z "$src_dir" ]]; then
-  echo "error: could not find ${crate}-${version} in cargo cache"
-  echo "hint: run 'cargo fetch -p ${crate}@${version}' in a clean Cargo state and retry"
-  exit 1
+  fetch_into_cache
+  src_dir="$(find_cached_src_dir || true)"
+  if [[ -z "$src_dir" ]]; then
+    echo "error: could not find ${crate}-${version} in cargo cache after auto-fetch"
+    echo "hint: check network/cargo registry config, then retry"
+    exit 1
+  fi
 fi
 
 mkdir -p "$history_root" "$vendor_root" "$manifest_root"
