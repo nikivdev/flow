@@ -1,0 +1,8 @@
+crate = "futures"
+version = "0.3.31"
+source = "crates.io"
+synced_at_utc = "2026-02-22T18:55:46Z"
+history_repo = "lib/vendor-history/futures.git"
+history_head = "0fa19ce3ec63d93ed56145a64def347d82e720fc"
+materialized_path = "lib/vendor/futures"
+sync_cmd = "scripts/vendor/inhouse-crate.sh futures 0.3.31"

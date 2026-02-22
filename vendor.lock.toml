@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "5d4d1476b77724dfb280398eef232e75a7ff3211"
+commit = "e692b5368837496d017221bf0ac6662760512423"
 
 [[crate]]
 name = "axum"
@@ -57,3 +57,9 @@ name = "tracing-subscriber"
 repo_path = "crates/tracing-subscriber"
 manifest_path = "manifests/tracing-subscriber.toml"
 materialized_path = "lib/vendor/tracing-subscriber"
+
+[[crate]]
+name = "futures"
+repo_path = "crates/futures"
+manifest_path = "manifests/futures.toml"
+materialized_path = "lib/vendor/futures"

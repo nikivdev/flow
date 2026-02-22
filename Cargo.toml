@@ -101,3 +101,4 @@ crypto_secretbox = { path = "lib/vendor/crypto_secretbox" }
 portable-pty = { path = "lib/vendor/portable-pty" }
 tokio-stream = { path = "lib/vendor/tokio-stream" }
 tracing-subscriber = { path = "lib/vendor/tracing-subscriber" }
+futures = { path = "lib/vendor/futures" }
