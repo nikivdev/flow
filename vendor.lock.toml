@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "d954c99a2c3cf94853fd4ed678839b2005f22e42"
+commit = "d3e7c1582cef379e938637ba20b365cb45f008fa"
 
 [[crate]]
 name = "axum"
@@ -45,3 +45,9 @@ name = "portable-pty"
 repo_path = "crates/portable-pty"
 manifest_path = "manifests/portable-pty.toml"
 materialized_path = "lib/vendor/portable-pty"
+
+[[crate]]
+name = "tokio-stream"
+repo_path = "crates/tokio-stream"
+manifest_path = "manifests/tokio-stream.toml"
+materialized_path = "lib/vendor/tokio-stream"

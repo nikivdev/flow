@@ -1,0 +1,8 @@
+crate = "tokio-stream"
+version = "0.1.17"
+source = "crates.io"
+synced_at_utc = "2026-02-22T18:35:18Z"
+history_repo = "lib/vendor-history/tokio-stream.git"
+history_head = "f9ff034b2d784ce5c9c3f91c846d4e3cb373e613"
+materialized_path = "lib/vendor/tokio-stream"
+sync_cmd = "scripts/vendor/inhouse-crate.sh tokio-stream 0.1.17"

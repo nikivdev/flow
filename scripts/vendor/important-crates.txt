@@ -5,3 +5,4 @@ ratatui
 url
 crypto_secretbox
 portable-pty
+tokio-stream
