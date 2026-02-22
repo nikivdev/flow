@@ -11,3 +11,4 @@ futures
 sha1
 sha2
 tokio
+crossterm

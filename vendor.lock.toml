@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "0f32bd0fab9c4d5934abb3170754725bb006d704"
+commit = "06f253baa183171f5ca41f68d7d84a9a93f3145d"
 
 [[crate]]
 name = "axum"
@@ -81,3 +81,9 @@ name = "tokio"
 repo_path = "crates/tokio"
 manifest_path = "manifests/tokio.toml"
 materialized_path = "lib/vendor/tokio"
+
+[[crate]]
+name = "crossterm"
+repo_path = "crates/crossterm"
+manifest_path = "manifests/crossterm.toml"
+materialized_path = "lib/vendor/crossterm"

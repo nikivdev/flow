@@ -1,0 +1,8 @@
+crate = "crossterm"
+version = "0.28.1"
+source = "crates.io"
+synced_at_utc = "2026-02-22T18:59:50Z"
+history_repo = "lib/vendor-history/crossterm.git"
+history_head = "4bc07d2468fa81dafa52f32d0a4f0dfed21e3d77"
+materialized_path = "lib/vendor/crossterm"
+sync_cmd = "scripts/vendor/inhouse-crate.sh crossterm 0.28.1"
