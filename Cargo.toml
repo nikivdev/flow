@@ -96,3 +96,4 @@ axum = { path = "lib/vendor/axum" }
 reqwest = { path = "lib/vendor/reqwest" }
 tower-http = { path = "lib/vendor/tower-http" }
 ratatui = { path = "lib/vendor/ratatui" }
+url = { path = "lib/vendor/url" }

@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "d1cb0229368753fb8f1a5f32024abf63c8d70113"
+commit = "7224f5a10c015f0e18e3c13e1f4bbf9f4374629a"
 
 [[crate]]
 name = "axum"
@@ -27,3 +27,9 @@ name = "ratatui"
 repo_path = "crates/ratatui"
 manifest_path = "manifests/ratatui.toml"
 materialized_path = "lib/vendor/ratatui"
+
+[[crate]]
+name = "url"
+repo_path = "crates/url"
+manifest_path = "manifests/url.toml"
+materialized_path = "lib/vendor/url"
