@@ -1,0 +1,8 @@
+crate = "portable-pty"
+version = "0.8.1"
+source = "crates.io"
+synced_at_utc = "2026-02-22T18:34:18Z"
+history_repo = "lib/vendor-history/portable-pty.git"
+history_head = "a7bc801d3b14791d00c7ba134d29b9970971526a"
+materialized_path = "lib/vendor/portable-pty"
+sync_cmd = "scripts/vendor/inhouse-crate.sh portable-pty 0.8.1"

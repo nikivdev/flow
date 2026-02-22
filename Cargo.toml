@@ -98,3 +98,4 @@ tower-http = { path = "lib/vendor/tower-http" }
 ratatui = { path = "lib/vendor/ratatui" }
 url = { path = "lib/vendor/url" }
 crypto_secretbox = { path = "lib/vendor/crypto_secretbox" }
+portable-pty = { path = "lib/vendor/portable-pty" }
