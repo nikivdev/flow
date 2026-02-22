@@ -25,12 +25,41 @@ apply_axum_trims() {
   ' "$file"
 }
 
+apply_ratatui_trims() {
+  local root="lib/vendor/ratatui"
+  [[ -d "$root" ]] || return 0
+
+  rm -rf \
+    "$root/benches" \
+    "$root/examples" \
+    "$root/tests"
+
+  rm -f \
+    "$root/Cargo.lock" \
+    "$root/.cz.toml" \
+    "$root/.editorconfig" \
+    "$root/.gitignore" \
+    "$root/.markdownlint.yaml" \
+    "$root/bacon.toml" \
+    "$root/cliff.toml" \
+    "$root/clippy.toml" \
+    "$root/codecov.yml" \
+    "$root/committed.toml" \
+    "$root/deny.toml" \
+    "$root/FUNDING.json" \
+    "$root/MAINTAINERS.md" \
+    "$root/RELEASE.md" \
+    "$root/SECURITY.md" \
+    "$root/BREAKING-CHANGES.md"
+}
+
 apply_vendor_trims() {
   local crate="${1:-}"
   if [[ -n "$crate" ]]; then
     case "$crate" in
       reqwest) apply_reqwest_trims ;;
       axum) apply_axum_trims ;;
+      ratatui) apply_ratatui_trims ;;
       *) echo "warning: no trim rules defined for crate '$crate'" ;;
     esac
     return
@@ -38,4 +67,5 @@ apply_vendor_trims() {
 
   apply_reqwest_trims
   apply_axum_trims
+  apply_ratatui_trims
 }

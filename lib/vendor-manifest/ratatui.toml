@@ -1,0 +1,8 @@
+crate = "ratatui"
+version = "0.29.0"
+source = "crates.io"
+synced_at_utc = "2026-02-22T17:51:53Z"
+history_repo = "lib/vendor-history/ratatui.git"
+history_head = "ea783181c2acf3506dba0e5364bd57559ee6d86b"
+materialized_path = "lib/vendor/ratatui"
+sync_cmd = "scripts/vendor/inhouse-crate.sh ratatui 0.29.0"
