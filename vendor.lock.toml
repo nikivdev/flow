@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "7224f5a10c015f0e18e3c13e1f4bbf9f4374629a"
+commit = "280b864d50cdfd8455bb3768115074d316b531fd"
 
 [[crate]]
 name = "axum"
@@ -33,3 +33,9 @@ name = "url"
 repo_path = "crates/url"
 manifest_path = "manifests/url.toml"
 materialized_path = "lib/vendor/url"
+
+[[crate]]
+name = "crypto_secretbox"
+repo_path = "crates/crypto_secretbox"
+manifest_path = "manifests/crypto_secretbox.toml"
+materialized_path = "lib/vendor/crypto_secretbox"
