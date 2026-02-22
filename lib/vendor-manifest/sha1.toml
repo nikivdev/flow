@@ -1,0 +1,8 @@
+crate = "sha1"
+version = "0.10.6"
+source = "crates.io"
+synced_at_utc = "2026-02-22T18:57:02Z"
+history_repo = "lib/vendor-history/sha1.git"
+history_head = "1a7bcebde8f534fb40a8b08e3a38f3c0244e23d9"
+materialized_path = "lib/vendor/sha1"
+sync_cmd = "scripts/vendor/inhouse-crate.sh sha1 0.10.6"
