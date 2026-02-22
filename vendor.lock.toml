@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "06f253baa183171f5ca41f68d7d84a9a93f3145d"
+commit = "c13f6c7e8a3b9814929c5022f9de4b70db2cf9da"
 
 [[crate]]
 name = "axum"
@@ -87,3 +87,9 @@ name = "crossterm"
 repo_path = "crates/crossterm"
 manifest_path = "manifests/crossterm.toml"
 materialized_path = "lib/vendor/crossterm"
+
+[[crate]]
+name = "hmac"
+repo_path = "crates/hmac"
+manifest_path = "manifests/hmac.toml"
+materialized_path = "lib/vendor/hmac"

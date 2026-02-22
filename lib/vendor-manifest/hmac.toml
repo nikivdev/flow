@@ -1,0 +1,8 @@
+crate = "hmac"
+version = "0.12.1"
+source = "crates.io"
+synced_at_utc = "2026-02-22T19:00:48Z"
+history_repo = "lib/vendor-history/hmac.git"
+history_head = "392173235d4c2340c040a971e9945d2fd057576b"
+materialized_path = "lib/vendor/hmac"
+sync_cmd = "scripts/vendor/inhouse-crate.sh hmac 0.12.1"
