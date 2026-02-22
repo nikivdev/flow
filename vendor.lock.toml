@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "6b151fffc36df796e514297421dd92eae0da229c"
+commit = "1f04f26fe589f5907305572d1defbe2b77d8f271"
 
 [[crate]]
 name = "axum"
@@ -15,3 +15,9 @@ name = "reqwest"
 repo_path = "crates/reqwest"
 manifest_path = "manifests/reqwest.toml"
 materialized_path = "lib/vendor/reqwest"
+
+[[crate]]
+name = "tower-http"
+repo_path = "crates/tower-http"
+manifest_path = "manifests/tower-http.toml"
+materialized_path = "lib/vendor/tower-http"
