@@ -1,0 +1,8 @@
+crate = "tokio"
+version = "1.48.0"
+source = "crates.io"
+synced_at_utc = "2026-02-22T18:58:49Z"
+history_repo = "lib/vendor-history/tokio.git"
+history_head = "6e5cb3be0785f209706b562d5540c5df58036505"
+materialized_path = "lib/vendor/tokio"
+sync_cmd = "scripts/vendor/inhouse-crate.sh tokio 1.48.0"
