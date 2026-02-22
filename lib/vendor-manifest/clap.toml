@@ -1,0 +1,8 @@
+crate = "clap"
+version = "4.5.53"
+source = "crates.io"
+synced_at_utc = "2026-02-22T19:35:46Z"
+history_repo = "lib/vendor-history/clap.git"
+history_head = "4a3d69e2f1bd16cee358a290e95d95158fb00418"
+materialized_path = "lib/vendor/clap"
+sync_cmd = "scripts/vendor/inhouse-crate.sh clap 4.5.53"

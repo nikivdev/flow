@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "609c3b794878e78649161332c634970d838e57ab"
+commit = "f2521bf3990ad39d76cf9edeed7f913f4441018d"
 
 [[crate]]
 name = "axum"
@@ -99,3 +99,9 @@ name = "toml"
 repo_path = "crates/toml"
 manifest_path = "manifests/toml.toml"
 materialized_path = "lib/vendor/toml"
+
+[[crate]]
+name = "clap"
+repo_path = "crates/clap"
+manifest_path = "manifests/clap.toml"
+materialized_path = "lib/vendor/clap"
