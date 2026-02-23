@@ -185,6 +185,14 @@ f run-list
 f run-load <name> <repo-ssh-url> [branch]
 f run-sync [name]
 f run-task <name> <task> [args...]
+f run-exec <name> <repo-ssh-url> [--branch <branch>] <task> [args...]
+```
+
+Single-command onboarding example:
+
+```sh
+cd ~/code/flow
+f run-exec linsa git@github.com:nikivdev/run.git onboard-fast contributor@email.com
 ```
 
 ## Examples

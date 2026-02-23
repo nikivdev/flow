@@ -12,6 +12,7 @@ Usage:
   run-repos.sh load <name> <repo-ssh-url> [branch]
   run-repos.sh sync [name]
   run-repos.sh task <name> <flow-task> [args...]
+  run-repos.sh exec <name> <repo-ssh-url> [--branch <branch>] <flow-task> [args...]
 
 Environment:
   RUN_ROOT              Run repo root (default: ~/code/run)
@@ -194,6 +195,49 @@ cmd_task() {
   )
 }
 
+cmd_exec() {
+  if [ "$#" -lt 3 ]; then
+    echo "ERROR: exec requires <name> <repo-ssh-url> [--branch <branch>] <flow-task> [args...]"
+    usage
+    exit 1
+  fi
+
+  local name="$1"
+  local repo_url="$2"
+  shift 2
+
+  local branch=""
+  if [ "${1:-}" = "--branch" ]; then
+    branch="${2:-}"
+    if [ -z "$branch" ]; then
+      echo "ERROR: --branch requires a value"
+      usage
+      exit 1
+    fi
+    shift 2
+  fi
+
+  if [ "$#" -lt 1 ]; then
+    echo "ERROR: exec requires a flow task after repo parameters"
+    usage
+    exit 1
+  fi
+
+  local dir
+  dir="$(repo_dir "$name")"
+  if [ -d "$dir" ] && [ -f "$dir/flow.toml" ] && ! is_git_repo "$dir"; then
+    echo "[run] using existing run task directory (non-git): $dir"
+  else
+    if [ -n "$branch" ]; then
+      cmd_load "$name" "$repo_url" "$branch"
+    else
+      cmd_load "$name" "$repo_url"
+    fi
+  fi
+
+  cmd_task "$name" "$@"
+}
+
 main() {
   local cmd="${1:-help}"
   shift || true
@@ -205,6 +249,7 @@ main() {
     load) cmd_load "$@" ;;
     sync) cmd_sync "$@" ;;
     task) cmd_task "$@" ;;
+    exec) cmd_exec "$@" ;;
     help|-h|--help) usage ;;
     *)
       echo "ERROR: unknown command: $cmd"

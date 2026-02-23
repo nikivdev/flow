@@ -393,6 +393,11 @@ name = "run-task"
 command = "bash ./scripts/run-repos.sh task $@"
 description = "Run a Flow task inside a run repo. Usage: f run-task <name> <task> [args...]"
 
+[[tasks]]
+name = "run-exec"
+command = "bash ./scripts/run-repos.sh exec $@"
+description = "Ensure run repo exists (clone/sync) and run a task. Usage: f run-exec <name> <repo-ssh-url> [--branch <branch>] <task> [args...]"
+
 [storage]
 provider = "myflow.sh"
 env_var = "FLOW_SECRETS_TOKEN" # optional; defaults to this value
