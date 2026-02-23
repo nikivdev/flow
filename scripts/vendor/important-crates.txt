@@ -21,3 +21,6 @@ x25519-dalek
 rusqlite
 rmp-serde
 ctrlc
+notify
+regex
+serde

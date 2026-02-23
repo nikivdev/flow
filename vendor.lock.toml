@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "3161f270a1e682a650371116bad51bed880f288a"
+commit = "565f798107a52d10a929f8da11278e7e30103c0e"
 
 [[crate]]
 name = "axum"
@@ -142,3 +142,21 @@ name = "ctrlc"
 repo_path = "crates/ctrlc"
 manifest_path = "manifests/ctrlc.toml"
 materialized_path = "lib/vendor/ctrlc"
+
+[[crate]]
+name = "notify"
+repo_path = "crates/notify"
+manifest_path = "manifests/notify.toml"
+materialized_path = "lib/vendor/notify"
+
+[[crate]]
+name = "regex"
+repo_path = "crates/regex"
+manifest_path = "manifests/regex.toml"
+materialized_path = "lib/vendor/regex"
+
+[[crate]]
+name = "serde"
+repo_path = "crates/serde"
+manifest_path = "manifests/serde.toml"
+materialized_path = "lib/vendor/serde"
