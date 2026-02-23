@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "721e1d4f00d993e184b3e98902b7c09f92fcd777"
+commit = "eabe9af13b4e98b680a56984da11175f193e15c8"
 
 [[crate]]
 name = "axum"
@@ -111,3 +111,22 @@ name = "notify-debouncer-mini"
 repo_path = "crates/notify-debouncer-mini"
 manifest_path = "manifests/notify-debouncer-mini.toml"
 materialized_path = "lib/vendor/notify-debouncer-mini"
+
+
+[[crate]]
+name = "ignore"
+repo_path = "crates/ignore"
+manifest_path = "manifests/ignore.toml"
+materialized_path = "lib/vendor/ignore"
+
+[[crate]]
+name = "x25519-dalek"
+repo_path = "crates/x25519-dalek"
+manifest_path = "manifests/x25519-dalek.toml"
+materialized_path = "lib/vendor/x25519-dalek"
+
+[[crate]]
+name = "rusqlite"
+repo_path = "crates/rusqlite"
+manifest_path = "manifests/rusqlite.toml"
+materialized_path = "lib/vendor/rusqlite"
