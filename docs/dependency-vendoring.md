@@ -1,96 +1,247 @@
-# Dependency Vendoring
+# Dependency Vendoring (Cargo-First)
 
-Flow now uses a split model:
+This project uses a Cargo-first vendoring model:
 
-- `nikivdev/flow-vendor` is the canonical vendored source repo.
-- `flow` pins an exact vendor commit in `vendor.lock.toml`.
-- `lib/vendor/*` is local materialized source for Cargo path patches.
+- Cargo remains the resolver, lockfile authority, and build system.
+- Vendored source is owned in `nikivdev/flow-vendor`.
+- `flow` pins vendored state by commit in `vendor.lock.toml`.
+- `flow` uses `[patch.crates-io]` path overrides into `lib/vendor/*`.
 
-## Goals
+This gives direct dependency control without giving up Cargo behavior.
 
-- Full dependency ownership and aggressive trim capability.
-- Fast iteration in `flow` without polluting `flow` history with vendored source churn.
-- Deterministic, lock-pinned hydration from vendor source.
+## Why This Model
 
-## Core Files
+### Problem
 
-- `vendor.lock.toml`: vendor repo URL/branch/checkout path, pinned commit, crate mapping.
-- `scripts/vendor/vendor-repo.sh`: lifecycle orchestration (init/import/hydrate/pin/status/push).
-- `lib/vendor-manifest/*.toml`: crate metadata used for update checks.
+- crates.io + transitive dependency growth hurts compile times and iteration speed.
+- upstream crates can pull convenience dependencies, macros, and features we do not need.
+- editing third-party code in-place inside the main repo pollutes history and makes updates hard.
 
-## Vendor Repo Layout (`flow-vendor`)
+### Requirements
 
-- `crates/<crate>/`: materialized crate source trees.
-- `manifests/<crate>.toml`: per-crate sync metadata.
-- `profiles/flow.toml`: crate list for Flow hydration.
+- keep Cargo benefits (resolver correctness, lock semantics, ecosystem compatibility),
+- gain direct control over dependency source and shape,
+- keep upstream sync fast and automatable,
+- keep repository history readable.
 
-## Flow Workflow
+### Result
 
-1. Initialize vendor checkout (local clone or local bootstrap):
+- dependency source churn lives in `flow-vendor`,
+- application-level pin and wiring lives in `flow`,
+- updates are reproducible and lock-pinned,
+- trim/refactor opportunities are local and fast.
+
+## Benefits
+
+- Faster local iteration by removing unneeded dependency surface area.
+- Ability to aggressively trim crates to exactly what `flow` uses.
+- Deterministic hydration in CI and local environments from a pinned vendor commit.
+- Clean `flow` history: metadata/pins in `flow`, source churn in `flow-vendor`.
+- Upstream updates remain scriptable and reviewable.
+
+## Core Files and Their Roles
+
+- `vendor.lock.toml`
+  - Source of truth for vendor remote, branch, checkout, pinned commit, and crate map.
+- `Cargo.toml`
+  - `[patch.crates-io]` points selected crates to `lib/vendor/<crate>`.
+- `Cargo.lock`
+  - Must resolve vendored crates by path (no registry source for vendored entries).
+- `lib/vendor/<crate>`
+  - Materialized source tree used by Cargo path patches.
+- `lib/vendor-manifest/<crate>.toml`
+  - Per-crate metadata for version/provenance/sync and verification.
+- `scripts/vendor/*`
+  - Toolkit for inhouse, hydrate, status, sync, and vendor-repo operations.
+
+## Repositories
+
+### `flow` repo
+
+- owns pins, manifests, trim logic hooks, and Cargo wiring.
+- should not include full vendored source history churn.
+
+### `flow-vendor` repo
+
+- canonical storage for vendored crate source (`crates/<crate>`),
+- vendored crate manifests (`manifests/<crate>.toml`),
+- profile metadata used during hydration.
+
+## Operating Principle: Cargo First
+
+Do not replace Cargo. Use Cargo as the system of record:
+
+- resolve versions through `Cargo.lock`,
+- use `cargo update -p <crate> --precise <version>` for deterministic lock rewrites,
+- build and validate with normal Cargo commands (`cargo check`, `cargo test --no-run`),
+- use vendoring only as controlled source substitution via patches.
+
+## Standard Workflow (One Crate)
+
+Recommended entrypoint:
 
 ```bash
-scripts/vendor/vendor-repo.sh init
+/Users/nikiv/code/rise/scripts/vendor-control.sh inhouse --project /Users/nikiv/code/flow <crate> [version]
 ```
 
-2. Import current local materialized crates into vendor repo and pin lock commit:
+What this does:
+
+1. Ensures lock entry and Cargo patch wiring.
+2. Materializes crate from Cargo cache into `lib/vendor/<crate>`.
+3. Stores crate history in `lib/vendor-history/<crate>.git`.
+4. Writes `lib/vendor-manifest/<crate>.toml` + `UPSTREAM.toml`.
+5. Re-syncs `Cargo.lock` to exact vendored version.
+6. Applies trim hooks (`scripts/vendor/apply-trims.sh`).
+7. Imports local materialized source into `.vendor/flow-vendor`.
+8. Pins `vendor.lock.toml` to new vendor commit.
+
+## Verification and Safety Gates
+
+Run after each vendoring step:
 
 ```bash
+/Users/nikiv/code/rise/scripts/vendor-control.sh verify --project /Users/nikiv/code/flow
+cargo check -q
+scripts/vendor/sync-all.sh --important --dry-run
+```
+
+`verify` enforces:
+
+- crate exists in `vendor.lock.toml`,
+- crate exists in `Cargo.lock`,
+- no registry source for vendored crate in `Cargo.lock`,
+- one resolved version per vendored crate,
+- patch path matches lock materialized path,
+- manifest version matches lock version.
+
+## Provenance and Hardening
+
+`inhouse` now records provenance fields in crate manifests:
+
+- `registry_index`
+- `cargo_registry_checksum`
+- `crate_archive_sha256`
+- `checksum_match`
+- `upstream_repository`
+- `upstream_homepage`
+- `history_head`
+
+Use report mode:
+
+```bash
+/Users/nikiv/code/rise/scripts/vendor-control.sh provenance --project /Users/nikiv/code/flow
+```
+
+Use stricter mode when migrating fully:
+
+```bash
+/Users/nikiv/code/rise/scripts/vendor-control.sh verify --project /Users/nikiv/code/flow --strict-provenance
+```
+
+## Transactional Failure Behavior
+
+`vendor-control.sh inhouse` includes rollback protection by default:
+
+- snapshot relevant files before mutation,
+- on failure, restore pre-run `Cargo.toml`, `Cargo.lock`, `vendor.lock.toml`,
+- remove newly created manifest/source/history artifacts for failed crate,
+- restore prior vendor lock pin.
+
+Escape hatch (not recommended except debugging):
+
+```bash
+/Users/nikiv/code/rise/scripts/vendor-control.sh inhouse --project /Users/nikiv/code/flow <crate> --no-rollback
+```
+
+## Upstream Sync Loop
+
+Track updates:
+
+```bash
+scripts/vendor/check-upstream.sh --important
+scripts/vendor/sync-all.sh --important --dry-run
+```
+
+Apply updates intentionally:
+
+```bash
+scripts/vendor/sync-all.sh --important
 scripts/vendor/vendor-repo.sh import-local
+git -C .vendor/flow-vendor push origin main
 ```
 
-3. Hydrate `lib/vendor/*` from pinned vendor commit:
+Policy:
+
+- patch updates can be frequent,
+- minor/major updates happen in explicit review windows (`--allow-minor`, `--allow-major`).
+
+## CI Contract
+
+CI must hydrate vendored source from `vendor.lock.toml` before Cargo build:
 
 ```bash
 scripts/vendor/vendor-repo.sh hydrate
-# equivalent default path:
-scripts/vendor/materialize-all.sh
 ```
 
-4. Inspect lock/checkout/remote state:
+Any CI build skipping hydrate can fail with missing `lib/vendor/*` path deps.
+
+## Optimization Strategy (Compile-Time Focus)
+
+For each vendored crate:
+
+1. inspect real usage in `flow` (APIs/types called),
+2. remove optional features not used,
+3. delete convenience-only dependencies,
+4. remove proc-macro convenience layers where reasonable,
+5. reduce duplicate major versions where possible,
+6. keep trim hooks deterministic and replayable.
+
+Use:
+
+```bash
+scripts/vendor/offenders.sh
+cargo tree -d
+```
+
+to rank impact and watch duplicate-version pressure.
+
+## Commit Policy
+
+- In `flow`: commit only lock/manifest/patch/docs/script changes.
+- In `flow-vendor`: commit source churn.
+- Push `flow-vendor` first, then push `flow` pin updates.
+- Prefer one crate per commit for auditability.
+
+## Recovery Playbook
+
+Inspect state:
 
 ```bash
 scripts/vendor/vendor-repo.sh status
 ```
 
-5. Push vendor repo updates:
+Re-hydrate local materialization from pinned commit:
 
 ```bash
-scripts/vendor/vendor-repo.sh push
+scripts/vendor/vendor-repo.sh hydrate
 ```
 
-6. Re-pin lock to a specific vendor commit if needed:
+Re-pin to known commit:
 
 ```bash
 scripts/vendor/vendor-repo.sh pin <commit>
 ```
 
-## Upstream Sync Loop
+## FAQ
 
-Keep existing update policy scripts:
+### Are we replacing Cargo?
 
-```bash
-scripts/vendor/check-upstream.sh --important
-scripts/vendor/sync-all.sh --important --dry-run
-scripts/vendor/sync-all.sh --important
-```
+No. Cargo remains central. Vendoring is an ownership layer on top.
 
-After syncing local vendored crates, import + pin to vendor repo:
+### Why separate repo for vendored source?
 
-```bash
-scripts/vendor/vendor-repo.sh import-local
-```
+To keep main repo history focused on product changes while retaining full dependency source control.
 
-## Fallback Mode (Cargo Cache)
+### Can we still pull upstream changes quickly?
 
-If you intentionally want the old local-cache materialization path:
-
-```bash
-scripts/vendor/materialize-all.sh --from-cache
-```
-
-## Guardrails
-
-- Commit only lock/metadata/scripts/docs in `flow`; keep vendor source in `flow-vendor`.
-- Keep trim logic deterministic in `scripts/vendor/apply-trims.sh`.
-- Keep patch updates default; minor/major only in explicit review windows.
-- Always run `cargo check` after hydration/sync.
+Yes. `check-upstream` + `sync-*` + locked import flow is designed for repeatable upstream ingestion.
