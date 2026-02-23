@@ -33,6 +33,7 @@ lib/vendor-history/
 .env*.local
 .env.production
 output
+out/
 dist
 target
 .idea
