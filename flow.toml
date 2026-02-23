@@ -398,6 +398,11 @@ name = "run-linsa-bootstrap"
 command = "bash ./scripts/run-repos.sh linsa-bootstrap $@"
 description = "Bootstrap linsa contributor flow from ~/code/run/linsa (loads repo if URL is provided)"
 
+[[tasks]]
+name = "run-linsa-bootstrap-safe"
+command = "bash ./scripts/bootstrap-linsa-contributor.sh"
+description = "Robust linsa bootstrap that self-heals Flow install/source and then runs run-linsa-bootstrap"
+
 [storage]
 provider = "myflow.sh"
 env_var = "FLOW_SECRETS_TOKEN" # optional; defaults to this value
