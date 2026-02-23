@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "e438a2540597455522abb26f7223603a6b9ea977"
+commit = "3161f270a1e682a650371116bad51bed880f288a"
 
 [[crate]]
 name = "axum"
@@ -136,3 +136,9 @@ name = "rmp-serde"
 repo_path = "crates/rmp-serde"
 manifest_path = "manifests/rmp-serde.toml"
 materialized_path = "lib/vendor/rmp-serde"
+
+[[crate]]
+name = "ctrlc"
+repo_path = "crates/ctrlc"
+manifest_path = "manifests/ctrlc.toml"
+materialized_path = "lib/vendor/ctrlc"
