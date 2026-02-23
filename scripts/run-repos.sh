@@ -226,6 +226,12 @@ cmd_exec() {
   local dir
   dir="$(repo_dir "$name")"
   if [ -d "$dir" ] && [ -f "$dir/flow.toml" ] && ! is_git_repo "$dir"; then
+    if is_git_repo "$RUN_ROOT"; then
+      echo "[run] syncing monorepo root: $RUN_ROOT"
+      if ! sync_git_repo "$RUN_ROOT"; then
+        echo "[run] WARN: failed to sync monorepo root; using local checkout"
+      fi
+    fi
     echo "[run] using existing run task directory (non-git): $dir"
   else
     if [ -n "$branch" ]; then
