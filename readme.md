@@ -8,11 +8,10 @@ Install the latest release (macOS/Linux):
 
 ```sh
 curl -fsSL https://myflow.sh/install.sh | sh
-# or:
-curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/install.sh | sh
 ```
 
 Then run `f --version` and `f doctor`.
+The installer also ensures a local source checkout at `~/code/flow` (or `FLOW_SOURCE_DIR`).
 
 The installer verifies SHA-256 checksums when available. If you are installing a legacy release
 that doesn't ship `checksums.txt`, it will warn and continue (GitHub download only). To bypass
