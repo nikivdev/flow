@@ -558,6 +558,26 @@ configure_shell() {
 after_install() {
   source_dir="${FLOW_SOURCE_DIR:-$HOME/code/flow}"
   install_path="${FLOW_INSTALL_PATH:-$HOME/.flow/bin/f}"
+  if [ ! -x "$install_path" ]; then
+    chmod +x "$install_path" 2>/dev/null || true
+  fi
+
+  if ! can_execute_flow_binary "$install_path"; then
+    if command -v xattr >/dev/null 2>&1; then
+      xattr -d com.apple.quarantine "$install_path" >/dev/null 2>&1 || true
+    fi
+    chmod +x "$install_path" 2>/dev/null || true
+  fi
+
+  if ! can_execute_flow_binary "$install_path"; then
+    info "flow: diagnostic: unable to execute fallback binary: $install_path"
+    info "flow: diagnostic: $(ls -l "$install_path" 2>/dev/null || echo missing)"
+    if command -v file >/dev/null 2>&1; then
+      info "flow: diagnostic: $(file "$install_path" 2>/dev/null || true)"
+    fi
+    error "installed flow binary is not runnable; rerun with FLOW_DEBUG=1 and share diagnostics"
+  fi
+
   info ""
   info "flow: installed successfully!"
   if command -v f >/dev/null 2>&1; then
