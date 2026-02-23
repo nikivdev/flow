@@ -129,6 +129,63 @@ validate_version() {
 }
 #endregion
 
+should_install_source() {
+  case "${FLOW_INSTALL_SOURCE:-1}" in
+    0|false|FALSE|no|NO|n|N) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+ensure_flow_source_checkout() {
+  if ! should_install_source; then
+    info "flow: skipping source checkout (FLOW_INSTALL_SOURCE=0)"
+    return 0
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    error "git is required to install flow source to ~/code/flow (or set FLOW_INSTALL_SOURCE=0)"
+  fi
+
+  source_dir="${FLOW_SOURCE_DIR:-$HOME/code/flow}"
+  source_repo="${FLOW_SOURCE_REPO_URL:-https://github.com/nikivdev/flow.git}"
+  source_branch="${FLOW_SOURCE_BRANCH:-main}"
+
+  mkdir -p "$(dirname "$source_dir")"
+
+  if [ -d "$source_dir/.git" ]; then
+    info "flow: source checkout found at $source_dir"
+
+    if ! git -C "$source_dir" diff --quiet >/dev/null 2>&1 || ! git -C "$source_dir" diff --cached --quiet >/dev/null 2>&1; then
+      info "flow: warning: source checkout has local changes; skipping auto-sync"
+      return 0
+    fi
+
+    if git -C "$source_dir" fetch --all --prune >/dev/null 2>&1; then
+      if git -C "$source_dir" show-ref --verify --quiet "refs/remotes/origin/$source_branch"; then
+        if ! git -C "$source_dir" checkout "$source_branch" >/dev/null 2>&1; then
+          info "flow: warning: failed to checkout '$source_branch'; leaving current branch"
+        fi
+        if ! git -C "$source_dir" pull --ff-only origin "$source_branch" >/dev/null 2>&1; then
+          info "flow: warning: failed to fast-forward source checkout; sync manually"
+        fi
+      fi
+    else
+      info "flow: warning: failed to fetch source checkout"
+    fi
+
+    return 0
+  fi
+
+  if [ -e "$source_dir" ]; then
+    error "flow source path exists but is not a git checkout: $source_dir"
+  fi
+
+  info "flow: cloning source checkout to $source_dir"
+  if ! git clone --branch "$source_branch" "$source_repo" "$source_dir" >/dev/null 2>&1; then
+    error "failed to clone flow source from $source_repo"
+  fi
+}
+
 #region download helpers
 download_file() {
   url="$1"
@@ -409,6 +466,7 @@ configure_shell() {
 }
 
 after_install() {
+  source_dir="${FLOW_SOURCE_DIR:-$HOME/code/flow}"
   info ""
   info "flow: installed successfully!"
   case "${SHELL:-}" in
@@ -416,10 +474,14 @@ after_install() {
     */zsh|*/bash) info "flow: restart shell or run: export PATH=\"\$HOME/.flow/bin:\$PATH\"" ;;
     *) info "flow: add ~/.flow/bin to your PATH" ;;
   esac
+  if should_install_source; then
+    info "flow: source checkout: $source_dir"
+  fi
   info "flow: then run 'f --help' to get started"
   info "flow: docs: https://myflow.sh"
 }
 
 install_flow
+ensure_flow_source_checkout
 configure_shell
 after_install

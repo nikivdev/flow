@@ -27,8 +27,8 @@ if [[ -n "${FLOW_INSTALL_SCRIPT_TMP:-}" ]]; then
 fi
 
 # Installs flow + f to the current user. Usage:
-#   curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/nikivdev/flow/main/scripts/install.sh | bash
+#   curl -fsSL https://myflow.sh/install.sh | sh
+#   curl -fsSL https://myflow.sh/install.sh | bash
 # Customize with:
 #   FLOW_INSTALL_ROOT=/usr/local         # overrides install prefix (default: ~/.local)
 #   FLOW_BIN_DIR=/usr/local/bin          # overrides bin dir (defaults to <root>/bin)
