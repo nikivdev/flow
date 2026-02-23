@@ -2,7 +2,7 @@
 repo = "git@github.com:nikivdev/flow-vendor.git"
 branch = "main"
 checkout = ".vendor/flow-vendor"
-commit = "eabe9af13b4e98b680a56984da11175f193e15c8"
+commit = "e438a2540597455522abb26f7223603a6b9ea977"
 
 [[crate]]
 name = "axum"
@@ -130,3 +130,9 @@ name = "rusqlite"
 repo_path = "crates/rusqlite"
 manifest_path = "manifests/rusqlite.toml"
 materialized_path = "lib/vendor/rusqlite"
+
+[[crate]]
+name = "rmp-serde"
+repo_path = "crates/rmp-serde"
+manifest_path = "manifests/rmp-serde.toml"
+materialized_path = "lib/vendor/rmp-serde"

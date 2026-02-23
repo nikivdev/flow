@@ -113,3 +113,4 @@ notify-debouncer-mini = { path = "lib/vendor/notify-debouncer-mini" }
 ignore = { path = "lib/vendor/ignore" }
 x25519-dalek = { path = "lib/vendor/x25519-dalek" }
 rusqlite = { path = "lib/vendor/rusqlite" }
+rmp-serde = { path = "lib/vendor/rmp-serde" }
