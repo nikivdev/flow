@@ -363,6 +363,41 @@ command = "bash ./scripts/agents-switch.sh $@"
 description = "Switch agents.md profile in a repo"
 interactive = true
 
+[[tasks]]
+name = "run-root"
+command = "bash ./scripts/run-repos.sh root"
+description = "Print run repo root path (default: ~/code/run)"
+
+[[tasks]]
+name = "run-ensure"
+command = "bash ./scripts/run-repos.sh ensure"
+description = "Ensure local run repo root exists"
+
+[[tasks]]
+name = "run-list"
+command = "bash ./scripts/run-repos.sh list"
+description = "List run repos under ~/code/run (flow.toml + git metadata)"
+
+[[tasks]]
+name = "run-load"
+command = "bash ./scripts/run-repos.sh load $@"
+description = "Clone or update a run repo. Usage: f run-load <name> <repo-ssh-url> [branch]"
+
+[[tasks]]
+name = "run-sync"
+command = "bash ./scripts/run-repos.sh sync $@"
+description = "Sync run repo(s). Usage: f run-sync [name]"
+
+[[tasks]]
+name = "run-task"
+command = "bash ./scripts/run-repos.sh task $@"
+description = "Run a Flow task inside a run repo. Usage: f run-task <name> <task> [args...]"
+
+[[tasks]]
+name = "run-linsa-bootstrap"
+command = "bash ./scripts/run-repos.sh linsa-bootstrap $@"
+description = "Bootstrap linsa contributor flow from ~/code/run/linsa (loads repo if URL is provided)"
+
 [storage]
 provider = "myflow.sh"
 env_var = "FLOW_SECRETS_TOKEN" # optional; defaults to this value

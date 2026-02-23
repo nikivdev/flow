@@ -166,6 +166,33 @@ Running `f deploy` will compile and put new version of flow into your path (so i
 
 For available features, see [docs](docs) or feed `f --help` to AI.
 
+## Run Repos
+
+Use `run` repos to keep executable onboarding/debug automation outside product repos.
+Flow treats each repo in `~/code/run/<name>` as a task container (must include `flow.toml`).
+
+Core tasks:
+
+```sh
+f run-ensure
+f run-list
+f run-load <name> <repo-ssh-url> [branch]
+f run-sync [name]
+f run-task <name> <task> [args...]
+```
+
+Linsa contributor bootstrap (full task-driven setup):
+
+```sh
+f run-linsa-bootstrap git@github.com:<org>/run-linsa.git
+```
+
+Or, if `~/code/run/linsa` is already present:
+
+```sh
+f run-linsa-bootstrap
+```
+
 ## Examples
 
 [Nikita](https://github.com/nikivdev)'s projects run on flow, including flow itself.
