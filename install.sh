@@ -32,6 +32,17 @@ is_truthy() {
     *) return 1 ;;
   esac
 }
+
+can_execute_flow_binary() {
+  bin_path="$1"
+  if [ ! -f "$bin_path" ]; then
+    return 1
+  fi
+  if [ ! -x "$bin_path" ]; then
+    chmod +x "$bin_path" 2>/dev/null || true
+  fi
+  "$bin_path" --version >/dev/null 2>&1
+}
 #endregion
 
 #region platform detection
@@ -480,6 +491,25 @@ install_flow() {
 
   # Cleanup
   rm -rf "$download_dir" "$extract_dir"
+
+  if ! can_execute_flow_binary "$install_path"; then
+    if [ "$os" = "macos" ] && ! is_truthy "${FLOW_INSTALL_RETRY_ALT_ARCH:-0}"; then
+      alt_arch="x64"
+      if [ "$arch" = "x64" ]; then
+        alt_arch="arm64"
+      fi
+      info "flow: installed binary failed execution; retrying with macos-$alt_arch build"
+      FLOW_ARCH="$alt_arch" FLOW_INSTALL_RETRY_ALT_ARCH=1 install_flow
+      return 0
+    fi
+
+    info "flow: diagnostic: unable to execute $install_path"
+    info "flow: diagnostic: $(ls -l "$install_path" 2>/dev/null || echo missing)"
+    if command -v file >/dev/null 2>&1; then
+      info "flow: diagnostic: $(file "$install_path" 2>/dev/null || true)"
+    fi
+    error "installed flow binary is not executable on this host"
+  fi
 
   info "flow: installed to $install_path"
 }
