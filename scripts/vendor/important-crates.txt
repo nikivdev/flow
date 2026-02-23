@@ -19,3 +19,4 @@ notify-debouncer-mini
 ignore
 x25519-dalek
 rusqlite
+rmp-serde
