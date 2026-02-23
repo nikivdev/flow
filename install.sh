@@ -136,6 +136,13 @@ should_install_source() {
   esac
 }
 
+should_install_path_shim() {
+  case "${FLOW_INSTALL_PATH_SHIM:-1}" in
+    0|false|FALSE|no|NO|n|N) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 ensure_flow_source_checkout() {
   if ! should_install_source; then
     info "flow: skipping source checkout (FLOW_INSTALL_SOURCE=0)"
@@ -183,6 +190,59 @@ ensure_flow_source_checkout() {
   info "flow: cloning source checkout to $source_dir"
   if ! git clone --branch "$source_branch" "$source_repo" "$source_dir" >/dev/null 2>&1; then
     error "failed to clone flow source from $source_repo"
+  fi
+}
+
+find_shim_dir() {
+  if [ -n "${FLOW_SHIM_DIR:-}" ]; then
+    if [ ! -d "$FLOW_SHIM_DIR" ]; then
+      mkdir -p "$FLOW_SHIM_DIR" 2>/dev/null || true
+    fi
+    if [ -d "$FLOW_SHIM_DIR" ] && [ -w "$FLOW_SHIM_DIR" ]; then
+      echo "$FLOW_SHIM_DIR"
+      return 0
+    fi
+  fi
+
+  old_ifs="${IFS:- }"
+  IFS=':'
+  for dir in ${PATH:-}; do
+    [ -n "$dir" ] || continue
+    [ -d "$dir" ] || continue
+    [ -w "$dir" ] || continue
+    echo "$dir"
+    IFS="$old_ifs"
+    return 0
+  done
+  IFS="$old_ifs"
+  return 1
+}
+
+install_path_shim() {
+  if ! should_install_path_shim; then
+    return 0
+  fi
+
+  install_path="${FLOW_INSTALL_PATH:-$HOME/.flow/bin/f}"
+  install_dir="$(dirname "$install_path")"
+  shim_dir="$(find_shim_dir 2>/dev/null || true)"
+
+  if [ -z "${shim_dir:-}" ]; then
+    info "flow: warning: no writable PATH directory found for immediate command shim"
+    return 0
+  fi
+
+  for name in f flow; do
+    target="$shim_dir/$name"
+    if [ -e "$target" ] && [ ! -L "$target" ] && [ "$target" != "$install_path" ]; then
+      # Do not replace existing non-symlink binaries/scripts.
+      continue
+    fi
+    ln -sf "$install_path" "$target" 2>/dev/null || true
+  done
+
+  if [ "$shim_dir" != "$install_dir" ]; then
+    info "flow: command shim installed in $shim_dir"
   fi
 }
 
@@ -467,13 +527,15 @@ configure_shell() {
 
 after_install() {
   source_dir="${FLOW_SOURCE_DIR:-$HOME/code/flow}"
+  install_path="${FLOW_INSTALL_PATH:-$HOME/.flow/bin/f}"
   info ""
   info "flow: installed successfully!"
-  case "${SHELL:-}" in
-    */fish) info "flow: restart shell or run: fish_add_path ~/.flow/bin" ;;
-    */zsh|*/bash) info "flow: restart shell or run: export PATH=\"\$HOME/.flow/bin:\$PATH\"" ;;
-    *) info "flow: add ~/.flow/bin to your PATH" ;;
-  esac
+  if command -v f >/dev/null 2>&1; then
+    info "flow: command ready: $(command -v f)"
+  else
+    info "flow: OPEN NEW SHELL to use 'f' by name"
+    info "flow: immediate fallback: $install_path --help"
+  fi
   if should_install_source; then
     info "flow: source checkout: $source_dir"
   fi
@@ -482,6 +544,7 @@ after_install() {
 }
 
 install_flow
+install_path_shim
 ensure_flow_source_checkout
 configure_shell
 after_install
