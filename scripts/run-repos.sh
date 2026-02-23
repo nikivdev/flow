@@ -12,13 +12,10 @@ Usage:
   run-repos.sh load <name> <repo-ssh-url> [branch]
   run-repos.sh sync [name]
   run-repos.sh task <name> <flow-task> [args...]
-  run-repos.sh linsa-bootstrap [run-repo-ssh-url]
 
 Environment:
   RUN_ROOT              Run repo root (default: ~/code/run)
   RUN_AUTO_SYNC         If set to 1, run-repos.sh task auto-syncs git repos before running task
-  RUN_LINSA_REPO_URL    Default URL for linsa run repo (used by linsa-bootstrap)
-  RUN_LINSA_BRANCH      Branch for linsa run repo load (default: main)
 USAGE
 }
 
@@ -197,29 +194,6 @@ cmd_task() {
   )
 }
 
-cmd_linsa_bootstrap() {
-  ensure_root
-  local dir
-  dir="$(repo_dir "linsa")"
-  local repo_url="${1:-${RUN_LINSA_REPO_URL:-}}"
-  local branch="${RUN_LINSA_BRANCH:-main}"
-
-  if [ ! -f "$dir/flow.toml" ]; then
-    if [ -z "$repo_url" ]; then
-      echo "ERROR: linsa run repo missing at $dir"
-      echo "Provide URL: f run-linsa-bootstrap git@github.com:<org>/run-linsa.git"
-      echo "Or set RUN_LINSA_REPO_URL and rerun."
-      exit 1
-    fi
-    cmd_load "linsa" "$repo_url" "$branch"
-  elif is_git_repo "$dir"; then
-    sync_git_repo "$dir"
-  fi
-
-  cmd_task "linsa" onboard
-  cmd_task "linsa" mobile-assistant-bootstrap
-}
-
 main() {
   local cmd="${1:-help}"
   shift || true
@@ -231,7 +205,6 @@ main() {
     load) cmd_load "$@" ;;
     sync) cmd_sync "$@" ;;
     task) cmd_task "$@" ;;
-    linsa-bootstrap) cmd_linsa_bootstrap "$@" ;;
     help|-h|--help) usage ;;
     *)
       echo "ERROR: unknown command: $cmd"

@@ -185,25 +185,6 @@ f run-list
 f run-load <name> <repo-ssh-url> [branch]
 f run-sync [name]
 f run-task <name> <task> [args...]
-f run-linsa-bootstrap-safe
-```
-
-Linsa contributor bootstrap (full task-driven setup):
-
-```sh
-f run-linsa-bootstrap git@github.com:<org>/run-linsa.git
-```
-
-Recovery-safe bootstrap (self-heals Flow install/source first):
-
-```sh
-f run-linsa-bootstrap-safe
-```
-
-Or, if `~/code/run/linsa` is already present:
-
-```sh
-f run-linsa-bootstrap
 ```
 
 ## Examples
