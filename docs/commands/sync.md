@@ -37,7 +37,7 @@ f sync -r --push
 | `--no-fix` | | Disable auto-fix |
 | `--max-fix-attempts <N>` | | Maximum auto-fix attempts (default: 3) |
 | `--allow-review-issues` | | Allow push even if P1/P2 review todos are open |
-| `--compact` | | Reduce output noise |
+| `--compact` | | Legacy noise-reduction flag (jj fetch output is already compact by default) |
 
 ## What Happens
 
@@ -75,6 +75,13 @@ Only when `--push` is passed:
 
 Restores auto-stashed changes if any were stashed in step 1.
 
+### Step 6: Synced commit list + clipboard
+
+On successful sync, Flow prints only the deduplicated list of newly synced commits (hash + subject)
+and copies that same list to your clipboard.
+
+Set `FLOW_NO_CLIPBOARD=1` to disable clipboard copy.
+
 ## JJ (Jujutsu) Support
 
 When a `.jj` directory is present and healthy, sync uses the jj flow instead of plain git. Falls back to git if:
@@ -84,6 +91,8 @@ When a `.jj` directory is present and healthy, sync uses the jj flow instead of 
 - jj workspace is unhealthy or corrupt
 
 Use `--stash-commits` to bookmark local jj commits before syncing.
+
+jj fetch output is compact by default; synced commit details are emitted once at the end for clipboard use.
 
 ## Commit Queue Guard
 

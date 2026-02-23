@@ -31,6 +31,20 @@ This gives direct dependency control without giving up Cargo behavior.
 - updates are reproducible and lock-pinned,
 - trim/refactor opportunities are local and fast.
 
+## Nix-Inspired Discipline
+
+This model borrows the parts of Nix that matter most for dependency control:
+
+- pinned inputs (`vendor.lock.toml`, `Cargo.lock`),
+- deterministic materialization (`vendor-repo.sh hydrate`),
+- provenance/checksum verification (`vendor-manifest`, strict verify),
+- transactional updates with rollback safety (`vendor-control.sh inhouse`),
+- closure-size reduction by trimming unused dependency surface.
+
+Reference:
+
+- `docs/vendor-nix-inspiration.md`
+
 ## Benefits
 
 - Faster local iteration by removing unneeded dependency surface area.
@@ -175,6 +189,45 @@ Policy:
 - patch updates can be frequent,
 - minor/major updates happen in explicit review windows (`--allow-minor`, `--allow-major`).
 
+## Code Intelligence Loop (opensrc-style, crates-focused)
+
+To make vendored code practical at scale, we index first-party + vendored sources into
+Typesense and query them fast during refactors and trim work.
+
+This follows the same high-level pattern as `opensrc`:
+
+- keep a local source inventory (`.vendor/typesense/sources.json`),
+- keep local source materialized (already done by vendor hydrate/inhouse),
+- index/search against local code state, not remote assumptions.
+
+Flow entrypoints:
+
+```bash
+f vendor-typesense-setup   # one-time if Typesense is not installed locally
+f vendor-typesense-up
+f vendor-code-index
+f vendor-code-search "Router"
+f vendor-code-search "serde" --scope vendor --crate axum
+f vendor-code-search-sources "ratatui"
+```
+
+Script used by tasks:
+
+```bash
+python3 ./scripts/vendor/typesense_code_index.py --help
+```
+
+Design goals:
+
+- search by vendored crate boundary (`--crate <name>`),
+- search by ownership boundary (`--scope vendor|firstparty`),
+- keep source provenance in inventory (`version`, `checksum`, `history_head`),
+- make trim/upstream update work faster by removing "where is this code?" overhead.
+
+Reference:
+
+- `docs/vendor-code-intelligence.md` for architecture, commands, and operating loop.
+
 ## CI Contract
 
 CI must hydrate vendored source from `vendor.lock.toml` before Cargo build:
@@ -204,6 +257,17 @@ cargo tree -d
 ```
 
 to rank impact and watch duplicate-version pressure.
+
+Operational tooling for this loop:
+
+- `f vendor-rough-audit`
+- `f vendor-offenders`
+- `f vendor-bench-iter -- --mode incremental --samples 3`
+- `f vendor-optimize-loop`
+
+Reference:
+
+- `docs/vendor-optimization-loop.md`
 
 ## Commit Policy
 

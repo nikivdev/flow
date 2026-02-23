@@ -140,7 +140,9 @@ impl SeqClient {
             Ok(response.result.unwrap_or_else(|| json!({})))
         } else {
             Err(SeqClientError::Remote(
-                response.error.unwrap_or_else(|| "unknown_error".to_string()),
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown_error".to_string()),
             ))
         }
     }
@@ -189,13 +191,7 @@ impl SeqClient {
         self.call(RpcRequest::new("scroll").with_args_json(json!({ "x": x, "y": y, "dy": dy })))
     }
 
-    pub fn drag(
-        &self,
-        x1: f64,
-        y1: f64,
-        x2: f64,
-        y2: f64,
-    ) -> Result<RpcResponse, SeqClientError> {
+    pub fn drag(&self, x1: f64, y1: f64, x2: f64, y2: f64) -> Result<RpcResponse, SeqClientError> {
         self.call(
             RpcRequest::new("drag")
                 .with_args_json(json!({ "x1": x1, "y1": y1, "x2": x2, "y2": y2 })),
@@ -342,4 +338,3 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 }
-
