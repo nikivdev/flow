@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
-use std::{cell::RefCell, collections::HashMap};
+use std::{cell::RefCell, collections::HashMap, collections::HashSet};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -58,7 +58,18 @@ struct SyncSnapshot {
     pushed: bool,
     success: bool,
     error: Option<String>,
+    remote_updates: Vec<SyncRemoteUpdate>,
     events: Vec<SyncEvent>,
+}
+
+#[derive(Serialize, Clone)]
+struct SyncRemoteUpdate {
+    remote: String,
+    branch: String,
+    before_tip: Option<String>,
+    after_tip: String,
+    commit_count: usize,
+    commits: Vec<String>,
 }
 
 struct SyncRecorder {
@@ -76,6 +87,7 @@ struct SyncRecorder {
     stashed: bool,
     rebase: bool,
     pushed: bool,
+    remote_updates: Vec<SyncRemoteUpdate>,
 }
 
 fn sync_should_push(cmd: &SyncCommand) -> bool {
@@ -127,6 +139,7 @@ impl SyncRecorder {
             stashed: false,
             rebase: cmd.rebase,
             pushed: should_push,
+            remote_updates: Vec::new(),
         };
         recorder.record(
             "start",
@@ -154,6 +167,7 @@ impl SyncRecorder {
             stashed: false,
             rebase: false,
             pushed: false,
+            remote_updates: Vec::new(),
         }
     }
 
@@ -170,6 +184,21 @@ impl SyncRecorder {
 
     fn set_stashed(&mut self, stashed: bool) {
         self.stashed = stashed;
+    }
+
+    fn add_remote_update(&mut self, update: SyncRemoteUpdate) {
+        if !self.enabled {
+            return;
+        }
+        if let Some(existing) = self
+            .remote_updates
+            .iter_mut()
+            .find(|item| item.remote == update.remote && item.branch == update.branch)
+        {
+            *existing = update;
+        } else {
+            self.remote_updates.push(update);
+        }
     }
 
     fn finish(&mut self, error: Option<&anyhow::Error>) {
@@ -210,6 +239,7 @@ impl SyncRecorder {
             pushed: self.pushed,
             success: error.is_none(),
             error: error.map(|e| e.to_string()),
+            remote_updates: self.remote_updates.clone(),
             events: self.events.clone(),
         };
 
@@ -836,6 +866,24 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
 
         Ok(())
     })();
+
+    if result.is_ok() {
+        let synced_commits = build_synced_commit_list(&recorder);
+        if !synced_commits.is_empty() {
+            println!("\n==> Synced commits:");
+            for line in &synced_commits {
+                println!("  {}", line);
+            }
+            let payload = synced_commits.join("\n");
+            match copy_sync_output_to_clipboard(&payload) {
+                Ok(true) => println!("Copied synced commit list to clipboard."),
+                Ok(false) => {}
+                Err(err) => {
+                    eprintln!("warn: failed to copy synced commit list to clipboard: {err}")
+                }
+            }
+        }
+    }
 
     recorder.finish(result.as_ref().err());
     result
@@ -1560,13 +1608,83 @@ fn short_commit_id(sha: &str) -> &str {
     }
 }
 
+fn build_synced_commit_list(recorder: &SyncRecorder) -> Vec<String> {
+    let mut seen_hashes: HashSet<String> = HashSet::new();
+    let mut commits: Vec<String> = Vec::new();
+
+    for update in &recorder.remote_updates {
+        for line in &update.commits {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let hash = match trimmed.split_whitespace().next() {
+                Some(value) if !value.is_empty() => value,
+                _ => continue,
+            };
+            if seen_hashes.insert(hash.to_string()) {
+                commits.push(trimmed.to_string());
+            }
+        }
+    }
+    commits
+}
+
+fn copy_sync_output_to_clipboard(text: &str) -> Result<bool> {
+    if std::env::var("FLOW_NO_CLIPBOARD").is_ok() {
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("failed to spawn pbcopy")?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        child.wait()?;
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let result = Command::new("xclip")
+            .arg("-selection")
+            .arg("clipboard")
+            .stdin(Stdio::piped())
+            .spawn();
+
+        let mut child = match result {
+            Ok(c) => c,
+            Err(_) => Command::new("xsel")
+                .arg("--clipboard")
+                .arg("--input")
+                .stdin(Stdio::piped())
+                .spawn()
+                .context("failed to spawn xclip or xsel")?,
+        };
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        child.wait()?;
+        return Ok(true);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        bail!("clipboard not supported on this platform");
+    }
+}
+
 fn print_fetched_remote_commits(
     repo_root: &Path,
     tracked: &[TrackedRemoteRef],
     recorder: &mut SyncRecorder,
-    compact: bool,
+    _compact: bool,
 ) {
-    let mut printed_header = false;
     for item in tracked {
         let Some(after_tip) = remote_branch_tip(repo_root, &item.remote, &item.branch) else {
             continue;
@@ -1575,15 +1693,17 @@ fn print_fetched_remote_commits(
             continue;
         }
 
-        if !printed_header {
-            println!("==> Fetched remote commits:");
-            printed_header = true;
-        }
-
         let label = format!("{}/{}", item.remote, item.branch);
         match item.before_tip.as_deref() {
             None => {
-                println!("  {} -> {}", label, short_commit_id(&after_tip));
+                recorder.add_remote_update(SyncRemoteUpdate {
+                    remote: item.remote.clone(),
+                    branch: item.branch.clone(),
+                    before_tip: None,
+                    after_tip: after_tip.clone(),
+                    commit_count: 0,
+                    commits: Vec::new(),
+                });
                 recorder.record(
                     "jj",
                     format!("fetched {} at {}", label, short_commit_id(&after_tip)),
@@ -1602,12 +1722,14 @@ fn print_fetched_remote_commits(
                     .filter(|line| !line.is_empty())
                     .collect();
                 if commits.is_empty() {
-                    println!(
-                        "  {} updated {} -> {}",
-                        label,
-                        short_commit_id(before_tip),
-                        short_commit_id(&after_tip)
-                    );
+                    recorder.add_remote_update(SyncRemoteUpdate {
+                        remote: item.remote.clone(),
+                        branch: item.branch.clone(),
+                        before_tip: Some(before_tip.to_string()),
+                        after_tip: after_tip.clone(),
+                        commit_count: 0,
+                        commits: Vec::new(),
+                    });
                     recorder.record(
                         "jj",
                         format!(
@@ -1618,17 +1740,14 @@ fn print_fetched_remote_commits(
                         ),
                     );
                 } else {
-                    if compact {
-                        println!("  {} (+{})", label, commits.len());
-                    } else {
-                        println!("  {} (+{}):", label, commits.len());
-                        for line in commits.iter().take(8) {
-                            println!("    {}", line);
-                        }
-                        if commits.len() > 8 {
-                            println!("    ... +{} more", commits.len() - 8);
-                        }
-                    }
+                    recorder.add_remote_update(SyncRemoteUpdate {
+                        remote: item.remote.clone(),
+                        branch: item.branch.clone(),
+                        before_tip: Some(before_tip.to_string()),
+                        after_tip: after_tip.clone(),
+                        commit_count: commits.len(),
+                        commits: commits.iter().map(|line| (*line).to_string()).collect(),
+                    });
                     recorder.record(
                         "jj",
                         format!("fetched {} (+{} commits)", label, commits.len()),

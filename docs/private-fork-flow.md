@@ -42,13 +42,28 @@ cd <repo-dir>
 git status --short --branch
 git diff --stat
 git diff
-f commit
+f commit --slow --review-model codex-high
 f sync --push
 ```
 
 Flow behavior:
 - `f sync --push` uses `[git].remote` when configured.
 - Fallback order is `[git].remote`, then legacy `[jj].remote`, then `origin`.
+
+## AI Trigger Contract
+
+Use this exact phrase when you want review-first behavior:
+
+`analyze diff commit and push`
+
+Expected assistant behavior:
+
+1. Run `git status --short --branch`, `git diff --stat`, `git diff`.
+2. Produce a findings-first review (ordered by severity, with file references).
+3. If unresolved P1/P2 issues exist, stop before commit/push and fix or ask for override.
+4. Run `f commit --slow --review-model codex-high`.
+5. Run `f sync --push`.
+6. Report which remote received the push (`[git].remote` or fallback `origin`).
 
 ## AI Guardrails (Must Follow)
 

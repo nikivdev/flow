@@ -224,6 +224,76 @@ command = "bash ./scripts/ci_host_setup.sh $@"
 description = "One command to set up ci.1focus.ai runner and switch workflows to host mode (optionally pass user@ip)"
 
 [[tasks]]
+name = "vendor-typesense-up"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense.sh up'"
+description = "Start local Typesense via infra/base shared launcher"
+
+[[tasks]]
+name = "vendor-typesense-setup"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense-flox-setup.sh'"
+description = "One-time setup for local Typesense via flox in infra/base"
+
+[[tasks]]
+name = "vendor-typesense-down"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense.sh down'"
+description = "Stop local Typesense via infra/base shared launcher"
+
+[[tasks]]
+name = "vendor-typesense-status"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense.sh status'"
+description = "Show local Typesense status via infra/base shared launcher"
+
+[[tasks]]
+name = "vendor-typesense-logs"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense.sh logs'"
+description = "Tail local Typesense logs via infra/base shared launcher"
+
+[[tasks]]
+name = "vendor-code-sources"
+command = "python3 ./scripts/vendor/typesense_code_index.py --project . sources $@"
+description = "Print opensrc-style source inventory for first-party + vendored crates"
+
+[[tasks]]
+name = "vendor-code-index"
+command = "python3 ./scripts/vendor/typesense_code_index.py --project . index $@"
+description = "Index first-party and vendored code chunks into Typesense"
+
+[[tasks]]
+name = "vendor-code-search"
+command = "python3 ./scripts/vendor/typesense_code_index.py --project . search $@"
+description = "Search indexed code (chunks by default) with optional scope/crate/lang filters"
+
+[[tasks]]
+name = "vendor-code-search-sources"
+command = "python3 ./scripts/vendor/typesense_code_index.py --project . search --collection sources $@"
+description = "Search source inventory metadata (crate/version/path/upstream)"
+
+[[tasks]]
+name = "vendor-rough-audit"
+command = "python3 ./scripts/vendor/rough_edges_audit.py --project . $@"
+description = "Audit vendoring rough edges (lock/manifest/patch/provenance/index freshness)"
+
+[[tasks]]
+name = "vendor-rough-audit-strict"
+command = "python3 ./scripts/vendor/rough_edges_audit.py --project . --strict-warnings $@"
+description = "Strict vendoring audit: warnings fail (good for pre-merge hardening)"
+
+[[tasks]]
+name = "vendor-offenders"
+command = "bash ./scripts/vendor/offenders.sh"
+description = "Rank dependency offenders by tree size and show duplicate-version pressure"
+
+[[tasks]]
+name = "vendor-bench-iter"
+command = "python3 ./scripts/vendor/bench_iteration.py --project . $@"
+description = "Record compile-iteration benchmark samples to out/vendor/iteration_bench.jsonl"
+
+[[tasks]]
+name = "vendor-optimize-loop"
+command = "bash ./scripts/vendor/optimize_loop.sh $@"
+description = "Run audit + offender scan + iteration benchmark in one command"
+
+[[tasks]]
 name = "test-flow-task-tracing"
 command = "bun i-run.ts"
 
