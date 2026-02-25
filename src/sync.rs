@@ -966,7 +966,7 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
 
     let mut switched_branch = target_branch.clone();
     let switch_result = (|| -> Result<()> {
-        let tracking_remote = resolve_tracking_remote_and_fetch(
+        let tracking = resolve_tracking_remote_and_fetch(
             &repo_root_path,
             &switched_branch,
             cmd.remote.as_deref(),
@@ -975,7 +975,7 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
         if git_ref_exists_in(&repo_root_path, &format!("refs/heads/{}", switched_branch)) {
             println!("==> Switching to local branch {}...", switched_branch);
             git_run_in(&repo_root_path, &["switch", &switched_branch])?;
-        } else if let Some(remote) = tracking_remote.as_deref() {
+        } else if let Some(remote) = tracking.remote.as_deref() {
             println!(
                 "==> Creating {} from {}/{}...",
                 switched_branch, remote, switched_branch
@@ -1008,11 +1008,18 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
             }
             switched_branch = checked_out;
         } else {
-            let preferred = cmd.remote.as_deref().unwrap_or("upstream/origin");
+            let searched = if tracking.searched.is_empty() {
+                cmd.remote
+                    .as_deref()
+                    .unwrap_or("upstream/origin")
+                    .to_string()
+            } else {
+                tracking.searched.join("/")
+            };
             bail!(
                 "Branch '{}' not found locally or on remotes (searched: {}).",
                 switched_branch,
-                preferred
+                searched
             );
         }
 
@@ -1390,25 +1397,48 @@ fn ensure_branch_attached(repo_root: &Path, target_branch: &str) -> Result<()> {
     Ok(())
 }
 
+struct SwitchTrackingResolution {
+    remote: Option<String>,
+    searched: Vec<String>,
+}
+
 fn resolve_tracking_remote_and_fetch(
     repo_root: &Path,
     branch: &str,
     preferred_remote: Option<&str>,
-) -> Result<Option<String>> {
+) -> Result<SwitchTrackingResolution> {
     let mut candidates: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_candidate = |remote: String| {
+        let trimmed = remote.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let key = trimmed.to_string();
+        if seen.insert(key.clone()) {
+            candidates.push(key);
+        }
+    };
+
     if let Some(remote) = preferred_remote.map(str::trim).filter(|s| !s.is_empty()) {
-        candidates.push(remote.to_string());
+        push_candidate(remote.to_string());
     }
     for remote in ["upstream", "origin"] {
-        if !candidates.iter().any(|r| r == remote) {
-            candidates.push(remote.to_string());
+        push_candidate(remote.to_string());
+    }
+
+    if let Ok(remotes_raw) = git_capture_in(repo_root, &["remote"]) {
+        for remote in remotes_raw.lines() {
+            push_candidate(remote.to_string());
         }
     }
 
+    let mut searched: Vec<String> = Vec::new();
     for remote in candidates {
         if !remote_exists(repo_root, &remote) {
             continue;
         }
+        searched.push(remote.clone());
         println!("==> Fetching {}...", remote);
         let args = vec!["fetch", remote.as_str(), "--prune"];
         if let Err(err) = git_run_in(repo_root, &args) {
@@ -1418,11 +1448,17 @@ fn resolve_tracking_remote_and_fetch(
             continue;
         }
         if remote_branch_exists(repo_root, &remote, branch) {
-            return Ok(Some(remote));
+            return Ok(SwitchTrackingResolution {
+                remote: Some(remote),
+                searched,
+            });
         }
     }
 
-    Ok(None)
+    Ok(SwitchTrackingResolution {
+        remote: None,
+        searched,
+    })
 }
 
 fn sync_local_upstream_branch(repo_root: &Path, branch: &str) -> Result<()> {
@@ -2002,8 +2038,15 @@ fn run_jj_sync(
                         "==> Rebasing branch {} with jj onto {}...",
                         current_branch, dest
                     );
-                    let preempt_ignore_immutable = !is_read_only
-                        && branch_tip_matches_remote(repo_root, &current_branch, &push_remote);
+                    let preempt_ignore_immutable = branch_tip_matches_remote(
+                        repo_root,
+                        &current_branch,
+                        if is_read_only {
+                            "upstream"
+                        } else {
+                            &push_remote
+                        },
+                    );
                     if preempt_ignore_immutable {
                         recorder.record(
                             "jj",
@@ -2038,7 +2081,7 @@ fn run_jj_sync(
                     );
                     if let Err(err) = jj_run_in(repo_root, &initial_rebase_args) {
                         recorder.record("jj", "jj branch rebase failed");
-                        if !preempt_ignore_immutable && !is_read_only {
+                        if !preempt_ignore_immutable {
                             println!(
                                 "==> Rebase blocked by immutable commits; retrying with --ignore-immutable..."
                             );
@@ -2098,13 +2141,15 @@ fn run_jj_sync(
                 recorder.record("jj", format!("jj rebase -d {}", dest));
                 if let Err(err) = jj_run_in(repo_root, &["rebase", "-d", &dest]) {
                     recorder.record("jj", "jj rebase failed");
-                    if !is_read_only {
-                        println!(
-                            "==> Rebase blocked by immutable commits; retrying with --ignore-immutable..."
-                        );
-                        recorder.record("jj", "jj rebase retry --ignore-immutable");
-                        jj_run_in(repo_root, &["rebase", "--ignore-immutable", "-d", &dest])?;
-                    } else {
+                    println!(
+                        "==> Rebase blocked by immutable commits; retrying with --ignore-immutable..."
+                    );
+                    recorder.record("jj", "jj rebase retry --ignore-immutable");
+                    if let Err(retry_err) =
+                        jj_run_in(repo_root, &["rebase", "--ignore-immutable", "-d", &dest])
+                    {
+                        // If even --ignore-immutable fails, return the original error.
+                        let _ = retry_err;
                         return Err(err);
                     }
                 }

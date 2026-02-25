@@ -16,7 +16,7 @@ cd <repo>
 f sync
 
 # 3) Try Flow-native switch first
-f switch <branch-name> --remote origin
+f switch <branch-name>
 
 # 4) If Flow says "Branch '<name>' not found locally or on remotes", create from current HEAD
 git switch -c <branch-name>
@@ -38,7 +38,7 @@ Paste this in requests when you want branch creation handled consistently:
 ```md
 Use Flow-native branch creation in this repo:
 1. Run `f sync`.
-2. Try `f switch <branch-name> --remote origin`.
+2. Try `f switch <branch-name>`.
 3. If Flow says branch is not found locally/remotely, run `git switch -c <branch-name>`.
 4. Verify branch name, upstream/tracking, and clean working tree (`git status --short --branch`).
 5. Report exact commands run, final branch, and HEAD commit.
@@ -53,6 +53,7 @@ Constraints:
 
 - `f switch` preserves safety snapshots and stashes by default.
 - `f switch` may create `f-switch-save/<branch>-<timestamp>` even when it fails to find the target branch; this is expected safety behavior.
+- `f switch` now searches all configured Git remotes (not just `upstream`/`origin`) when resolving a missing local branch.
 - Today, `f switch` may fail for a brand-new local-only branch name; use the documented fallback.
 - If you intentionally need a different base, switch to that base first, then run `f switch <branch-name>`.
 - If your default trunk is `upstream/main`, use `--remote upstream`.

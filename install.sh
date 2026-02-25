@@ -245,7 +245,11 @@ install_path_shim() {
 
   for name in f flow; do
     target="$shim_dir/$name"
-    if [ -e "$target" ] && [ ! -L "$target" ] && [ "$target" != "$install_path" ]; then
+    # Never overwrite the installed binary with a symlink to itself.
+    if [ "$target" = "$install_path" ]; then
+      continue
+    fi
+    if [ -e "$target" ] && [ ! -L "$target" ]; then
       # Do not replace existing non-symlink binaries/scripts.
       continue
     fi
