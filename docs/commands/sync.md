@@ -6,6 +6,17 @@ Sync git repo: pull from tracking remote, merge upstream changes, optionally pus
 
 Single command to bring a repository up to date. Pulls from the tracking branch, syncs upstream if configured (fork workflow), and optionally pushes. Works with both plain git and jj (jujutsu) colocated repos.
 
+## Context Card
+
+Use this block when passing `f sync` behavior to another agent:
+
+- Default behavior: pull/sync only; push is off unless `--push`.
+- Defaults: `--stash=true`, `--fix=true`.
+- Modes: uses jj flow in healthy colocated workspaces, falls back to plain git when needed.
+- Push target: configured `[git].remote` first, then standard fallback behavior.
+- Clipboard output: synced commit list is copied only when remote commit ranges are detected (typically jj fetch path).
+- Conflict note: jj can finish with unresolved conflicts and prints `jj resolve` guidance.
+
 ## Quick Start
 
 ```bash
@@ -77,8 +88,10 @@ Restores auto-stashed changes if any were stashed in step 1.
 
 ### Step 6: Synced commit list + clipboard
 
-On successful sync, Flow prints only the deduplicated list of newly synced commits (hash + subject)
-and copies that same list to your clipboard.
+When remote commit ranges are discovered (typically during jj fetch), Flow prints a deduplicated
+list of newly synced commits (hash + subject) and copies that same list to your clipboard.
+
+If no synced commit ranges were detected, this section is skipped.
 
 Set `FLOW_NO_CLIPBOARD=1` to disable clipboard copy.
 
@@ -176,6 +189,14 @@ If jj sync fails due to workspace/store issues, sync automatically retries with 
 jj git import
 # or if still broken:
 rm -rf .jj && jj git init --colocate
+```
+
+### "Sync complete (jj) but conflicts remain"
+
+This means sync/rebase completed but conflict revisions still exist in jj.
+
+```bash
+jj resolve
 ```
 
 ## See Also

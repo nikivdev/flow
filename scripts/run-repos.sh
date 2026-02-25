@@ -12,6 +12,10 @@ Usage:
   run-repos.sh load <name> <repo-ssh-url> [branch]
   run-repos.sh sync [name]
   run-repos.sh task <name> <flow-task> [args...]
+  run-repos.sh r <flow-task> [args...]
+  run-repos.sh ri <flow-task> [args...]
+  run-repos.sh rp <project> <flow-task> [args...]
+  run-repos.sh rip <project> <flow-task> [args...]
   run-repos.sh exec <name> <repo-ssh-url> [--branch <branch>] <flow-task> [args...]
 
 Environment:
@@ -34,6 +38,25 @@ is_git_repo() {
   [ -d "$dir/.git" ]
 }
 
+validate_relative_path() {
+  local rel="$1"
+  local label="$2"
+  if [ -z "$rel" ]; then
+    echo "ERROR: $label cannot be empty"
+    exit 1
+  fi
+  case "$rel" in
+    /*)
+      echo "ERROR: $label must be relative to \$RUN_ROOT (got absolute path: $rel)"
+      exit 1
+      ;;
+    ..|../*|*/..|*/../*)
+      echo "ERROR: $label must not contain '..' segments: $rel"
+      exit 1
+      ;;
+  esac
+}
+
 sync_git_repo() {
   local dir="$1"
   if ! is_git_repo "$dir"; then
@@ -54,6 +77,89 @@ sync_git_repo() {
   fi
 }
 
+print_repo_row() {
+  local name="$1"
+  local dir="$2"
+  if is_git_repo "$dir"; then
+    local remote=""
+    local branch=""
+    remote="$(git -C "$dir" remote get-url origin 2>/dev/null || true)"
+    branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    echo "$name | git | ${branch:-?} | ${remote:-no-origin} | $dir"
+  else
+    echo "$name | no-git | - | - | $dir"
+  fi
+}
+
+display_name_for_dir() {
+  local dir="$1"
+  if [ "$dir" = "$RUN_ROOT" ]; then
+    printf 'root'
+    return 0
+  fi
+  printf '%s' "${dir#$RUN_ROOT/}"
+}
+
+run_task_in_dir() {
+  local dir="$1"
+  local label="$2"
+  shift 2
+
+  if [ ! -d "$dir" ]; then
+    echo "ERROR: run repo/project not found: $dir"
+    exit 1
+  fi
+
+  if [ ! -f "$dir/flow.toml" ]; then
+    echo "ERROR: no flow.toml in: $dir"
+    exit 1
+  fi
+
+  if [ "${RUN_AUTO_SYNC:-0}" = "1" ] && is_git_repo "$dir"; then
+    sync_git_repo "$dir"
+  fi
+
+  local config_path="$dir/flow.toml"
+  echo "[run] $label -> f run --config $config_path $*"
+  (
+    cd "$dir"
+    f run --config "$config_path" "$@"
+  )
+}
+
+resolve_project_dir() {
+  local project="$1"
+  validate_relative_path "$project" "project"
+
+  local direct
+  local internal
+  direct="$(repo_dir "$project")"
+  internal="$(repo_dir "i/$project")"
+
+  if [ "$project" != i/* ] && [ -d "$direct" ] && [ -d "$internal" ]; then
+    echo "ERROR: project '$project' is ambiguous."
+    echo "Use explicit path: 'i/$project' for internal, or '$project' for public."
+    exit 1
+  fi
+
+  if [ -d "$direct" ]; then
+    printf '%s\n' "$direct"
+    return 0
+  fi
+
+  if [ "$project" != i/* ] && [ -d "$internal" ]; then
+    printf '%s\n' "$internal"
+    return 0
+  fi
+
+  echo "ERROR: project not found under \$RUN_ROOT:"
+  echo "  tried: $direct"
+  if [ "$project" != i/* ]; then
+    echo "  tried: $internal"
+  fi
+  exit 1
+}
+
 cmd_root() {
   echo "$RUN_ROOT"
 }
@@ -67,21 +173,20 @@ cmd_list() {
   ensure_root
 
   local has_any=0
-  for dir in "$RUN_ROOT"/*; do
-    [ -d "$dir" ] || continue
-    [ -f "$dir/flow.toml" ] || continue
+  if [ -f "$RUN_ROOT/flow.toml" ]; then
+    print_repo_row "root" "$RUN_ROOT"
     has_any=1
-    local name="$(basename "$dir")"
-    if is_git_repo "$dir"; then
-      local remote=""
-      local branch=""
-      remote="$(git -C "$dir" remote get-url origin 2>/dev/null || true)"
-      branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-      echo "$name | git | ${branch:-?} | ${remote:-no-origin} | $dir"
-    else
-      echo "$name | no-git | - | - | $dir"
-    fi
-  done
+  fi
+
+  while IFS= read -r toml; do
+    local dir
+    local name
+    dir="$(dirname "$toml")"
+    [ "$dir" = "$RUN_ROOT" ] && continue
+    name="${dir#$RUN_ROOT/}"
+    print_repo_row "$name" "$dir"
+    has_any=1
+  done < <(find "$RUN_ROOT" -mindepth 1 -maxdepth 6 -type f -name flow.toml 2>/dev/null | sort)
 
   if [ "$has_any" -eq 0 ]; then
     echo "[run] no run repos found in $RUN_ROOT"
@@ -96,6 +201,7 @@ cmd_load() {
   fi
 
   local name="$1"
+  validate_relative_path "$name" "name"
   local repo_url="$2"
   local branch="${3:-}"
   local dir
@@ -138,6 +244,7 @@ cmd_sync() {
 
   if [ "$#" -gt 0 ]; then
     local name="$1"
+    validate_relative_path "$name" "name"
     local dir
     dir="$(repo_dir "$name")"
     if [ ! -d "$dir" ]; then
@@ -149,13 +256,13 @@ cmd_sync() {
   fi
 
   local found=0
-  for dir in "$RUN_ROOT"/*; do
-    [ -d "$dir" ] || continue
-    if is_git_repo "$dir"; then
-      found=1
-      sync_git_repo "$dir"
-    fi
-  done
+  while IFS= read -r git_dir; do
+    [ -n "$git_dir" ] || continue
+    local repo
+    repo="$(dirname "$git_dir")"
+    found=1
+    sync_git_repo "$repo"
+  done < <(find "$RUN_ROOT" -type d -name .git -prune 2>/dev/null | sort)
 
   if [ "$found" -eq 0 ]; then
     echo "[run] no git run repos to sync in $RUN_ROOT"
@@ -171,28 +278,57 @@ cmd_task() {
 
   local name="$1"
   shift
+  validate_relative_path "$name" "name"
   local dir
   dir="$(repo_dir "$name")"
 
-  if [ ! -d "$dir" ]; then
-    echo "ERROR: run repo not found: $dir"
+  run_task_in_dir "$dir" "$name" "$@"
+}
+
+cmd_ri() {
+  # Shortcut: run task in $RUN_ROOT/i
+  cmd_task i "$@"
+}
+
+cmd_r() {
+  # Shortcut: run task in $RUN_ROOT (the public run repo itself)
+  if [ "$#" -lt 1 ]; then
+    echo "ERROR: r requires <flow-task> [args...]"
     exit 1
   fi
+  ensure_root
+  run_task_in_dir "$RUN_ROOT" "root" "$@"
+}
 
-  if [ ! -f "$dir/flow.toml" ]; then
-    echo "ERROR: run repo has no flow.toml: $dir"
+cmd_rp() {
+  # Run a task in a run project by path/name (resolves internal fallback).
+  if [ "$#" -lt 2 ]; then
+    echo "ERROR: rp requires <project> <flow-task> [args...]"
+    usage
     exit 1
   fi
+  local project="$1"
+  shift
+  local dir
+  local label
+  dir="$(resolve_project_dir "$project")"
+  label="$(display_name_for_dir "$dir")"
+  run_task_in_dir "$dir" "$label" "$@"
+}
 
-  if [ "${RUN_AUTO_SYNC:-0}" = "1" ] && is_git_repo "$dir"; then
-    sync_git_repo "$dir"
+cmd_rip() {
+  # Run a task in an internal run project: $RUN_ROOT/i/<project>.
+  if [ "$#" -lt 2 ]; then
+    echo "ERROR: rip requires <project> <flow-task> [args...]"
+    usage
+    exit 1
   fi
-
-  echo "[run] $name -> f $*"
-  (
-    cd "$dir"
-    f "$@"
-  )
+  local project="$1"
+  shift
+  validate_relative_path "$project" "project"
+  local dir
+  dir="$(repo_dir "i/$project")"
+  run_task_in_dir "$dir" "i/$project" "$@"
 }
 
 cmd_exec() {
@@ -203,6 +339,7 @@ cmd_exec() {
   fi
 
   local name="$1"
+  validate_relative_path "$name" "name"
   local repo_url="$2"
   shift 2
 
@@ -255,6 +392,10 @@ main() {
     load) cmd_load "$@" ;;
     sync) cmd_sync "$@" ;;
     task) cmd_task "$@" ;;
+    ri) cmd_ri "$@" ;;
+    r) cmd_r "$@" ;;
+    rp) cmd_rp "$@" ;;
+    rip) cmd_rip "$@" ;;
     exec) cmd_exec "$@" ;;
     help|-h|--help) usage ;;
     *)

@@ -18,6 +18,7 @@ use crate::setup::add_gitignore_entry;
 pub fn run(_opts: HealthOpts) -> Result<()> {
     println!("Running flow health checks...\n");
 
+    ensure_run_layout()?;
     ensure_fish_shell()?;
     ensure_fish_flow_init()?;
     ensure_gitignore()?;
@@ -30,6 +31,48 @@ pub fn run(_opts: HealthOpts) -> Result<()> {
     ensure_zerg_ai_health()?;
 
     println!("\n✅ flow health checks passed.");
+    Ok(())
+}
+
+fn ensure_run_layout() -> Result<()> {
+    let run_root = config::expand_path("~/code/run");
+    let run_internal = run_root.join("i");
+
+    if !run_root.exists() {
+        fs::create_dir_all(&run_root)
+            .with_context(|| format!("failed to create {}", run_root.display()))?;
+        println!("✅ created run root: {}", run_root.display());
+    } else {
+        println!("✅ run root ready: {}", run_root.display());
+    }
+
+    if !run_internal.exists() {
+        fs::create_dir_all(&run_internal)
+            .with_context(|| format!("failed to create {}", run_internal.display()))?;
+        println!("✅ created internal run root: {}", run_internal.display());
+    } else {
+        println!("✅ internal run root ready: {}", run_internal.display());
+    }
+
+    if run_root.join("flow.toml").exists() {
+        println!("✅ run public repo detected");
+    } else {
+        println!("ℹ️  run public repo not detected at {}", run_root.display());
+    }
+
+    if run_internal.join("flow.toml").exists() {
+        println!("✅ run internal repo detected");
+    } else {
+        println!(
+            "ℹ️  run internal repo not detected at {}",
+            run_internal.display()
+        );
+    }
+
+    println!(
+        "ℹ️  run shortcuts: f r <task>, f ri <task>, f rp <project> <task>, f rip <project> <task>"
+    );
+
     Ok(())
 }
 
