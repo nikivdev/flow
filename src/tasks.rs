@@ -112,6 +112,29 @@ impl LogIngester {
     }
 }
 
+/// Flag set by the SIGWINCH signal handler when the terminal is resized.
+static SIGWINCH_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+/// Tracks whether raw mode is currently active so the ctrlc handler can restore
+/// the terminal before exiting.
+static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+unsafe extern "C" fn sigwinch_handler(_sig: libc::c_int) {
+    SIGWINCH_RECEIVED.store(true, Ordering::SeqCst);
+}
+
+/// RAII guard that disables raw mode and clears the global flag on drop,
+/// ensuring the terminal is always restored even on early returns or panics.
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        RAW_MODE_ACTIVE.store(false, Ordering::SeqCst);
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
 /// Global state for cancel cleanup handler.
 static CANCEL_HANDLER_SET: AtomicBool = AtomicBool::new(false);
 static FISHX_WARNED: AtomicBool = AtomicBool::new(false);
@@ -176,6 +199,9 @@ fn setup_cancel_handler(on_cancel: Option<&str>, workdir: &Path) {
     if !CANCEL_HANDLER_SET.swap(true, Ordering::SeqCst) {
         let _ = ctrlc::set_handler(move || {
             run_cleanup();
+            if RAW_MODE_ACTIVE.load(Ordering::SeqCst) {
+                let _ = crossterm::terminal::disable_raw_mode();
+            }
             std::process::exit(130); // 128 + SIGINT (2)
         });
     }
@@ -2341,7 +2367,7 @@ fn run_host_command(
     let is_tty = has_tty_access();
 
     if interactive && is_tty {
-        return run_interactive_command(workdir, command, args, ctx);
+        return run_command_with_pty(workdir, command, args, ctx);
     }
 
     let mut cmd = Command::new("/bin/sh");
@@ -2444,7 +2470,22 @@ fn run_flox_command(
     let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
 
     if interactive && has_tty_access() {
-        return run_flox_interactive_command(env, workdir, command, args, ctx);
+        // Build a single command string that wraps the user command inside
+        // `flox activate`, then hand it to the PTY path for full interactivity
+        // + output capture.
+        let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
+        let inner = if args.is_empty() || command_references_args(command) {
+            command.to_string()
+        } else {
+            format!("{} \"$@\"", command)
+        };
+        let flox_cmd = format!(
+            "{} activate -d {} -- /bin/sh -c {}",
+            shell_words::quote(&flox_bin.to_string_lossy()),
+            shell_words::quote(&env.project_root.to_string_lossy()),
+            shell_words::quote(&inner),
+        );
+        return run_command_with_pty(workdir, &flox_cmd, args, ctx);
     }
 
     let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
@@ -2476,102 +2517,15 @@ fn run_flox_command(
     run_command_with_tee(cmd, ctx).with_context(|| "failed to spawn flox activate for task")
 }
 
-/// Run an interactive flox command with inherited stdio for proper TTY handling.
-fn run_flox_interactive_command(
-    env: &FloxEnv,
-    workdir: &Path,
-    command: &str,
-    args: &[String],
-    ctx: Option<TaskContext>,
-) -> Result<(ExitStatus, String)> {
-    let flox_bin = which("flox").context("flox is required to run tasks with flox deps")?;
-
-    // If args are provided and command doesn't already reference them,
-    // append "$@" to pass them through properly
-    let full_command = if args.is_empty() || command_references_args(command) {
-        command.to_string()
-    } else {
-        format!("{} \"$@\"", command)
-    };
-
-    let mut cmd = Command::new(flox_bin);
-    cmd.arg("activate")
-        .arg("-d")
-        .arg(&env.project_root)
-        .arg("--")
-        .arg("/bin/sh")
-        .arg("-c")
-        .arg(&full_command);
-    if !args.is_empty() {
-        cmd.arg("sh"); // $0 placeholder
-        for arg in args {
-            cmd.arg(arg);
-        }
-    }
-    cmd.current_dir(workdir);
-
-    // Inherit all stdio for full TTY passthrough
-    cmd.stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    // NOTE: Do NOT create a new process group for interactive commands.
-    // The child must remain in the foreground process group to read from the terminal.
-
-    let mut child = cmd
-        .spawn()
-        .with_context(|| "failed to spawn interactive flox command")?;
-
-    let pid = child.id();
-    let pgid = running::get_pgid(pid).unwrap_or(pid);
-    set_cleanup_process(pid, pgid);
-
-    if let Some(ref task_ctx) = ctx {
-        let entry = RunningProcess {
-            pid,
-            pgid,
-            task_name: task_ctx.task_name.clone(),
-            command: task_ctx.command.clone(),
-            started_at: running::now_ms(),
-            config_path: task_ctx.config_path.clone(),
-            project_root: task_ctx.project_root.clone(),
-            used_flox: task_ctx.used_flox,
-            project_name: task_ctx.project_name.clone(),
-        };
-        if let Err(err) = running::register_process(entry) {
-            tracing::warn!(?err, "failed to register running process");
-        }
-    }
-
-    let status = child
-        .wait()
-        .with_context(|| "failed to wait on interactive flox command")?;
-
-    if ctx.is_some() {
-        if let Err(err) = running::unregister_process(pid) {
-            tracing::debug!(?err, "failed to unregister process");
-        }
-    }
-
-    // No output captured for interactive commands
-    Ok((status, String::new()))
-}
-
 fn run_command_with_tee(
     mut cmd: Command,
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
     inject_global_env(&mut cmd);
-    // Only use `script` for tasks explicitly marked as interactive
-    // This avoids issues with non-interactive tasks hanging
-    let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
-    let use_script = interactive && std::io::stdin().is_terminal() && cfg!(unix);
-
-    if use_script {
-        run_command_with_script(cmd, ctx)
-    } else {
-        run_command_with_pipes(cmd, ctx)
-    }
+    // Interactive commands are now caught upstream by run_host_command /
+    // run_flox_command and routed through run_command_with_pty, so this
+    // always delegates to the pipe-based path.
+    run_command_with_pipes(cmd, ctx)
 }
 
 fn inject_global_env(cmd: &mut Command) {
@@ -2622,264 +2576,62 @@ fn inject_global_env(cmd: &mut Command) {
     }
 }
 
-/// Use the `script` command to run a command interactively while capturing output.
-/// This is more reliable than manual PTY handling for diverse programs.
-fn run_command_with_script(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitStatus, String)> {
-    let interactive = ctx.as_ref().map(|c| c.interactive).unwrap_or(false);
-    // Create a temp file for capturing output
-    let temp_dir = std::env::temp_dir();
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let script_log = temp_dir.join(format!("flow_script_{}.log", timestamp));
+/// Inject global env vars into a `portable_pty::CommandBuilder`.
+fn inject_global_env_pty(cmd: &mut CommandBuilder) {
+    let keys = config::global_env_keys();
+    if keys.is_empty() {
+        return;
+    }
 
-    // Build the inner command string
-    let program = cmd.get_program().to_string_lossy().to_string();
-    let args: Vec<String> = cmd
-        .get_args()
-        .map(|a| a.to_string_lossy().to_string())
+    let missing: Vec<String> = keys
+        .into_iter()
+        .filter(|key| std::env::var_os(key).is_none())
         .collect();
-    let cwd = cmd.get_current_dir().map(|p| p.to_path_buf());
 
-    // Construct the command to pass to script
-    let inner_cmd = if args.is_empty() {
-        shell_words::quote(&program).to_string()
-    } else {
-        format!(
-            "{} {}",
-            shell_words::quote(&program),
-            args.iter()
-                .map(|a| shell_words::quote(a).to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
-    };
-
-    // Build the script command
-    // macOS: script -q <logfile> /bin/sh -c "command"
-    // Linux: script -q -c "command" <logfile>
-    let mut script_cmd = Command::new("script");
-
-    #[cfg(target_os = "macos")]
-    {
-        // macOS script: script [-q] file [command ...]
-        // We need to pass the shell and -c as separate args after the file
-        script_cmd
-            .arg("-q")
-            .arg("-F") // Flush immediately
-            .arg(&script_log)
-            .args(["/bin/sh", "-c", &inner_cmd]);
+    if missing.is_empty() {
+        return;
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        script_cmd
-            .arg("-q")
-            .arg("-c")
-            .arg(&inner_cmd)
-            .arg(&script_log);
-    }
-
-    if let Some(dir) = cwd {
-        script_cmd.current_dir(dir);
-    }
-
-    // Run with TTY stdio for interactivity, even if parent stdio is redirected.
-    let tty_in = std::fs::File::open("/dev/tty").ok();
-    let tty_out = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .ok();
-    let tty_err = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .ok();
-
-    if let (Some(tty_in), Some(tty_out), Some(tty_err)) = (tty_in, tty_out, tty_err) {
-        script_cmd
-            .stdin(Stdio::from(tty_in))
-            .stdout(Stdio::from(tty_out))
-            .stderr(Stdio::from(tty_err));
-    } else {
-        script_cmd
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-    }
-
-    // Create process group for proper signal handling (non-interactive only)
-    #[cfg(unix)]
-    if !interactive {
-        use std::os::unix::process::CommandExt;
-        script_cmd.process_group(0);
-    }
-
-    let mut child = script_cmd
-        .spawn()
-        .with_context(|| "failed to spawn script command")?;
-
-    let pid = child.id();
-    let pgid = running::get_pgid(pid).unwrap_or(pid);
-    set_cleanup_process(pid, pgid);
-
-    // Register the process if we have task context
-    if let Some(ref task_ctx) = ctx {
-        let entry = RunningProcess {
-            pid,
-            pgid,
-            task_name: task_ctx.task_name.clone(),
-            command: task_ctx.command.clone(),
-            started_at: running::now_ms(),
-            config_path: task_ctx.config_path.clone(),
-            project_root: task_ctx.project_root.clone(),
-            used_flox: task_ctx.used_flox,
-            project_name: task_ctx.project_name.clone(),
-        };
-        if let Err(err) = running::register_process(entry) {
-            tracing::warn!(?err, "failed to register running process");
-        }
-    }
-
-    let status = child
-        .wait()
-        .with_context(|| "failed to wait on script command")?;
-
-    // Unregister the process
-    if ctx.is_some() {
-        if let Err(err) = running::unregister_process(pid) {
-            tracing::debug!(?err, "failed to unregister process");
-        }
-    }
-
-    // Read the captured output
-    let output = fs::read_to_string(&script_log).unwrap_or_default();
-
-    // Clean up temp file
-    let _ = fs::remove_file(&script_log);
-
-    // Also write to log file if configured
-    if let Some(ref task_ctx) = ctx {
-        if let Some(log_path) = task_log_path(task_ctx) {
-            if let Some(parent) = log_path.parent() {
-                let _ = fs::create_dir_all(parent);
+    if !crate::env::has_cloud_auth_token() {
+        match crate::env::fetch_local_personal_env_vars(&missing) {
+            Ok(vars) => {
+                for (key, value) in vars {
+                    if !value.is_empty() {
+                        cmd.env(key, value);
+                    }
+                }
             }
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-                let header = format!(
-                    "\n--- {} | task:{} | cmd:{} ---\n",
-                    running::now_ms(),
-                    task_ctx.task_name,
-                    task_ctx.command
-                );
-                let _ = file.write_all(header.as_bytes());
-                let _ = file.write_all(output.as_bytes());
+            Err(err) => {
+                tracing::debug!(?err, "failed to read local env vars");
             }
         }
+        return;
     }
 
-    // Strip ANSI codes for history but keep colors for display (already shown)
-    let clean_output = String::from_utf8_lossy(&strip_ansi_escapes::strip(&output)).to_string();
-
-    Ok((status, clean_output))
+    match crate::env::fetch_personal_env_vars(&missing) {
+        Ok(vars) => {
+            for (key, value) in vars {
+                if !value.is_empty() {
+                    cmd.env(key, value);
+                }
+            }
+        }
+        Err(err) => {
+            tracing::debug!(?err, "failed to fetch global env vars");
+        }
+    }
 }
 
-/// Run an interactive command with inherited stdio for proper TTY handling.
-/// Output is not captured (returns empty string) since interactive commands
-/// need direct terminal access for readline, prompts, etc.
-fn run_interactive_command(
+/// Run a command inside a PTY with full interactivity, color support, and output
+/// capture.  Enables raw mode so keystrokes pass through unbuffered, installs a
+/// SIGWINCH handler to propagate terminal resizes, and uses `poll(2)` on stdin
+/// so the forwarding thread exits promptly when the child terminates.
+fn run_command_with_pty(
     workdir: &Path,
     command: &str,
     args: &[String],
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
-    let mut cmd = Command::new("/bin/sh");
-
-    // If args are provided and command doesn't already reference them,
-    // append "$@" to pass them through properly
-    let full_command = if args.is_empty() || command_references_args(command) {
-        command.to_string()
-    } else {
-        format!("{} \"$@\"", command)
-    };
-
-    cmd.arg("-c").arg(&full_command);
-    if !args.is_empty() {
-        cmd.arg("sh"); // $0 placeholder
-        for arg in args {
-            cmd.arg(arg);
-        }
-    }
-    cmd.current_dir(workdir);
-    inject_global_env(&mut cmd);
-
-    // Prefer /dev/tty so interactive tasks keep working even if stdio is redirected.
-    // Fall back to inherited stdio if /dev/tty is unavailable.
-    let tty_in = std::fs::File::open("/dev/tty").ok();
-    let tty_out = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .ok();
-    let tty_err = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .ok();
-
-    if let (Some(tty_in), Some(tty_out), Some(tty_err)) = (tty_in, tty_out, tty_err) {
-        cmd.stdin(Stdio::from(tty_in))
-            .stdout(Stdio::from(tty_out))
-            .stderr(Stdio::from(tty_err));
-    } else {
-        cmd.stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-    }
-
-    // NOTE: Do NOT create a new process group for interactive commands.
-    // The child must remain in the foreground process group to read from the terminal.
-
-    let mut child = cmd
-        .spawn()
-        .with_context(|| "failed to spawn interactive command")?;
-
-    let pid = child.id();
-    let pgid = running::get_pgid(pid).unwrap_or(pid);
-    set_cleanup_process(pid, pgid);
-
-    // Register the process if we have task context
-    if let Some(ref task_ctx) = ctx {
-        let entry = RunningProcess {
-            pid,
-            pgid,
-            task_name: task_ctx.task_name.clone(),
-            command: task_ctx.command.clone(),
-            started_at: running::now_ms(),
-            config_path: task_ctx.config_path.clone(),
-            project_root: task_ctx.project_root.clone(),
-            used_flox: task_ctx.used_flox,
-            project_name: task_ctx.project_name.clone(),
-        };
-        if let Err(err) = running::register_process(entry) {
-            tracing::warn!(?err, "failed to register running process");
-        }
-    }
-
-    let status = child
-        .wait()
-        .with_context(|| "failed to wait on interactive command")?;
-
-    // Unregister the process
-    if ctx.is_some() {
-        if let Err(err) = running::unregister_process(pid) {
-            tracing::debug!(?err, "failed to unregister process");
-        }
-    }
-
-    // No output captured for interactive commands
-    Ok((status, String::new()))
-}
-
-#[allow(dead_code)]
-fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitStatus, String)> {
     let pty_system = NativePtySystem::default();
 
     // Get terminal size or use defaults
@@ -2901,22 +2653,29 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
         .openpty(size)
         .map_err(|e| anyhow::anyhow!("failed to open pty: {}", e))?;
 
-    // Build command for PTY - extract info from the std::process::Command
-    // We need to reconstruct the command since portable-pty uses its own CommandBuilder
-    let program = cmd.get_program().to_string_lossy().to_string();
-    let args: Vec<String> = cmd
-        .get_args()
-        .map(|a| a.to_string_lossy().to_string())
-        .collect();
-    let cwd = cmd.get_current_dir().map(|p| p.to_path_buf());
+    // Build the shell command, appending "$@" for positional args if needed
+    let full_command = if args.is_empty() || command_references_args(command) {
+        command.to_string()
+    } else {
+        format!("{} \"$@\"", command)
+    };
 
-    let mut pty_cmd = CommandBuilder::new(&program);
-    for arg in &args {
-        pty_cmd.arg(arg);
+    let mut pty_cmd = CommandBuilder::new("/bin/sh");
+    pty_cmd.arg("-c");
+    pty_cmd.arg(&full_command);
+    if !args.is_empty() {
+        pty_cmd.arg("sh"); // $0 placeholder
+        for arg in args {
+            pty_cmd.arg(arg);
+        }
     }
-    if let Some(dir) = cwd {
-        pty_cmd.cwd(dir);
-    }
+    pty_cmd.cwd(workdir);
+
+    // Enable full color support in child processes
+    pty_cmd.env("TERM", "xterm-256color");
+    pty_cmd.env("COLORTERM", "truecolor");
+
+    inject_global_env_pty(&mut pty_cmd);
 
     let mut child = pair
         .slave
@@ -2947,6 +2706,18 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
         }
     }
 
+    // Install SIGWINCH handler for terminal resize propagation
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGWINCH, sigwinch_handler as *const () as libc::sighandler_t);
+    }
+
+    // Enable raw mode so every keystroke reaches the child unbuffered
+    crossterm::terminal::enable_raw_mode()
+        .map_err(|e| anyhow::anyhow!("failed to enable raw mode: {}", e))?;
+    RAW_MODE_ACTIVE.store(true, Ordering::SeqCst);
+    let _raw_guard = RawModeGuard;
+
     let output = Arc::new(Mutex::new(String::new()));
 
     // Set up optional log file
@@ -2975,26 +2746,55 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
         .master
         .try_clone_reader()
         .map_err(|e| anyhow::anyhow!("failed to clone pty reader: {}", e))?;
-    let writer = pair.master;
 
-    // Thread to forward stdin to PTY
+    // Keep the master alive so SIGWINCH can resize it; take_writer for stdin
+    let master = pair.master;
+    let mut pty_writer = master
+        .take_writer()
+        .map_err(|e| anyhow::anyhow!("failed to take pty writer: {}", e))?;
+
+    // Shared flag so the stdin thread knows when to stop
+    let child_done = Arc::new(AtomicBool::new(false));
+
+    // Thread to forward stdin to PTY using poll(2) with 100ms timeout
     let stdin_handle = {
-        let mut writer = writer
-            .take_writer()
-            .map_err(|e| anyhow::anyhow!("failed to take pty writer: {}", e))?;
+        let child_done = child_done.clone();
         thread::spawn(move || {
-            let mut stdin = std::io::stdin();
+            let stdin_fd = libc::STDIN_FILENO;
             let mut buf = [0u8; 1024];
             loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if writer.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                        let _ = writer.flush();
+                if child_done.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Use poll(2) so we can periodically check if the child has exited
+                let mut pfd = libc::pollfd {
+                    fd: stdin_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ret = unsafe { libc::poll(&mut pfd, 1, 100) };
+                if ret <= 0 {
+                    // timeout or error — loop back and check child_done
+                    continue;
+                }
+                if pfd.revents & libc::POLLIN != 0 {
+                    let n = unsafe {
+                        libc::read(
+                            stdin_fd,
+                            buf.as_mut_ptr() as *mut libc::c_void,
+                            buf.len(),
+                        )
+                    };
+                    if n <= 0 {
+                        break;
                     }
-                    Err(_) => break,
+                    if pty_writer.write_all(&buf[..n as usize]).is_err() {
+                        break;
+                    }
+                    let _ = pty_writer.flush();
+                }
+                if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                    break;
                 }
             }
         })
@@ -3008,17 +2808,31 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
         ))
     });
 
-    // Thread to read PTY output and tee to stdout + capture
+    // Thread to read PTY output, tee to stdout, capture, and handle SIGWINCH
     let output_clone = output.clone();
     let log_file_clone = log_file.clone();
     let ingester_clone = ingester.clone();
+    let child_done_output = child_done.clone();
     let output_handle = thread::spawn(move || {
         let mut stdout = std::io::stdout();
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 8192];
         let mut line_buf = String::with_capacity(2048);
         let preferred_url = lifecycle_preferred_url();
         let mut preferred_url_hint_emitted = false;
         loop {
+            // Check for SIGWINCH and propagate resize to the PTY
+            if SIGWINCH_RECEIVED.swap(false, Ordering::SeqCst) {
+                if let Ok((cols, rows)) = crossterm::terminal::size() {
+                    let new_size = PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    };
+                    let _ = master.resize(new_size);
+                }
+            }
+
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -3061,6 +2875,12 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
                 }
                 Err(_) => break,
             }
+
+            // If child already exited, drain remaining output then stop
+            if child_done_output.load(Ordering::SeqCst) {
+                // One more non-blocking drain attempt
+                break;
+            }
         }
         // Flush remaining partial line
         if !line_buf.is_empty() {
@@ -3080,9 +2900,14 @@ fn run_command_with_pty(cmd: Command, ctx: Option<TaskContext>) -> Result<(ExitS
         .wait()
         .map_err(|e| anyhow::anyhow!("failed to wait on child: {}", e))?;
 
-    // Wait for output thread (stdin thread may block on read, so we don't join it)
+    // Signal threads that the child is done
+    child_done.store(true, Ordering::SeqCst);
+
+    // Wait for output thread (stdin thread will exit via poll + child_done flag)
     let _ = output_handle.join();
-    drop(stdin_handle); // Let it terminate naturally
+    let _ = stdin_handle.join();
+
+    // _raw_guard drops here, restoring the terminal
 
     // Unregister the process
     if ctx.is_some() {
