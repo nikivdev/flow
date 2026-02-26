@@ -11,6 +11,7 @@ Complete documentation for all `f` (flow) commands.
 | [`publish`](publish.md) | Publish project to GitHub |
 | [`install`](install.md) | Install a CLI/tool via registry, parm, or flox |
 | [`repos`](repos.md) | Clone repositories into ~/repos |
+| [`new`](new.md) | Create a project from a local template in ~/new |
 | [`commit`](commit.md) | AI-powered commit with code review |
 | [`pr`](pr.md) | Create/open PRs and ingest GitHub feedback |
 | [`upstream`](upstream.md) | Manage upstream fork workflow |
@@ -93,6 +94,7 @@ f commit --help
 
 ### Project Management
 
+- **[new](new.md)** - Create a project from a local starter in `~/new`
 - **[projects](projects.md)** - List registered projects
 - **[active](active.md)** - Show or set active project
 - **[hub](hub.md)** - Ensure hub daemon is running
