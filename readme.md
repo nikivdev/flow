@@ -175,7 +175,7 @@ For available features, see [docs](docs) or feed `f --help` to AI.
 ## Run Repos
 
 Use `run` repos to keep executable onboarding/debug automation outside product repos.
-Flow treats each repo in `~/code/run/<name>` as a task container (must include `flow.toml`).
+Flow treats each repo in `~/run/<name>` as a task container (must include `flow.toml`).
 
 Core tasks:
 

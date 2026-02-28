@@ -92,6 +92,9 @@ f run --config ~/code/seq/flow.toml agent-session-search-list --path "$(pwd)" "y
 
 ## Troubleshooting
 
+- Repo path changed (rename/move):
+  - Run `f code move-sessions --from /old/path --to /new/path`.
+  - This migrates Claude/Codex session paths and Seq zvec `agent_qa.jsonl` metadata so folder-scoped semantic search still matches the new path.
 - No results:
   - Run `f agent-qa-capture-once --backfill --reset-state` in `~/code/seq`.
 - No picker:

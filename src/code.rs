@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -17,6 +17,18 @@ use crate::config;
 
 const DEFAULT_CODE_ROOT: &str = "~/code";
 const DEFAULT_TEMPLATE_ROOT: &str = "~/new";
+const DEFAULT_AGENT_QA_ZVEC_JSONL: &str = "~/repos/alibaba/zvec/data/agent_qa.jsonl";
+const FLOW_AGENT_QA_ZVEC_JSONL_ENV: &str = "FLOW_AGENT_QA_ZVEC_JSONL";
+
+struct ZvecMoveSummary {
+    updated_docs: usize,
+    index_found: bool,
+}
+
+struct ZvecCopySummary {
+    copied_docs: usize,
+    index_found: bool,
+}
 
 /// List available templates from ~/new/.
 fn list_templates() -> Result<Vec<String>> {
@@ -649,6 +661,8 @@ fn copy_sessions(opts: CodeMoveSessionsOpts) -> Result<()> {
     let mut copied_claude = 0;
     let mut copied_codex = 0;
     let mut copied_codex_files = 0;
+    let mut copied_zvec_docs = 0;
+    let mut zvec_index_found = false;
 
     if !opts.skip_claude {
         let base = claude_projects_dir();
@@ -660,11 +674,24 @@ fn copy_sessions(opts: CodeMoveSessionsOpts) -> Result<()> {
         let codex_copy = copy_codex_sessions(&from, &to, opts.dry_run)?;
         copied_codex_files = codex_copy.copied_files;
     }
+    if let Some(zvec_path) = resolve_agent_qa_zvec_path() {
+        let zvec_copy = copy_zvec_agent_qa_paths(&zvec_path, &from, &to, opts.dry_run)?;
+        copied_zvec_docs = zvec_copy.copied_docs;
+        zvec_index_found = zvec_copy.index_found;
+    }
 
     println!("Session copy summary:");
     println!("  Claude project dirs copied: {}", copied_claude);
     println!("  Codex legacy dirs copied: {}", copied_codex);
     println!("  Codex jsonl files copied: {}", copied_codex_files);
+    if zvec_index_found {
+        println!("  Seq zvec docs copied: {}", copied_zvec_docs);
+    } else {
+        println!(
+            "  Seq zvec docs copied: {} (index not found)",
+            copied_zvec_docs
+        );
+    }
     if opts.dry_run {
         println!("Dry run only; no files were changed.");
     }
@@ -684,6 +711,8 @@ fn move_sessions(opts: CodeMoveSessionsOpts) -> Result<()> {
     let mut moved_codex = 0;
     let mut updated_codex_files = 0;
     let mut remaining_codex_files = Vec::new();
+    let mut updated_zvec_docs = 0;
+    let mut zvec_index_found = false;
 
     if !opts.skip_claude {
         let base = claude_projects_dir();
@@ -732,11 +761,24 @@ fn move_sessions(opts: CodeMoveSessionsOpts) -> Result<()> {
             }
         }
     }
+    if let Some(zvec_path) = resolve_agent_qa_zvec_path() {
+        let zvec_update = update_zvec_agent_qa_paths(&zvec_path, &from, &to, opts.dry_run)?;
+        updated_zvec_docs = zvec_update.updated_docs;
+        zvec_index_found = zvec_update.index_found;
+    }
 
     println!("Session migration summary:");
     println!("  Claude project dirs moved: {}", moved_claude);
     println!("  Codex legacy dirs moved: {}", moved_codex);
     println!("  Codex jsonl files updated: {}", updated_codex_files);
+    if zvec_index_found {
+        println!("  Seq zvec docs updated: {}", updated_zvec_docs);
+    } else {
+        println!(
+            "  Seq zvec docs updated: {} (index not found)",
+            updated_zvec_docs
+        );
+    }
     if !remaining_codex_files.is_empty() {
         println!("WARN Codex sessions still reference the old path:");
         for path in &remaining_codex_files {
@@ -945,6 +987,243 @@ fn codex_sessions_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".codex")
         .join("sessions")
+}
+
+fn resolve_agent_qa_zvec_path() -> Option<PathBuf> {
+    match std::env::var(FLOW_AGENT_QA_ZVEC_JSONL_ENV) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(config::expand_path(trimmed))
+            }
+        }
+        Err(_) => Some(config::expand_path(DEFAULT_AGENT_QA_ZVEC_JSONL)),
+    }
+}
+
+fn update_zvec_agent_qa_paths(
+    zvec_jsonl: &Path,
+    from: &Path,
+    to: &Path,
+    dry_run: bool,
+) -> Result<ZvecMoveSummary> {
+    if !zvec_jsonl.exists() {
+        return Ok(ZvecMoveSummary {
+            updated_docs: 0,
+            index_found: false,
+        });
+    }
+
+    let from_str = from.to_string_lossy().to_string();
+    let to_str = to.to_string_lossy().to_string();
+    let from_project_key = path_to_project_name(from);
+    let to_project_key = path_to_project_name(to);
+
+    let input = fs::File::open(zvec_jsonl)
+        .with_context(|| format!("failed to read {}", zvec_jsonl.display()))?;
+    let reader = BufReader::new(input);
+    let tmp_path = zvec_jsonl.with_extension("jsonl.tmp");
+    let mut writer = if dry_run {
+        None
+    } else {
+        Some(BufWriter::new(fs::File::create(&tmp_path).with_context(
+            || format!("failed to write {}", tmp_path.display()),
+        )?))
+    };
+
+    let mut updated_docs = 0;
+    for line in reader.lines() {
+        let line =
+            line.with_context(|| format!("failed to read line from {}", zvec_jsonl.display()))?;
+        let mut output_line = line.clone();
+        if line.contains(&from_str) || line.contains(&from_project_key) {
+            if let Ok(mut value) = serde_json::from_str::<Value>(&line) {
+                if rewrite_zvec_doc_paths(
+                    &mut value,
+                    &from_str,
+                    &to_str,
+                    &from_project_key,
+                    &to_project_key,
+                ) {
+                    output_line = serde_json::to_string(&value)?;
+                    updated_docs += 1;
+                }
+            }
+        }
+        if let Some(writer) = writer.as_mut() {
+            writer.write_all(output_line.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
+    }
+
+    if let Some(mut writer) = writer {
+        writer.flush()?;
+        fs::rename(&tmp_path, zvec_jsonl)
+            .with_context(|| format!("failed to replace {}", zvec_jsonl.display()))?;
+    }
+
+    Ok(ZvecMoveSummary {
+        updated_docs,
+        index_found: true,
+    })
+}
+
+fn copy_zvec_agent_qa_paths(
+    zvec_jsonl: &Path,
+    from: &Path,
+    to: &Path,
+    dry_run: bool,
+) -> Result<ZvecCopySummary> {
+    if !zvec_jsonl.exists() {
+        return Ok(ZvecCopySummary {
+            copied_docs: 0,
+            index_found: false,
+        });
+    }
+
+    let from_str = from.to_string_lossy().to_string();
+    let to_str = to.to_string_lossy().to_string();
+    let from_project_key = path_to_project_name(from);
+    let to_project_key = path_to_project_name(to);
+
+    let input = fs::File::open(zvec_jsonl)
+        .with_context(|| format!("failed to read {}", zvec_jsonl.display()))?;
+    let reader = BufReader::new(input);
+    let tmp_path = zvec_jsonl.with_extension("jsonl.tmp");
+    let mut writer = if dry_run {
+        None
+    } else {
+        Some(BufWriter::new(fs::File::create(&tmp_path).with_context(
+            || format!("failed to write {}", tmp_path.display()),
+        )?))
+    };
+
+    let mut copied_docs = 0;
+    for line in reader.lines() {
+        let line =
+            line.with_context(|| format!("failed to read line from {}", zvec_jsonl.display()))?;
+        if let Some(writer) = writer.as_mut() {
+            writer.write_all(line.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
+
+        if !line.contains(&from_str) && !line.contains(&from_project_key) {
+            continue;
+        }
+        let Ok(mut value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if !rewrite_zvec_doc_paths(
+            &mut value,
+            &from_str,
+            &to_str,
+            &from_project_key,
+            &to_project_key,
+        ) {
+            continue;
+        }
+
+        let old_id = value.get("id").and_then(|v| v.as_str());
+        let new_id = derive_copy_doc_id(old_id, &line, &to_str);
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(new_id));
+        }
+
+        copied_docs += 1;
+        if let Some(writer) = writer.as_mut() {
+            let copied_line = serde_json::to_string(&value)?;
+            writer.write_all(copied_line.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
+    }
+
+    if let Some(mut writer) = writer {
+        writer.flush()?;
+        fs::rename(&tmp_path, zvec_jsonl)
+            .with_context(|| format!("failed to replace {}", zvec_jsonl.display()))?;
+    }
+
+    Ok(ZvecCopySummary {
+        copied_docs,
+        index_found: true,
+    })
+}
+
+fn rewrite_zvec_doc_paths(
+    doc: &mut Value,
+    from_path: &str,
+    to_path: &str,
+    from_project_key: &str,
+    to_project_key: &str,
+) -> bool {
+    let Some(root) = doc.as_object_mut() else {
+        return false;
+    };
+    let Some(meta_value) = root.get_mut("metadata") else {
+        return false;
+    };
+    let Some(meta) = meta_value.as_object_mut() else {
+        return false;
+    };
+
+    let mut changed = false;
+
+    if let Some(project_path) = meta.get("project_path").and_then(|v| v.as_str()) {
+        if let Some(rewritten) = rewrite_path_prefix(project_path, from_path, to_path) {
+            meta.insert("project_path".to_string(), Value::String(rewritten));
+            changed = true;
+        }
+    }
+
+    if let Some(source_path) = meta.get("source_path").and_then(|v| v.as_str()) {
+        if let Some(rewritten) =
+            rewrite_project_source_path(source_path, from_project_key, to_project_key)
+        {
+            meta.insert("source_path".to_string(), Value::String(rewritten));
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+fn rewrite_path_prefix(value: &str, from: &str, to: &str) -> Option<String> {
+    if value == from {
+        return Some(to.to_string());
+    }
+    let prefix = format!("{from}/");
+    if let Some(suffix) = value.strip_prefix(&prefix) {
+        return Some(format!("{to}/{suffix}"));
+    }
+    None
+}
+
+fn rewrite_project_source_path(
+    source_path: &str,
+    from_project_key: &str,
+    to_project_key: &str,
+) -> Option<String> {
+    for marker in ["/.claude/projects/", "/.codex/projects/"] {
+        let old = format!("{marker}{from_project_key}");
+        if source_path.contains(&old) {
+            let new = format!("{marker}{to_project_key}");
+            return Some(source_path.replacen(&old, &new, 1));
+        }
+    }
+    None
+}
+
+fn derive_copy_doc_id(existing_id: Option<&str>, line: &str, to: &str) -> String {
+    if let Some(id) = existing_id {
+        return derive_copy_id(id, to);
+    }
+    let mut hasher = DefaultHasher::new();
+    line.hash(&mut hasher);
+    to.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!("agent-qa-copy-{hash:x}")
 }
 
 fn move_project_dir(base: &Path, from: &Path, to: &Path, dry_run: bool) -> Result<usize> {
@@ -1445,4 +1724,98 @@ fn ensure_gitignore_entry(repo_root: &Path, entry: &str) -> Result<()> {
     fs::write(&gitignore, output.as_bytes())
         .with_context(|| format!("failed to write {}", gitignore.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn rewrite_path_prefix_rewrites_exact_and_nested_paths() {
+        let from = "/Users/nikiv/code/org/linsa/linsa-mac";
+        let to = "/Users/nikiv/code/org/linsa/linsa-native";
+        assert_eq!(rewrite_path_prefix(from, from, to), Some(to.to_string()));
+        assert_eq!(
+            rewrite_path_prefix("/Users/nikiv/code/org/linsa/linsa-mac/src/ui", from, to),
+            Some("/Users/nikiv/code/org/linsa/linsa-native/src/ui".to_string())
+        );
+        assert_eq!(
+            rewrite_path_prefix("/Users/nikiv/code/org/linsa/linsa", from, to),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_zvec_doc_paths_updates_project_and_source_paths() {
+        let from = "/Users/nikiv/code/org/linsa/linsa-mac";
+        let to = "/Users/nikiv/code/org/linsa/linsa-native";
+        let from_key = path_to_project_name(Path::new(from));
+        let to_key = path_to_project_name(Path::new(to));
+        let mut value = serde_json::json!({
+            "id": "doc-1",
+            "text": "Question: q\n\nAnswer: a",
+            "metadata": {
+                "project_path": "/Users/nikiv/code/org/linsa/linsa-mac/src",
+                "source_path": format!(
+                    "/Users/nikiv/.claude/projects/{from_key}/session.jsonl"
+                )
+            }
+        });
+
+        let changed = rewrite_zvec_doc_paths(&mut value, from, to, &from_key, &to_key);
+        assert!(changed);
+        assert_eq!(
+            value
+                .get("metadata")
+                .and_then(|m| m.get("project_path"))
+                .and_then(|v| v.as_str()),
+            Some("/Users/nikiv/code/org/linsa/linsa-native/src")
+        );
+        assert_eq!(
+            value
+                .get("metadata")
+                .and_then(|m| m.get("source_path"))
+                .and_then(|v| v.as_str()),
+            Some(format!("/Users/nikiv/.claude/projects/{to_key}/session.jsonl").as_str())
+        );
+    }
+
+    #[test]
+    fn zvec_move_and_copy_update_project_scope() -> Result<()> {
+        let tmp = tempdir()?;
+        let zvec_path = tmp.path().join("agent_qa.jsonl");
+        let from = Path::new("/Users/nikiv/code/org/linsa/linsa-mac");
+        let to = Path::new("/Users/nikiv/code/org/linsa/linsa-native");
+        let from_key = path_to_project_name(from);
+
+        let row = serde_json::json!({
+            "id": "doc-1",
+            "text": "Question: q\n\nAnswer: a",
+            "metadata": {
+                "agent": "codex",
+                "session_id": "s1",
+                "project_path": "/Users/nikiv/code/org/linsa/linsa-mac",
+                "source_path": format!("/Users/nikiv/.claude/projects/{from_key}/s1.jsonl"),
+                "ts_ms": 1
+            }
+        });
+        fs::write(&zvec_path, format!("{}\n", serde_json::to_string(&row)?))?;
+
+        let move_summary = update_zvec_agent_qa_paths(&zvec_path, from, to, false)?;
+        assert_eq!(move_summary.updated_docs, 1);
+        let moved = fs::read_to_string(&zvec_path)?;
+        assert!(moved.contains("/Users/nikiv/code/org/linsa/linsa-native"));
+        assert!(!moved.contains("/Users/nikiv/code/org/linsa/linsa-mac\""));
+
+        fs::write(&zvec_path, format!("{}\n", serde_json::to_string(&row)?))?;
+        let copy_summary = copy_zvec_agent_qa_paths(&zvec_path, from, to, false)?;
+        assert_eq!(copy_summary.copied_docs, 1);
+        let copied = fs::read_to_string(&zvec_path)?;
+        assert!(copied.contains("/Users/nikiv/code/org/linsa/linsa-mac"));
+        assert!(copied.contains("/Users/nikiv/code/org/linsa/linsa-native"));
+        assert!(copied.contains("doc-1-copy-"));
+
+        Ok(())
+    }
 }

@@ -1,33 +1,37 @@
 # Run Repos Shortcuts (`f r`, `f ri`, `f rp`, `f rip`)
 
-This workflow lets you run Flow tasks in `~/code/run` and `~/code/run/i` from anywhere,
+This workflow lets you run Flow tasks in `~/run` and `~/run/i` from anywhere,
 without manual `cd`.
 
 ## Standard Layout
 
 ```text
-~/code/run/            # public run repo (has flow.toml)
-~/code/run/i/          # internal run repo (has flow.toml)
-~/code/run/i/linsa/    # nested internal project example
+~/run/            # public run repo (has flow.toml)
+~/run/i/          # internal run repo (has flow.toml)
+~/run/i/linsa/    # nested internal project example
 ```
 
-`f health` now ensures `~/code/run` and `~/code/run/i` directories exist.
+`f health` now ensures `~/run` and `~/run/i` directories exist.
+
+Root behavior:
+- This is a hard path: run repos live under `~/run`.
+- `RUN_ROOT` can still override the root explicitly.
 
 ## Primary Commands
 
 | Command | Meaning |
 |---|---|
-| `f r <task> [args...]` | Run task in `~/code/run` |
-| `f ri <task> [args...]` | Run task in `~/code/run/i` |
+| `f r <task> [args...]` | Run task in `~/run` |
+| `f ri <task> [args...]` | Run task in `~/run/i` |
 | `f rp <project> <task> [args...]` | Run task in project under run tree |
-| `f rip <project> <task> [args...]` | Run task in `~/code/run/i/<project>` |
+| `f rip <project> <task> [args...]` | Run task in `~/run/i/<project>` |
 
 ## Resolution Rules
 
 `f rp <project> ...` resolves in this order:
 
-1. `~/code/run/<project>`
-2. `~/code/run/i/<project>` (fallback)
+1. `~/run/<project>`
+2. `~/run/i/<project>` (fallback)
 
 If both exist, Flow fails with an ambiguity error and asks for explicit path:
 
@@ -43,7 +47,7 @@ f rip linsa bootstrap
 f rp linsa opencode-codex-login
 ```
 
-Both target `~/code/run/i/linsa` (unless `~/code/run/linsa` also exists).
+Both target `~/run/i/linsa` (unless `~/run/linsa` also exists).
 
 ## Why This Is Robust
 
@@ -54,9 +58,9 @@ Both target `~/code/run/i/linsa` (unless `~/code/run/linsa` also exists).
 ## Discovery and Maintenance
 
 ```bash
-f run-list           # list all flow.toml repos/projects under ~/code/run (recursive)
-f run-sync           # sync all git repos under ~/code/run (recursive)
-f run-sync i         # sync only ~/code/run/i
+f run-list           # list all flow.toml repos/projects under ~/run (recursive)
+f run-sync           # sync all git repos under ~/run (recursive)
+f run-sync i         # sync only ~/run/i
 ```
 
 ## Script Interface

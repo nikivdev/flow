@@ -366,7 +366,7 @@ interactive = true
 [[tasks]]
 name = "run-root"
 command = "bash ./scripts/run-repos.sh root"
-description = "Print run repo root path (default: ~/code/run)"
+description = "Print run repo root path (default: ~/run)"
 
 [[tasks]]
 name = "run-ensure"
@@ -376,7 +376,7 @@ description = "Ensure local run repo root exists"
 [[tasks]]
 name = "run-list"
 command = "bash ./scripts/run-repos.sh list"
-description = "List run repos under ~/code/run (flow.toml + git metadata)"
+description = "List run repos under ~/run (flow.toml + git metadata)"
 
 [[tasks]]
 name = "run-load"
@@ -401,25 +401,25 @@ description = "Ensure run repo exists (clone/sync) and run a task. Usage: f run-
 [[tasks]]
 name = "run-ri"
 command = "bash ./scripts/run-repos.sh ri $@"
-description = "Run a task in the internal run repo (~/code/run/i). Usage: f ri <task> [args...]"
+description = "Run a task in the internal run repo (~/run/i). Usage: f ri <task> [args...]"
 shortcuts = ["ri"]
 
 [[tasks]]
 name = "run-r"
 command = "bash ./scripts/run-repos.sh r $@"
-description = "Run a task in the public run repo (~/code/run). Usage: f r <task> [args...]"
+description = "Run a task in the public run repo (~/run). Usage: f r <task> [args...]"
 shortcuts = ["r"]
 
 [[tasks]]
 name = "run-rp"
 command = "bash ./scripts/run-repos.sh rp $@"
-description = "Run a task in a run project. Usage: f rp <project> <task> [args...] (resolves ~/code/run/<project> or ~/code/run/i/<project>)"
+description = "Run a task in a run project. Usage: f rp <project> <task> [args...] (resolves ~/run/<project> or ~/run/i/<project>)"
 shortcuts = ["rp"]
 
 [[tasks]]
 name = "run-rip"
 command = "bash ./scripts/run-repos.sh rip $@"
-description = "Run a task in an internal run project. Usage: f rip <project> <task> [args...] (maps to ~/code/run/i/<project>)"
+description = "Run a task in an internal run project. Usage: f rip <project> <task> [args...] (maps to ~/run/i/<project>)"
 shortcuts = ["rip"]
 
 [storage]

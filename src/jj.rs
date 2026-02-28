@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::cli::{
     JjAction, JjBookmarkAction, JjCommand, JjPushOpts, JjRebaseOpts, JjSyncOpts, JjWorkspaceAction,
@@ -133,29 +133,92 @@ fn run_workspace(action: JjWorkspaceAction) -> Result<()> {
     let repo_root = vcs::ensure_jj_repo()?;
     match action {
         JjWorkspaceAction::List => jj_run_in(&repo_root, &["workspace", "list"]),
-        JjWorkspaceAction::Add { name, path } => {
+        JjWorkspaceAction::Add { name, path, rev } => {
             let workspace_path = match path {
                 Some(p) => p,
                 None => workspace_default_path(&repo_root, &name)?,
             };
-            if let Some(parent) = workspace_path.parent() {
-                std::fs::create_dir_all(parent)?;
+            run_workspace_add(&repo_root, &name, workspace_path, rev.as_deref())
+        }
+        JjWorkspaceAction::Lane {
+            name,
+            path,
+            base,
+            remote,
+            no_fetch,
+        } => {
+            ensure_git_not_busy(&repo_root)?;
+            let remote = remote.unwrap_or_else(|| default_remote(&repo_root));
+            if !no_fetch {
+                if let Err(err) = jj_run_in(&repo_root, &["git", "fetch"]) {
+                    eprintln!("⚠ jj git fetch failed: {err}");
+                    eprintln!("  continuing with current local refs");
+                }
             }
-            jj_run_in(
-                &repo_root,
-                &[
-                    "workspace",
-                    "add",
-                    &name,
-                    workspace_path
-                        .to_str()
-                        .ok_or_else(|| anyhow::anyhow!("invalid workspace path"))?,
-                ],
-            )?;
-            println!("Created workspace {} at {}", name, workspace_path.display());
+            let workspace_path = match path {
+                Some(p) => p,
+                None => workspace_default_path(&repo_root, &name)?,
+            };
+            let base_rev = base.unwrap_or_else(|| {
+                let dest = default_branch(&repo_root);
+                resolve_rebase_target(&repo_root, &dest, &remote)
+            });
+            run_workspace_add(&repo_root, &name, workspace_path.clone(), Some(&base_rev))?;
+            println!("Lane {} is anchored at {}", name, base_rev);
+            println!("Next: cd {}", workspace_path.display());
+            println!(
+                "Optional bookmark: f jj bookmark create {} --rev @ --track --remote {}",
+                name, remote
+            );
             Ok(())
         }
     }
+}
+
+fn run_workspace_add(
+    repo_root: &Path,
+    name: &str,
+    workspace_path: PathBuf,
+    rev: Option<&str>,
+) -> Result<()> {
+    if let Some(parent) = workspace_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let path_str = workspace_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid workspace path"))?
+        .to_string();
+    let args = workspace_add_args(&path_str, name, rev);
+    jj_run_owned_in(repo_root, &args)?;
+    if let Some(rev) = rev.filter(|v| !v.trim().is_empty()) {
+        println!(
+            "Created workspace {} at {} (base: {})",
+            name,
+            workspace_path.display(),
+            rev.trim()
+        );
+    } else {
+        println!("Created workspace {} at {}", name, workspace_path.display());
+    }
+    Ok(())
+}
+
+fn workspace_add_args(destination: &str, name: &str, rev: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "workspace".to_string(),
+        "add".to_string(),
+        destination.to_string(),
+        "--name".to_string(),
+        name.to_string(),
+    ];
+    if let Some(rev) = rev {
+        let trimmed = rev.trim();
+        if !trimmed.is_empty() {
+            args.push("--revision".to_string());
+            args.push(trimmed.to_string());
+        }
+    }
+    args
 }
 
 fn run_bookmark(action: JjBookmarkAction) -> Result<()> {
@@ -271,6 +334,32 @@ mod tests {
 
         assert_eq!(default_remote(repo_root), "myflow-i");
     }
+
+    #[test]
+    fn workspace_add_args_use_modern_jj_shape() {
+        let args = workspace_add_args("/tmp/ws-fix-otp", "fix-otp", None);
+        assert_eq!(
+            args,
+            vec!["workspace", "add", "/tmp/ws-fix-otp", "--name", "fix-otp",]
+        );
+    }
+
+    #[test]
+    fn workspace_add_args_include_revision_when_set() {
+        let args = workspace_add_args("/tmp/ws-testflight", "testflight", Some("main@upstream"));
+        assert_eq!(
+            args,
+            vec![
+                "workspace",
+                "add",
+                "/tmp/ws-testflight",
+                "--name",
+                "testflight",
+                "--revision",
+                "main@upstream",
+            ]
+        );
+    }
 }
 
 fn is_jj_repo(path: &Path) -> bool {
@@ -285,12 +374,23 @@ fn is_jj_repo(path: &Path) -> bool {
 }
 
 fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("jj")
+    let output = Command::new("jj")
         .current_dir(repo_root)
         .args(args)
-        .status()
+        .output()
         .with_context(|| format!("failed to run jj {}", args.join(" ")))?;
-    if !status.success() {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        print!("{}", stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.lines() {
+        if line.contains("Refused to snapshot") {
+            continue;
+        }
+        eprintln!("{}", line);
+    }
+    if !output.status.success() {
         bail!("jj {} failed", args.join(" "));
     }
     Ok(())
@@ -306,6 +406,11 @@ fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
         bail!("jj {} failed", args.join(" "));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn jj_run_owned_in(repo_root: &Path, args: &[String]) -> Result<()> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    jj_run_in(repo_root, &refs)
 }
 
 fn git_ref_exists(repo_root: &Path, name: &str) -> bool {

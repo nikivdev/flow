@@ -3,7 +3,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::cli::ExtCommand;
 use crate::code;
@@ -161,10 +161,11 @@ fn prepare_source_workspace(source: &Path, project_root: &Path) -> Result<PathBu
         &[
             "workspace",
             "add",
-            &workspace,
             workspace_path
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid workspace path"))?,
+            "--name",
+            &workspace,
         ],
     )?;
 
@@ -240,12 +241,23 @@ fn jj_workspace_list(repo_root: &Path) -> Result<std::collections::HashMap<Strin
 }
 
 fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("jj")
+    let output = Command::new("jj")
         .current_dir(repo_root)
         .args(args)
-        .status()
+        .output()
         .with_context(|| format!("failed to run jj {}", args.join(" ")))?;
-    if !status.success() {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        print!("{}", stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.lines() {
+        if line.contains("Refused to snapshot") {
+            continue;
+        }
+        eprintln!("{}", line);
+    }
+    if !output.status.success() {
         bail!("jj {} failed", args.join(" "));
     }
     Ok(())

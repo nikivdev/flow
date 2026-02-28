@@ -2830,12 +2830,23 @@ fn git_ref_exists(reference: &str) -> bool {
 }
 
 fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("jj")
+    let output = Command::new("jj")
         .current_dir(repo_root)
         .args(args)
-        .status()
+        .output()
         .with_context(|| format!("failed to run jj {}", args.join(" ")))?;
-    if !status.success() {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        print!("{}", stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.lines() {
+        if line.contains("Refused to snapshot") {
+            continue;
+        }
+        eprintln!("{}", line);
+    }
+    if !output.status.success() {
         bail!("jj {} failed", args.join(" "));
     }
     Ok(())
