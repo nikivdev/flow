@@ -35,7 +35,7 @@ pub fn run(_opts: HealthOpts) -> Result<()> {
 }
 
 fn ensure_run_layout() -> Result<()> {
-    let run_root = config::expand_path("~/code/run");
+    let run_root = config::expand_path("~/run");
     let run_internal = run_root.join("i");
 
     if !run_root.exists() {

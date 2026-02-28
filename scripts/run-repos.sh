@@ -1,7 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUN_ROOT="${RUN_ROOT:-$HOME/code/run}"
+RUN_ROOT_DEFAULT="$HOME/run"
+
+expand_path() {
+  local raw="$1"
+  case "$raw" in
+    "~")
+      printf '%s\n' "$HOME"
+      ;;
+    "~/"*)
+      printf '%s/%s\n' "$HOME" "${raw#~/}"
+      ;;
+    *)
+      printf '%s\n' "$raw"
+      ;;
+  esac
+}
+
+RUN_ROOT="$(expand_path "${RUN_ROOT:-$RUN_ROOT_DEFAULT}")"
 
 usage() {
   cat <<'USAGE'
@@ -19,7 +36,7 @@ Usage:
   run-repos.sh exec <name> <repo-ssh-url> [--branch <branch>] <flow-task> [args...]
 
 Environment:
-  RUN_ROOT              Run repo root (default: ~/code/run)
+  RUN_ROOT              Run repo root (default: ~/run)
   RUN_AUTO_SYNC         If set to 1, run-repos.sh task auto-syncs git repos before running task
 USAGE
 }
@@ -30,7 +47,7 @@ ensure_root() {
 
 repo_dir() {
   local name="$1"
-  printf '%s/%s' "$RUN_ROOT" "$name"
+  printf '%s/%s\n' "$RUN_ROOT" "$name"
 }
 
 is_git_repo() {
@@ -166,6 +183,7 @@ cmd_root() {
 
 cmd_ensure() {
   ensure_root
+  mkdir -p "$RUN_ROOT/i"
   echo "[run] root ready: $RUN_ROOT"
 }
 

@@ -60,6 +60,16 @@ f env get --personal GITHUB_TOKEN -f value
 f env run --personal -k GITHUB_TOKEN -- gh auth status
 ```
 
+Deepgram example (keep value in Flow store, never in docs):
+
+```bash
+# Set once (personal scope)
+f env set --personal DEEPGRAM_API_KEY=<redacted>
+
+# Read when needed
+f env get --personal DEEPGRAM_API_KEY -f value
+```
+
 ## Environment Names
 
 Supported environments:

@@ -23,10 +23,31 @@ f jj sync --bookmark feature-x
 - `f jj push --bookmark <name>` — Push a single bookmark
 - `f jj push --all` — Push all bookmarks
 - `f jj sync --bookmark <name>` — Fetch, rebase, then push bookmark
-- `f jj workspace add <name> [--path <dir>]` — Create a workspace
+- `f jj workspace add <name> [--path <dir>] [--rev <rev>]` — Create a workspace (optionally anchored to a revision)
+- `f jj workspace lane <name> [--path <dir>] [--base <rev>] [--remote <name>] [--no-fetch]` — Create an isolated parallel lane from trunk defaults
 - `f jj workspace list` — List workspaces
 - `f jj bookmark create <name> [--rev <rev>] [--track]` — Create bookmark
 - `f jj bookmark track <name> [--remote <remote>]` — Track remote bookmark
+
+## Parallel lanes (no interleaving)
+
+Use lanes when you want multiple active tasks in one repo without stash/pop churn:
+
+```bash
+# In your current repo, create isolated lanes anchored from trunk
+f jj workspace lane fix-otp
+f jj workspace lane testflight
+
+# Work each lane independently
+cd ~/.jj/workspaces/<repo>/fix-otp
+jj st
+```
+
+`f jj workspace lane` does:
+
+1. `jj git fetch` (unless `--no-fetch`)
+2. chooses base as `<default_branch>@<remote>` when tracked (fallback: `<default_branch>`)
+3. creates a dedicated workspace with its own `@` working-copy commit
 
 ## Config
 

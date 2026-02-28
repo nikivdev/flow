@@ -2088,6 +2088,26 @@ pub enum JjWorkspaceAction {
         /// Optional path for workspace directory.
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Optional base revision for the new workspace working copy.
+        #[arg(long)]
+        rev: Option<String>,
+    },
+    /// Create an isolated parallel workspace lane anchored on trunk.
+    Lane {
+        /// Lane/workspace name.
+        name: String,
+        /// Optional path for workspace directory.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Base revision (default: <default_branch>@<remote> if tracked, else <default_branch>).
+        #[arg(long)]
+        base: Option<String>,
+        /// Remote used for default base resolution.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Skip fetch before creating the lane.
+        #[arg(long)]
+        no_fetch: bool,
     },
 }
 

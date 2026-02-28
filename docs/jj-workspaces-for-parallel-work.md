@@ -13,6 +13,13 @@ cd ~/code/org/project
 jj workspace add ../project-traces -r pr/main-fdb3446
 ```
 
+Flow wrapper (recommended):
+
+```bash
+cd ~/code/org/project
+f jj workspace lane traces --base pr/main-fdb3446 --path ../project-traces
+```
+
 Now you have two working copies sharing the same repo:
 
 | Path | Branch | Use |
@@ -48,10 +55,19 @@ jj diff --from main --to pr/main-fdb3446 --stat
 ### Work on two PRs at once
 
 ```bash
-jj workspace add ../project-pr2 -r pr/feature-b
+f jj workspace lane pr2 --base pr/feature-b --path ../project-pr2
 # Edit files in both directories independently
 # Both share the same jj repo — commits are visible everywhere
 ```
+
+### Default isolated lanes from trunk
+
+```bash
+f jj workspace lane fix-otp
+f jj workspace lane release-testflight
+```
+
+By default this fetches and anchors each lane on `<default_branch>@<remote>` (or `<default_branch>` if the remote bookmark is missing).
 
 ## How It Works
 

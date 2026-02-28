@@ -4,13 +4,13 @@ How Flow manages repository locations, migration, and AI session continuity.
 
 ## Directory Layout
 
-Flow uses two managed roots:
+Flow uses three managed roots:
 
 | Root | Purpose |
 |------|---------|
 | `~/code` | Active projects (`f code`) |
 | `~/repos` | Cloned third-party repos (`f repos`) |
-| `~/code/run` | Task-execution repos (`f r`, `f ri`, `f rp`) |
+| `~/run` | Task-execution repos (`f r`, `f ri`, `f rp`) |
 
 ## Cloning Into the Right Place
 
@@ -83,6 +83,7 @@ Claude and Codex store project sessions keyed by filesystem path:
 
 - **Claude**: `~/.claude/projects/<path-key>` directories are renamed
 - **Codex**: `~/.codex/projects/<path-key>` directories are renamed, plus `.jsonl` session files under `~/.codex/sessions/` are updated in-place (the `cwd` field in `session_meta` records)
+- **Seq zvec index**: if present at `~/repos/alibaba/zvec/data/agent_qa.jsonl`, matching docs are migrated so `metadata.project_path` (and project-keyed `metadata.source_path`) follows the new repo path for semantic session search.
 
 After migration a summary is printed:
 
@@ -91,9 +92,10 @@ Session migration summary:
   Claude project dirs moved: 1
   Codex legacy dirs moved: 1
   Codex jsonl files updated: 2
+  Seq zvec docs updated: 124
 ```
 
-When copying (`--copy`), sessions are duplicated with a derived ID so both locations have independent history.
+When copying (`--copy`), sessions are duplicated with a derived ID so both locations have independent history. Seq zvec docs are duplicated too, with copied doc IDs and rewritten `metadata.project_path`.
 
 ### `f code migrate` (alternative form)
 
@@ -113,16 +115,27 @@ f code move-sessions --from /old/path --to /new/path --dry-run
 ```
 
 Useful when you moved a repo manually and need to fix sessions after the fact.
+This also updates Seq zvec path metadata when the index exists.
 
-## Run Repos (`~/code/run`)
+To override the default zvec file or disable zvec migration:
+
+```bash
+# Use a custom zvec JSONL file
+export FLOW_AGENT_QA_ZVEC_JSONL=/path/to/agent_qa.jsonl
+
+# Disable zvec migration for this command
+export FLOW_AGENT_QA_ZVEC_JSONL=""
+```
+
+## Run Repos (`~/run`)
 
 Run repos are a separate system for executing Flow tasks across multiple codebases without `cd`.
 
 ```bash
-f r <task>                  # run in ~/code/run
-f ri <task>                 # run in ~/code/run/i
-f rp <project> <task>       # run in ~/code/run/<project> (falls back to i/<project>)
-f rip <project> <task>      # run in ~/code/run/i/<project>
+f r <task>                  # run in ~/run
+f ri <task>                 # run in ~/run/i
+f rp <project> <task>       # run in ~/run/<project> (falls back to i/<project>)
+f rip <project> <task>      # run in ~/run/i/<project>
 ```
 
 Management:
