@@ -597,8 +597,130 @@ after_install() {
   info "flow: docs: https://myflow.sh"
 }
 
+should_setup_run() {
+  case "${FLOW_SETUP_RUN:-1}" in
+    0|false|FALSE|no|NO|n|N) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+is_interactive() {
+  [ -t 0 ] && [ -t 1 ]
+}
+
+prompt_value() {
+  label="$1"
+  default="$2"
+  env_override="$3"
+  if [ -n "$env_override" ]; then
+    echo "$env_override"
+    return 0
+  fi
+  if ! is_interactive; then
+    echo "$default"
+    return 0
+  fi
+  printf '%s [%s]: ' "$label" "$default" >&2
+  read -r answer </dev/tty || answer=""
+  answer="${answer:-$default}"
+  echo "$answer"
+}
+
+prompt_yn() {
+  question="$1"
+  default="${2:-y}"
+  if ! is_interactive; then
+    case "$default" in y|Y) return 0 ;; *) return 1 ;; esac
+  fi
+  if [ "$default" = "y" ]; then
+    hint="Y/n"
+  else
+    hint="y/N"
+  fi
+  printf '%s (%s): ' "$question" "$hint" >&2
+  read -r answer </dev/tty || answer=""
+  answer="${answer:-$default}"
+  case "$answer" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+clone_if_missing() {
+  target_dir="$1"
+  repo_url="$2"
+  label="$3"
+
+  if [ -d "$target_dir/.git" ]; then
+    info "flow: $label already exists at $target_dir"
+    return 0
+  fi
+
+  if [ -e "$target_dir" ] && [ ! -d "$target_dir" ]; then
+    info "flow: warning: $target_dir exists but is not a directory; skipping $label"
+    return 1
+  fi
+
+  if [ -z "$repo_url" ] || [ "$repo_url" = "-" ] || [ "$repo_url" = "skip" ]; then
+    info "flow: skipping $label (no repo URL)"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$target_dir")"
+  info "flow: cloning $label -> $target_dir"
+  if git clone "$repo_url" "$target_dir" >/dev/null 2>&1; then
+    info "flow: $label ready"
+  else
+    info "flow: warning: failed to clone $label from $repo_url"
+    return 1
+  fi
+}
+
+setup_run_repos() {
+  if ! should_setup_run; then
+    info "flow: skipping ~/run setup (FLOW_SETUP_RUN=0)"
+    return 0
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    info "flow: warning: git not found; skipping ~/run setup"
+    return 0
+  fi
+
+  run_root="${RUN_ROOT:-$HOME/run}"
+
+  # If both already exist, skip entirely
+  if [ -d "$run_root/.git" ] && [ -d "$run_root/i/.git" ]; then
+    info "flow: ~/run and ~/run/i already set up"
+    return 0
+  fi
+
+  info ""
+  if ! prompt_yn "Set up ~/run repos (task collections)?"; then
+    info "flow: skipping ~/run setup"
+    info "flow: you can set this up later with: f run-load"
+    return 0
+  fi
+
+  # ~/run (public)
+  if [ ! -d "$run_root/.git" ]; then
+    run_url="$(prompt_value "~/run repo URL (SSH or HTTPS)" "git@github.com:nikivdev/run.git" "${FLOW_RUN_REPO:-}")"
+    clone_if_missing "$run_root" "$run_url" "~/run"
+  fi
+
+  # ~/run/i (internal/private)
+  if [ ! -d "$run_root/i/.git" ]; then
+    run_i_url="$(prompt_value "~/run/i repo URL (SSH or HTTPS, or 'skip')" "git@github.com:nikivdev/run-i.git" "${FLOW_RUN_I_REPO:-}")"
+    clone_if_missing "$run_root/i" "$run_i_url" "~/run/i"
+  fi
+
+  info "flow: ~/run repos ready"
+  info "flow: run tasks with: f r <task> (public) or f ri <task> (internal)"
+}
+
 install_flow
 install_path_shim
 ensure_flow_source_checkout
 configure_shell
+setup_run_repos
 after_install
