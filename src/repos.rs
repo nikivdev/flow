@@ -214,7 +214,8 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
             }
         }
     }
-    let prefer_ssh = ssh::prefer_ssh();
+    // Always prefer SSH for GitHub clone/upstream URLs.
+    let prefer_ssh = true;
     let repo_target = parse_repo_target(&opts.url)?;
     let root = normalize_root(&opts.root)?;
     let mut github_ref: Option<RepoRef> = None;
