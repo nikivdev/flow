@@ -12,6 +12,7 @@ while keeping Cargo correctness and upstream sync reliability.
 ## Commands
 
 ```bash
+f update-deps -- --dry-run
 f vendor-trims
 f vendor-rough-audit
 f vendor-offenders
