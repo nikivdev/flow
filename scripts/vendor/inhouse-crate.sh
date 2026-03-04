@@ -249,13 +249,13 @@ git -C "$checkout_dir" add -A
 if git -C "$checkout_dir" diff --cached --quiet; then
   commit_state="no-op"
 else
-  git -C "$checkout_dir" commit -m "sync(${crate}): crates.io ${version}" >/dev/null
+  git -C "$checkout_dir" -c commit.gpgSign=false commit -m "sync(${crate}): crates.io ${version}" >/dev/null
   commit_state="committed"
 fi
 
 git -C "$checkout_dir" push -q -u origin main
 
-git -C "$checkout_dir" tag -f "v${version}" >/dev/null
+git -C "$checkout_dir" -c tag.gpgSign=false tag -f -a "v${version}" -m "sync(${crate}): crates.io ${version}" >/dev/null
 git -C "$checkout_dir" push -q -f origin "refs/tags/v${version}"
 
 history_head="$(git -C "$checkout_dir" rev-parse HEAD)"
