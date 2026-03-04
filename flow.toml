@@ -299,6 +299,11 @@ command = "bash ./scripts/vendor/optimize_loop.sh $@"
 description = "Run audit + offender scan + iteration benchmark in one command"
 
 [[tasks]]
+name = "update-deps"
+command = "bash ./scripts/vendor/update-deps.sh $@"
+description = "One-command dependency refresh: sync vendored crates to latest, trim/harden, pin vendor lock, and validate"
+
+[[tasks]]
 name = "test-flow-task-tracing"
 command = "bun i-run.ts"
 
