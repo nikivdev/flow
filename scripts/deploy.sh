@@ -20,6 +20,15 @@ ALT_DIR="${HOME}/.local/bin"
 PRIMARY_F="$(command -v f 2>/dev/null || true)"
 PRIMARY_INSTALLED=false
 
+ad_hoc_sign_if_available() {
+    local bin_path="$1"
+    [[ -f "$bin_path" ]] || return 0
+    if command -v codesign >/dev/null 2>&1; then
+        # Avoid macOS "load code signature error" on copied local binaries.
+        codesign --force --sign - --timestamp=none "$bin_path" >/dev/null 2>&1 || true
+    fi
+}
+
 if [[ -n "${PRIMARY_F}" ]]; then
     PRIMARY_DIR="$(dirname -- "${PRIMARY_F}")"
 fi
@@ -35,16 +44,19 @@ install_to_dir() {
     else
         cp -f "${SOURCE_F}" "${dir}/f" 2>/dev/null || return 1
     fi
+    ad_hoc_sign_if_available "${dir}/f"
     if [[ -e "${dir}/flow" && "${SOURCE_F}" -ef "${dir}/flow" ]]; then
         :
     else
         cp -f "${SOURCE_F}" "${dir}/flow" 2>/dev/null || true
     fi
+    ad_hoc_sign_if_available "${dir}/flow"
     if [[ -e "${dir}/lin" && "${SOURCE_LIN}" -ef "${dir}/lin" ]]; then
         :
     else
         cp -f "${SOURCE_LIN}" "${dir}/lin" 2>/dev/null || true
     fi
+    ad_hoc_sign_if_available "${dir}/lin"
     return 0
 }
 
