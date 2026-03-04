@@ -46,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --no-audit) run_audit=false; shift ;;
     --no-check) run_check=false; shift ;;
     --push-vendor) push_vendor=true; shift ;;
+    --) shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "error: unknown arg: $1"
@@ -75,21 +76,21 @@ PY
   return 1
 }
 
-sync_args=()
-check_args=()
+sync_cmd=(scripts/vendor/sync-all.sh)
+check_cmd=(scripts/vendor/check-upstream.sh)
 if [[ "$important_only" == true ]]; then
-  sync_args+=(--important)
-  check_args+=(--important)
+  sync_cmd+=(--important)
+  check_cmd+=(--important)
 fi
 if [[ "$allow_minor" == true ]]; then
-  sync_args+=(--allow-minor)
+  sync_cmd+=(--allow-minor)
 fi
 if [[ "$allow_major" == true ]]; then
-  sync_args+=(--allow-major)
+  sync_cmd+=(--allow-major)
 fi
 
 echo "== update-deps: upstream scan =="
-upstream_json="$(scripts/vendor/check-upstream.sh "${check_args[@]}" --json)"
+upstream_json="$("${check_cmd[@]}" --json)"
 updates_total="$(printf '%s\n' "$upstream_json" | jq '[.[] | select(.status=="update-available")] | length')"
 patch_updates="$(printf '%s\n' "$upstream_json" | jq '[.[] | select(.status=="update-available" and .level=="patch")] | length')"
 minor_updates="$(printf '%s\n' "$upstream_json" | jq '[.[] | select(.status=="update-available" and .level=="minor")] | length')"
@@ -99,13 +100,13 @@ echo "updates available: ${updates_total} (patch=${patch_updates}, minor=${minor
 if [[ "$dry_run" == true ]]; then
   echo
   echo "== update-deps: dry-run sync plan =="
-  scripts/vendor/sync-all.sh "${sync_args[@]}" --dry-run
+  "${sync_cmd[@]}" --dry-run
   exit 0
 fi
 
 echo
 echo "== update-deps: sync vendored crates =="
-scripts/vendor/sync-all.sh "${sync_args[@]}" --no-vendor-import
+"${sync_cmd[@]}" --no-vendor-import
 
 echo
 echo "== update-deps: apply trims/warning hygiene =="

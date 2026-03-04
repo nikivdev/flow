@@ -114,7 +114,7 @@ What this does:
 Run after each vendoring step:
 
 ```bash
-f update-deps -- --important
+f update-deps --important
 f vendor-trims
 /Users/nikiv/code/rise/scripts/vendor-control.sh verify --project /Users/nikiv/code/flow
 python3 ./scripts/vendor/rough_edges_audit.py --project . --strict-warnings
@@ -131,9 +131,9 @@ f update-deps
 Useful flags:
 
 ```bash
-f update-deps -- --dry-run
-f update-deps -- --no-major
-f update-deps -- --push-vendor
+f update-deps --dry-run
+f update-deps --no-major
+f update-deps --push-vendor
 ```
 
 `verify` enforces:
