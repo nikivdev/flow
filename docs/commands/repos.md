@@ -2,6 +2,8 @@
 
 Clone repositories into a structured local directory or create new ones.
 
+If you want standard `git clone` destination behavior, use [`f clone`](clone.md) instead.
+
 ## Overview
 
 `f repos clone` clones GitHub repositories into `~/repos/<owner>/<repo>` using SSH URLs. By default it does a shallow clone for speed, then fetches full history in the background. It always sets up an `upstream` remote and local tracking branch unless you pass `--no-upstream`.

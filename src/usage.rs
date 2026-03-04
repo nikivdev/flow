@@ -318,6 +318,7 @@ fn command_path(raw_args: &[String]) -> String {
         "deploy",
         "prod",
         "publish",
+        "clone",
         "repos",
         "code",
         "migrate",
