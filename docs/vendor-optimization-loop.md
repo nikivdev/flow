@@ -12,6 +12,7 @@ while keeping Cargo correctness and upstream sync reliability.
 ## Commands
 
 ```bash
+f vendor-trims
 f vendor-rough-audit
 f vendor-offenders
 f vendor-bench-iter -- --mode incremental --samples 3
@@ -39,6 +40,8 @@ f vendor-optimize-loop -- --strict
 - provenance fields in manifests (`history_head`, `upstream_repository`),
 - stale code index detection (`.vendor/typesense/sources.json` freshness),
 - extra drift artifacts (`lib/vendor/*` or patch entries not in lock).
+- warning-hygiene regressions in vendored crates that would reintroduce noisy
+  release-build warnings.
 
 `vendor-offenders` (`scripts/vendor/offenders.sh`) shows:
 

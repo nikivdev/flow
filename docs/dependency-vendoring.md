@@ -114,7 +114,9 @@ What this does:
 Run after each vendoring step:
 
 ```bash
+f vendor-trims
 /Users/nikiv/code/rise/scripts/vendor-control.sh verify --project /Users/nikiv/code/flow
+python3 ./scripts/vendor/rough_edges_audit.py --project . --strict-warnings
 cargo check -q
 scripts/vendor/sync-all.sh --important --dry-run
 ```
@@ -127,6 +129,10 @@ scripts/vendor/sync-all.sh --important --dry-run
 - one resolved version per vendored crate,
 - patch path matches lock materialized path,
 - manifest version matches lock version.
+
+`vendor-rough-audit --strict-warnings` additionally enforces warning-hygiene
+regressions for known vendored crate hot spots (`crossterm`, `portable-pty`,
+`x25519-dalek`, `ratatui`) so release builds stay quiet.
 
 ## Provenance and Hardening
 

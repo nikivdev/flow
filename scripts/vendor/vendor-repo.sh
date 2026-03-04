@@ -300,6 +300,9 @@ cmd_import_local() {
   ensure_repo_layout "$checkout"
   ensure_git_identity "$checkout"
 
+  # Keep imported source deterministic with the same trim/hygiene rules used by hydrate.
+  scripts/vendor/apply-trims.sh
+
   while IFS=$'\t' read -r name repo_path manifest_path materialized_path; do
     [[ -n "$name" ]] || continue
 
