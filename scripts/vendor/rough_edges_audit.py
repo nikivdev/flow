@@ -86,6 +86,89 @@ def latest_mtime(paths: list[Path]) -> float:
     return latest
 
 
+def check_warning_hygiene(project: Path) -> list[Finding]:
+    findings: list[Finding] = []
+
+    checks: list[tuple[str, str]] = [
+        (
+            "lib/vendor/crossterm/src/lib.rs",
+            'cfg(all(winapi, not(feature = "winapi")))',
+        ),
+        (
+            "lib/vendor/crossterm/src/lib.rs",
+            'cfg(all(crossterm_winapi, not(feature = "crossterm_winapi")))',
+        ),
+        (
+            "lib/vendor/crossterm/src/terminal/sys/unix.rs",
+            "map(|file| (FileDesc::Owned(file.into())))",
+        ),
+        (
+            "lib/vendor/portable-pty/src/unix.rs",
+            'feature = "cargo-clippy"',
+        ),
+        (
+            "lib/vendor/x25519-dalek/src/lib.rs",
+            'cfg_attr(feature = "bench", feature(test))',
+        ),
+        (
+            "lib/vendor/ratatui/src/terminal/terminal.rs",
+            "pub fn get_frame(&mut self) -> Frame {",
+        ),
+        (
+            "lib/vendor/ratatui/src/terminal/terminal.rs",
+            "pub fn draw<F>(&mut self, render_callback: F) -> io::Result<CompletedFrame>",
+        ),
+        (
+            "lib/vendor/ratatui/src/terminal/terminal.rs",
+            "pub fn try_draw<F, E>(&mut self, render_callback: F) -> io::Result<CompletedFrame>",
+        ),
+        (
+            "lib/vendor/ratatui/src/text/line.rs",
+            "pub fn iter(&self) -> std::slice::Iter<Span<'a>> {",
+        ),
+        (
+            "lib/vendor/ratatui/src/text/line.rs",
+            "pub fn iter_mut(&mut self) -> std::slice::IterMut<Span<'a>> {",
+        ),
+        (
+            "lib/vendor/ratatui/src/text/text.rs",
+            "pub fn iter(&self) -> std::slice::Iter<Line<'a>> {",
+        ),
+        (
+            "lib/vendor/ratatui/src/text/text.rs",
+            "pub fn iter_mut(&mut self) -> std::slice::IterMut<Line<'a>> {",
+        ),
+        (
+            "lib/vendor/ratatui/src/text/text.rs",
+            "fn to_text(&self) -> Text {",
+        ),
+        (
+            "lib/vendor/ratatui/src/widgets/block.rs",
+            ") -> impl DoubleEndedIterator<Item = &Line> {",
+        ),
+    ]
+
+    for rel_path, needle in checks:
+        path = project / rel_path
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if needle in content:
+            findings.append(
+                Finding(
+                    "warn",
+                    "warning_hygiene_regression",
+                    f"{rel_path}: found stale warning pattern `{needle}`",
+                    "run scripts/vendor/apply-trims.sh (or hydrate) to re-apply warning hygiene patches",
+                )
+            )
+
+    return findings
+
+
 def build_report(project: Path) -> tuple[dict[str, Any], list[Finding]]:
     findings: list[Finding] = []
     metrics: dict[str, Any] = {
@@ -96,6 +179,7 @@ def build_report(project: Path) -> tuple[dict[str, Any], list[Finding]]:
         "direct_dependencies": 0,
         "direct_non_vendored_dependencies": 0,
         "direct_non_vendored_list": [],
+        "warning_hygiene_regressions": 0,
     }
 
     vendor_lock_path = project / "vendor.lock.toml"
@@ -401,6 +485,10 @@ def build_report(project: Path) -> tuple[dict[str, Any], list[Finding]]:
             )
         )
 
+    warning_hygiene_findings = check_warning_hygiene(project)
+    metrics["warning_hygiene_regressions"] = len(warning_hygiene_findings)
+    findings.extend(warning_hygiene_findings)
+
     return metrics, findings
 
 
@@ -411,6 +499,7 @@ def print_text(metrics: dict[str, Any], findings: list[Finding]) -> None:
     print(f"vendor patch entries: {metrics['vendor_patch_entries']}")
     print(f"direct deps: {metrics['direct_dependencies']}")
     print(f"direct deps not yet vendored: {metrics['direct_non_vendored_dependencies']}")
+    print(f"warning hygiene regressions: {metrics['warning_hygiene_regressions']}")
     if metrics["direct_non_vendored_list"]:
         preview = ", ".join(metrics["direct_non_vendored_list"][:12])
         suffix = " ..." if len(metrics["direct_non_vendored_list"]) > 12 else ""

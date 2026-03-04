@@ -269,6 +269,11 @@ command = "python3 ./scripts/vendor/typesense_code_index.py --project . search -
 description = "Search source inventory metadata (crate/version/path/upstream)"
 
 [[tasks]]
+name = "vendor-trims"
+command = "bash ./scripts/vendor/apply-trims.sh $@"
+description = "Apply deterministic trim + warning-hygiene patches to vendored crates"
+
+[[tasks]]
 name = "vendor-rough-audit"
 command = "python3 ./scripts/vendor/rough_edges_audit.py --project . $@"
 description = "Audit vendoring rough edges (lock/manifest/patch/provenance/index freshness)"
