@@ -10,6 +10,7 @@ Complete documentation for all `f` (flow) commands.
 | [`release`](release.md) | Publish a release to registry or GitHub |
 | [`publish`](publish.md) | Publish project to GitHub |
 | [`install`](install.md) | Install a CLI/tool via registry, parm, or flox |
+| [`clone`](clone.md) | Clone repositories with git-like destination behavior |
 | [`repos`](repos.md) | Clone repositories into ~/repos |
 | [`new`](new.md) | Create a project from a local template in ~/new |
 | [`commit`](commit.md) | AI-powered commit with code review |
@@ -53,6 +54,7 @@ f commit --help
 
 - **[commit](commit.md)** - AI-powered commits with review
 - **[pr](pr.md)** - PR creation/editing plus review feedback ingestion
+- **[clone](clone.md)** - Clone with git-like destination behavior
 - **[repos](repos.md)** - Clone repos into a structured directory
 - **[upstream](upstream.md)** - Fork management and sync
 - **[fixup](fixup.md)** - Fix common TOML syntax errors

@@ -540,6 +540,9 @@ fn main() -> Result<()> {
             Some(Commands::Publish(cmd)) => {
                 publish::run(cmd)?;
             }
+            Some(Commands::Clone(opts)) => {
+                repos::clone_git_like(opts)?;
+            }
             Some(Commands::Repos(cmd)) => {
                 repos::run(cmd)?;
             }

@@ -513,6 +513,11 @@ pub enum Commands {
     )]
     Publish(PublishCommand),
     #[command(
+        about = "Clone a repository into the current directory (git clone style).",
+        long_about = "Clones into the current working directory by default, matching git clone destination behavior. GitHub inputs are normalized to SSH URLs."
+    )]
+    Clone(CloneOpts),
+    #[command(
         about = "Clone repositories into a structured local directory.",
         long_about = "Clone repositories into ~/repos/<owner>/<repo> with SSH URLs and optional upstream setup for forks."
     )]
@@ -3231,6 +3236,14 @@ pub struct PublishOpts {
 pub struct PublishCommand {
     #[command(subcommand)]
     pub action: Option<PublishAction>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CloneOpts {
+    /// Repository URL or owner/repo.
+    pub url: String,
+    /// Optional destination directory (same as git clone <url> <dir>).
+    pub directory: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]

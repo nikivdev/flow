@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use url::Url;
 
-use crate::cli::{ReposAction, ReposCloneOpts, ReposCommand};
+use crate::cli::{CloneOpts, ReposAction, ReposCloneOpts, ReposCommand};
 use crate::{config, publish, ssh, ssh_keys, upstream, vcs};
 
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
@@ -28,6 +28,43 @@ pub fn run(cmd: ReposCommand) -> Result<()> {
         Some(ReposAction::Create(opts)) => publish::run_github(opts),
         None => fuzzy_select_repo(),
     }
+}
+
+/// Clone into the current working directory (git clone style destination behavior).
+pub fn clone_git_like(opts: CloneOpts) -> Result<()> {
+    ssh::ensure_ssh_env();
+    let mode = ssh::ssh_mode();
+    if matches!(mode, ssh::SshMode::Force) && !ssh::has_identities() {
+        match ssh_keys::ensure_default_identity(24) {
+            Ok(()) => {}
+            Err(err) => {
+                bail!(
+                    "SSH mode is forced but no key is available. Run `f ssh setup` or `f ssh unlock` (error: {})",
+                    err
+                );
+            }
+        }
+    }
+
+    let clone_url = resolve_git_like_clone_url(&opts.url)?;
+    let mut cmd = Command::new("git");
+    cmd.arg("clone").arg(&clone_url);
+    if let Some(dir) = opts.directory {
+        cmd.arg(dir);
+    }
+
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run git clone")?;
+
+    if !status.success() {
+        bail!("git clone failed");
+    }
+
+    Ok(())
 }
 
 fn open_in_zed(path: &std::path::Path) -> Result<()> {
@@ -436,6 +473,55 @@ fn parse_repo_target(input: &str) -> Result<RepoTarget> {
 
     let generic = parse_generic_repo(input)?;
     Ok(RepoTarget::Generic(generic))
+}
+
+fn resolve_git_like_clone_url(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        bail!("missing repository URL");
+    }
+
+    if trimmed.starts_with("git@github.com:")
+        || trimmed.contains("github.com/")
+        || looks_like_github_shorthand(trimmed)
+    {
+        let repo_ref = parse_github_repo(trimmed)?;
+        return Ok(format!(
+            "git@github.com:{}/{}.git",
+            repo_ref.owner, repo_ref.repo
+        ));
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn looks_like_github_shorthand(input: &str) -> bool {
+    if input.contains("://")
+        || input.contains('@')
+        || input.starts_with('/')
+        || input.starts_with("./")
+        || input.starts_with("../")
+        || input.starts_with("~/")
+    {
+        return false;
+    }
+
+    let mut parts = input.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(repo) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+
+    if owner.is_empty() || repo.is_empty() {
+        return false;
+    }
+
+    owner != "." && owner != ".." && repo != "." && repo != ".."
 }
 
 fn is_github_input(input: &str) -> bool {

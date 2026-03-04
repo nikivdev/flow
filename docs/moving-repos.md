@@ -14,6 +14,18 @@ Flow uses three managed roots:
 
 ## Cloning Into the Right Place
 
+### `f clone`
+
+Clones with git-like destination behavior from your current working directory:
+
+```bash
+f clone owner/repo
+f clone https://github.com/owner/repo
+f clone owner/repo local-folder
+```
+
+GitHub inputs are normalized to SSH URLs, but destination behavior matches `git clone` (no forced `~/repos` root).
+
 ### `f repos clone`
 
 Clones GitHub repos into `~/repos/<owner>/<repo>`:
@@ -189,6 +201,7 @@ f code move-sessions --from ~/code/old --to ~/code/new
 
 ## See Also
 
+- [commands/clone.md](commands/clone.md) — `f clone` (git-like destination behavior)
 - [commands/repos.md](commands/repos.md) — `f repos clone` / `f repos create`
 - [commands/migrate.md](commands/migrate.md) — `f migrate` full reference
 - [run-repos.md](run-repos.md) — run repo shortcuts
