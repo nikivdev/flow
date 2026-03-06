@@ -51,7 +51,7 @@ rise sandbox "set -euo pipefail; cd /root/project; <feature command>; echo FEATU
 
 ## Installer/Release Verification (Flow)
 
-Use this to verify `curl -fsSL https://myflow.sh/install.sh | sh` pulls the newest canary:
+Use this to verify `curl -fsSL https://myflow.sh/install.sh | sh` pulls the latest release:
 
 ```bash
 rise sandbox "set -euo pipefail; curl -fsSL https://myflow.sh/install.sh | sh; ~/.flow/bin/f --version; echo INSTALL_OK" \
@@ -59,10 +59,10 @@ rise sandbox "set -euo pipefail; curl -fsSL https://myflow.sh/install.sh | sh; ~
   --expect INSTALL_OK
 ```
 
-Then verify canary tag points to the commit you expect:
+Then verify the latest release tag is what you expect:
 
 ```bash
-git ls-remote --tags https://github.com/nikivdev/flow.git canary
+gh release view --repo nikivdev/flow --json tagName,publishedAt
 ```
 
 ## Infra Optimization Loop
@@ -95,14 +95,13 @@ Fix: build/use `~/repos/lynaghk/vibe/target/release/vibe` (rise resolves this fi
 
 Check:
 
-1. Canary tag head:
+1. Latest release tag:
    ```bash
-   git ls-remote --tags https://github.com/nikivdev/flow.git canary
+   gh release view --repo nikivdev/flow --json tagName,publishedAt
    ```
-2. Latest canary workflow status:
+2. Latest release workflow status:
    ```bash
    gh run list -R nikivdev/flow --limit 5
    ```
 
-If canary tag already points to your target commit, installer should fetch that version even if other optional jobs are still running.
-
+If the latest release tag points to your target commit, installer should fetch that version.
