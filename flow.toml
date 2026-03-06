@@ -1,10 +1,546 @@
 version = 1
-name = "lab"
+name = "flow"
+
+[agents]
+review-agent = "nikivdev:review-agent"
+
+[flow]
+primary_task = "deploy"
+deploy_task = "deploy"
+release_task = "release"
+
+[options]
+# Enable gitedit.dev mirroring for commits
+gitedit_mirror = true
+# Enable gitedit.dev mirroring for commitWithCheck
+commit_with_check_gitedit_mirror = true
+# Larger default review window for big diffs during `f commit`.
+commit_with_check_timeout_secs = 300
+gitedit_url = "https://gitedit.dev"
+commit_with_check_review_url = "http://100.114.156.47:3000/review"
+# Enable myflow.sh mirroring for commits
+myflow_mirror = true
+
+[commit]
+queue = true
+queue_on_issues = true
+
+[jj]
+default_branch = "main"
+remote = "origin"
+auto_track = true
+review_prefix = "review"
+
+[release]
+# Default release provider for `f release`.
+default = "registry"
+# Use calendar versioning for registry releases (YYYY.M.D).
+versioning = "calver"
+# Set these to your release host values.
+domain = "flow.yourdomain.com"
+base_url = "https://flow.yourdomain.com"
+root = "/var/www/flow"
+caddyfile = "/etc/caddy/Caddyfile"
+readme = "readme.md"
+
+[release.registry]
+url = "https://myflow.sh"
+package = "flow"
+bins = ["f", "lin"]
+default_bin = "f"
+token_env = "FLOW_REGISTRY_TOKEN"
+latest = true
+
+[flox]
+[flox.install]
+cargo.pkg-path = "cargo"
+eza.pkg-path = "eza"
 
 [[tasks]]
-name = "dev"
-command = "npm run build && npm run dev"
-workdir = "/Users/nikitavoloboev/code/prom/x/nikiv/lab/designer"
-description = "Build and start the Designer app"
-shortcuts = ["d"]
+name = "setup"
+command = "cargo check"
+description = "Compile the workspace to make sure the toolchain works"
+activate_on_cd_to_root = true
+
+[[tasks]]
+name = "test"
+command = "cargo test"
+description = "Run the full test suite for a basic sanity check"
+
+[[tasks]]
+name = "which-cargo"
+command = "which cargo && cargo --version"
+description = "Confirm cargo is coming from the managed toolchain"
+dependencies = ["cargo"]
+
+[[tasks]]
+name = "test-deps"
+command = "tsx tests/deps.ts"
+description = "Run the e2e managed-deps test script"
+
+[[tasks]]
+name = "dev-hub"
+command = "cargo run -- hub start"
+description = "Ensure the hub daemon is running locally"
+
+[[tasks]]
+name = "deploy-cli-release"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh"
+description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
+
+[[tasks]]
+name = "deploy"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh"
+description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
+
+[[tasks]]
+name = "deploy-traces"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh"
+description = "Deploy CLI with traces updates (f traces)"
+
+[[tasks]]
+name = "rl-signals-tail"
+command = "sh -lc \"mkdir -p out/logs && touch ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl} && tail -f ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl}\""
+description = "Follow structured RL signal events emitted by flow runtime."
+
+[[tasks]]
+name = "rl-signals-summary"
+command = "python3 ./scripts/rl_signal_summary.py ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl} $@"
+description = "Summarize RL signal counts, errors, and latency percentiles."
+
+[[tasks]]
+name = "rl-dataset-build"
+command = "python3 ./scripts/build_rl_runtime_dataset.py --harbor-dir ${HARBOR_DIR:-$HOME/repos/laude-institute/harbor} --flow-signals ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl} --seq-mem ${SEQ_CH_MEM_PATH:-$HOME/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl} --write-latest $@"
+description = "Build Harbor-ready RL dataset snapshot from flow+seq runtime signals."
+
+[[tasks]]
+name = "rl-dataset-validate"
+command = "python3 -c \"import json, os, pathlib, sys; root = pathlib.Path(os.path.expanduser(os.environ.get('HARBOR_DIR', '~/repos/laude-institute/harbor'))); p = root / 'data' / 'flow_runtime_prepared' / 'latest' / 'validation_report.json'; (print(f'missing validation report: {p}') or sys.exit(1)) if not p.exists() else None; obj = json.loads(p.read_text(encoding='utf-8')); print(json.dumps(obj, indent=2)); sys.exit(0 if obj.get('ok') else 1)\""
+description = "Print and enforce latest RL dataset validation report."
+
+[[tasks]]
+name = "rl-capture-on-all"
+command = "sh -lc \"cd $HOME/code/seq && f rl-capture-on && f agent-qa-capture-on && f agent-qa-capture-status\""
+description = "Enable seq low-latency capture + always-on Claude/Codex Q/A ingest."
+
+[[tasks]]
+name = "rl-capture-status"
+command = "sh -lc \"cd $HOME/code/seq && f agent-qa-capture-status && f rl-signal-summary --last ${LAST:-5000}\""
+description = "Show seq Q/A ingest status and current high-signal event density."
+
+[[tasks]]
+name = "rl-capture-logs"
+command = "sh -lc \"cd $HOME/code/seq && f agent-qa-capture-logs\""
+description = "Tail background Claude/Codex Q/A ingest daemon logs from seq."
+
+[[tasks]]
+name = "deploy-with-hub-reload"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh && f hub stop && FLOW_DOCS_FOCUS=1 f hub"
+description = "Deploy and restart hub daemons (lin + docs)"
+
+[[tasks]]
+name = "release-build"
+command = "bash ./scripts/package-release.sh"
+description = "Build signed release artifacts into dist/ (set FLOW_VERSION, CODESIGN_IDENTITY env vars as needed)"
+
+[[tasks]]
+name = "release"
+command = "./scripts/release.sh"
+description = "Build darwin/arm64 release, publish to host, update install snippet"
+
+[[tasks]]
+name = "release-host-setup"
+command = "infra release setup --path ."
+description = "Install Caddy and configure a release host (uses infra host set + [release])"
+
+[[tasks]]
+name = "release-publish"
+command = "bash -c 'tarball=$(ls -t dist/flow_*_darwin_arm64.tar.gz | head -n1) && infra release publish \"$tarball\" --path .'"
+description = "Upload the latest darwin/arm64 release tarball to the release host"
+
+[[tasks]]
+name = "ci-blacksmith-status"
+command = "python3 ./scripts/ci_blacksmith.py status"
+description = "Show CI runner mode for canary/release workflows (github, blacksmith, or host)"
+
+[[tasks]]
+name = "ci-blacksmith-enable"
+command = "python3 ./scripts/ci_blacksmith.py enable"
+description = "Switch Linux CI lanes to Blacksmith runners and enable Linux host SIMD job"
+
+[[tasks]]
+name = "ci-blacksmith-enable-apply"
+command = "python3 ./scripts/ci_blacksmith.py enable --commit --push"
+description = "Enable Blacksmith CI mode, commit workflow updates, and push"
+
+[[tasks]]
+name = "ci-blacksmith-disable"
+command = "python3 ./scripts/ci_blacksmith.py disable"
+description = "Switch CI back to GitHub-hosted Linux runners and disable Linux host SIMD job"
+
+[[tasks]]
+name = "ci-blacksmith-disable-apply"
+command = "python3 ./scripts/ci_blacksmith.py disable --commit --push"
+description = "Disable Blacksmith CI mode, commit workflow updates, and push"
+
+[[tasks]]
+name = "ci-host-enable"
+command = "python3 ./scripts/ci_blacksmith.py host"
+description = "Keep standard Linux CI lanes on GitHub runners, but enable Linux host SIMD build on ci-1focus self-hosted runner"
+
+[[tasks]]
+name = "ci-host-enable-apply"
+command = "python3 ./scripts/ci_blacksmith.py host --commit --push"
+description = "Enable host SIMD CI mode, commit workflow updates, and push"
+
+[[tasks]]
+name = "ci-host-runner-status"
+command = "python3 ./scripts/ci_host_runner.py status --repo nikivdev/flow"
+description = "Show ci-1focus runner service status on infra host and GitHub runner registration state"
+
+[[tasks]]
+name = "ci-host-runner-install"
+command = "python3 ./scripts/ci_host_runner.py install --repo nikivdev/flow"
+description = "Install/register self-hosted GitHub runner on configured infra Linux host (label: ci-1focus)"
+
+[[tasks]]
+name = "ci-host-runner-remove"
+command = "python3 ./scripts/ci_host_runner.py remove --repo nikivdev/flow"
+description = "Unregister ci-1focus self-hosted GitHub runner and remove runner service on infra host"
+
+[[tasks]]
+name = "ci-host-bootstrap"
+command = "python3 ./scripts/ci_host_runner.py install --repo nikivdev/flow && python3 ./scripts/ci_blacksmith.py host"
+description = "One-command setup: install ci-1focus runner on infra host and switch workflows to host SIMD mode"
+
+[[tasks]]
+name = "ci-host-bootstrap-apply"
+command = "python3 ./scripts/ci_host_runner.py install --repo nikivdev/flow && python3 ./scripts/ci_blacksmith.py host --commit --push"
+description = "Install ci-1focus runner, switch workflows to host SIMD mode, then commit and push workflow updates"
+
+[[tasks]]
+name = "ci-host-setup"
+command = "bash ./scripts/ci_host_setup.sh $@"
+description = "One command to set up ci.1focus.ai runner and switch workflows to host mode (optionally pass user@ip)"
+
+[[tasks]]
+name = "vendor-typesense-up"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense.sh up'"
+description = "Start local Typesense via infra/base shared launcher"
+
+[[tasks]]
+name = "vendor-typesense-setup"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense-flox-setup.sh'"
+description = "One-time setup for local Typesense via flox in infra/base"
+
+[[tasks]]
+name = "vendor-typesense-down"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense.sh down'"
+description = "Stop local Typesense via infra/base shared launcher"
+
+[[tasks]]
+name = "vendor-typesense-status"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense.sh status'"
+description = "Show local Typesense status via infra/base shared launcher"
+
+[[tasks]]
+name = "vendor-typesense-logs"
+command = "bash -lc 'cd \"$HOME/code/infra/base\" && ./scripts/typesense.sh logs'"
+description = "Tail local Typesense logs via infra/base shared launcher"
+
+[[tasks]]
+name = "vendor-code-sources"
+command = "python3 ./scripts/vendor/typesense_code_index.py --project . sources $@"
+description = "Print opensrc-style source inventory for first-party + vendored crates"
+
+[[tasks]]
+name = "vendor-code-index"
+command = "python3 ./scripts/vendor/typesense_code_index.py --project . index $@"
+description = "Index first-party and vendored code chunks into Typesense"
+
+[[tasks]]
+name = "vendor-code-search"
+command = "python3 ./scripts/vendor/typesense_code_index.py --project . search $@"
+description = "Search indexed code (chunks by default) with optional scope/crate/lang filters"
+
+[[tasks]]
+name = "vendor-code-search-sources"
+command = "python3 ./scripts/vendor/typesense_code_index.py --project . search --collection sources $@"
+description = "Search source inventory metadata (crate/version/path/upstream)"
+
+[[tasks]]
+name = "vendor-trims"
+command = "bash ./scripts/vendor/apply-trims.sh $@"
+description = "Apply deterministic trim + warning-hygiene patches to vendored crates"
+
+[[tasks]]
+name = "vendor-rough-audit"
+command = "python3 ./scripts/vendor/rough_edges_audit.py --project . $@"
+description = "Audit vendoring rough edges (lock/manifest/patch/provenance/index freshness)"
+
+[[tasks]]
+name = "vendor-rough-audit-strict"
+command = "python3 ./scripts/vendor/rough_edges_audit.py --project . --strict-warnings $@"
+description = "Strict vendoring audit: warnings fail (good for pre-merge hardening)"
+
+[[tasks]]
+name = "vendor-offenders"
+command = "bash ./scripts/vendor/offenders.sh"
+description = "Rank dependency offenders by tree size and show duplicate-version pressure"
+
+[[tasks]]
+name = "vendor-bench-iter"
+command = "python3 ./scripts/vendor/bench_iteration.py --project . $@"
+description = "Record compile-iteration benchmark samples to out/vendor/iteration_bench.jsonl"
+
+[[tasks]]
+name = "vendor-optimize-loop"
+command = "bash ./scripts/vendor/optimize_loop.sh $@"
+description = "Run audit + offender scan + iteration benchmark in one command"
+
+[[tasks]]
+name = "update-deps"
+command = "bash ./scripts/vendor/update-deps.sh $@"
+description = "One-command dependency refresh: sync vendored crates to latest, trim/harden, pin vendor lock, and validate"
+
+[[tasks]]
+name = "test-flow-task-tracing"
+command = "bun i-run.ts"
+
+[[tasks]]
+name = "test-flow-server-tracing"
+command = "bun i-server.ts"
+
+[[tasks]]
+name = "test-log-server"
+command = "bun tests/test_log_server.ts"
+description = "Test log ingestion and query endpoints (requires 'f server' running)"
+
+[[tasks]]
+name = "bench-ai-runtime"
+command = "python3 ./scripts/bench-ai-runtime.py $@"
+description = "Benchmark MoonBit AI task runtime paths (moon-run vs cached vs daemon)"
+
+[[tasks]]
+name = "bench-ffi-boundary"
+command = "python3 ./scripts/bench-moonbit-rust-ffi.py $@"
+description = "Benchmark MoonBit <-> Rust FFI boundary ns/op overhead"
+
+[[tasks]]
+name = "myflow-commit-session-smoke"
+command = "bash ./scripts/myflow-commit-session-smoke.sh $@"
+description = "Verify commit sync to myflow and attached Claude/Codex sessions for a repo/commit."
+shortcuts = ["mcss"]
+
+[[tasks]]
+name = "install-ai-fast-client"
+command = "mkdir -p \"$HOME/.local/bin\" && cargo build --release -p ai-taskd-client --bin ai-taskd-client && install -m 755 ./target/release/ai-taskd-client \"$HOME/.local/bin/fai\""
+description = "Install low-latency ai-taskd client as ~/.local/bin/fai"
+
+[[tasks]]
+name = "ai-taskd-launchd-install"
+command = "python3 ./scripts/ai-taskd-launchd.py install"
+description = "Install always-on ai-taskd launch agent (launchd)"
+
+[[tasks]]
+name = "ai-taskd-launchd-uninstall"
+command = "python3 ./scripts/ai-taskd-launchd.py uninstall"
+description = "Remove ai-taskd launch agent (launchd)"
+
+[[tasks]]
+name = "ai-taskd-launchd-status"
+command = "python3 ./scripts/ai-taskd-launchd.py status"
+description = "Show ai-taskd launch agent status"
+
+[[tasks]]
+name = "ai-taskd-launchd-logs"
+command = "python3 ./scripts/ai-taskd-launchd.py logs $@"
+description = "Show ai-taskd launch agent logs"
+
+[[tasks]]
+name = "test-args"
+command = "echo \"arg1=$1 arg2=$2 all=$@\""
+description = "Test that task args are passed correctly"
+
+[[tasks]]
+name = "clone-test-repo"
+command = "git clone https://github.com/nikivdev/flow-testing testing/flow-testing"
+description = "Clone the flow-testing repo into testing/"
+
+[[tasks]]
+name = "agents"
+command = "bash ./scripts/agents-switch.sh $@"
+description = "Switch agents.md profile in a repo"
 interactive = true
+
+[[tasks]]
+name = "run-root"
+command = "bash ./scripts/run-repos.sh root"
+description = "Print run repo root path (default: ~/run)"
+
+[[tasks]]
+name = "run-ensure"
+command = "bash ./scripts/run-repos.sh ensure"
+description = "Ensure local run repo root exists"
+
+[[tasks]]
+name = "run-list"
+command = "bash ./scripts/run-repos.sh list"
+description = "List run repos under ~/run (flow.toml + git metadata)"
+
+[[tasks]]
+name = "run-load"
+command = "bash ./scripts/run-repos.sh load $@"
+description = "Clone or update a run repo. Usage: f run-load <name> <repo-ssh-url> [branch]"
+
+[[tasks]]
+name = "run-sync"
+command = "bash ./scripts/run-repos.sh sync $@"
+description = "Sync run repo(s). Usage: f run-sync [name]"
+
+[[tasks]]
+name = "run-task"
+command = "bash ./scripts/run-repos.sh task $@"
+description = "Run a Flow task inside a run repo. Usage: f run-task <name> <task> [args...]"
+
+[[tasks]]
+name = "run-exec"
+command = "bash ./scripts/run-repos.sh exec $@"
+description = "Ensure run repo exists (clone/sync) and run a task. Usage: f run-exec <name> <repo-ssh-url> [--branch <branch>] <task> [args...]"
+
+[[tasks]]
+name = "run-ri"
+command = "bash ./scripts/run-repos.sh ri $@"
+description = "Run a task in the internal run repo (~/run/i). Usage: f ri <task> [args...]"
+shortcuts = ["ri"]
+
+[[tasks]]
+name = "run-r"
+command = "bash ./scripts/run-repos.sh r $@"
+description = "Run a task in the public run repo (~/run). Usage: f r <task> [args...]"
+shortcuts = ["r"]
+
+[[tasks]]
+name = "run-rp"
+command = "bash ./scripts/run-repos.sh rp $@"
+description = "Run a task in a run project. Usage: f rp <project> <task> [args...] (resolves ~/run/<project> or ~/run/i/<project>)"
+shortcuts = ["rp"]
+
+[[tasks]]
+name = "run-rip"
+command = "bash ./scripts/run-repos.sh rip $@"
+description = "Run a task in an internal run project. Usage: f rip <project> <task> [args...] (maps to ~/run/i/<project>)"
+shortcuts = ["rip"]
+
+[storage]
+provider = "myflow.sh"
+env_var = "FLOW_SECRETS_TOKEN" # optional; defaults to this value
+
+[[storage.envs]]
+name = "local"
+description = "Local development defaults"
+variables = [
+  { key = "DATABASE_URL", default = "" },
+  { key = "OPENAI_API_KEY", default = "" },
+  { key = "ANTHROPIC_API_KEY", default = "" },
+  { key = "FLOW_RL_SIGNALS", default = "true" },
+  { key = "FLOW_RL_SIGNALS_PATH", default = "out/logs/flow_rl_signals.jsonl" },
+  { key = "FLOW_RL_SIGNALS_SEQ_MIRROR", default = "true" },
+  { key = "FLOW_RL_SIGNALS_SEQ_PATH", default = "~/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl" },
+  { key = "FLOW_ROUTER_SUGGESTED_TASK", default = "" },
+  { key = "FLOW_ROUTER_OVERRIDE_REASON", default = "" },
+  { key = "FLOW_RL_SIGNAL_TEXT", default = "snippet" },
+  { key = "FLOW_RL_SIGNAL_MAX_CHARS", default = "4000" },
+  { key = "SEQ_CH_MEM_PATH", default = "~/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl" },
+  { key = "HARBOR_DIR", default = "~/repos/laude-institute/harbor" },
+]
+
+# ============================================================================
+# Swarm Demo Tasks - Run with: uv run flow <command> "<task>"
+# ============================================================================
+
+[[tasks]]
+name = "swarm-single"
+command = "uv run flow.py single \"$@\""
+description = "Single agent demo"
+
+[[tasks]]
+name = "swarm-seq"
+command = "uv run flow.py sequential \"$@\""
+description = "Sequential workflow (Researcher -> Analyst -> Writer)"
+
+[[tasks]]
+name = "swarm-parallel"
+command = "uv run flow.py concurrent \"$@\""
+description = "Concurrent agents (Optimist, Critic, Pragmatist)"
+
+[[tasks]]
+name = "swarm-hier"
+command = "uv run flow.py hierarchical \"$@\""
+description = "Hierarchical swarm (Director with workers)"
+
+[[tasks]]
+name = "swarm-rearrange"
+command = "uv run flow.py rearrange \"$@\""
+description = "Agent rearrange with custom flow"
+
+[[tasks]]
+name = "swarm-chat"
+command = "uv run flow.py chat \"$@\""
+description = "Group chat discussion"
+
+[[tasks]]
+name = "swarm-auto"
+command = "uv run flow.py auto \"$@\""
+description = "Auto-generate a swarm for a task"
+
+[[tasks]]
+name = "pond-build"
+command = "bash -c 'cd /Users/nikiv/repos/ghostty-org/ghostty && zig build && zig build -Doptimize=ReleaseFast'"
+description = "Build Pond (Ghostty fork) in debug and production modes"
+
+[[tasks]]
+name = "pond-debug"
+command = "bash -c 'cd /Users/nikiv/repos/ghostty-org/ghostty && zig build -Doptimize=Debug'"
+description = "Build Pond (Ghostty fork) in debug mode"
+
+[[tasks]]
+name = "zed-build-debug-release"
+command = "bash -c 'cd /Users/nikiv/repos/zed-industries/zed && ./script/bundle-mac -d && ./script/bundle-mac'"
+description = "Build Zed macOS bundle in debug mode (fast) and then in release mode"
+
+[[tasks]]
+name = "linsa-assistant-serve"
+command = "bash -c 'cd /Users/nikiv/code/org/linsa/linsa/api/cpp && sh ./run.sh serve'"
+description = "Build + run the Linsa C++ assistant proxy server"
+
+[[tasks]]
+name = "linsa-assistant-stream"
+command = "bash -c 'curl -N -X POST http://127.0.0.1:8788/api/assistant/chat/stream -H \"Content-Type: application/json\" -d \"{\\\"message\\\":\\\"hello\\\"}\"'"
+description = "Stream assistant response via SSE from the local proxy"
+
+[skills]
+sync_tasks = true
+install = ["quality-bun-feature-delivery"]
+
+[skills.codex]
+generate_openai_yaml = true
+force_reload_after_sync = true
+task_skill_allow_implicit_invocation = false
+
+[commit.skill_gate]
+mode = "block"
+required = ["quality-bun-feature-delivery"]
+
+[commit.skill_gate.min_version]
+quality-bun-feature-delivery = 2
+
+[commit.testing]
+mode = "block"
+runner = "bun"
+bun_repo_strict = true
+require_related_tests = true
+ai_scratch_test_dir = ".ai/test"
+run_ai_scratch_tests = true
+allow_ai_scratch_to_satisfy_gate = false
+max_local_gate_seconds = 20
