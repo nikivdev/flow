@@ -17,7 +17,7 @@ Then run:
 ~/.flow/bin/f doctor
 ```
 
-If `f` is not found by name immediately, open a new shell.
+If `f` is not found by name immediately, open a new shell (`exec zsh -l` on zsh).
 The installer also ensures a local source checkout at `~/code/flow` (or `FLOW_SOURCE_DIR`).
 
 The installer verifies SHA-256 checksums when available. If you are installing a legacy release
