@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -8,17 +9,25 @@ use serde::Deserialize;
 use toml::Value;
 use toml::map::Map;
 
-use crate::cli::{DepsAction, DepsCommand, DepsManager, ReposCloneOpts};
-use crate::{config, repos, upstream};
+use crate::cli::{
+    DepsAction, DepsCommand, DepsEcosystem, DepsManager, ReposCloneOpts, UpdateDepsOpts,
+};
+use crate::{config, opentui_prompt, repos, upstream};
 
 pub fn run(cmd: DepsCommand) -> Result<()> {
     let action = cmd.action;
+    let manager_override = cmd.manager;
     let project_root = project_root()?;
-    let manager = cmd.manager.unwrap_or_else(|| detect_manager(&project_root));
 
     match action {
         None | Some(DepsAction::Pick) => {
             pick_dependency(&project_root)?;
+        }
+        Some(DepsAction::Update(mut opts)) => {
+            if opts.manager.is_none() {
+                opts.manager = manager_override;
+            }
+            run_update_with_context(opts)?;
         }
         Some(DepsAction::Repo {
             repo,
@@ -27,7 +36,8 @@ pub fn run(cmd: DepsCommand) -> Result<()> {
         }) => {
             link_repo_dependency(&project_root, &repo, &root, private)?;
         }
-        Some(other) => {
+        Some(other @ DepsAction::Install { .. }) => {
+            let manager = manager_override.unwrap_or_else(|| detect_manager(&project_root));
             let (program, args) = build_command(manager, &project_root, &other)?;
             let status = Command::new(program)
                 .args(&args)
@@ -42,6 +52,33 @@ pub fn run(cmd: DepsCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_update_with_context(opts: UpdateDepsOpts) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let search_root = update_search_root(&cwd);
+    let context = UpdateDetectContext { cwd, search_root };
+    let plans = build_update_plans(&context, &opts)?;
+
+    if plans.is_empty() {
+        bail!(
+            "no dependency manifests found from {} up to {}",
+            context.cwd.display(),
+            context.search_root.display()
+        );
+    }
+
+    print_update_summary(&plans);
+    if opts.dry_run {
+        return Ok(());
+    }
+
+    if !opts.yes && !confirm_update_plan(&opts, &plans)? {
+        println!("dependency update canceled");
+        return Ok(());
+    }
+
+    run_update_plans(&plans)
 }
 
 fn build_command(
@@ -63,25 +100,7 @@ fn build_command(
             args.push("install".to_string());
             args.extend(extra.clone());
         }
-        DepsAction::Update { args: extra } => {
-            match manager {
-                DepsManager::Pnpm => {
-                    args.push("up".to_string());
-                    args.push("--latest".to_string());
-                }
-                DepsManager::Yarn => {
-                    args.push("up".to_string());
-                }
-                DepsManager::Bun => {
-                    args.push("update".to_string());
-                }
-                DepsManager::Npm => {
-                    args.push("update".to_string());
-                }
-            }
-            args.extend(extra.clone());
-        }
-        DepsAction::Repo { .. } | DepsAction::Pick => {
+        DepsAction::Update(_) | DepsAction::Repo { .. } | DepsAction::Pick => {
             bail!("dependency action is not a package manager command");
         }
     }
@@ -90,6 +109,9 @@ fn build_command(
 }
 
 fn detect_manager(project_root: &Path) -> DepsManager {
+    if let Some(pm) = detect_manager_from_package_json(project_root) {
+        return pm;
+    }
     if project_root.join("pnpm-lock.yaml").exists()
         || project_root.join("pnpm-workspace.yaml").exists()
     {
@@ -105,6 +127,29 @@ fn detect_manager(project_root: &Path) -> DepsManager {
         return DepsManager::Npm;
     }
     DepsManager::Npm
+}
+
+fn detect_manager_from_package_json(project_root: &Path) -> Option<DepsManager> {
+    let package_json = project_root.join("package.json");
+    if !package_json.exists() {
+        return None;
+    }
+    let contents = std::fs::read_to_string(package_json).ok()?;
+    let json = serde_json::from_str::<serde_json::Value>(&contents).ok()?;
+    let manager = json.get("packageManager")?.as_str()?;
+    if manager.starts_with("pnpm@") {
+        return Some(DepsManager::Pnpm);
+    }
+    if manager.starts_with("bun@") {
+        return Some(DepsManager::Bun);
+    }
+    if manager.starts_with("yarn@") {
+        return Some(DepsManager::Yarn);
+    }
+    if manager.starts_with("npm@") {
+        return Some(DepsManager::Npm);
+    }
+    None
 }
 
 fn is_workspace(project_root: &Path) -> bool {
@@ -130,6 +175,458 @@ fn find_flow_toml(start: &PathBuf) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct UpdateDetectContext {
+    cwd: PathBuf,
+    search_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct UpdateTarget {
+    root: PathBuf,
+    ecosystem: DepsEcosystem,
+    detail: UpdateTargetDetail,
+}
+
+#[derive(Debug, Clone)]
+enum UpdateTargetDetail {
+    Js {
+        manager: DepsManager,
+        workspace: bool,
+    },
+    Rust,
+    Go,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedCommand {
+    program: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct UpdatePlan {
+    target: UpdateTarget,
+    commands: Vec<PlannedCommand>,
+}
+
+trait EcosystemUpdater {
+    fn ecosystem(&self) -> DepsEcosystem;
+    fn detect_target(
+        &self,
+        ctx: &UpdateDetectContext,
+        opts: &UpdateDepsOpts,
+    ) -> Result<Option<UpdateTarget>>;
+    fn build_commands(
+        &self,
+        target: &UpdateTarget,
+        opts: &UpdateDepsOpts,
+    ) -> Result<Vec<PlannedCommand>>;
+}
+
+struct JavaScriptUpdater;
+struct RustUpdater;
+struct GoUpdater;
+
+impl EcosystemUpdater for JavaScriptUpdater {
+    fn ecosystem(&self) -> DepsEcosystem {
+        DepsEcosystem::Js
+    }
+
+    fn detect_target(
+        &self,
+        ctx: &UpdateDetectContext,
+        opts: &UpdateDepsOpts,
+    ) -> Result<Option<UpdateTarget>> {
+        let nearest = nearest_ancestor_with_file(&ctx.cwd, &ctx.search_root, "package.json");
+        let Some(nearest_pkg) = nearest else {
+            return Ok(None);
+        };
+        let root =
+            find_js_workspace_root(&nearest_pkg, &ctx.search_root).unwrap_or(nearest_pkg.clone());
+        let manager = opts.manager.unwrap_or_else(|| detect_manager(&root));
+        let workspace = root != nearest_pkg || is_js_workspace_root(&root);
+
+        Ok(Some(UpdateTarget {
+            root,
+            ecosystem: DepsEcosystem::Js,
+            detail: UpdateTargetDetail::Js { manager, workspace },
+        }))
+    }
+
+    fn build_commands(
+        &self,
+        target: &UpdateTarget,
+        opts: &UpdateDepsOpts,
+    ) -> Result<Vec<PlannedCommand>> {
+        let UpdateTargetDetail::Js { manager, workspace } = target.detail else {
+            bail!("invalid js update target");
+        };
+
+        let mut args = match manager {
+            DepsManager::Pnpm => {
+                let mut args = Vec::new();
+                if workspace {
+                    args.push("-r".to_string());
+                }
+                args.push("up".to_string());
+                if opts.latest {
+                    args.push("--latest".to_string());
+                }
+                args
+            }
+            DepsManager::Bun => {
+                let mut args = vec!["update".to_string()];
+                if opts.latest {
+                    args.push("--latest".to_string());
+                }
+                args
+            }
+            DepsManager::Yarn => vec!["up".to_string()],
+            DepsManager::Npm => vec!["update".to_string()],
+        };
+
+        args.extend(opts.args.clone());
+
+        Ok(vec![PlannedCommand {
+            program: manager_program(manager).to_string(),
+            args,
+            cwd: target.root.clone(),
+        }])
+    }
+}
+
+impl EcosystemUpdater for RustUpdater {
+    fn ecosystem(&self) -> DepsEcosystem {
+        DepsEcosystem::Rust
+    }
+
+    fn detect_target(
+        &self,
+        ctx: &UpdateDetectContext,
+        _opts: &UpdateDepsOpts,
+    ) -> Result<Option<UpdateTarget>> {
+        let root = find_rust_update_root(&ctx.cwd, &ctx.search_root);
+        let Some(root) = root else {
+            return Ok(None);
+        };
+        Ok(Some(UpdateTarget {
+            root,
+            ecosystem: DepsEcosystem::Rust,
+            detail: UpdateTargetDetail::Rust,
+        }))
+    }
+
+    fn build_commands(
+        &self,
+        target: &UpdateTarget,
+        opts: &UpdateDepsOpts,
+    ) -> Result<Vec<PlannedCommand>> {
+        let mut args = vec!["update".to_string()];
+        args.extend(opts.args.clone());
+
+        Ok(vec![PlannedCommand {
+            program: "cargo".to_string(),
+            args,
+            cwd: target.root.clone(),
+        }])
+    }
+}
+
+impl EcosystemUpdater for GoUpdater {
+    fn ecosystem(&self) -> DepsEcosystem {
+        DepsEcosystem::Go
+    }
+
+    fn detect_target(
+        &self,
+        ctx: &UpdateDetectContext,
+        _opts: &UpdateDepsOpts,
+    ) -> Result<Option<UpdateTarget>> {
+        let root = nearest_ancestor_with_file(&ctx.cwd, &ctx.search_root, "go.mod");
+        let Some(root) = root else {
+            return Ok(None);
+        };
+        Ok(Some(UpdateTarget {
+            root,
+            ecosystem: DepsEcosystem::Go,
+            detail: UpdateTargetDetail::Go,
+        }))
+    }
+
+    fn build_commands(
+        &self,
+        target: &UpdateTarget,
+        opts: &UpdateDepsOpts,
+    ) -> Result<Vec<PlannedCommand>> {
+        let mut get_args = vec!["get".to_string(), "-u".to_string()];
+        if opts.args.is_empty() {
+            get_args.push("./...".to_string());
+        } else {
+            get_args.extend(opts.args.clone());
+        }
+
+        Ok(vec![
+            PlannedCommand {
+                program: "go".to_string(),
+                args: get_args,
+                cwd: target.root.clone(),
+            },
+            PlannedCommand {
+                program: "go".to_string(),
+                args: vec!["mod".to_string(), "tidy".to_string()],
+                cwd: target.root.clone(),
+            },
+        ])
+    }
+}
+
+fn build_update_plans(ctx: &UpdateDetectContext, opts: &UpdateDepsOpts) -> Result<Vec<UpdatePlan>> {
+    let updaters: Vec<Box<dyn EcosystemUpdater>> = vec![
+        Box::new(JavaScriptUpdater),
+        Box::new(RustUpdater),
+        Box::new(GoUpdater),
+    ];
+
+    let mut plans = Vec::new();
+    for updater in updaters {
+        if let Some(requested) = opts.ecosystem
+            && requested != updater.ecosystem()
+        {
+            continue;
+        }
+
+        if let Some(target) = updater.detect_target(ctx, opts)? {
+            let commands = updater.build_commands(&target, opts)?;
+            plans.push(UpdatePlan { target, commands });
+        }
+    }
+
+    Ok(plans)
+}
+
+fn run_update_plans(plans: &[UpdatePlan]) -> Result<()> {
+    for plan in plans {
+        for cmd in &plan.commands {
+            println!(
+                "→ [{}] {}",
+                ecosystem_label(plan.target.ecosystem),
+                display_command(cmd)
+            );
+            let status = Command::new(&cmd.program)
+                .args(&cmd.args)
+                .current_dir(&cmd.cwd)
+                .status()
+                .with_context(|| format!("failed to run {}", cmd.program))?;
+            if !status.success() {
+                bail!("dependency update command failed: {}", display_command(cmd));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_update_summary(plans: &[UpdatePlan]) {
+    println!("Detected {} dependency update target(s):", plans.len());
+    for plan in plans {
+        println!(
+            "  [{}] {}",
+            ecosystem_label(plan.target.ecosystem),
+            plan.target.root.display()
+        );
+        if let UpdateTargetDetail::Js { manager, workspace } = plan.target.detail {
+            println!(
+                "    manager: {}{}",
+                manager_program(manager),
+                if workspace { " (workspace)" } else { "" }
+            );
+        }
+        for cmd in &plan.commands {
+            println!("    $ {}", display_command(cmd));
+        }
+    }
+}
+
+fn confirm_update_plan(opts: &UpdateDepsOpts, plans: &[UpdatePlan]) -> Result<bool> {
+    let mut lines = Vec::new();
+    for plan in plans {
+        lines.push(format!(
+            "[{}] {}",
+            ecosystem_label(plan.target.ecosystem),
+            plan.target.root.display()
+        ));
+        for cmd in &plan.commands {
+            lines.push(format!("  $ {}", display_command(cmd)));
+        }
+    }
+
+    if !opts.no_tui
+        && let Some(answer) = opentui_prompt::confirm("Update Dependencies", &lines, true)
+    {
+        return Ok(answer);
+    }
+
+    for line in &lines {
+        println!("{}", line);
+    }
+    confirm_default_yes("Proceed with dependency updates? [Y/n]: ")
+}
+
+fn confirm_default_yes(prompt: &str) -> Result<bool> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
+
+    if io::stdin().is_terminal() {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(true);
+        }
+        return Ok(matches!(trimmed.to_ascii_lowercase().as_str(), "y" | "yes"));
+    }
+
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(true);
+    }
+    Ok(matches!(trimmed.to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+fn ecosystem_label(ecosystem: DepsEcosystem) -> &'static str {
+    match ecosystem {
+        DepsEcosystem::Js => "js",
+        DepsEcosystem::Rust => "rust",
+        DepsEcosystem::Go => "go",
+    }
+}
+
+fn manager_program(manager: DepsManager) -> &'static str {
+    match manager {
+        DepsManager::Pnpm => "pnpm",
+        DepsManager::Npm => "npm",
+        DepsManager::Yarn => "yarn",
+        DepsManager::Bun => "bun",
+    }
+}
+
+fn display_command(cmd: &PlannedCommand) -> String {
+    if cmd.args.is_empty() {
+        return cmd.program.clone();
+    }
+    format!("{} {}", cmd.program, cmd.args.join(" "))
+}
+
+fn update_search_root(cwd: &Path) -> PathBuf {
+    if let Some(flow_path) = find_flow_toml(&cwd.to_path_buf()) {
+        return flow_path.parent().unwrap_or(cwd).to_path_buf();
+    }
+    filesystem_root(cwd)
+}
+
+fn filesystem_root(path: &Path) -> PathBuf {
+    let mut root = path.to_path_buf();
+    while let Some(parent) = root.parent() {
+        if parent == root {
+            break;
+        }
+        root = parent.to_path_buf();
+    }
+    root
+}
+
+fn nearest_ancestor_with_file(start: &Path, boundary: &Path, file: &str) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(file).exists() {
+            return Some(current);
+        }
+        if current == boundary {
+            break;
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn find_js_workspace_root(start: &Path, boundary: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if is_js_workspace_root(&current) {
+            return Some(current);
+        }
+        if current == boundary {
+            break;
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn is_js_workspace_root(root: &Path) -> bool {
+    if root.join("pnpm-workspace.yaml").exists() {
+        return true;
+    }
+    package_json_has_workspaces(root)
+}
+
+fn package_json_has_workspaces(root: &Path) -> bool {
+    let package_json = root.join("package.json");
+    if !package_json.exists() {
+        return false;
+    }
+    let Ok(contents) = std::fs::read_to_string(package_json) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    value.get("workspaces").is_some()
+}
+
+fn find_rust_update_root(start: &Path, boundary: &Path) -> Option<PathBuf> {
+    let mut nearest: Option<PathBuf> = None;
+    let mut workspace_root: Option<PathBuf> = None;
+    let mut current = start.to_path_buf();
+
+    loop {
+        let cargo_toml = current.join("Cargo.toml");
+        if cargo_toml.exists() {
+            if nearest.is_none() {
+                nearest = Some(current.clone());
+            }
+            if workspace_root.is_none() && cargo_toml_has_workspace(&cargo_toml) {
+                workspace_root = Some(current.clone());
+            }
+        }
+        if current == boundary {
+            break;
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+
+    workspace_root.or(nearest)
+}
+
+fn cargo_toml_has_workspace(path: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+        return false;
+    };
+    value.get("workspace").is_some()
 }
 
 #[derive(Debug)]
@@ -1032,4 +1529,70 @@ fn configure_upstream(repo_dir: &Path, upstream_url: &str) -> Result<()> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_manager_prefers_package_manager_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","packageManager":"bun@1.2.3"}"#,
+        )
+        .expect("write package.json");
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), "").expect("write lock");
+
+        let manager = detect_manager(dir.path());
+        assert!(matches!(manager, DepsManager::Bun));
+    }
+
+    #[test]
+    fn rust_update_root_prefers_workspace_ancestor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=[\"crates/app\"]\n",
+        )
+        .expect("write root Cargo.toml");
+        let crate_dir = root.join("crates").join("app");
+        std::fs::create_dir_all(&crate_dir).expect("mkdir");
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname=\"app\"\nversion=\"0.1.0\"\n",
+        )
+        .expect("write crate Cargo.toml");
+
+        let selected = find_rust_update_root(&crate_dir, root).expect("root");
+        assert_eq!(selected, root);
+    }
+
+    #[test]
+    fn build_update_plans_detects_js_workspace_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"mono","workspaces":["packages/*"],"packageManager":"pnpm@10.0.0"}"#,
+        )
+        .expect("write root package.json");
+        let app_dir = root.join("packages").join("app");
+        std::fs::create_dir_all(&app_dir).expect("mkdir");
+        std::fs::write(app_dir.join("package.json"), r#"{"name":"app"}"#).expect("write app pkg");
+
+        let ctx = UpdateDetectContext {
+            cwd: app_dir,
+            search_root: root.clone(),
+        };
+
+        let plans = build_update_plans(&ctx, &UpdateDepsOpts::default()).expect("plan");
+        let js_plan = plans
+            .iter()
+            .find(|p| p.target.ecosystem == DepsEcosystem::Js)
+            .expect("js plan");
+        assert_eq!(js_plan.target.root, root);
+    }
 }

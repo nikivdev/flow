@@ -2914,12 +2914,8 @@ pub enum DepsAction {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
-    /// Update dependencies to latest.
-    Update {
-        /// Extra args to pass to the package manager.
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-    },
+    /// Smart dependency updates based on inferred ecosystem.
+    Update(UpdateDepsOpts),
     /// Fuzzy-pick a dependency or linked repo and fetch it to ~/repos.
     #[command(alias = "pick", alias = "find", alias = "search")]
     Pick,
@@ -2942,6 +2938,38 @@ pub enum DepsManager {
     Npm,
     Yarn,
     Bun,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DepsEcosystem {
+    Js,
+    Rust,
+    Go,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct UpdateDepsOpts {
+    /// Upgrade to latest versions when supported by ecosystem tooling.
+    #[arg(long)]
+    pub latest: bool,
+    /// Print planned commands without executing them.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Disable OpenTUI confirmation and use plain prompt.
+    #[arg(long)]
+    pub no_tui: bool,
+    /// Force a specific ecosystem instead of auto-detect.
+    #[arg(long, value_enum)]
+    pub ecosystem: Option<DepsEcosystem>,
+    /// Force JS package manager (only used for js ecosystem).
+    #[arg(long, value_enum)]
+    pub manager: Option<DepsManager>,
+    /// Extra arguments passed through to ecosystem update commands.
+    #[arg(trailing_var_arg = true)]
+    pub args: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]

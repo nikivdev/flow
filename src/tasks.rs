@@ -2709,7 +2709,10 @@ fn run_command_with_pty(
     // Install SIGWINCH handler for terminal resize propagation
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGWINCH, sigwinch_handler as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGWINCH,
+            sigwinch_handler as *const () as libc::sighandler_t,
+        );
     }
 
     // Enable raw mode so every keystroke reaches the child unbuffered
@@ -2779,11 +2782,7 @@ fn run_command_with_pty(
                 }
                 if pfd.revents & libc::POLLIN != 0 {
                     let n = unsafe {
-                        libc::read(
-                            stdin_fd,
-                            buf.as_mut_ptr() as *mut libc::c_void,
-                            buf.len(),
-                        )
+                        libc::read(stdin_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
                     };
                     if n <= 0 {
                         break;
