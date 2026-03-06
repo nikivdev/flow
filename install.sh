@@ -33,6 +33,8 @@ is_truthy() {
   esac
 }
 
+FLOW_SHIM_DIR_SELECTED=""
+
 can_execute_flow_binary() {
   bin_path="$1"
   if [ ! -f "$bin_path" ]; then
@@ -219,6 +221,7 @@ find_shim_dir() {
   IFS=':'
   for dir in ${PATH:-}; do
     [ -n "$dir" ] || continue
+    [ "$dir" = "." ] && continue
     [ -d "$dir" ] || continue
     [ -w "$dir" ] || continue
     echo "$dir"
@@ -226,6 +229,16 @@ find_shim_dir() {
     return 0
   done
   IFS="$old_ifs"
+
+  fallback="$HOME/.local/bin"
+  if [ ! -d "$fallback" ]; then
+    mkdir -p "$fallback" 2>/dev/null || true
+  fi
+  if [ -d "$fallback" ] && [ -w "$fallback" ]; then
+    echo "$fallback"
+    return 0
+  fi
+
   return 1
 }
 
@@ -243,6 +256,8 @@ install_path_shim() {
     return 0
   fi
 
+  FLOW_SHIM_DIR_SELECTED="$shim_dir"
+
   for name in f flow; do
     target="$shim_dir/$name"
     # Never overwrite the installed binary with a symlink to itself.
@@ -259,6 +274,26 @@ install_path_shim() {
   if [ "$shim_dir" != "$install_dir" ]; then
     info "flow: command shim installed in $shim_dir"
   fi
+}
+
+ensure_line_in_file() {
+  file="$1"
+  needle="$2"
+  line="$3"
+
+  parent="$(dirname "$file")"
+  [ -d "$parent" ] || mkdir -p "$parent" 2>/dev/null || true
+  [ -f "$file" ] || touch "$file" 2>/dev/null || true
+
+  if ! grep -F -q "$needle" "$file" 2>/dev/null; then
+    printf '%s\n' "$line" >> "$file"
+  fi
+}
+
+ensure_sh_path_entry() {
+  file="$1"
+  dir="$2"
+  ensure_line_in_file "$file" "$dir" "export PATH=\"$dir:\$PATH\""
 }
 
 #region download helpers
@@ -520,43 +555,54 @@ install_flow() {
 
 configure_shell() {
   install_dir="$(dirname "${FLOW_INSTALL_PATH:-$HOME/.flow/bin/f}")"
+  shim_dir="${FLOW_SHIM_DIR_SELECTED:-}"
+  fallback_shim="$HOME/.local/bin"
   registry_url="${FLOW_REGISTRY_URL:-https://myflow.sh}"
 
   # Fish
   if [ -f "$HOME/.config/fish/config.fish" ]; then
-    if ! grep -q ".flow/bin" "$HOME/.config/fish/config.fish" 2>/dev/null; then
-      echo "fish_add_path $install_dir" >> "$HOME/.config/fish/config.fish"
-      info "flow: added to ~/.config/fish/config.fish"
+    ensure_line_in_file "$HOME/.config/fish/config.fish" "$install_dir" "fish_add_path $install_dir"
+    if [ -n "$shim_dir" ] && [ "$shim_dir" != "$install_dir" ]; then
+      ensure_line_in_file "$HOME/.config/fish/config.fish" "$shim_dir" "fish_add_path $shim_dir"
     fi
-    if ! grep -q "FLOW_REGISTRY_URL" "$HOME/.config/fish/config.fish" 2>/dev/null; then
-      echo "set -gx FLOW_REGISTRY_URL \"$registry_url\"" >> "$HOME/.config/fish/config.fish"
-    fi
+    ensure_line_in_file "$HOME/.config/fish/config.fish" "$fallback_shim" "fish_add_path $fallback_shim"
+    ensure_line_in_file "$HOME/.config/fish/config.fish" "FLOW_REGISTRY_URL" "set -gx FLOW_REGISTRY_URL \"$registry_url\""
+    info "flow: updated ~/.config/fish/config.fish"
   fi
 
   # Zsh
-  if [ -f "$HOME/.zshrc" ]; then
-    if ! grep -q ".flow/bin" "$HOME/.zshrc" 2>/dev/null; then
-      echo "export PATH=\"$install_dir:\$PATH\"" >> "$HOME/.zshrc"
-      info "flow: added to ~/.zshrc"
+  for zsh_rc in "$HOME/.zshrc" "$HOME/.zprofile"; do
+    ensure_sh_path_entry "$zsh_rc" "$install_dir"
+    if [ -n "$shim_dir" ] && [ "$shim_dir" != "$install_dir" ]; then
+      ensure_sh_path_entry "$zsh_rc" "$shim_dir"
     fi
-    if ! grep -q "FLOW_REGISTRY_URL" "$HOME/.zshrc" 2>/dev/null; then
-      echo "export FLOW_REGISTRY_URL=\"$registry_url\"" >> "$HOME/.zshrc"
-    fi
-  fi
+    ensure_sh_path_entry "$zsh_rc" "$fallback_shim"
+    ensure_line_in_file "$zsh_rc" "FLOW_REGISTRY_URL" "export FLOW_REGISTRY_URL=\"$registry_url\""
+  done
+  info "flow: updated ~/.zshrc and ~/.zprofile"
 
   # Bash
+  bash_updated=0
   for rc in "$HOME/.bashrc" "$HOME/.bash_profile"; do
     if [ -f "$rc" ]; then
-      if ! grep -q ".flow/bin" "$rc" 2>/dev/null; then
-        echo "export PATH=\"$install_dir:\$PATH\"" >> "$rc"
-        info "flow: added to $rc"
+      ensure_sh_path_entry "$rc" "$install_dir"
+      if [ -n "$shim_dir" ] && [ "$shim_dir" != "$install_dir" ]; then
+        ensure_sh_path_entry "$rc" "$shim_dir"
       fi
-      if ! grep -q "FLOW_REGISTRY_URL" "$rc" 2>/dev/null; then
-        echo "export FLOW_REGISTRY_URL=\"$registry_url\"" >> "$rc"
-      fi
-      break
+      ensure_sh_path_entry "$rc" "$fallback_shim"
+      ensure_line_in_file "$rc" "FLOW_REGISTRY_URL" "export FLOW_REGISTRY_URL=\"$registry_url\""
+      bash_updated=1
     fi
   done
+  if [ "$bash_updated" = "0" ]; then
+    rc="$HOME/.bashrc"
+    ensure_sh_path_entry "$rc" "$install_dir"
+    if [ -n "$shim_dir" ] && [ "$shim_dir" != "$install_dir" ]; then
+      ensure_sh_path_entry "$rc" "$shim_dir"
+    fi
+    ensure_sh_path_entry "$rc" "$fallback_shim"
+    ensure_line_in_file "$rc" "FLOW_REGISTRY_URL" "export FLOW_REGISTRY_URL=\"$registry_url\""
+  fi
 }
 
 after_install() {
@@ -586,6 +632,9 @@ after_install() {
   info "flow: installed successfully!"
   if command -v f >/dev/null 2>&1; then
     info "flow: command ready: $(command -v f)"
+  elif [ -n "${FLOW_SHIM_DIR_SELECTED:-}" ] && [ -x "${FLOW_SHIM_DIR_SELECTED}/f" ]; then
+    info "flow: command shim ready: ${FLOW_SHIM_DIR_SELECTED}/f"
+    info "flow: open a new shell to refresh PATH (zsh: exec zsh -l)"
   else
     info "flow: OPEN NEW SHELL to use 'f' by name"
     info "flow: immediate fallback: $install_path --help"
