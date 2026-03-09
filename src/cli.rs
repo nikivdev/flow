@@ -475,6 +475,12 @@ pub enum Commands {
     )]
     Push(PushCommand),
     #[command(
+        about = "Show JJ workflow status optimized for stacked home-branch work.",
+        long_about = "Displays the current JJ workspace, home branch, intake branch, trunk relation, leaf branches, and the working-copy summary. This is intended to replace a raw `jj st` for repos that use a persistent home branch plus review/codex workspaces.",
+        alias = "st"
+    )]
+    Status(StatusOpts),
+    #[command(
         about = "Jujutsu (jj) workflow helpers.",
         long_about = "Initialize jj, manage workspaces/bookmarks, and sync with git remotes in a safe, structured flow."
     )]
@@ -492,8 +498,7 @@ pub enum Commands {
     Info,
     #[command(
         about = "Manage upstream fork workflow.",
-        long_about = "Set up and manage upstream forks. Creates a local 'upstream' branch to cleanly track the original repo, making merges easier.",
-        alias = "up"
+        long_about = "Set up and manage upstream forks. Creates a local 'upstream' branch to cleanly track the original repo, making merges easier."
     )]
     Upstream(UpstreamCommand),
     #[command(
@@ -2023,6 +2028,20 @@ pub struct JjCommand {
     pub action: Option<JjAction>,
 }
 
+#[derive(Args, Debug, Clone, Default)]
+pub struct StatusOpts {
+    /// Show raw `jj status` output without Flow's workflow summary.
+    #[arg(long)]
+    pub raw: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct JjStatusOpts {
+    /// Show raw `jj status` output without Flow's workflow summary.
+    #[arg(long)]
+    pub raw: bool,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum JjAction {
     /// Initialize jj in the repo (colocated with git when possible).
@@ -2032,7 +2051,7 @@ pub enum JjAction {
         path: Option<PathBuf>,
     },
     /// Show jj status.
-    Status,
+    Status(JjStatusOpts),
     /// Fetch from git remotes.
     Fetch,
     /// Rebase current change onto a destination.
@@ -2111,6 +2130,23 @@ pub enum JjWorkspaceAction {
         #[arg(long)]
         remote: Option<String>,
         /// Skip fetch before creating the lane.
+        #[arg(long)]
+        no_fetch: bool,
+    },
+    /// Create or reuse a stable JJ workspace for a review branch without touching the current checkout.
+    Review {
+        /// Review branch name (for example: review/nikiv-feature).
+        branch: String,
+        /// Optional path for workspace directory.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Optional base revision. Defaults to the branch commit when found, else trunk.
+        #[arg(long)]
+        base: Option<String>,
+        /// Remote used for branch lookup and default base resolution.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Skip fetch before resolving the review branch.
         #[arg(long)]
         no_fetch: bool,
     },

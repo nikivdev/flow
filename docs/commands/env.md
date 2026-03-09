@@ -30,6 +30,15 @@ export default {
 }
 ```
 
+If the current project has an unambiguous deploy env source such as:
+
+```toml
+[host]
+env_source = "local"
+```
+
+then `f env` will also use the local backend automatically in that project.
+
 ### Local Storage Structure
 
 ```
@@ -47,7 +56,7 @@ Files are plain `.env` format (not encrypted).
 ## Quick Start
 
 ```bash
-# Store a secret
+# Store a personal secret
 f env set API_KEY=sk-xxx -d "OpenAI API key"
 
 # List variables (default action when logged in)
@@ -100,7 +109,7 @@ Notes:
 
 ## Set
 
-Store an environment variable:
+Store a personal environment variable:
 
 ```bash
 # Basic set
@@ -109,17 +118,25 @@ f env set API_KEY=sk-xxx
 # With description
 f env set API_KEY=sk-xxx -d "OpenAI API key"
 
-# Specific environment
-f env set DATABASE_URL=postgres://... -e staging
+# Personal envs always use the production personal store
+f env set GITHUB_TOKEN=ghp_xxx
 ```
 
 ### Options
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--environment <ENV>` | `-e` | Environment: dev, staging, production (default: production) |
 | `--description <DESC>` | `-d` | Optional description for this env var |
-| `--personal` | | Fetch from personal store (get/run only) |
+| `--personal` | | Compatibility flag; `set` already targets personal envs |
+
+## Project Set
+
+Store a project-scoped environment variable:
+
+```bash
+f env project set -e dev DATABASE_URL=postgres://localhost/app
+f env project set -e production PUBLIC_API_BASE_URL=https://api.example.com
+```
 
 ---
 
@@ -348,10 +365,10 @@ Flow supports three environments:
 | `staging` | Staging/preview secrets |
 | `dev` | Development secrets |
 
-Use `-e` flag to specify:
+Use `-e` flag with project-scoped commands:
 
 ```bash
-f env set DATABASE_URL=postgres://staging... -e staging
+f env project set DATABASE_URL=postgres://staging... -e staging
 f env list -e dev
 f env run -e staging -- npm run preview
 ```
@@ -362,12 +379,11 @@ f env run -e staging -- npm run preview
 
 | Type | Flag | Scope | Use Case |
 |------|------|-------|----------|
-| Project | (default) | Current project | API keys, database URLs |
+| Project | (default for `get`, `list`, `run`, `project ...`) | Current project | API keys, database URLs |
 | Personal | `--personal` | Global/user | GitHub token, Telegram bot token |
 
 Personal variables are tied to your user account, not a specific project.
-`--personal` is supported for `get` and `run` (reading), while `set` writes
-project env vars.
+`f env set` writes personal vars. Use `f env project set` for project vars.
 
 ```bash
 # Use a personal token in any project
@@ -404,8 +420,8 @@ token creation.
 f env login
 
 # 2. Set up secrets
-f env set DATABASE_URL=postgres://... -d "Production database"
-f env set API_KEY=sk-xxx -d "OpenAI key"
+f env project set DATABASE_URL=postgres://... -e production
+f env project set API_KEY=sk-xxx -e production
 
 # 3. Verify
 f env list
@@ -418,8 +434,8 @@ f env run -- npm start
 
 ```bash
 # Set staging secrets
-f env set DATABASE_URL=postgres://staging... -e staging
-f env set API_KEY=sk-test-xxx -e staging
+f env project set DATABASE_URL=postgres://staging... -e staging
+f env project set API_KEY=sk-test-xxx -e staging
 
 # Test with staging env
 f env run -e staging -- npm run preview

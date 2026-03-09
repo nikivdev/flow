@@ -516,30 +516,77 @@ fn env_target_label(target: &EnvTarget) -> String {
     }
 }
 
+fn normalize_env_backend_name(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "local" => Some("local"),
+        "cloud" | "remote" | "myflow" => Some("cloud"),
+        _ => None,
+    }
+}
+
+fn project_env_backend_from_config(cfg: &config::Config) -> Option<&'static str> {
+    let mut resolved: Option<&'static str> = None;
+
+    for source in [
+        cfg.host
+            .as_ref()
+            .and_then(|host| host.env_source.as_deref()),
+        cfg.cloudflare
+            .as_ref()
+            .and_then(|cloudflare| cloudflare.env_source.as_deref()),
+        cfg.web.as_ref().and_then(|web| web.env_source.as_deref()),
+    ] {
+        let Some(backend) = source.and_then(normalize_env_backend_name) else {
+            continue;
+        };
+
+        match resolved {
+            Some(existing) if existing != backend => return None,
+            Some(_) => {}
+            None => resolved = Some(backend),
+        }
+    }
+
+    resolved
+}
+
+fn project_env_backend_from_current_dir() -> Option<&'static str> {
+    let cwd = std::env::current_dir().ok()?;
+    let flow_path = find_flow_toml(&cwd)?;
+    let cfg = config::load(&flow_path).ok()?;
+    project_env_backend_from_config(&cfg)
+}
+
 fn local_env_enabled() -> bool {
+    match std::env::var("FLOW_ENV_BACKEND")
+        .ok()
+        .as_deref()
+        .and_then(normalize_env_backend_name)
+    {
+        Some("local") => return true,
+        Some("cloud") => return false,
+        _ => {}
+    }
+
     if let Some(backend) = config::preferred_env_backend() {
-        match backend.as_str() {
-            "local" => return true,
-            "cloud" | "remote" => return false,
+        match normalize_env_backend_name(&backend) {
+            Some("local") => return true,
+            Some("cloud") => return false,
             _ => {}
         }
     }
 
-    match std::env::var("FLOW_ENV_BACKEND")
-        .ok()
-        .map(|v| v.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("local") => true,
-        Some("cloud") | Some("remote") => false,
-        _ => std::env::var("FLOW_ENV_LOCAL")
-            .ok()
-            .map(|v| {
-                let v = v.to_ascii_lowercase();
-                v == "1" || v == "true" || v == "yes"
-            })
-            .unwrap_or(false),
+    if let Some(backend) = project_env_backend_from_current_dir() {
+        return backend == "local";
     }
+
+    std::env::var("FLOW_ENV_LOCAL")
+        .ok()
+        .map(|v| {
+            let v = v.to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
 }
 
 fn local_env_root() -> Result<PathBuf> {
@@ -644,6 +691,22 @@ fn set_local_env_var(
 ) -> Result<PathBuf> {
     let mut vars = read_local_env_vars(target, environment)?;
     vars.insert(key.to_string(), value.to_string());
+    write_local_env_vars(target, environment, &vars)
+}
+
+fn delete_local_env_vars(
+    target: &EnvTarget,
+    environment: &str,
+    keys: &[String],
+) -> Result<PathBuf> {
+    if keys.is_empty() {
+        bail!("No keys specified");
+    }
+
+    let mut vars = read_local_env_vars(target, environment)?;
+    for key in keys {
+        vars.remove(key);
+    }
     write_local_env_vars(target, environment, &vars)
 }
 
@@ -1126,6 +1189,17 @@ fn set_project_env_var_from_pair(pair: &str, environment: &str) -> Result<()> {
 }
 
 pub(crate) fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
+    if local_env_enabled() {
+        let target = resolve_personal_target()?;
+        let path = delete_local_env_vars(&target, "production", keys)?;
+        println!(
+            "✓ Deleted {} key(s) from personal envs (stored at {})",
+            keys.len(),
+            path.display()
+        );
+        return Ok(());
+    }
+
     let auth = load_auth_config()?;
     let token = auth
         .token
@@ -1166,6 +1240,20 @@ pub(crate) fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
 }
 
 fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
+    if local_env_enabled() {
+        let target = resolve_env_target()?;
+        let target_label = env_target_label(&target);
+        let path = delete_local_env_vars(&target, environment, keys)?;
+        println!(
+            "✓ Deleted {} key(s) from {} ({}) locally at {}",
+            keys.len(),
+            target_label,
+            environment,
+            path.display()
+        );
+        return Ok(());
+    }
+
     let auth = load_auth_config()?;
     let token = auth
         .token
@@ -1999,7 +2087,7 @@ fn show_keys() -> Result<()> {
 /// List env vars for this project.
 fn list(environment: &str) -> Result<()> {
     if local_env_enabled() {
-        let target = resolve_personal_target()?;
+        let target = resolve_env_target()?;
         let label = env_target_label(&target);
         let vars = read_local_env_vars(&target, environment)?;
 
@@ -2367,7 +2455,8 @@ fn status() -> Result<()> {
         println!();
         println!("Commands:");
         println!("  f env list    - List env vars");
-        println!("  f env set K=V - Set env var");
+        println!("  f env set K=V - Set personal env var");
+        println!("  f env project set -e <env> K=V - Set project env var");
         println!("  f env get ... - Read env vars");
         println!("  f env run -- <cmd> - Run with env vars injected");
         println!("  f env keys    - Show configured env keys");
@@ -2411,7 +2500,8 @@ fn status() -> Result<()> {
     println!("  f env setup   - Interactive env setup");
     println!("  f env list    - List env vars");
     println!("  f env keys    - Show configured env keys");
-    println!("  f env set K=V - Set env var");
+    println!("  f env set K=V - Set personal env var");
+    println!("  f env project set -e <env> K=V - Set project env var");
 
     Ok(())
 }
@@ -2852,4 +2942,52 @@ fn token_revoke(name: &str) -> Result<()> {
     println!("Any host using this token will no longer be able to fetch env vars.");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_env_backend_from_config;
+    use crate::config::Config;
+
+    #[test]
+    fn project_env_backend_detects_local_host_source() {
+        let cfg: Config = toml::from_str(
+            r#"
+[host]
+env_source = "local"
+"#,
+        )
+        .expect("host env_source should parse");
+
+        assert_eq!(project_env_backend_from_config(&cfg), Some("local"));
+    }
+
+    #[test]
+    fn project_env_backend_detects_cloud_source() {
+        let cfg: Config = toml::from_str(
+            r#"
+[cloudflare]
+env_source = "cloud"
+"#,
+        )
+        .expect("cloudflare env_source should parse");
+
+        assert_eq!(project_env_backend_from_config(&cfg), Some("cloud"));
+    }
+
+    #[test]
+    fn project_env_backend_requires_unambiguous_sources() {
+        let cfg: Config = toml::from_str(
+            r#"
+[host]
+env_source = "local"
+
+[cloudflare]
+env_source = "cloud"
+"#,
+        )
+        .expect("mixed env_source config should parse");
+
+        assert_eq!(project_env_backend_from_config(&cfg), None);
+    }
 }

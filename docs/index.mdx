@@ -21,6 +21,7 @@ High-signal docs for the Codex/Claude workflow:
 - [`commands/reviews-todo.md`](commands/reviews-todo.md): fast-commit + deferred Codex deep-review backlog workflow.
 - [`fast-commit-deep-review-loop.md`](fast-commit-deep-review-loop.md): recommended speed-first workflow for `~/code/myflow` (GLM/Cerebras fast lane + batched Codex deep reviews).
 - [`how-to-use-flow-ai-to-manage-claude-code-sessions.md`](how-to-use-flow-ai-to-manage-claude-code-sessions.md): practical session workflow for Claude + Codex in one repo loop.
+- [`codex-openai-session-resolver.md`](codex-openai-session-resolver.md): app-server-backed `L <query>` resolver for repo-scoped Codex session resume in `~/repos/openai/codex`.
 - [`session-history-mining.md`](session-history-mining.md): efficient cross-project session mining (`f sessions`) and prompt scaffolds for token-sensitive planning.
 - [`session-semantic-recovery-with-seq.md`](session-semantic-recovery-with-seq.md): recover lost Claude/Codex work after resets using Seq's zvec-backed semantic session search plus `f ai ... resume`.
 - [`how-to-make-a-project-flow-project.md`](how-to-make-a-project-flow-project.md): detailed onboarding and migration playbook for turning any repo into a Flow-native project.
@@ -44,6 +45,8 @@ High-signal docs for the Codex/Claude workflow:
 - [`private-fork-flow.md`](private-fork-flow.md): generic AI runbook for private-fork setup and safe push routing via Flow `[git].remote`.
 - [`commands/jj.md`](commands/jj.md): Flow wrapper for `jj` workflows (`sync`, bookmarks, and workspace/lane management).
 - [`jj-workspaces-for-parallel-work.md`](jj-workspaces-for-parallel-work.md): practical parallel-branch workflow with isolated workspace lanes.
+- [`jj-review-workspaces.md`](jj-review-workspaces.md): stable JJ-native review workspaces for branch-specific inspection and edits without touching the current checkout.
+- [`jj-home-branch-workflow.md`](jj-home-branch-workflow.md): status-first workflow for a long-lived home branch with stacked review or codex branches in isolated JJ workspaces.
 - [`moving-repos.md`](moving-repos.md): how Flow manages repo locations, `f migrate` for moving projects with AI session continuity, and the `~/code` / `~/repos` / `~/run` layout.
 - [`run-repos.md`](run-repos.md): shortcuts and resolution rules for running tasks in `~/run` and `~/run/i` from anywhere.
 - [`ai-run-task-fast-path.md`](ai-run-task-fast-path.md): minimal prompt/response contract for AI to add public or internal run tasks quickly and return ready-to-run `f ...` commands.

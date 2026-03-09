@@ -60,6 +60,16 @@ f jj workspace lane pr2 --base pr/feature-b --path ../project-pr2
 # Both share the same jj repo — commits are visible everywhere
 ```
 
+### Reuse one stable workspace for a review branch
+
+```bash
+f jj workspace review review/alice-feature
+cd ~/.jj/workspaces/project/review-alice-feature
+```
+
+Use this when you want one predictable workspace path for a specific review branch instead of a
+general-purpose lane.
+
 ### Default isolated lanes from trunk
 
 ```bash
@@ -92,6 +102,7 @@ rm -rf ../project-ref
 | Need | Tool |
 |------|------|
 | Full directory for another tool/session to explore | `jj workspace add` |
+| Stable branch-specific review workspace | `f jj workspace review <branch>` |
 | Read a specific file from another branch | `jj file show <path> -r <rev>` |
 | See what changed on another branch | `jj diff --from main --to <branch>` |
 | Compare two branches | `jj log -r 'branchA..branchB'` |
