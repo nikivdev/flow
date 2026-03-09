@@ -18,14 +18,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use server::{Backend, ProxyRouter, ProxyServer};
 use summary::{SummaryState, SummaryWriter};
 use trace::TraceBuffer;
 
 /// Proxy configuration from flow.toml
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProxyConfig {
     /// Listen address (e.g., ":8080" or "127.0.0.1:8080")
     #[serde(default = "default_listen")]
@@ -73,7 +73,7 @@ fn default_slow_threshold() -> u32 {
 }
 
 /// Individual proxy target configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProxyTargetConfig {
     /// Unique name for this proxy
     pub name: String,

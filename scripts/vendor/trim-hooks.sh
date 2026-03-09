@@ -58,26 +58,34 @@ apply_ratatui_trims() {
   local text_text_file="$root/src/text/text.rs"
   local widgets_block_file="$root/src/widgets/block.rs"
 
-  [[ -f "$terminal_file" ]] && perl -0777 -i -pe '
-    s/pub fn get_frame\(&mut self\) -> Frame \{/pub fn get_frame(&mut self) -> Frame<'\''_> {/g;
-    s/pub fn draw<F>\(&mut self, render_callback: F\) -> io::Result<CompletedFrame>/pub fn draw<F>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'\''_>>/g;
-    s/pub fn try_draw<F, E>\(&mut self, render_callback: F\) -> io::Result<CompletedFrame>/pub fn try_draw<F, E>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'\''_>>/g;
-  ' "$terminal_file"
+  if [[ -f "$terminal_file" ]]; then
+    perl -0777 -i -pe '
+      s/pub fn get_frame\(&mut self\) -> Frame \{/pub fn get_frame(&mut self) -> Frame<'\''_> {/g;
+      s/pub fn draw<F>\(&mut self, render_callback: F\) -> io::Result<CompletedFrame>/pub fn draw<F>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'\''_>>/g;
+      s/pub fn try_draw<F, E>\(&mut self, render_callback: F\) -> io::Result<CompletedFrame>/pub fn try_draw<F, E>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'\''_>>/g;
+    ' "$terminal_file"
+  fi
 
-  [[ -f "$text_line_file" ]] && perl -0777 -i -pe '
-    s/pub fn iter\(&self\) -> std::slice::Iter<Span<'\''a>>/pub fn iter(&self) -> std::slice::Iter<'\''_, Span<'\''a>>/g;
-    s/pub fn iter_mut\(&mut self\) -> std::slice::IterMut<Span<'\''a>>/pub fn iter_mut(&mut self) -> std::slice::IterMut<'\''_, Span<'\''a>>/g;
-  ' "$text_line_file"
+  if [[ -f "$text_line_file" ]]; then
+    perl -0777 -i -pe '
+      s/pub fn iter\(&self\) -> std::slice::Iter<Span<'\''a>>/pub fn iter(&self) -> std::slice::Iter<'\''_, Span<'\''a>>/g;
+      s/pub fn iter_mut\(&mut self\) -> std::slice::IterMut<Span<'\''a>>/pub fn iter_mut(&mut self) -> std::slice::IterMut<'\''_, Span<'\''a>>/g;
+    ' "$text_line_file"
+  fi
 
-  [[ -f "$text_text_file" ]] && perl -0777 -i -pe '
-    s/pub fn iter\(&self\) -> std::slice::Iter<Line<'\''a>>/pub fn iter(&self) -> std::slice::Iter<'\''_, Line<'\''a>>/g;
-    s/pub fn iter_mut\(&mut self\) -> std::slice::IterMut<Line<'\''a>>/pub fn iter_mut(&mut self) -> std::slice::IterMut<'\''_, Line<'\''a>>/g;
-    s/fn to_text\(&self\) -> Text \{/fn to_text(&self) -> Text<'\''_> {/g;
-  ' "$text_text_file"
+  if [[ -f "$text_text_file" ]]; then
+    perl -0777 -i -pe '
+      s/pub fn iter\(&self\) -> std::slice::Iter<Line<'\''a>>/pub fn iter(&self) -> std::slice::Iter<'\''_, Line<'\''a>>/g;
+      s/pub fn iter_mut\(&mut self\) -> std::slice::IterMut<Line<'\''a>>/pub fn iter_mut(&mut self) -> std::slice::IterMut<'\''_, Line<'\''a>>/g;
+      s/fn to_text\(&self\) -> Text \{/fn to_text(&self) -> Text<'\''_> {/g;
+    ' "$text_text_file"
+  fi
 
-  [[ -f "$widgets_block_file" ]] && perl -0777 -i -pe '
-    s/\) -> impl DoubleEndedIterator<Item = &Line> \{/) -> impl DoubleEndedIterator<Item = &Line<'\''_>> {/g;
-  ' "$widgets_block_file"
+  if [[ -f "$widgets_block_file" ]]; then
+    perl -0777 -i -pe '
+      s/\) -> impl DoubleEndedIterator<Item = &Line> \{/) -> impl DoubleEndedIterator<Item = &Line<'\''_>> {/g;
+    ' "$widgets_block_file"
+  fi
 }
 
 apply_crossterm_trims() {
@@ -88,39 +96,45 @@ apply_crossterm_trims() {
   local unix_file="$root/src/terminal/sys/unix.rs"
   local filter_file="$root/src/event/filter.rs"
 
-  [[ -f "$lib_file" ]] && perl -0777 -i -pe '
-    s/\n#\[cfg\(all\(winapi, not\(feature = "winapi"\)\)\)\]\ncompile_error!\("Compiling on Windows with \\"winapi\\" feature disabled\. Feature \\"winapi\\" should only be disabled when project will never be compiled on Windows\."\);\n//g;
-    s/\n#\[cfg\(all\(crossterm_winapi, not\(feature = "crossterm_winapi"\)\)\)\]\ncompile_error!\("Compiling on Windows with \\"crossterm_winapi\\" feature disabled\. Feature \\"crossterm_winapi\\" should only be disabled when project will never be compiled on Windows\."\);\n//g;
-  ' "$lib_file"
+  if [[ -f "$lib_file" ]]; then
+    perl -0777 -i -pe '
+      s/\n#\[cfg\(all\(winapi, not\(feature = "winapi"\)\)\)\]\ncompile_error!\("Compiling on Windows with \\"winapi\\" feature disabled\. Feature \\"winapi\\" should only be disabled when project will never be compiled on Windows\."\);\n//g;
+      s/\n#\[cfg\(all\(crossterm_winapi, not\(feature = "crossterm_winapi"\)\)\)\]\ncompile_error!\("Compiling on Windows with \\"crossterm_winapi\\" feature disabled\. Feature \\"crossterm_winapi\\" should only be disabled when project will never be compiled on Windows\."\);\n//g;
+    ' "$lib_file"
+  fi
 
-  [[ -f "$unix_file" ]] && perl -0777 -i -pe '
-    s/File::open\("\/dev\/tty"\)\.map\(\|file\| \(FileDesc::Owned\(file\.into\(\)\)\)\)/File::open("\/dev\/tty").map(|file| FileDesc::Owned(file.into()))/g;
-  ' "$unix_file"
+  if [[ -f "$unix_file" ]]; then
+    perl -0777 -i -pe '
+      s/File::open\("\/dev\/tty"\)\.map\(\|file\| \(FileDesc::Owned\(file\.into\(\)\)\)\)/File::open("\/dev\/tty").map(|file| FileDesc::Owned(file.into()))/g;
+    ' "$unix_file"
+  fi
 
-  [[ -f "$filter_file" ]] && perl -0777 -i -pe '
-    if (!/\#\[allow\(dead_code\)\]\s*pub\(crate\) struct InternalEventFilter;/s) {
-      s/\#\[derive\(Debug, Clone\)\]\s*pub\(crate\) struct InternalEventFilter;/#[derive(Debug, Clone)]\n#[allow(dead_code)]\npub(crate) struct InternalEventFilter;/s;
-    }
-  ' "$filter_file"
+  if [[ -f "$filter_file" ]]; then
+    perl -0777 -i -pe '
+      if (!/\#\[allow\(dead_code\)\]\s*pub\(crate\) struct InternalEventFilter;/s) {
+        s/\#\[derive\(Debug, Clone\)\]\s*pub\(crate\) struct InternalEventFilter;/#[derive(Debug, Clone)]\n#[allow(dead_code)]\npub(crate) struct InternalEventFilter;/s;
+      }
+    ' "$filter_file"
+  fi
 }
 
 apply_portable_pty_trims() {
   local file="lib/vendor/portable-pty/src/unix.rs"
-  [[ -f "$file" ]] || return 0
-
-  perl -0777 -i -pe '
-    s/\n[ \t]*#\[cfg_attr\(feature = "cargo-clippy", allow\(clippy::unnecessary_mut_passed\)\)\]//g;
-    s/\n[ \t]*#\[cfg_attr\(feature = "cargo-clippy", allow\(clippy::cast_lossless\)\)\]//g;
-  ' "$file"
+  if [[ -f "$file" ]]; then
+    perl -0777 -i -pe '
+      s/\n[ \t]*#\[cfg_attr\(feature = "cargo-clippy", allow\(clippy::unnecessary_mut_passed\)\)\]//g;
+      s/\n[ \t]*#\[cfg_attr\(feature = "cargo-clippy", allow\(clippy::cast_lossless\)\)\]//g;
+    ' "$file"
+  fi
 }
 
 apply_x25519_dalek_trims() {
   local file="lib/vendor/x25519-dalek/src/lib.rs"
-  [[ -f "$file" ]] || return 0
-
-  perl -0777 -i -pe '
-    s/\n#!\[cfg_attr\(feature = "bench", feature\(test\)\)\]//g;
-  ' "$file"
+  if [[ -f "$file" ]]; then
+    perl -0777 -i -pe '
+      s/\n#!\[cfg_attr\(feature = "bench", feature\(test\)\)\]//g;
+    ' "$file"
+  fi
 }
 
 apply_vendor_trims() {

@@ -401,7 +401,7 @@ async fn processes_list(State(state): State<AppState>) -> impl IntoResponse {
         }
     }
 
-    // 3. Running tasks from running.json
+    // 3. Running tasks from the persistent running-process store
     let task_result = tokio::task::spawn_blocking(|| running::load_running_processes()).await;
     if let Ok(Ok(processes)) = task_result {
         for procs in processes.projects.values() {

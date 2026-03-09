@@ -1,14 +1,17 @@
 //! Fast discovery of nested flow.toml files in a project.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use serde::{Deserialize, Serialize};
 
-use crate::config::{self, Config, TaskConfig};
+use crate::config::{self, CommandFileConfig, TaskConfig, TaskResolutionConfig};
+use crate::fixup;
 
 /// A task with its source location information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredTask {
     /// The task configuration.
     pub task: TaskConfig,
@@ -46,14 +49,49 @@ impl DiscoveredTask {
 }
 
 /// Result of discovering flow.toml files in a directory tree.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryResult {
     /// All discovered tasks, sorted by depth (root first).
     pub tasks: Vec<DiscoveredTask>,
     /// The root config path (if exists).
     pub root_config: Option<PathBuf>,
-    /// Root config object (if exists).
-    pub root_cfg: Option<Config>,
+    /// Root task-resolution policy (if configured).
+    pub root_task_resolution: Option<TaskResolutionConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DiscoveryArtifacts {
+    pub result: DiscoveryResult,
+    pub watched_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DiscoveryConfigFile {
+    #[serde(
+        default,
+        rename = "name",
+        alias = "project_name",
+        alias = "project-name"
+    )]
+    project_name: Option<String>,
+    #[serde(default)]
+    tasks: Vec<TaskConfig>,
+    #[serde(
+        default,
+        rename = "task_resolution",
+        alias = "task-resolution",
+        alias = "taskResolution"
+    )]
+    task_resolution: Option<TaskResolutionConfig>,
+    #[serde(default, rename = "commands")]
+    command_files: Vec<CommandFileConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedDiscoveryConfig {
+    project_name: Option<String>,
+    tasks: Vec<TaskConfig>,
+    task_resolution: Option<TaskResolutionConfig>,
 }
 
 /// Discover all flow.toml files starting from the given root directory.
@@ -67,18 +105,28 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
         std::env::current_dir()?.join(root)
     };
     let root = root.canonicalize().unwrap_or(root);
+    discover_tasks_from_root(root)
+}
 
+pub(crate) fn discover_tasks_from_root(root: PathBuf) -> Result<DiscoveryResult> {
+    Ok(discover_tasks_from_root_artifacts(root)?.result)
+}
+
+pub(crate) fn discover_tasks_from_root_artifacts(root: PathBuf) -> Result<DiscoveryArtifacts> {
     let mut discovered: Vec<DiscoveredTask> = Vec::new();
     let mut root_config: Option<PathBuf> = None;
-    let mut root_cfg: Option<Config> = None;
+    let mut root_task_resolution: Option<TaskResolutionConfig> = None;
+    let mut watched_paths = Vec::new();
+    push_watched_path(&mut watched_paths, &root);
 
     // Check if root itself has a flow.toml
     let root_flow_toml = root.join("flow.toml");
     if root_flow_toml.exists() {
-        match config::load(&root_flow_toml) {
+        match load_discovery_config(&root_flow_toml, &mut Vec::new(), &mut watched_paths) {
             Ok(cfg) => {
-                let (scope, scope_aliases) = infer_scope_metadata("", &cfg);
+                let (scope, scope_aliases) = infer_scope_metadata("", cfg.project_name.as_deref());
                 root_config = Some(root_flow_toml.clone());
+                root_task_resolution = cfg.task_resolution.clone();
                 for task in &cfg.tasks {
                     discovered.push(DiscoveredTask {
                         task: task.clone(),
@@ -89,7 +137,6 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
                         scope_aliases: scope_aliases.clone(),
                     });
                 }
-                root_cfg = Some(cfg);
             }
             Err(e) => {
                 eprintln!(
@@ -141,6 +188,9 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
 
     for entry in walker.flatten() {
         let path = entry.path();
+        if path.is_dir() {
+            push_watched_path(&mut watched_paths, path);
+        }
 
         // Skip the root (already handled above)
         if path == root {
@@ -158,7 +208,7 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
         }
 
         // Parse the config
-        let cfg = match config::load(&flow_toml) {
+        let cfg = match load_discovery_config(&flow_toml, &mut Vec::new(), &mut watched_paths) {
             Ok(c) => c,
             Err(_) => continue, // Skip invalid configs
         };
@@ -173,7 +223,8 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
         let depth = relative_dir.matches('/').count()
             + relative_dir.matches('\\').count()
             + if relative_dir.is_empty() { 0 } else { 1 };
-        let (scope, scope_aliases) = infer_scope_metadata(&relative_dir, &cfg);
+        let (scope, scope_aliases) =
+            infer_scope_metadata(&relative_dir, cfg.project_name.as_deref());
 
         for task in cfg.tasks {
             discovered.push(DiscoveredTask {
@@ -195,10 +246,13 @@ pub fn discover_tasks(root: &Path) -> Result<DiscoveryResult> {
             .then_with(|| a.task.name.cmp(&b.task.name))
     });
 
-    Ok(DiscoveryResult {
-        tasks: discovered,
-        root_config,
-        root_cfg,
+    Ok(DiscoveryArtifacts {
+        result: DiscoveryResult {
+            tasks: discovered,
+            root_config,
+            root_task_resolution,
+        },
+        watched_paths,
     })
 }
 
@@ -215,7 +269,7 @@ fn normalize_scope_token(raw: &str) -> String {
     out.trim_matches('-').trim_matches('/').to_string()
 }
 
-fn infer_scope_metadata(relative_dir: &str, cfg: &Config) -> (String, Vec<String>) {
+fn infer_scope_metadata(relative_dir: &str, project_name: Option<&str>) -> (String, Vec<String>) {
     let mut aliases: Vec<String> = Vec::new();
     let mut push_alias = |raw: &str| {
         let normalized = normalize_scope_token(raw);
@@ -224,7 +278,7 @@ fn infer_scope_metadata(relative_dir: &str, cfg: &Config) -> (String, Vec<String
         }
     };
 
-    if let Some(name) = cfg.project_name.as_deref() {
+    if let Some(name) = project_name {
         push_alias(name);
     } else if relative_dir.trim().is_empty() {
         push_alias("root");
@@ -243,6 +297,85 @@ fn infer_scope_metadata(relative_dir: &str, cfg: &Config) -> (String, Vec<String
         .cloned()
         .unwrap_or_else(|| "root".to_string());
     (primary, aliases)
+}
+
+fn push_watched_path(paths: &mut Vec<PathBuf>, path: &Path) {
+    if !paths.iter().any(|existing| existing == path) {
+        paths.push(path.to_path_buf());
+    }
+}
+
+fn load_discovery_config(
+    path: &Path,
+    visited: &mut Vec<PathBuf>,
+    watched_paths: &mut Vec<PathBuf>,
+) -> Result<LoadedDiscoveryConfig> {
+    let canonical = path.canonicalize()?;
+    if visited.contains(&canonical) {
+        anyhow::bail!(
+            "cycle detected while loading config includes: {}",
+            path.display()
+        );
+    }
+    visited.push(canonical.clone());
+    push_watched_path(watched_paths, &canonical);
+
+    let contents = fs::read_to_string(&canonical)?;
+    let mut cfg = parse_discovery_config(&canonical, &contents)?;
+
+    let mut project_name = cfg.project_name.take();
+    let mut tasks = cfg.tasks;
+    let mut task_resolution = cfg.task_resolution.take();
+
+    for include in cfg.command_files {
+        let include_path = config::resolve_include_path(&canonical, &include.path);
+        let included = load_discovery_config(&include_path, visited, watched_paths)?;
+        if project_name.is_none() {
+            project_name = included.project_name;
+        }
+        if task_resolution.is_none() {
+            task_resolution = included.task_resolution;
+        }
+        tasks.extend(included.tasks);
+    }
+
+    visited.pop();
+    Ok(LoadedDiscoveryConfig {
+        project_name,
+        tasks,
+        task_resolution,
+    })
+}
+
+fn parse_discovery_config(path: &Path, contents: &str) -> Result<DiscoveryConfigFile> {
+    match toml::from_str(contents) {
+        Ok(cfg) => Ok(cfg),
+        Err(err) => {
+            let fix = fixup::fix_toml_content(contents);
+            if fix.fixes_applied.is_empty() {
+                Err(err).with_context(|| {
+                    format!(
+                        "failed to parse flow discovery config at {}",
+                        path.display()
+                    )
+                })
+            } else {
+                let fixed = fixup::apply_fixes_to_content(contents, &fix.fixes_applied);
+                fs::write(path, &fixed).with_context(|| {
+                    format!(
+                        "failed to write auto-fixed discovery config at {}",
+                        path.display()
+                    )
+                })?;
+                toml::from_str(&fixed).with_context(|| {
+                    format!(
+                        "failed to parse flow discovery config at {} (after auto-fix)",
+                        path.display()
+                    )
+                })
+            }
+        }
+    }
 }
 
 #[cfg(test)]

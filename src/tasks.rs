@@ -32,11 +32,13 @@ use crate::{
         TasksDaemonCommand, TasksDupesOpts, TasksInitAiOpts, TasksListOpts, TasksOpts,
         TasksRunAiOpts,
     },
-    config::{self, Config, FloxInstallSpec, TaskConfig},
+    config::{self, Config, FloxInstallSpec, TaskConfig, TaskResolutionConfig},
     discover,
     flox::{self, FloxEnv},
     history::{self, InvocationRecord},
-    hub, init, jazz_state, projects,
+    hub, init, jazz_state,
+    project_snapshot::{self, AiTaskSnapshot, ProjectSnapshot},
+    projects,
     running::{self, RunningProcess},
     secret_redact, task_failure_agents, task_match,
 };
@@ -378,7 +380,7 @@ pub fn run_tasks_command(cmd: TasksCommand) -> Result<()> {
 }
 
 pub fn run_fast(opts: FastRunOpts) -> Result<()> {
-    let root = resolve_ai_root(&opts.root)?;
+    let root = project_snapshot::canonicalize_root(&opts.root)?;
     let selector = opts.name.trim();
     if !selector.to_ascii_lowercase().starts_with("ai:") {
         bail!(
@@ -404,11 +406,15 @@ fn run_ai_task_daemon_command(cmd: TasksDaemonCommand) -> Result<()> {
 }
 
 fn build_ai_task(opts: TasksBuildAiOpts) -> Result<()> {
-    let root = resolve_ai_root(&opts.root)?;
-    let ai_discovery = ai_tasks::discover_tasks(&root)?;
-    let task = ai_tasks::select_task(&ai_discovery, &opts.name)?
-        .with_context(|| format!("AI task '{}' not found in {}", opts.name, root.display()))?;
-    let artifact = ai_tasks::build_task_cached(task, &root, opts.force)?;
+    let snapshot = AiTaskSnapshot::from_root(&opts.root)?;
+    let task = ai_tasks::select_task(&snapshot.tasks, &opts.name)?.with_context(|| {
+        format!(
+            "AI task '{}' not found in {}",
+            opts.name,
+            snapshot.root.display()
+        )
+    })?;
+    let artifact = ai_tasks::build_task_cached(task, &snapshot.root, opts.force)?;
     println!(
         "ai task cached: {}\n  key: {}\n  binary: {}\n  rebuilt: {}",
         task.id,
@@ -420,7 +426,7 @@ fn build_ai_task(opts: TasksBuildAiOpts) -> Result<()> {
 }
 
 fn run_ai_task(opts: TasksRunAiOpts) -> Result<()> {
-    let root = resolve_ai_root(&opts.root)?;
+    let root = project_snapshot::canonicalize_root(&opts.root)?;
     let mut policy = AiTaskExecutionPolicy::from_env();
     if opts.daemon {
         policy.use_daemon = true;
@@ -432,15 +438,6 @@ fn run_ai_task(opts: TasksRunAiOpts) -> Result<()> {
         bail!("AI task '{}' not found in {}", opts.name, root.display());
     }
     Ok(())
-}
-
-fn resolve_ai_root(root: &Path) -> Result<PathBuf> {
-    let root = if root.is_absolute() {
-        root.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(root)
-    };
-    Ok(root.canonicalize().unwrap_or(root))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -655,8 +652,8 @@ fn execute_ai_task_by_selector(
         return Ok(true);
     }
 
-    let ai_discovery = ai_tasks::discover_tasks(root)?;
-    let Some(ai_task) = ai_tasks::select_task(&ai_discovery, selector)? else {
+    let snapshot = AiTaskSnapshot::from_canonical_root(root.to_path_buf())?;
+    let Some(ai_task) = ai_tasks::select_task(&snapshot.tasks, selector)? else {
         return Ok(false);
     };
 
@@ -707,30 +704,15 @@ fn run_via_daemon_with_lazy_start(
 
 /// Fuzzy search through task history (most recent first).
 fn fuzzy_search_task_history() -> Result<()> {
-    let records = history::load_all_records()?;
+    let records = history::load_unique_task_records()?;
 
     if records.is_empty() {
         println!("No task history found.");
         return Ok(());
     }
 
-    // Dedupe by task_name + project_root, keeping most recent
-    let mut seen = std::collections::HashSet::new();
-    let mut unique_records = Vec::new();
-    for rec in records {
-        let key = format!("{}:{}", rec.project_root, rec.task_name);
-        if seen.insert(key) {
-            unique_records.push(rec);
-        }
-    }
-
-    if unique_records.is_empty() {
-        println!("No task history found.");
-        return Ok(());
-    }
-
     // Format for fzf: "task_name  project_path"
-    let lines: Vec<String> = unique_records
+    let lines: Vec<String> = records
         .iter()
         .map(|r| {
             let project = r
@@ -815,34 +797,21 @@ fn fuzzy_search_task_history() -> Result<()> {
 
 /// List tasks from flow.toml (moved from `f tasks` to `f tasks list`).
 fn list_tasks(opts: TasksListOpts) -> Result<()> {
-    // Determine root directory for discovery
-    let mut root = if opts.config.is_absolute() {
-        opts.config
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    };
-    if is_default_flow_config(&opts.config) && !root.join("flow.toml").exists() {
-        if let Some(found) = find_flow_toml_upwards(&root) {
-            root = found.parent().unwrap_or(&root).to_path_buf();
-        }
-    }
-
-    let discovery = discover::discover_tasks(&root)?;
-    let ai_discovery = ai_tasks::discover_tasks(&root)?;
+    let snapshot = ProjectSnapshot::from_task_config(&opts.config, true)?;
     if opts.dupes {
-        return print_duplicate_tasks(&discovery.tasks);
+        return print_duplicate_tasks(&snapshot.discovery.tasks);
     }
 
-    if discovery.tasks.is_empty() && ai_discovery.is_empty() {
-        println!("No tasks defined in {} or subdirectories", root.display());
+    if !snapshot.has_any_tasks() {
+        println!(
+            "No tasks defined in {} or subdirectories",
+            snapshot.root.display()
+        );
         return Ok(());
     }
 
-    println!("Tasks (root: {}):", root.display());
-    for line in format_discovered_task_lines(&discovery.tasks, &ai_discovery) {
+    println!("Tasks (root: {}):", snapshot.root.display());
+    for line in format_discovered_task_lines(&snapshot.discovery.tasks, &snapshot.ai_tasks) {
         println!("{line}");
     }
 
@@ -850,21 +819,8 @@ fn list_tasks(opts: TasksListOpts) -> Result<()> {
 }
 
 fn list_task_duplicates(opts: TasksDupesOpts) -> Result<()> {
-    let mut root = if opts.config.is_absolute() {
-        opts.config
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    };
-    if is_default_flow_config(&opts.config) && !root.join("flow.toml").exists() {
-        if let Some(found) = find_flow_toml_upwards(&root) {
-            root = found.parent().unwrap_or(&root).to_path_buf();
-        }
-    }
-    let discovery = discover::discover_tasks(&root)?;
-    print_duplicate_tasks(&discovery.tasks)
+    let snapshot = ProjectSnapshot::from_task_config_tasks_only(&opts.config, true)?;
+    print_duplicate_tasks(&snapshot.discovery.tasks)
 }
 
 fn init_ai_tasks(opts: TasksInitAiOpts) -> Result<()> {
@@ -892,31 +848,18 @@ fn init_ai_tasks(opts: TasksInitAiOpts) -> Result<()> {
 }
 
 pub fn list(opts: TasksOpts) -> Result<()> {
-    // Determine root directory for discovery
-    let mut root = if opts.config.is_absolute() {
-        opts.config
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    };
-    if is_default_flow_config(&opts.config) && !root.join("flow.toml").exists() {
-        if let Some(found) = find_flow_toml_upwards(&root) {
-            root = found.parent().unwrap_or(&root).to_path_buf();
-        }
-    }
+    let snapshot = ProjectSnapshot::from_task_config(&opts.config, true)?;
 
-    let discovery = discover::discover_tasks(&root)?;
-    let ai_discovery = ai_tasks::discover_tasks(&root)?;
-
-    if discovery.tasks.is_empty() && ai_discovery.is_empty() {
-        println!("No tasks defined in {} or subdirectories", root.display());
+    if !snapshot.has_any_tasks() {
+        println!(
+            "No tasks defined in {} or subdirectories",
+            snapshot.root.display()
+        );
         return Ok(());
     }
 
-    println!("Tasks (root: {}):", root.display());
-    for line in format_discovered_task_lines(&discovery.tasks, &ai_discovery) {
+    println!("Tasks (root: {}):", snapshot.root.display());
+    for line in format_discovered_task_lines(&snapshot.discovery.tasks, &snapshot.ai_tasks) {
         println!("{line}");
     }
 
@@ -982,19 +925,15 @@ pub fn run_global(opts: GlobalCommand) -> Result<()> {
 
 /// Run a task, searching nested flow.toml files if not found in root.
 pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
-    let mut root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if !root.join("flow.toml").exists() {
-        if let Some(found) = find_flow_toml_upwards(&root) {
-            root = found.parent().unwrap_or(&root).to_path_buf();
-        }
-    }
-    let discovery = discover::discover_tasks(&root)?;
-    let ai_discovery = ai_tasks::discover_tasks(&root)?;
-    if discovery.tasks.is_empty() && ai_discovery.is_empty() {
-        bail!("No tasks defined in {} or subdirectories", root.display());
+    let snapshot = ProjectSnapshot::from_current_dir(true)?;
+    if !snapshot.has_any_tasks() {
+        bail!(
+            "No tasks defined in {} or subdirectories",
+            snapshot.root.display()
+        );
     }
 
-    let discovered = select_discovered_task(&discovery, task_name)?;
+    let discovered = select_discovered_task(&snapshot.discovery, task_name)?;
     if let Some(discovered) = discovered {
         return run(TaskRunOpts {
             config: discovered.config_path.clone(),
@@ -1007,14 +946,19 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
     }
 
     let ai_policy = AiTaskExecutionPolicy::from_env();
-    if execute_ai_task_by_selector(&root, task_name, &args, &ai_policy)? {
+    if execute_ai_task_by_selector(&snapshot.root, task_name, &args, &ai_policy)? {
         return Ok(());
     }
 
     // List available tasks in error message
-    let available: Vec<_> = discovery.tasks.iter().map(task_reference).collect();
+    let available: Vec<_> = snapshot
+        .discovery
+        .tasks
+        .iter()
+        .map(task_reference)
+        .collect();
     let mut available_all = available;
-    available_all.extend(ai_discovery.iter().map(ai_tasks::task_reference));
+    available_all.extend(snapshot.ai_tasks.iter().map(ai_tasks::task_reference));
     bail!(
         "task '{}' not found.\nAvailable tasks: {}",
         task_name,
@@ -1107,7 +1051,7 @@ fn select_discovered_task<'a>(
         Some(resolve_ambiguous_task_match(
             task_name,
             &exact_matches,
-            discovery.root_cfg.as_ref(),
+            discovery.root_task_resolution.as_ref(),
         )?)
     };
 
@@ -1190,9 +1134,9 @@ fn ambiguous_task_error(task_name: &str, matches: &[&discover::DiscoveredTask]) 
 fn resolve_ambiguous_task_match<'a>(
     query: &str,
     matches: &[&'a discover::DiscoveredTask],
-    root_cfg: Option<&Config>,
+    task_resolution: Option<&TaskResolutionConfig>,
 ) -> Result<&'a discover::DiscoveredTask> {
-    let Some(policy) = root_cfg.and_then(|cfg| cfg.task_resolution.as_ref()) else {
+    let Some(policy) = task_resolution else {
         return Err(ambiguous_task_error(query, matches));
     };
 
@@ -1492,11 +1436,11 @@ pub fn activate(opts: TaskActivateOpts) -> Result<()> {
 pub(crate) fn load_project_config(path: PathBuf) -> Result<(PathBuf, Config)> {
     let mut config_path = resolve_path(path)?;
     if !config_path.exists() {
-        let is_default = is_default_flow_config(&config_path);
+        let is_default = project_snapshot::is_default_flow_config(&config_path);
         if is_default {
-            if let Some(found) =
-                find_flow_toml_upwards(config_path.parent().unwrap_or_else(|| Path::new(".")))
-            {
+            if let Some(found) = project_snapshot::find_flow_toml_upwards(
+                config_path.parent().unwrap_or_else(|| Path::new(".")),
+            ) {
                 config_path = found;
             } else {
                 init::write_template(&config_path)?;
@@ -1523,23 +1467,6 @@ fn resolve_path(path: PathBuf) -> Result<PathBuf> {
         Ok(path)
     } else {
         Ok(std::env::current_dir()?.join(path))
-    }
-}
-
-fn is_default_flow_config(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()) == Some("flow.toml")
-}
-
-fn find_flow_toml_upwards(start: &Path) -> Option<PathBuf> {
-    let mut current = start.to_path_buf();
-    loop {
-        let candidate = current.join("flow.toml");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-        if !current.pop() {
-            return None;
-        }
     }
 }
 
@@ -3539,8 +3466,8 @@ mod tests {
             warn_on_implicit_scope: Some(false),
         });
 
-        let selected =
-            resolve_ambiguous_task_match("dev", &matches, Some(&cfg)).expect("route should pick");
+        let selected = resolve_ambiguous_task_match("dev", &matches, cfg.task_resolution.as_ref())
+            .expect("route should pick");
         assert_eq!(selected.scope, "mobile");
 
         cfg.task_resolution = Some(TaskResolutionConfig {
@@ -3548,7 +3475,7 @@ mod tests {
             routes: HashMap::new(),
             warn_on_implicit_scope: Some(false),
         });
-        let selected = resolve_ambiguous_task_match("dev", &matches, Some(&cfg))
+        let selected = resolve_ambiguous_task_match("dev", &matches, cfg.task_resolution.as_ref())
             .expect("preferred scope should pick");
         assert_eq!(selected.scope, "root");
     }
@@ -3560,7 +3487,7 @@ mod tests {
         let discovery = discover::DiscoveryResult {
             tasks: vec![scoped, exact],
             root_config: None,
-            root_cfg: None,
+            root_task_resolution: None,
         };
 
         let selected = select_discovered_task(&discovery, "mobile:dev")

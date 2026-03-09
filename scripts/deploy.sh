@@ -9,6 +9,31 @@ TARGET_DIR="debug"
 BUILD_ARGS=()
 [[ "${PROFILE}" == "release" ]] && TARGET_DIR="release" && BUILD_ARGS+=("--release")
 
+append_rustflag() {
+    local flag="$1"
+    if [[ -n "${RUSTFLAGS:-}" ]]; then
+        RUSTFLAGS+=" ${flag}"
+    else
+        RUSTFLAGS="${flag}"
+    fi
+}
+
+if [[ "${PROFILE}" == "release" ]]; then
+    export CARGO_INCREMENTAL=0
+
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        append_rustflag "-C target-cpu=${FLOW_DEPLOY_TARGET_CPU:-native}"
+        append_rustflag "-C link-arg=-Wl,-dead_strip"
+        append_rustflag "-C link-arg=-Wl,-dead_strip_dylibs"
+    fi
+
+    if [[ -n "${FLOW_DEPLOY_RUSTFLAGS:-}" ]]; then
+        append_rustflag "${FLOW_DEPLOY_RUSTFLAGS}"
+    fi
+
+    export RUSTFLAGS
+fi
+
 # Build
 cargo build "${BUILD_ARGS[@]}" --quiet
 

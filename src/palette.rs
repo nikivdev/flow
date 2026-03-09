@@ -10,7 +10,8 @@ use crate::{
     ai_tasks,
     cli::TasksOpts,
     config::{self, TaskConfig},
-    discover::{self, DiscoveredTask},
+    discover::DiscoveredTask,
+    project_snapshot::ProjectSnapshot,
 };
 
 pub fn run(opts: TasksOpts) -> Result<()> {
@@ -222,26 +223,14 @@ fn build_entries(project_opts: Option<TasksOpts>) -> Result<Vec<PaletteEntry>> {
     let mut has_project = false;
 
     if let Some(opts) = project_opts {
-        // Determine the root directory for discovery
-        let root = if opts.config.is_absolute() {
-            opts.config
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."))
-        } else {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        };
+        let snapshot = ProjectSnapshot::from_task_config(&opts.config, false)?;
 
-        // Discover all nested flow.toml files
-        let discovery = discover::discover_tasks(&root)?;
-        let ai_discovery = ai_tasks::discover_tasks(&root)?;
-
-        if !discovery.tasks.is_empty() || !ai_discovery.is_empty() {
+        if snapshot.has_any_tasks() {
             has_project = true;
-            for discovered in &discovery.tasks {
+            for discovered in &snapshot.discovery.tasks {
                 entries.push(PaletteEntry::from_discovered(discovered));
             }
-            for task in &ai_discovery {
+            for task in &snapshot.ai_tasks {
                 entries.push(PaletteEntry::from_ai_task(task));
             }
         }

@@ -1,16 +1,12 @@
 use std::{
     collections::HashMap,
-    fs::{self, OpenOptions},
-    io::Write,
     path::{Path, PathBuf},
-    process::Command,
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 /// A process started by flow
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,235 +39,243 @@ pub struct RunningProcesses {
     pub projects: HashMap<String, Vec<RunningProcess>>,
 }
 
-/// Returns ~/.config/flow/running.json
+/// Returns ~/.config/flow/running.sqlite
 pub fn running_processes_path() -> PathBuf {
-    crate::config::global_state_dir().join("running.json")
+    crate::config::global_state_dir().join("running.sqlite")
 }
 
-struct RunningProcessesLock {
-    path: PathBuf,
-}
-
-impl Drop for RunningProcessesLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn lock_path() -> PathBuf {
-    crate::config::global_state_dir().join("running.json.lock")
-}
-
-fn lock_owner_pid(path: &Path) -> Option<u32> {
-    let raw = fs::read_to_string(path).ok()?;
-    for line in raw.lines() {
-        let line = line.trim();
-        if let Some(value) = line.strip_prefix("pid=") {
-            if let Ok(pid) = value.trim().parse::<u32>() {
-                return Some(pid);
-            }
-        }
-    }
-    None
-}
-
-fn lock_is_stale(path: &Path, max_age: Duration) -> bool {
-    if let Some(owner_pid) = lock_owner_pid(path) {
-        if !process_alive(owner_pid) {
-            return true;
-        }
-    }
-
-    let Ok(meta) = fs::metadata(path) else {
-        return false;
-    };
-    let Ok(modified) = meta.modified() else {
-        return false;
-    };
-    let Ok(elapsed) = modified.elapsed() else {
-        return false;
-    };
-    elapsed > max_age
-}
-
-fn acquire_running_processes_lock() -> Result<RunningProcessesLock> {
-    let _ = crate::config::ensure_global_state_dir()
-        .with_context(|| "failed to create flow global state dir")?;
-
-    let path = lock_path();
-    let timeout = Duration::from_secs(5);
-    let stale_after = Duration::from_secs(120);
-    let start = Instant::now();
-
-    loop {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                let _ = writeln!(file, "pid={}", std::process::id());
-                return Ok(RunningProcessesLock { path });
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if lock_is_stale(&path, stale_after) {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                if start.elapsed() >= timeout {
-                    return Err(err).with_context(|| {
-                        format!(
-                            "timed out acquiring running-process lock at {}",
-                            path.display()
-                        )
-                    });
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(err) => {
-                return Err(err).with_context(|| format!("failed to open lock {}", path.display()));
-            }
-        }
-    }
-}
-
-fn parse_running_processes(contents: &str, path: &Path) -> Result<(RunningProcesses, bool)> {
-    match serde_json::from_str::<RunningProcesses>(contents) {
-        Ok(processes) => Ok((processes, false)),
-        Err(primary_err) => {
-            // Recovery path: accept the first valid JSON value and ignore trailing garbage.
-            // This handles cases like a valid object followed by stray braces due to interrupted writes.
-            let mut de = serde_json::Deserializer::from_str(contents);
-            match RunningProcesses::deserialize(&mut de) {
-                Ok(processes) => {
-                    warn!(
-                        path = %path.display(),
-                        error = %primary_err,
-                        "running.json contained trailing/invalid suffix; recovered first JSON value"
-                    );
-                    Ok((processes, true))
-                }
-                Err(_) => {
-                    Err(primary_err).with_context(|| format!("failed to parse {}", path.display()))
-                }
-            }
-        }
-    }
-}
-
-fn save_running_processes_unlocked(processes: &RunningProcesses) -> Result<()> {
-    let path = running_processes_path();
-    let _ = crate::config::ensure_global_state_dir()
-        .with_context(|| format!("failed to create {}", path.display()))?;
-
-    let temp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    let contents = serde_json::to_string_pretty(processes)?;
-
-    {
-        let mut file = fs::File::create(&temp_path)
-            .with_context(|| format!("failed to create {}", temp_path.display()))?;
-        file.write_all(contents.as_bytes())
-            .with_context(|| format!("failed to write {}", temp_path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("failed to sync {}", temp_path.display()))?;
-    }
-
-    fs::rename(&temp_path, &path).with_context(|| {
-        format!(
-            "failed to replace running state {} from {}",
-            path.display(),
-            temp_path.display()
-        )
-    })?;
-
+fn open_running_db(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
-        if let Ok(dir) = fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    Ok(())
+    let conn =
+        Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .context("failed to set running DB busy timeout")?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .context("failed to enable running DB WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .context("failed to tune running DB sync mode")?;
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .context("failed to tune running DB temp store")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS running_processes (
+            pid INTEGER PRIMARY KEY,
+            pgid INTEGER NOT NULL,
+            task_name TEXT NOT NULL,
+            command TEXT NOT NULL,
+            started_at INTEGER NOT NULL,
+            config_path TEXT NOT NULL,
+            project_root TEXT NOT NULL,
+            used_flox INTEGER NOT NULL,
+            project_name TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_running_processes_config_path
+        ON running_processes(config_path);
+        CREATE INDEX IF NOT EXISTS idx_running_processes_started_at
+        ON running_processes(started_at);",
+    )
+    .context("failed to initialize running-process schema")?;
+    Ok(conn)
 }
 
-fn load_running_processes_unlocked() -> Result<RunningProcesses> {
-    let path = running_processes_path();
-    if !path.exists() {
-        return Ok(RunningProcesses::default());
-    }
+fn read_processes(conn: &Connection, config_path: Option<&Path>) -> Result<Vec<RunningProcess>> {
+    let mut processes = Vec::new();
 
-    let contents =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let (mut processes, recovered) = parse_running_processes(&contents, &path)?;
-
-    // Validate and clean up dead processes
-    let mut changed = recovered;
-    for procs in processes.projects.values_mut() {
-        let before = procs.len();
-        procs.retain(|p| process_alive(p.pid));
-        if procs.len() != before {
-            changed = true;
+    if let Some(config_path) = config_path {
+        let config_path = config_path.to_string_lossy().to_string();
+        let mut stmt = conn
+            .prepare(
+                "SELECT pid, pgid, task_name, command, started_at, config_path, project_root,
+                        used_flox, project_name
+                 FROM running_processes
+                 WHERE config_path = ?1
+                 ORDER BY started_at ASC",
+            )
+            .context("failed to prepare filtered running-process query")?;
+        let rows = stmt
+            .query_map(params![config_path], row_to_running_process)
+            .context("failed to query filtered running processes")?;
+        for row in rows {
+            processes.push(row.context("failed to decode running process row")?);
         }
-    }
-    processes.projects.retain(|_, v| !v.is_empty());
-
-    if changed {
-        save_running_processes_unlocked(&processes)?;
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT pid, pgid, task_name, command, started_at, config_path, project_root,
+                        used_flox, project_name
+                 FROM running_processes
+                 ORDER BY started_at ASC",
+            )
+            .context("failed to prepare running-process query")?;
+        let rows = stmt
+            .query_map([], row_to_running_process)
+            .context("failed to query running processes")?;
+        for row in rows {
+            processes.push(row.context("failed to decode running process row")?);
+        }
     }
 
     Ok(processes)
 }
 
-/// Load running processes, validating that PIDs are still alive
-pub fn load_running_processes() -> Result<RunningProcesses> {
-    let _lock = acquire_running_processes_lock()?;
-    load_running_processes_unlocked()
+fn row_to_running_process(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunningProcess> {
+    let started_at_raw: i64 = row.get(4)?;
+    Ok(RunningProcess {
+        pid: row.get(0)?,
+        pgid: row.get(1)?,
+        task_name: row.get(2)?,
+        command: row.get(3)?,
+        started_at: u128::try_from(started_at_raw.max(0)).unwrap_or(0),
+        config_path: PathBuf::from(row.get::<_, String>(5)?),
+        project_root: PathBuf::from(row.get::<_, String>(6)?),
+        used_flox: row.get::<_, i64>(7)? != 0,
+        project_name: row.get(8)?,
+    })
 }
 
-/// Atomically save running processes (write to temp, then rename)
-pub fn save_running_processes(processes: &RunningProcesses) -> Result<()> {
-    let _lock = acquire_running_processes_lock()?;
-    save_running_processes_unlocked(processes)
-}
-
-/// Register a new running process
-pub fn register_process(entry: RunningProcess) -> Result<()> {
-    let _lock = acquire_running_processes_lock()?;
-    let mut processes = load_running_processes_unlocked()?;
-    let key = entry.config_path.display().to_string();
-    processes.projects.entry(key).or_default().push(entry);
-    save_running_processes_unlocked(&processes)
-}
-
-/// Unregister a process by PID
-pub fn unregister_process(pid: u32) -> Result<()> {
-    let _lock = acquire_running_processes_lock()?;
-    let mut processes = load_running_processes_unlocked()?;
-    for procs in processes.projects.values_mut() {
-        procs.retain(|p| p.pid != pid);
+fn remove_processes(conn: &mut Connection, pids: &[u32]) -> Result<()> {
+    if pids.is_empty() {
+        return Ok(());
     }
-    processes.projects.retain(|_, v| !v.is_empty());
-    save_running_processes_unlocked(&processes)
+
+    let tx = conn
+        .transaction()
+        .context("failed to start running-process cleanup transaction")?;
+    {
+        let mut stmt = tx
+            .prepare("DELETE FROM running_processes WHERE pid = ?1")
+            .context("failed to prepare running-process cleanup statement")?;
+        for pid in pids {
+            stmt.execute(params![pid])
+                .with_context(|| format!("failed to delete stale running process {}", pid))?;
+        }
+    }
+    tx.commit()
+        .context("failed to commit running-process cleanup transaction")?;
+    Ok(())
 }
 
-/// Get processes for a specific project
+fn collect_alive_processes(
+    conn: &mut Connection,
+    config_path: Option<&Path>,
+) -> Result<Vec<RunningProcess>> {
+    let rows = read_processes(conn, config_path)?;
+    let mut alive = Vec::with_capacity(rows.len());
+    let mut stale = Vec::new();
+
+    for process in rows {
+        if process_alive(process.pid) {
+            alive.push(process);
+        } else {
+            stale.push(process.pid);
+        }
+    }
+
+    remove_processes(conn, &stale)?;
+    Ok(alive)
+}
+
+fn load_running_processes_at(path: &Path) -> Result<RunningProcesses> {
+    let mut conn = open_running_db(path)?;
+    let processes = collect_alive_processes(&mut conn, None)?;
+    let mut grouped: HashMap<String, Vec<RunningProcess>> = HashMap::new();
+    for process in processes {
+        grouped
+            .entry(process.config_path.display().to_string())
+            .or_default()
+            .push(process);
+    }
+    Ok(RunningProcesses { projects: grouped })
+}
+
+fn register_process_at(path: &Path, entry: RunningProcess) -> Result<()> {
+    let mut conn = open_running_db(path)?;
+    let tx = conn
+        .transaction()
+        .context("failed to start running-process register transaction")?;
+    tx.execute(
+        "INSERT INTO running_processes (
+            pid, pgid, task_name, command, started_at, config_path, project_root,
+            used_flox, project_name
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(pid) DO UPDATE SET
+            pgid = excluded.pgid,
+            task_name = excluded.task_name,
+            command = excluded.command,
+            started_at = excluded.started_at,
+            config_path = excluded.config_path,
+            project_root = excluded.project_root,
+            used_flox = excluded.used_flox,
+            project_name = excluded.project_name",
+        params![
+            entry.pid,
+            entry.pgid,
+            entry.task_name,
+            entry.command,
+            i64::try_from(entry.started_at).unwrap_or(i64::MAX),
+            entry.config_path.display().to_string(),
+            entry.project_root.display().to_string(),
+            if entry.used_flox { 1i64 } else { 0i64 },
+            entry.project_name,
+        ],
+    )
+    .with_context(|| format!("failed to register running process {}", entry.task_name))?;
+    tx.commit()
+        .context("failed to commit running-process register transaction")?;
+    Ok(())
+}
+
+fn unregister_process_at(path: &Path, pid: u32) -> Result<()> {
+    let conn = open_running_db(path)?;
+    conn.execute("DELETE FROM running_processes WHERE pid = ?1", params![pid])
+        .with_context(|| format!("failed to unregister running process {}", pid))?;
+    Ok(())
+}
+
+fn get_project_processes_at(path: &Path, config_path: &Path) -> Result<Vec<RunningProcess>> {
+    let mut conn = open_running_db(path)?;
+    collect_alive_processes(&mut conn, Some(config_path))
+}
+
+/// Load running processes, validating that PIDs are still alive.
+pub fn load_running_processes() -> Result<RunningProcesses> {
+    load_running_processes_at(&running_processes_path())
+}
+
+/// Register a new running process.
+pub fn register_process(entry: RunningProcess) -> Result<()> {
+    register_process_at(&running_processes_path(), entry)
+}
+
+/// Unregister a process by PID.
+pub fn unregister_process(pid: u32) -> Result<()> {
+    unregister_process_at(&running_processes_path(), pid)
+}
+
+/// Get processes for a specific project.
 pub fn get_project_processes(config_path: &Path) -> Result<Vec<RunningProcess>> {
-    let processes = load_running_processes()?;
-    let key = config_path.display().to_string();
-    Ok(processes.projects.get(&key).cloned().unwrap_or_default())
+    get_project_processes_at(&running_processes_path(), config_path)
 }
 
-/// Check if a process is alive
+/// Check if a process is alive.
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        use std::process::Stdio;
-        Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if result == 0 {
+            return true;
+        }
+        matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        )
     }
     #[cfg(windows)]
     {
+        use std::process::Command;
         use std::process::Stdio;
         Command::new("tasklist")
             .stdout(Stdio::piped())
@@ -284,14 +288,11 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// Get process group ID for a PID
+/// Get process group ID for a PID.
 #[cfg(unix)]
 pub fn get_pgid(pid: u32) -> Option<u32> {
-    let output = Command::new("ps")
-        .args(["-o", "pgid=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+    if pgid < 0 { None } else { Some(pgid as u32) }
 }
 
 #[cfg(not(unix))]
@@ -299,7 +300,7 @@ pub fn get_pgid(pid: u32) -> Option<u32> {
     Some(pid)
 }
 
-/// Get current timestamp in milliseconds
+/// Get current timestamp in milliseconds.
 pub fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -312,28 +313,61 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn parse_running_processes_recovers_from_trailing_garbage() {
-        let raw = "{\n  \"projects\": {}\n}\n}  }\n";
-        let (parsed, recovered) =
-            parse_running_processes(raw, Path::new("running.json")).expect("recover parse");
-        assert!(recovered);
-        assert!(parsed.projects.is_empty());
+    fn sample_process(pid: u32, root: &Path) -> RunningProcess {
+        RunningProcess {
+            pid,
+            pgid: get_pgid(std::process::id()).unwrap_or(pid),
+            task_name: "dev".to_string(),
+            command: "cargo run".to_string(),
+            started_at: now_ms(),
+            config_path: root.join("flow.toml"),
+            project_root: root.to_path_buf(),
+            used_flox: false,
+            project_name: Some("flow".to_string()),
+        }
     }
 
     #[test]
-    fn lock_owner_pid_parses_pid_line() {
+    fn register_load_and_unregister_round_trip() {
         let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("running.json.lock");
-        fs::write(&path, "pid=12345\n").expect("write lock");
-        assert_eq!(lock_owner_pid(&path), Some(12345));
+        let db_path = dir.path().join("running.sqlite");
+        let process = sample_process(std::process::id(), dir.path());
+
+        register_process_at(&db_path, process.clone()).expect("register process");
+        let loaded = load_running_processes_at(&db_path).expect("load processes");
+        let key = process.config_path.display().to_string();
+        let entries = loaded.projects.get(&key).expect("project entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pid, process.pid);
+
+        let project_entries =
+            get_project_processes_at(&db_path, &process.config_path).expect("project entries");
+        assert_eq!(project_entries.len(), 1);
+        assert_eq!(project_entries[0].task_name, process.task_name);
+
+        unregister_process_at(&db_path, process.pid).expect("unregister process");
+        let loaded = load_running_processes_at(&db_path).expect("reload processes");
+        assert!(loaded.projects.is_empty());
     }
 
     #[test]
-    fn lock_owner_pid_ignores_invalid_content() {
+    fn stale_processes_are_removed_on_read() {
         let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("running.json.lock");
-        fs::write(&path, "oops\npid=abc\n").expect("write lock");
-        assert_eq!(lock_owner_pid(&path), None);
+        let db_path = dir.path().join("running.sqlite");
+        let process = sample_process(999_999, dir.path());
+
+        register_process_at(&db_path, process.clone()).expect("register process");
+        let loaded = load_running_processes_at(&db_path).expect("load processes");
+        assert!(
+            loaded.projects.is_empty(),
+            "stale process should be dropped"
+        );
+
+        let project_entries =
+            get_project_processes_at(&db_path, &process.config_path).expect("project entries");
+        assert!(
+            project_entries.is_empty(),
+            "stale project process should be removed"
+        );
     }
 }

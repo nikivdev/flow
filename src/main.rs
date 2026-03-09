@@ -19,9 +19,29 @@ use flowd::{
     usage, web,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartupPolicy {
+    load_global_secrets: bool,
+    sync_skills: bool,
+}
+
+impl StartupPolicy {
+    const NONE: Self = Self {
+        load_global_secrets: false,
+        sync_skills: false,
+    };
+    const SECRETS_ONLY: Self = Self {
+        load_global_secrets: true,
+        sync_skills: false,
+    };
+    const FULL: Self = Self {
+        load_global_secrets: true,
+        sync_skills: true,
+    };
+}
+
 fn main() -> Result<()> {
     init_tracing();
-    flowd::config::load_global_secrets();
 
     let raw_args: Vec<String> = std::env::args().collect();
     let analytics_capture = usage::command_capture(&raw_args);
@@ -51,6 +71,7 @@ fn main() -> Result<()> {
                     let _bin = iter.next();
                     if let Some(task_name) = iter.next() {
                         let args: Vec<String> = iter.collect();
+                        apply_startup_policy(StartupPolicy::SECRETS_ONLY);
                         return tasks::run_with_discovery(&task_name, args);
                     }
                 }
@@ -58,8 +79,7 @@ fn main() -> Result<()> {
             }
         };
 
-        // Keep default skills in sync for Flow projects (minimal cost).
-        skills::auto_sync_skills();
+        apply_startup_policy(startup_policy_for(cli.command.as_ref()));
 
         match cli.command {
             Some(Commands::Hub(cmd)) => {
@@ -613,6 +633,180 @@ fn main() -> Result<()> {
     result
 }
 
+fn apply_startup_policy(policy: StartupPolicy) {
+    let policy = apply_startup_env_overrides(policy);
+    if policy.load_global_secrets {
+        flowd::config::load_global_secrets();
+    }
+    if policy.sync_skills {
+        skills::auto_sync_skills();
+    }
+}
+
+fn apply_startup_env_overrides(mut policy: StartupPolicy) -> StartupPolicy {
+    if let Some(value) = env_truthy_override("FLOW_STARTUP_LOAD_GLOBAL_SECRETS") {
+        policy.load_global_secrets = value;
+    }
+    if let Some(value) = env_truthy_override("FLOW_STARTUP_SYNC_SKILLS") {
+        policy.sync_skills = value;
+    }
+    policy
+}
+
+fn env_truthy_override(key: &str) -> Option<bool> {
+    let value = std::env::var(key).ok()?;
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn startup_policy_for(command: Option<&Commands>) -> StartupPolicy {
+    use flowd::cli::{AnalyticsAction, GlobalAction, ProxyAction, TasksAction};
+
+    match command {
+        None => StartupPolicy::NONE,
+        Some(Commands::Search) => StartupPolicy::NONE,
+        Some(Commands::ShellInit(_)) => StartupPolicy::NONE,
+        Some(Commands::Shell(_)) => StartupPolicy::NONE,
+        Some(Commands::Init(_)) => StartupPolicy::NONE,
+        Some(Commands::New(_)) => StartupPolicy::NONE,
+        Some(Commands::Archive(_)) => StartupPolicy::NONE,
+        Some(Commands::Doctor(_)) => StartupPolicy::NONE,
+        Some(Commands::Health(_)) => StartupPolicy::NONE,
+        Some(Commands::Invariants(_)) => StartupPolicy::NONE,
+        Some(Commands::Projects) => StartupPolicy::NONE,
+        Some(Commands::Active(_)) => StartupPolicy::NONE,
+        Some(Commands::LastCmd) => StartupPolicy::NONE,
+        Some(Commands::LastCmdFull) => StartupPolicy::NONE,
+        Some(Commands::FishLast) => StartupPolicy::NONE,
+        Some(Commands::FishLastFull) => StartupPolicy::NONE,
+        Some(Commands::FishInstall(_)) => StartupPolicy::NONE,
+        Some(Commands::Ps(_)) => StartupPolicy::NONE,
+        Some(Commands::Logs(_)) => StartupPolicy::NONE,
+        Some(Commands::Trace(_)) => StartupPolicy::NONE,
+        Some(Commands::Branches(_)) => StartupPolicy::NONE,
+        Some(Commands::Status(_)) => StartupPolicy::NONE,
+        Some(Commands::Changes(_)) => StartupPolicy::NONE,
+        Some(Commands::Diff(_)) => StartupPolicy::NONE,
+        Some(Commands::Hash(_)) => StartupPolicy::NONE,
+        Some(Commands::Daemon(_)) => StartupPolicy::NONE,
+        Some(Commands::Supervisor(_)) => StartupPolicy::NONE,
+        Some(Commands::Macos(_)) => StartupPolicy::NONE,
+        Some(Commands::Ssh(_)) => StartupPolicy::NONE,
+        Some(Commands::Todo(_)) => StartupPolicy::NONE,
+        Some(Commands::Ext(_)) => StartupPolicy::NONE,
+        Some(Commands::Tools(_)) => StartupPolicy::NONE,
+        Some(Commands::Notify(_)) => StartupPolicy::NONE,
+        Some(Commands::Commits(_)) => StartupPolicy::NONE,
+        Some(Commands::SeqRpc(_)) => StartupPolicy::NONE,
+        Some(Commands::ExplainCommits(_)) => StartupPolicy::NONE,
+        Some(Commands::Info) => StartupPolicy::NONE,
+        Some(Commands::Upstream(_)) => StartupPolicy::NONE,
+        Some(Commands::Latest) => StartupPolicy::NONE,
+        Some(Commands::Analytics(cmd)) => match cmd.action.as_ref() {
+            None
+            | Some(&AnalyticsAction::Status)
+            | Some(&AnalyticsAction::Enable)
+            | Some(&AnalyticsAction::Disable)
+            | Some(&AnalyticsAction::Export)
+            | Some(&AnalyticsAction::Purge) => StartupPolicy::NONE,
+        },
+        Some(Commands::Tasks(cmd)) => match cmd.action.as_ref() {
+            None
+            | Some(TasksAction::List(_))
+            | Some(TasksAction::Dupes(_))
+            | Some(TasksAction::InitAi(_))
+            | Some(TasksAction::Daemon(_)) => StartupPolicy::NONE,
+            Some(TasksAction::BuildAi(_)) | Some(TasksAction::RunAi(_)) => {
+                StartupPolicy::SECRETS_ONLY
+            }
+        },
+        Some(Commands::Global(cmd)) => match (cmd.action.as_ref(), cmd.list, cmd.task.as_ref()) {
+            (Some(GlobalAction::List), _, _) | (None, true, _) | (None, false, None) => {
+                StartupPolicy::NONE
+            }
+            _ => StartupPolicy::SECRETS_ONLY,
+        },
+        Some(Commands::Sessions(opts)) => {
+            if opts.summarize || opts.handoff {
+                StartupPolicy::SECRETS_ONLY
+            } else {
+                StartupPolicy::NONE
+            }
+        }
+        Some(Commands::Proxy(cmd)) => match &cmd.action {
+            ProxyAction::Trace(_)
+            | ProxyAction::Last(_)
+            | ProxyAction::Add(_)
+            | ProxyAction::List
+            | ProxyAction::Stop => StartupPolicy::NONE,
+            ProxyAction::Start(_) => StartupPolicy::SECRETS_ONLY,
+        },
+        Some(Commands::Ai(_)) => StartupPolicy::FULL,
+        Some(Commands::Codex { .. }) => StartupPolicy::FULL,
+        Some(Commands::Claude { .. }) => StartupPolicy::FULL,
+        Some(Commands::Commit(_))
+        | Some(Commands::CommitQueue(_))
+        | Some(Commands::CommitSimple(_))
+        | Some(Commands::CommitWithCheck(_))
+        | Some(Commands::Fix(_))
+        | Some(Commands::Fixup(_))
+        | Some(Commands::Skills(_))
+        | Some(Commands::Setup(_)) => StartupPolicy::FULL,
+        Some(Commands::Run(_))
+        | Some(Commands::Fast(_))
+        | Some(Commands::Up(_))
+        | Some(Commands::Down(_))
+        | Some(Commands::Rerun(_))
+        | Some(Commands::Kill(_))
+        | Some(Commands::Server(_))
+        | Some(Commands::Web(_))
+        | Some(Commands::Match(_))
+        | Some(Commands::Ask(_))
+        | Some(Commands::Review(_))
+        | Some(Commands::ReviewsTodo(_))
+        | Some(Commands::Pr(_))
+        | Some(Commands::Gitignore(_))
+        | Some(Commands::Recipe(_))
+        | Some(Commands::GitRepair(_))
+        | Some(Commands::Jj(_))
+        | Some(Commands::Env(_))
+        | Some(Commands::Otp(_))
+        | Some(Commands::Auth(_))
+        | Some(Commands::Services(_))
+        | Some(Commands::Deps(_))
+        | Some(Commands::Db(_))
+        | Some(Commands::Home(_))
+        | Some(Commands::Hub(_))
+        | Some(Commands::AiTestNew(_))
+        | Some(Commands::Code(_))
+        | Some(Commands::Migrate(_))
+        | Some(Commands::Parallel(_))
+        | Some(Commands::Docs(_))
+        | Some(Commands::Upgrade(_))
+        | Some(Commands::Release(_))
+        | Some(Commands::Install(_))
+        | Some(Commands::Registry(_))
+        | Some(Commands::Domains(_))
+        | Some(Commands::Sync(_))
+        | Some(Commands::Checkout(_))
+        | Some(Commands::Switch(_))
+        | Some(Commands::Push(_))
+        | Some(Commands::Deploy(_))
+        | Some(Commands::Prod(_))
+        | Some(Commands::Publish(_))
+        | Some(Commands::Clone(_))
+        | Some(Commands::Repos(_))
+        | Some(Commands::TaskShortcut(_))
+        | Some(Commands::Agents(_))
+        | Some(Commands::Hive(_)) => StartupPolicy::SECRETS_ONLY,
+        Some(Commands::Undo(_)) => StartupPolicy::NONE,
+    }
+}
+
 fn rerun(opts: RerunOpts) -> Result<()> {
     let project_root = if opts.config.is_absolute() {
         opts.config.parent().unwrap_or(Path::new(".")).to_path_buf()
@@ -865,4 +1059,86 @@ fn proxy_command(cmd: ProxyCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{StartupPolicy, startup_policy_for};
+    use flowd::cli::{
+        AiAction, AiCommand, AnalyticsCommand, Commands, GlobalAction, GlobalCommand, SessionsOpts,
+        StatusOpts, TasksAction, TasksBuildAiOpts, TasksCommand, TasksListOpts,
+    };
+
+    #[test]
+    fn startup_policy_skips_common_local_read_only_commands() {
+        assert_eq!(startup_policy_for(None), StartupPolicy::NONE);
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Status(StatusOpts::default()))),
+            StartupPolicy::NONE
+        );
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Tasks(TasksCommand {
+                action: Some(TasksAction::List(TasksListOpts {
+                    config: PathBuf::from("flow.toml"),
+                    dupes: false,
+                })),
+            }))),
+            StartupPolicy::NONE
+        );
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Analytics(AnalyticsCommand {
+                action: None,
+            }))),
+            StartupPolicy::NONE
+        );
+    }
+
+    #[test]
+    fn startup_policy_keeps_execution_paths_loading_secrets() {
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Tasks(TasksCommand {
+                action: Some(TasksAction::BuildAi(TasksBuildAiOpts {
+                    name: "ai:flow/noop".to_string(),
+                    root: PathBuf::from("."),
+                    force: false,
+                })),
+            }))),
+            StartupPolicy::SECRETS_ONLY
+        );
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Global(GlobalCommand {
+                action: Some(GlobalAction::Run {
+                    task: "setup".to_string(),
+                    args: vec![],
+                }),
+                task: None,
+                list: false,
+                args: vec![],
+            }))),
+            StartupPolicy::SECRETS_ONLY
+        );
+    }
+
+    #[test]
+    fn startup_policy_syncs_skills_for_ai_heavy_paths() {
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Ai(AiCommand {
+                action: Some(AiAction::List),
+            }))),
+            StartupPolicy::FULL
+        );
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Sessions(SessionsOpts {
+                provider: "all".to_string(),
+                count: None,
+                list: false,
+                full: false,
+                summarize: true,
+                handoff: false,
+            }))),
+            StartupPolicy::SECRETS_ONLY
+        );
+    }
 }

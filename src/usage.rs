@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -82,6 +82,14 @@ pub struct AnalyticsStatus {
     pub endpoint: String,
     pub queue_path: PathBuf,
     pub queued_events: usize,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AnalyticsConfigProbe {
+    #[serde(default)]
+    analytics: Option<config::AnalyticsConfig>,
+    #[serde(default, rename = "commands")]
+    command_files: Vec<config::CommandFileConfig>,
 }
 
 pub fn command_capture(raw_args: &[String]) -> CommandCapture {
@@ -205,7 +213,7 @@ pub fn status() -> Result<AnalyticsStatus> {
     let state = load_or_init_state()?;
     let runtime_cfg = runtime_config();
     let queue_path = queue_path();
-    let queued_events = read_queue_lines()?.len();
+    let queued_events = count_queue_lines()?;
     Ok(AnalyticsStatus {
         consent: state.consent,
         effective_enabled: should_capture(&state, &runtime_cfg),
@@ -499,23 +507,52 @@ fn runtime_config() -> AnalyticsRuntimeConfig {
 }
 
 fn load_project_analytics_config() -> Option<config::AnalyticsConfig> {
-    let mut current = std::env::current_dir().ok()?;
-    loop {
-        let candidate = current.join("flow.toml");
-        if candidate.exists() {
-            let cfg = config::load_or_default(&candidate);
-            return cfg.analytics;
+    let cwd = std::env::current_dir().ok()?;
+    if let Some(candidate) = crate::project_snapshot::find_flow_toml_upwards(&cwd) {
+        if let Some(analytics) = load_minimal_analytics_config(&candidate, &mut Vec::new()) {
+            return Some(analytics);
         }
-        if !current.pop() {
-            break;
-        }
+        let cfg = config::load_or_default(&candidate);
+        return cfg.analytics;
     }
 
     let global = config::default_config_path();
     if global.exists() {
+        if let Some(analytics) = load_minimal_analytics_config(&global, &mut Vec::new()) {
+            return Some(analytics);
+        }
         return config::load_or_default(global).analytics;
     }
 
+    None
+}
+
+fn load_minimal_analytics_config(
+    path: &Path,
+    visited: &mut Vec<PathBuf>,
+) -> Option<config::AnalyticsConfig> {
+    let canonical = path.canonicalize().ok()?;
+    if visited.contains(&canonical) {
+        return None;
+    }
+    visited.push(canonical.clone());
+
+    let contents = fs::read_to_string(&canonical).ok()?;
+    let parsed: AnalyticsConfigProbe = toml::from_str(&contents).ok()?;
+    if let Some(analytics) = parsed.analytics {
+        visited.pop();
+        return Some(analytics);
+    }
+
+    for include in parsed.command_files {
+        let include_path = config::resolve_include_path(&canonical, &include.path);
+        if let Some(analytics) = load_minimal_analytics_config(&include_path, visited) {
+            visited.pop();
+            return Some(analytics);
+        }
+    }
+
+    visited.pop();
     None
 }
 
@@ -671,13 +708,35 @@ fn read_queue_lines() -> Result<Vec<String>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let content =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(content
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.to_string())
-        .collect())
+    let file =
+        std::fs::File::open(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut lines = Vec::new();
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("failed to read {}", path.display()))?;
+        if !line.trim().is_empty() {
+            lines.push(line);
+        }
+    }
+    Ok(lines)
+}
+
+fn count_queue_lines() -> Result<usize> {
+    let path = queue_path();
+    if !path.exists() {
+        return Ok(0);
+    }
+    let file =
+        std::fs::File::open(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut count = 0usize;
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("failed to read {}", path.display()))?;
+        if !line.trim().is_empty() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn env_flag(name: &str) -> bool {
@@ -701,6 +760,10 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -759,5 +822,39 @@ mod tests {
         let a = rotating_anon_user_id(&state, 1000).expect("anon id");
         let b = rotating_anon_user_id(&state, 1000 + window).expect("anon id");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn minimal_analytics_probe_follows_includes() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).expect("repo dir");
+        fs::write(
+            root.join("flow.toml"),
+            r#"
+[[commands]]
+path = "commands.toml"
+"#,
+        )
+        .expect("write root flow");
+        fs::write(
+            root.join("commands.toml"),
+            r#"
+[analytics]
+enabled = true
+endpoint = "https://example.test/telemetry"
+sample_rate = 0.25
+"#,
+        )
+        .expect("write commands flow");
+
+        let analytics =
+            load_minimal_analytics_config(&root.join("flow.toml"), &mut Vec::new()).expect("analytics");
+        assert_eq!(analytics.enabled, Some(true));
+        assert_eq!(
+            analytics.endpoint.as_deref(),
+            Some("https://example.test/telemetry")
+        );
+        assert_eq!(analytics.sample_rate, Some(0.25));
     }
 }

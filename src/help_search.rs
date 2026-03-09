@@ -3,10 +3,13 @@
 use anyhow::{Context, Result};
 use clap::{Command, CommandFactory};
 use serde::Serialize;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::process::{Command as Cmd, Stdio};
 
 use crate::cli::Cli;
+
+const EMBEDDED_HELP_JSON: &str = include_str!("help_full.json");
+const HELP_FULL_REGENERATE_ENV: &str = "FLOW_REGENERATE_HELP_FULL";
 
 /// Entry format compatible with the `cmd` tool's cache format.
 #[derive(Serialize)]
@@ -156,8 +159,35 @@ fn collect_entries(cmd: &Command, prefix: &str, entries: &mut Vec<Entry>) {
 
 /// Output all commands in JSON format compatible with the `cmd` tool.
 pub fn print_full_json() -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut writer = BufWriter::new(stdout.lock());
+    if should_regenerate_help_full() {
+        write_generated_full_json(&mut writer)?;
+    } else {
+        writer.write_all(EMBEDDED_HELP_JSON.as_bytes())?;
+        if !EMBEDDED_HELP_JSON.ends_with('\n') {
+            writer.write_all(b"\n")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn should_regenerate_help_full() -> bool {
+    matches!(
+        std::env::var(HELP_FULL_REGENERATE_ENV)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn write_generated_full_json(writer: &mut impl Write) -> Result<()> {
     let cmd = Cli::command();
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(512);
 
     for sub in cmd.get_subcommands() {
         if !sub.is_hide_set() {
@@ -165,7 +195,6 @@ pub fn print_full_json() -> Result<()> {
         }
     }
 
-    // Also add top-level flags
     for arg in cmd.get_arguments() {
         if arg.is_hide_set() {
             continue;
@@ -190,9 +219,24 @@ pub fn print_full_json() -> Result<()> {
 
     let version = env!("CARGO_PKG_VERSION").to_string();
     let info = CommandInfo { version, entries };
-
-    let json = serde_json::to_string(&info)?;
-    println!("{}", json);
-
+    serde_json::to_writer(&mut *writer, &info)?;
+    writer.write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EMBEDDED_HELP_JSON, write_generated_full_json};
+    use anyhow::Result;
+
+    #[test]
+    fn embedded_help_json_matches_current_cli() -> Result<()> {
+        let mut generated = Vec::new();
+        write_generated_full_json(&mut generated)?;
+        assert_eq!(
+            String::from_utf8(generated).expect("generated help JSON should be UTF-8"),
+            EMBEDDED_HELP_JSON
+        );
+        Ok(())
+    }
 }

@@ -2,35 +2,21 @@
 
 ## Overview
 
-Replace the unreliable `sysinfo`-based cwd scanning with PID-based process tracking. Track PIDs when flow starts tasks, store in a global state file, and provide `f ps` and `f kill` commands.
+Replace the unreliable `sysinfo`-based cwd scanning with PID-based process tracking. Track PIDs when flow starts tasks, store them in persistent global state, and provide `f ps` and `f kill` commands.
 
 ## Design Decisions
 
-1. **Storage**: `~/.config/flow/running.json` (global file with project paths as keys)
+1. **Storage**: `~/.config/flow/running.sqlite` (global SQLite store keyed by PID and config path)
 2. **Child Processes**: Use Unix process groups (PGID) to track and kill entire process trees
 3. **Cleanup**: Validate PIDs on read, remove stale entries automatically
 4. **Kill Signal**: SIGTERM first, SIGKILL after 5s timeout (configurable)
 
 ## Data Structure
 
-```json
-{
-  "projects": {
-    "/path/to/flow.toml": [
-      {
-        "pid": 12345,
-        "pgid": 12345,
-        "task_name": "dev",
-        "command": "pnpm run dev",
-        "started_at": 1701388800000,
-        "config_path": "/path/to/flow.toml",
-        "project_root": "/path/to/project",
-        "used_flox": false
-      }
-    ]
-  }
-}
-```
+SQLite table `running_processes` with:
+- `pid` primary key
+- `pgid`, `task_name`, `command`, `started_at`
+- `config_path`, `project_root`, `used_flox`, `project_name`
 
 ## Implementation
 
@@ -40,7 +26,6 @@ PID tracking state management:
 - `RunningProcess` struct with pid, pgid, task_name, command, timestamps, paths
 - `RunningProcesses` struct mapping config paths to process lists
 - `load_running_processes()` - load and validate (remove dead PIDs)
-- `save_running_processes()` - atomic write (temp file then rename)
 - `register_process()` / `unregister_process()` - add/remove entries
 - `get_project_processes()` - get processes for specific project
 - `process_alive()` - check if PID exists
@@ -97,7 +82,7 @@ New `Kill(KillOpts)` command in Commands enum.
 ### Rewritten: `src/processes.rs`
 
 Replace sysinfo-based scanning with PID-based lookup:
-- `show_project_processes()` - list from running.json
+- `show_project_processes()` - list from the running-process store
 - `show_all_processes()` - list all projects
 - `kill_processes()` - dispatch to kill_by_pid/task/all
 - `terminate_process_group()` - SIGTERM then SIGKILL with timeout
@@ -135,4 +120,4 @@ f kill --force dev      # SIGKILL immediately
 - **Process dies before unregister**: Cleaned up on next `load_running_processes()`
 - **Multiple tasks with same name**: All killed by `f kill <name>`
 - **Flow crashes**: Orphaned processes shown in `f ps`, killed on next run
-- **Race conditions**: Atomic file writes prevent corruption
+- **Race conditions**: SQLite WAL mode and write transactions prevent corruption

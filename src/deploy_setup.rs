@@ -266,7 +266,9 @@ fn run_app<B: ratatui::backend::Backend>(
     app: &mut DeploySetupApp,
 ) -> Result<Option<CloudflareSetupResult>> {
     loop {
-        terminal.draw(|f| draw_ui(f, app))?;
+        terminal
+            .draw(|f| draw_ui(f, app))
+            .map_err(|err| anyhow::anyhow!("failed to draw deploy setup UI: {err}"))?;
 
         if event::poll(std::time::Duration::from_millis(200))? {
             if let CEvent::Key(key) = event::read()? {

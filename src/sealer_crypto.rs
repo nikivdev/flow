@@ -4,8 +4,7 @@ use crypto_secretbox::{
     XSalsa20Poly1305,
     aead::{Aead, KeyInit},
 };
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::{TryRng, rngs::SysRng};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const SECRET_PREFIX: &str = "sealerSecret_z";
@@ -13,7 +12,9 @@ const ID_PREFIX: &str = "sealer_z";
 
 pub fn new_x25519_private_key() -> Vec<u8> {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("system RNG should provide x25519 key material");
     bytes.to_vec()
 }
 
