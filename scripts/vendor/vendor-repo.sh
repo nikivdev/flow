@@ -18,6 +18,7 @@ Commands:
   hydrate              Materialize lib/vendor from pinned commit in vendor.lock.toml
   pin [commit]         Pin vendor.lock.toml commit (defaults to checkout HEAD)
   status               Show lock/checkout/remote status summary
+  verify-pinned-origin Fail unless pinned commit is published on vendor origin/<branch>
   push                 Push checkout HEAD to origin/<branch>
 
 Environment:
@@ -201,6 +202,50 @@ ensure_git_identity() {
   fi
 }
 
+fetch_origin_branch() {
+  local checkout="$1"
+  local branch="$2"
+  git -C "$checkout" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$checkout" fetch -q origin "$branch" >/dev/null 2>&1
+}
+
+ensure_pinned_commit_published_on_origin() {
+  local checkout="$1"
+  local branch="$2"
+  local commit="$3"
+  local remote_head
+
+  if [[ -z "$commit" ]]; then
+    echo "error: pinned commit is empty in $lock_file" >&2
+    return 1
+  fi
+
+  if ! git -C "$checkout" cat-file -e "${commit}^{commit}" 2>/dev/null; then
+    echo "error: pinned commit $commit not found in $checkout" >&2
+    return 1
+  fi
+
+  if ! fetch_origin_branch "$checkout" "$branch"; then
+    echo "error: failed to fetch origin/$branch from $checkout" >&2
+    return 1
+  fi
+
+  if ! git -C "$checkout" rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+    echo "error: missing origin/$branch in $checkout" >&2
+    return 1
+  fi
+
+  remote_head="$(git -C "$checkout" rev-parse "origin/$branch")"
+  if git -C "$checkout" merge-base --is-ancestor "$commit" "origin/$branch"; then
+    echo "verified: pinned commit $commit is published on origin/$branch"
+    return 0
+  fi
+
+  echo "error: pinned commit $commit is not published on origin/$branch (remote head $remote_head)" >&2
+  echo "hint: push .vendor/flow-vendor before pushing flow when vendor.lock.toml changes" >&2
+  return 1
+}
+
 ensure_repo_layout() {
   local checkout="$1"
   mkdir -p "$checkout/crates" "$checkout/manifests" "$checkout/profiles"
@@ -353,7 +398,7 @@ cmd_hydrate() {
   fi
 
   if git -C "$checkout" remote get-url origin >/dev/null 2>&1; then
-    git -C "$checkout" fetch -q origin "$(read_lock_value branch)" >/dev/null 2>&1 || true
+    fetch_origin_branch "$checkout" "$(read_lock_value branch)" || true
   fi
 
   if ! git -C "$checkout" cat-file -e "${commit}^{commit}" 2>/dev/null; then
@@ -410,6 +455,7 @@ cmd_pin() {
 
 cmd_status() {
   local repo_url branch checkout commit
+  local origin_branch_ready=0
   repo_url="$(read_lock_value repo)"
   branch="$(read_lock_value branch)"
   checkout="$(read_lock_value checkout)"
@@ -430,12 +476,12 @@ cmd_status() {
     fi
 
     if git -C "$checkout" remote get-url origin >/dev/null 2>&1; then
-      if git -C "$checkout" fetch -q origin "$branch" >/dev/null 2>&1; then
-        :
+      if fetch_origin_branch "$checkout" "$branch"; then
+        origin_branch_ready=1
       else
         echo "origin:    unreachable (fetch failed)"
       fi
-      if git -C "$checkout" rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+      if [[ "$origin_branch_ready" == "1" ]] && git -C "$checkout" rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
         local counts
         counts="$(git -C "$checkout" rev-list --left-right --count "origin/$branch...HEAD")"
         echo "origin:    origin/$branch ($counts: behind ahead)"
@@ -443,6 +489,24 @@ cmd_status() {
     fi
   else
     echo "head:      <checkout missing>"
+  fi
+
+  if [[ -n "$commit" && -d "$checkout/.git" ]]; then
+    if git -C "$checkout" cat-file -e "${commit}^{commit}" 2>/dev/null; then
+      if [[ "$origin_branch_ready" == "1" ]] && git -C "$checkout" rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+        if git -C "$checkout" merge-base --is-ancestor "$commit" "origin/$branch"; then
+          echo "pinned_origin: published on origin/$branch"
+        else
+          echo "pinned_origin: NOT published on origin/$branch"
+        fi
+      else
+        echo "pinned_origin: unknown (origin/$branch unavailable)"
+      fi
+    else
+      echo "pinned_origin: unknown (pinned commit missing from checkout)"
+    fi
+  else
+    echo "pinned_origin: unknown"
   fi
 
   echo
@@ -474,6 +538,14 @@ cmd_push() {
   echo "pushed ${checkout} HEAD -> origin/${branch}"
 }
 
+cmd_verify_pinned_origin() {
+  local checkout branch commit
+  checkout="$(ensure_checkout)"
+  branch="$(read_lock_value branch)"
+  commit="$(read_lock_value commit)"
+  ensure_pinned_commit_published_on_origin "$checkout" "$branch" "$commit"
+}
+
 case "$command" in
   init) cmd_init "$@" ;;
   create-remote) cmd_create_remote "$@" ;;
@@ -481,6 +553,7 @@ case "$command" in
   hydrate) cmd_hydrate "$@" ;;
   pin) cmd_pin "$@" ;;
   status) cmd_status "$@" ;;
+  verify-pinned-origin) cmd_verify_pinned_origin "$@" ;;
   push) cmd_push "$@" ;;
   *)
     usage

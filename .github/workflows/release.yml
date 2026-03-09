@@ -48,6 +48,9 @@ jobs:
             lib/vendor-manifest
           key: ${{ runner.os }}-${{ runner.arch }}-vendor-${{ hashFiles('vendor.lock.toml') }}
 
+      - name: Verify pinned vendor commit is published
+        run: scripts/vendor/vendor-repo.sh verify-pinned-origin
+
       - name: Hydrate vendored deps
         run: scripts/vendor/vendor-repo.sh hydrate
 
@@ -123,6 +126,9 @@ jobs:
             lib/vendor
             lib/vendor-manifest
           key: ${{ runner.os }}-${{ runner.arch }}-vendor-${{ hashFiles('vendor.lock.toml') }}
+
+      - name: Verify pinned vendor commit is published
+        run: scripts/vendor/vendor-repo.sh verify-pinned-origin
 
       - name: Hydrate vendored deps
         run: scripts/vendor/vendor-repo.sh hydrate
