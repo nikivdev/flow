@@ -225,6 +225,42 @@ fn ensure_symlinks_at(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn merge_skill_entries_into_existing_dir(source_dir: &Path, existing_dir: &Path) -> Result<()> {
+    if !existing_dir.exists() {
+        fs::create_dir_all(existing_dir)?;
+    }
+
+    for entry in fs::read_dir(source_dir).context("failed to read source skills directory")? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let name = entry.file_name();
+        let dest_path = existing_dir.join(name);
+
+        if dest_path.exists() || dest_path.is_symlink() {
+            continue;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(&source_path, &dest_path)?;
+        }
+
+        #[cfg(windows)]
+        {
+            if source_path.is_dir() {
+                use std::os::windows::fs::symlink_dir;
+                symlink_dir(&source_path, &dest_path)?;
+            } else {
+                use std::os::windows::fs::symlink_file;
+                symlink_file(&source_path, &dest_path)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Create a symlink if it doesn't exist or points elsewhere.
 fn create_symlink_if_needed(
     target: &PathBuf,
@@ -246,7 +282,10 @@ fn create_symlink_if_needed(
         // Wrong target, remove it
         fs::remove_file(link_path)?;
     } else if link_path.exists() {
-        // It's a real directory, skip (don't overwrite user's files)
+        // It's a real directory, keep the directory and merge missing local skills into it.
+        if link_path.is_dir() {
+            merge_skill_entries_into_existing_dir(target, link_path)?;
+        }
         return Ok(());
     }
 
@@ -1523,6 +1562,48 @@ mod tests {
         assert!(pr_markdown_content.contains("name: pr-markdown-body-file"));
         assert!(pr_markdown_content.contains("version: 1"));
         assert!(pr_markdown_content.contains("source: flow-default"));
+    }
+
+    #[test]
+    fn ensure_default_skills_merges_into_existing_codex_skills_directory() {
+        let dir = tempdir().expect("tempdir");
+        let existing_skill_dir = dir.path().join(".codex/skills/existing-custom-skill");
+        fs::create_dir_all(&existing_skill_dir).expect("existing skill dir");
+        fs::write(
+            existing_skill_dir.join("SKILL.md"),
+            "---\nname: existing-custom-skill\n---\n",
+        )
+        .expect("existing skill");
+
+        ensure_default_skills_at(dir.path()).expect("default skills should be written");
+
+        let codex_skills_dir = dir.path().join(".codex/skills");
+        assert!(
+            codex_skills_dir.is_dir(),
+            "codex skills directory should remain a directory"
+        );
+        assert!(
+            codex_skills_dir
+                .join("existing-custom-skill/SKILL.md")
+                .exists(),
+            "existing codex skill should be preserved"
+        );
+        assert!(
+            codex_skills_dir.join("env/SKILL.md").exists(),
+            "default env skill should be exposed inside existing codex skills directory"
+        );
+        assert!(
+            codex_skills_dir
+                .join("quality-bun-feature-delivery/SKILL.md")
+                .exists(),
+            "default quality skill should be exposed inside existing codex skills directory"
+        );
+        assert!(
+            codex_skills_dir
+                .join("pr-markdown-body-file/SKILL.md")
+                .exists(),
+            "default pr markdown skill should be exposed inside existing codex skills directory"
+        );
     }
 
     #[test]

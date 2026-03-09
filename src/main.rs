@@ -198,6 +198,9 @@ fn main() -> Result<()> {
             Some(Commands::Branches(cmd)) => {
                 branches::run(cmd)?;
             }
+            Some(Commands::Status(opts)) => {
+                jj::run_workflow_status(opts.raw)?;
+            }
             Some(Commands::Commit(opts)) => {
                 // Default: fast commit lane with deferred Codex deep review.
                 let mut force = opts.force || opts.approved;

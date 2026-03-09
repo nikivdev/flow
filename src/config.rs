@@ -481,6 +481,14 @@ pub struct JjConfig {
         alias = "autoTrack"
     )]
     pub auto_track: Option<bool>,
+    /// Home branch that review/codex branches stack on top of (for example: "nikiv").
+    #[serde(
+        default,
+        rename = "home_branch",
+        alias = "home-branch",
+        alias = "homeBranch"
+    )]
+    pub home_branch: Option<String>,
     /// Prefix for review bookmarks created by flow (e.g., "review").
     #[serde(
         default,
