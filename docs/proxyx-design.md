@@ -512,7 +512,7 @@ f proxy
 
 # Add a proxy (AI suggests name)
 f proxy add localhost:3000
-# Detected: node process, cwd=/Users/nikiv/code/myapi
+# Detected: node process, cwd=~/code/myapi
 # Suggested name: "myapi" [Y/n/custom]:
 
 # Add with explicit name

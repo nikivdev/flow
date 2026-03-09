@@ -29,7 +29,7 @@ From `~/code/rise`:
 
 ```bash
 rise sandbox "set -euo pipefail; <your commands>; echo SANDBOX_OK" \
-  --root /Users/nikiv/code/flow \
+  --root ~/code/flow \
   --expect SANDBOX_OK
 ```
 
@@ -37,7 +37,7 @@ Why this shape:
 
 - `set -euo pipefail` fails hard on the first real issue.
 - `--expect` gives a strict pass/fail marker.
-- `--root /Users/nikiv/code/flow` mounts the Flow repo into `/root/project`.
+- `--root ~/code/flow` mounts the Flow repo into `/root/project`.
 
 ## Feature Test Template
 
@@ -45,7 +45,7 @@ Replace with your feature command:
 
 ```bash
 rise sandbox "set -euo pipefail; cd /root/project; <feature command>; echo FEATURE_OK" \
-  --root /Users/nikiv/code/flow \
+  --root ~/code/flow \
   --expect FEATURE_OK
 ```
 
@@ -55,7 +55,7 @@ Use this to verify `curl -fsSL https://myflow.sh/install.sh | sh` pulls the late
 
 ```bash
 rise sandbox "set -euo pipefail; curl -fsSL https://myflow.sh/install.sh | sh; ~/.flow/bin/f --version; echo INSTALL_OK" \
-  --root /Users/nikiv/code/flow \
+  --root ~/code/flow \
   --expect INSTALL_OK
 ```
 

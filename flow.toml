@@ -496,28 +496,88 @@ description = "Auto-generate a swarm for a task"
 
 [[tasks]]
 name = "pond-build"
-command = "bash -c 'cd /Users/nikiv/repos/ghostty-org/ghostty && zig build && zig build -Doptimize=ReleaseFast'"
+command = "bash -c 'cd ~/repos/ghostty-org/ghostty && zig build && zig build -Doptimize=ReleaseFast'"
 description = "Build Pond (Ghostty fork) in debug and production modes"
 
 [[tasks]]
 name = "pond-debug"
-command = "bash -c 'cd /Users/nikiv/repos/ghostty-org/ghostty && zig build -Doptimize=Debug'"
+command = "bash -c 'cd ~/repos/ghostty-org/ghostty && zig build -Doptimize=Debug'"
 description = "Build Pond (Ghostty fork) in debug mode"
 
 [[tasks]]
 name = "zed-build-debug-release"
-command = "bash -c 'cd /Users/nikiv/repos/zed-industries/zed && ./script/bundle-mac -d && ./script/bundle-mac'"
+command = "bash -c 'cd ~/repos/zed-industries/zed && ./script/bundle-mac -d && ./script/bundle-mac'"
 description = "Build Zed macOS bundle in debug mode (fast) and then in release mode"
 
 [[tasks]]
 name = "linsa-assistant-serve"
-command = "bash -c 'cd /Users/nikiv/code/org/linsa/linsa/api/cpp && sh ./run.sh serve'"
+command = "bash -c 'cd ~/code/org/linsa/linsa/api/cpp && sh ./run.sh serve'"
 description = "Build + run the Linsa C++ assistant proxy server"
 
 [[tasks]]
 name = "linsa-assistant-stream"
 command = "bash -c 'curl -N -X POST http://127.0.0.1:8788/api/assistant/chat/stream -H \"Content-Type: application/json\" -d \"{\\\"message\\\":\\\"hello\\\"}\"'"
 description = "Stream assistant response via SSE from the local proxy"
+
+[[tasks]]
+name = "x-deploy"
+command = "bash -lc 'bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh install && bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh run build'"
+description = "Install and build the zvec X likes/bookmarks CLI workspace with the local Bun debug build"
+
+[[tasks]]
+name = "x-doctor"
+command = "bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh ~/repos/alibaba/zvec/tools/x/src/cli.ts doctor $@"
+description = "Inspect zvec X archive settings, discovered query ids, and auth prerequisites"
+
+[[tasks]]
+name = "x-import-file"
+command = "bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh ~/repos/alibaba/zvec/tools/x/src/cli.ts import-file $@"
+description = "Ingest a bookmarks.json or likes.json export into the zvec X archive"
+
+[[tasks]]
+name = "x-capture-js"
+command = "bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh ~/repos/alibaba/zvec/tools/x/src/cli.ts capture-js"
+description = "Print a browser console script that captures bookmarks or likes into JSON"
+
+[[tasks]]
+name = "x-sync"
+command = "bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh ~/repos/alibaba/zvec/tools/x/src/cli.ts sync --source all $@"
+description = "Incrementally sync X bookmarks and likes into ~/repos/alibaba/zvec/var/x"
+
+[[tasks]]
+name = "x-backfill"
+command = "bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh ~/repos/alibaba/zvec/tools/x/src/cli.ts backfill --source all $@"
+description = "Fetch as much of the bookmarks and likes timelines as X will return into the zvec archive"
+
+[[tasks]]
+name = "x-sync-loop"
+command = "bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh ~/repos/alibaba/zvec/tools/x/src/cli.ts watch --source all $@"
+description = "Poll X continuously and keep the zvec archive and search index current"
+
+[[tasks]]
+name = "x-search"
+command = "bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh ~/repos/alibaba/zvec/tools/x/src/cli.ts search $@"
+description = "Search the local zvec X archive across bookmarks and likes"
+
+[[tasks]]
+name = "x-list"
+command = "bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh ~/repos/alibaba/zvec/tools/x/src/cli.ts list $@"
+description = "List recent items from the local zvec X archive"
+
+[[tasks]]
+name = "x-stats"
+command = "bash ~/repos/alibaba/zvec/tools/x/run-local-bun.sh ~/repos/alibaba/zvec/tools/x/src/cli.ts stats $@"
+description = "Show counts and latest-seen timestamps for the local zvec X archive"
+
+[[tasks]]
+name = "siftly-x"
+command = "bash ~/repos/viperrcrypto/Siftly/scripts/run-local-bun.sh run siftly -- x $@"
+description = "Run the Siftly CLI wrapper for the zvec X workspace with the local Bun debug build"
+
+[[tasks]]
+name = "siftly-x-deploy"
+command = "bash ~/repos/viperrcrypto/Siftly/scripts/run-local-bun.sh run siftly -- x deploy $@"
+description = "Install and build the zvec X workspace for use through the Siftly CLI with the local Bun debug build"
 
 [skills]
 sync_tasks = true

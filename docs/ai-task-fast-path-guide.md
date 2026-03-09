@@ -173,7 +173,8 @@ For focused hot-loop comparisons:
 ```bash
 python3 - <<'PY'
 import subprocess,time,statistics
-root='/Users/nikiv/code/flow'
+from pathlib import Path
+root=Path('~/code/flow').expanduser()
 cases=[
  ('f_daemon',['./target/debug/f','tasks','run-ai','--daemon','ai:flow/noop']),
  ('fai',['fai','ai:flow/noop']),

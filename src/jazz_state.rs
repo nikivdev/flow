@@ -10,11 +10,11 @@ use groove::ObjectId;
 use groove::sql::{Database, DatabaseError};
 use groove_rocksdb::RocksEnvironment;
 
-use crate::history::InvocationRecord;
+use crate::{config, history::InvocationRecord};
 
 const CATALOG_ID_FILE: &str = "catalog.id";
 const DEFAULT_DB_DIR: &str = ".config/flow/jazz2";
-const DEFAULT_REPO_ROOT: &str = "/Users/nikiv/repos/garden-co/jazz2";
+const DEFAULT_REPO_ROOT: &str = "~/repos/garden-co/jazz2";
 const OUTPUT_LIMIT: usize = 80_000;
 
 static DB: OnceLock<Mutex<Option<Database>>> = OnceLock::new();
@@ -104,9 +104,9 @@ fn is_lock_error(err: &anyhow::Error) -> bool {
 
 pub fn state_dir() -> PathBuf {
     if let Ok(path) = std::env::var("FLOW_JAZZ2_PATH") {
-        return PathBuf::from(path);
+        return config::expand_path(&path);
     }
-    let repo_root = PathBuf::from(DEFAULT_REPO_ROOT);
+    let repo_root = config::expand_path(DEFAULT_REPO_ROOT);
     if repo_root.exists() {
         return repo_root.join(".jazz2");
     }

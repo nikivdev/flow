@@ -44,7 +44,7 @@ You can provide a server template in your global config at `~/.config/flow/flow.
 
 ```toml
 [setup.server]
-template = "/Users/nikiv/infra/flow.toml"
+template = "~/infra/flow.toml"
 ```
 
 Or inline host defaults:

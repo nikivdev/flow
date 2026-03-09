@@ -420,10 +420,7 @@ fn repo_contains_package(project_root: &Path, needle: &str) -> bool {
 }
 
 fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
-    let legacy_roots = [
-        "/Users/nikiv/code/org/1f/jazz2",
-        "/Users/nikiv/repos/garden-co/jazz2",
-    ];
+    let legacy_roots = home_path_variants(&["~/code/org/1f/jazz2", "~/repos/garden-co/jazz2"]);
     let files = [
         project_root.join("packages/web/package.json"),
         project_root.join("packages/web/tsconfig.json"),
@@ -455,7 +452,7 @@ fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
         .or_else(|| std::env::var("FLOW_JAZZ_ROOT").ok());
 
     let mut target_root = env_root
-        .map(PathBuf::from)
+        .map(|raw| config::expand_path(&raw))
         .or_else(|| {
             let candidate = dirs::home_dir()?.join("repos/garden-co/jazz2");
             candidate.exists().then_some(candidate)
@@ -517,8 +514,8 @@ fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
         if !had_rewrites {
             continue;
         }
-        for root in legacy_roots {
-            text = text.replace(root, &target_root_str);
+        for root in &legacy_roots {
+            text = text.replace(root.as_str(), &target_root_str);
             text = text.replace(&format!("link:{root}"), &link_new);
         }
         fs::write(file, text).with_context(|| format!("failed to write {}", file.display()))?;
@@ -526,6 +523,20 @@ fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn home_path_variants(values: &[&str]) -> Vec<String> {
+    let mut variants: Vec<String> = values.iter().map(|value| (*value).to_string()).collect();
+    if let Some(home) = dirs::home_dir() {
+        for value in values {
+            if let Some(stripped) = value.strip_prefix("~/") {
+                variants.push(home.join(stripped).to_string_lossy().into_owned());
+            }
+        }
+    }
+    variants.sort();
+    variants.dedup();
+    variants
 }
 
 fn resolve_project_root(config_path: &PathBuf) -> Result<(PathBuf, PathBuf)> {

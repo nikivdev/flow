@@ -61,7 +61,7 @@ Forbidden fields:
 Validation:
 
 ```bash
-cd /Users/nikiv/code/flow
+cd ~/code/flow
 cargo check
 cargo run --bin f -- analytics status
 ```
@@ -112,7 +112,7 @@ Implement using `base` doc `docs/flow-usage-tracking.md` (added in parallel).
 
 ### Phase 5: Read path and dashboards
 
-1. Extend `seqch` in `/Users/nikiv/code/org/linsa/base/crates/seqch-cli/src/main.rs`
+1. Extend `seqch` in `~/code/org/linsa/base/crates/seqch-cli/src/main.rs`
    - new top-level area: `flow`
    - commands:
      - `seqch flow commands --hours 24`

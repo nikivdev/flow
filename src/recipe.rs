@@ -740,7 +740,7 @@ tags: [seq, app]
 Open Safari via seq and create a new tab.
 
 ```sh
-/Users/nikiv/code/seq/cli/cpp/out/bin/seq run "open Safari new tab"
+~/code/seq/cli/cpp/out/bin/seq run "open Safari new tab"
 ```
 "#;
 
