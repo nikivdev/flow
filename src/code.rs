@@ -1733,32 +1733,32 @@ mod tests {
 
     #[test]
     fn rewrite_path_prefix_rewrites_exact_and_nested_paths() {
-        let from = "/Users/nikiv/code/org/linsa/linsa-mac";
-        let to = "/Users/nikiv/code/org/linsa/linsa-native";
+        let from = "~/code/org/linsa/linsa-mac";
+        let to = "~/code/org/linsa/linsa-native";
         assert_eq!(rewrite_path_prefix(from, from, to), Some(to.to_string()));
         assert_eq!(
-            rewrite_path_prefix("/Users/nikiv/code/org/linsa/linsa-mac/src/ui", from, to),
-            Some("/Users/nikiv/code/org/linsa/linsa-native/src/ui".to_string())
+            rewrite_path_prefix("~/code/org/linsa/linsa-mac/src/ui", from, to),
+            Some("~/code/org/linsa/linsa-native/src/ui".to_string())
         );
         assert_eq!(
-            rewrite_path_prefix("/Users/nikiv/code/org/linsa/linsa", from, to),
+            rewrite_path_prefix("~/code/org/linsa/linsa", from, to),
             None
         );
     }
 
     #[test]
     fn rewrite_zvec_doc_paths_updates_project_and_source_paths() {
-        let from = "/Users/nikiv/code/org/linsa/linsa-mac";
-        let to = "/Users/nikiv/code/org/linsa/linsa-native";
+        let from = "~/code/org/linsa/linsa-mac";
+        let to = "~/code/org/linsa/linsa-native";
         let from_key = path_to_project_name(Path::new(from));
         let to_key = path_to_project_name(Path::new(to));
         let mut value = serde_json::json!({
             "id": "doc-1",
             "text": "Question: q\n\nAnswer: a",
             "metadata": {
-                "project_path": "/Users/nikiv/code/org/linsa/linsa-mac/src",
+                "project_path": "~/code/org/linsa/linsa-mac/src",
                 "source_path": format!(
-                    "/Users/nikiv/.claude/projects/{from_key}/session.jsonl"
+                    "~/.claude/projects/{from_key}/session.jsonl"
                 )
             }
         });
@@ -1770,14 +1770,14 @@ mod tests {
                 .get("metadata")
                 .and_then(|m| m.get("project_path"))
                 .and_then(|v| v.as_str()),
-            Some("/Users/nikiv/code/org/linsa/linsa-native/src")
+            Some("~/code/org/linsa/linsa-native/src")
         );
         assert_eq!(
             value
                 .get("metadata")
                 .and_then(|m| m.get("source_path"))
                 .and_then(|v| v.as_str()),
-            Some(format!("/Users/nikiv/.claude/projects/{to_key}/session.jsonl").as_str())
+            Some(format!("~/.claude/projects/{to_key}/session.jsonl").as_str())
         );
     }
 
@@ -1785,8 +1785,8 @@ mod tests {
     fn zvec_move_and_copy_update_project_scope() -> Result<()> {
         let tmp = tempdir()?;
         let zvec_path = tmp.path().join("agent_qa.jsonl");
-        let from = Path::new("/Users/nikiv/code/org/linsa/linsa-mac");
-        let to = Path::new("/Users/nikiv/code/org/linsa/linsa-native");
+        let from = Path::new("~/code/org/linsa/linsa-mac");
+        let to = Path::new("~/code/org/linsa/linsa-native");
         let from_key = path_to_project_name(from);
 
         let row = serde_json::json!({
@@ -1795,8 +1795,8 @@ mod tests {
             "metadata": {
                 "agent": "codex",
                 "session_id": "s1",
-                "project_path": "/Users/nikiv/code/org/linsa/linsa-mac",
-                "source_path": format!("/Users/nikiv/.claude/projects/{from_key}/s1.jsonl"),
+                "project_path": "~/code/org/linsa/linsa-mac",
+                "source_path": format!("~/.claude/projects/{from_key}/s1.jsonl"),
                 "ts_ms": 1
             }
         });
@@ -1805,15 +1805,15 @@ mod tests {
         let move_summary = update_zvec_agent_qa_paths(&zvec_path, from, to, false)?;
         assert_eq!(move_summary.updated_docs, 1);
         let moved = fs::read_to_string(&zvec_path)?;
-        assert!(moved.contains("/Users/nikiv/code/org/linsa/linsa-native"));
-        assert!(!moved.contains("/Users/nikiv/code/org/linsa/linsa-mac\""));
+        assert!(moved.contains("~/code/org/linsa/linsa-native"));
+        assert!(!moved.contains("~/code/org/linsa/linsa-mac\""));
 
         fs::write(&zvec_path, format!("{}\n", serde_json::to_string(&row)?))?;
         let copy_summary = copy_zvec_agent_qa_paths(&zvec_path, from, to, false)?;
         assert_eq!(copy_summary.copied_docs, 1);
         let copied = fs::read_to_string(&zvec_path)?;
-        assert!(copied.contains("/Users/nikiv/code/org/linsa/linsa-mac"));
-        assert!(copied.contains("/Users/nikiv/code/org/linsa/linsa-native"));
+        assert!(copied.contains("~/code/org/linsa/linsa-mac"));
+        assert!(copied.contains("~/code/org/linsa/linsa-native"));
         assert!(copied.contains("doc-1-copy-"));
 
         Ok(())

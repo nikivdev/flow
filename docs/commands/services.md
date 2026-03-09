@@ -37,6 +37,6 @@ keys found there (fallback order):
 ### Example
 
 ```bash
-cd /Users/nikiv/org/gen/new
+cd ~/org/gen/new
 f services stripe --mode test --apply
 ```

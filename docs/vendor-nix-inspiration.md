@@ -58,9 +58,9 @@ Nix analogy: reducing closure size to speed builds and improve iteration.
 ## Practical Loop
 
 ```bash
-/Users/nikiv/code/rise/scripts/vendor-control.sh sync --project /Users/nikiv/code/flow -- --important --dry-run
-/Users/nikiv/code/rise/scripts/vendor-control.sh sync --project /Users/nikiv/code/flow -- --important
-/Users/nikiv/code/rise/scripts/vendor-control.sh verify --project /Users/nikiv/code/flow --strict-provenance
+~/code/rise/scripts/vendor-control.sh sync --project ~/code/flow -- --important --dry-run
+~/code/rise/scripts/vendor-control.sh sync --project ~/code/flow -- --important
+~/code/rise/scripts/vendor-control.sh verify --project ~/code/flow --strict-provenance
 scripts/vendor/vendor-repo.sh hydrate
 cargo check -q
 ```

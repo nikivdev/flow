@@ -68,6 +68,8 @@ pub mod opentui_prompt;
 pub mod otp;
 pub mod palette;
 pub mod parallel;
+#[cfg(test)]
+mod path_hygiene;
 pub mod pr_edit;
 pub mod processes;
 pub mod projects;

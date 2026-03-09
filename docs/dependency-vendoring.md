@@ -95,7 +95,7 @@ Do not replace Cargo. Use Cargo as the system of record:
 Recommended entrypoint:
 
 ```bash
-/Users/nikiv/code/rise/scripts/vendor-control.sh inhouse --project /Users/nikiv/code/flow <crate> [version]
+~/code/rise/scripts/vendor-control.sh inhouse --project ~/code/flow <crate> [version]
 ```
 
 What this does:
@@ -116,7 +116,7 @@ Run after each vendoring step:
 ```bash
 f update-deps --important
 f vendor-trims
-/Users/nikiv/code/rise/scripts/vendor-control.sh verify --project /Users/nikiv/code/flow
+~/code/rise/scripts/vendor-control.sh verify --project ~/code/flow
 python3 ./scripts/vendor/rough_edges_audit.py --project . --strict-warnings
 cargo check -q
 scripts/vendor/sync-all.sh --important --dry-run
@@ -164,13 +164,13 @@ regressions for known vendored crate hot spots (`crossterm`, `portable-pty`,
 Use report mode:
 
 ```bash
-/Users/nikiv/code/rise/scripts/vendor-control.sh provenance --project /Users/nikiv/code/flow
+~/code/rise/scripts/vendor-control.sh provenance --project ~/code/flow
 ```
 
 Use stricter mode when migrating fully:
 
 ```bash
-/Users/nikiv/code/rise/scripts/vendor-control.sh verify --project /Users/nikiv/code/flow --strict-provenance
+~/code/rise/scripts/vendor-control.sh verify --project ~/code/flow --strict-provenance
 ```
 
 ## Transactional Failure Behavior
@@ -185,7 +185,7 @@ Use stricter mode when migrating fully:
 Escape hatch (not recommended except debugging):
 
 ```bash
-/Users/nikiv/code/rise/scripts/vendor-control.sh inhouse --project /Users/nikiv/code/flow <crate> --no-rollback
+~/code/rise/scripts/vendor-control.sh inhouse --project ~/code/flow <crate> --no-rollback
 ```
 
 ## Upstream Sync Loop

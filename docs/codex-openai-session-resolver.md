@@ -4,8 +4,8 @@ This documents the personal `L` wrapper that opens or resumes Codex sessions wit
 
 Relevant files:
 
-- fish entrypoint: `/Users/nikitavoloboev/config/fish/fn.fish`
-- resolver: `/Users/nikitavoloboev/config/fish/scripts/codex-openai-session.ts`
+- fish entrypoint: `~/config/fish/fn.fish`
+- resolver: `~/config/fish/scripts/codex-openai-session.ts`
 
 ## Behavior
 
@@ -32,7 +32,7 @@ For this wrapper, exact repo scoping is the main win. It avoids mixing sessions 
 1. Spawn `codex app-server` with cwd set to `~/repos/openai/codex`.
 2. Send `initialize`, then `initialized`.
 3. Call `thread/list` with:
-   - `cwd: /Users/nikitavoloboev/repos/openai/codex`
+   - `cwd: ~/repos/openai/codex`
    - `archived: false`
    - `sortKey: updated_at`
 4. Use a small first fetch when possible:

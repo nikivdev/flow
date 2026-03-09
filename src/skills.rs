@@ -751,7 +751,7 @@ fn default_seq_repo() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         return home.join("code").join("seq");
     }
-    PathBuf::from("/Users/nikiv/code/seq")
+    PathBuf::from("~/code/seq")
 }
 
 fn resolve_path_arg(raw: &str, base: &Path) -> PathBuf {

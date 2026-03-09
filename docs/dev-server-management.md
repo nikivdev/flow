@@ -78,7 +78,7 @@ The lin config watcher runs `bun ./config.ts` which generates:
 name = "myflow-web"
 command = "bash"
 args = ["-c", "bash ./scripts/patch-rise-root.sh && cd web && RISE_WEB_PORT=3000 VITE_API_URL=http://localhost:8780 rise dev --root .. --platform web"]
-working_dir = "/Users/nikiv/code/myflow"
+working_dir = "~/code/myflow"
 port = 3000
 autostart = false
 ```

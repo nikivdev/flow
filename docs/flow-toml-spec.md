@@ -71,7 +71,7 @@ install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/sk
 # myflow_url = "https://myflow.sh"
 # myflow_token = "..."
 # codex_bin = "/path/to/codex-wrapper"  # must support `app-server` JSON-RPC
-# codex_bin = "/Users/nikiv/code/flow/scripts/codex-jazz-wrapper"
+# codex_bin = "~/code/flow/scripts/codex-jazz-wrapper"
 # You can set this in repo flow.toml or global ~/.config/flow/flow.toml
 
 [commit.testing]      # optional: local commit-time test gate

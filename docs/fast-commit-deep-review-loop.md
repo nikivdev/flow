@@ -33,7 +33,7 @@ myflow_mirror = true
 
 # Optional: route Codex review through a wrapper transport binary.
 # Must implement `app-server` JSON-RPC compatibility.
-# codex_bin = "/Users/nikiv/code/flow/scripts/codex-jazz-wrapper"
+# codex_bin = "~/code/flow/scripts/codex-jazz-wrapper"
 ```
 
 ## 2) Daily loop
