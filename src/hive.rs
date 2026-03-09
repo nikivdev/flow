@@ -68,7 +68,7 @@ pub struct AgentConfig {
 }
 
 /// Hive global config from ~/.hive/config.json
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HiveConfig {
     #[serde(default)]
     pub agents: HashMap<String, HiveAgentSpec>,
@@ -76,7 +76,7 @@ pub struct HiveConfig {
     pub defaults: Option<HiveDefaults>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HiveAgentSpec {
     #[serde(default)]
     pub job: Option<String>,
@@ -86,7 +86,7 @@ pub struct HiveAgentSpec {
     pub matched_on: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HiveDefaults {
     #[serde(default)]
     pub provider: Option<String>,

@@ -88,7 +88,6 @@ pub fn run(opts: SetupOpts) -> Result<()> {
     ensure_bike_gitignore(&project_root)?;
     ensure_project_dependencies(&cfg)?;
     ensure_pnpm_only_built_deps(&project_root)?;
-    ensure_jazz_local_links(&project_root)?;
 
     if tasks::find_task(&cfg, "setup").is_some() {
         if created_flow_toml {
@@ -417,126 +416,6 @@ fn repo_contains_package(project_root: &Path, needle: &str) -> bool {
         }
     }
     false
-}
-
-fn ensure_jazz_local_links(project_root: &Path) -> Result<()> {
-    let legacy_roots = home_path_variants(&["~/code/org/1f/jazz2", "~/repos/garden-co/jazz2"]);
-    let files = [
-        project_root.join("packages/web/package.json"),
-        project_root.join("packages/web/tsconfig.json"),
-        project_root.join("packages/web/vite.config.ts"),
-        project_root.join("pnpm-lock.yaml"),
-    ];
-
-    let mut needs_rewrite = false;
-    for file in files.iter() {
-        if !file.exists() {
-            continue;
-        }
-        let text = fs::read_to_string(file).unwrap_or_default();
-        if legacy_roots
-            .iter()
-            .any(|root| text.contains(root) || text.contains(&format!("link:{root}")))
-        {
-            needs_rewrite = true;
-            break;
-        }
-    }
-
-    if !needs_rewrite {
-        return Ok(());
-    }
-
-    let env_root = std::env::var("JAZZ_ROOT")
-        .ok()
-        .or_else(|| std::env::var("FLOW_JAZZ_ROOT").ok());
-
-    let mut target_root = env_root
-        .map(|raw| config::expand_path(&raw))
-        .or_else(|| {
-            let candidate = dirs::home_dir()?.join("repos/garden-co/jazz2");
-            candidate.exists().then_some(candidate)
-        })
-        .or_else(|| {
-            let candidate = dirs::home_dir()?.join("code/org/1f/jazz2");
-            candidate.exists().then_some(candidate)
-        });
-
-    if target_root.is_none() {
-        let candidate = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("~"))
-            .join("repos/garden-co/jazz2");
-        if let Some(parent) = candidate.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        println!(
-            "Jazz2 repo not found; attempting to clone to {}...",
-            candidate.display()
-        );
-        let status = Command::new("git")
-            .args([
-                "clone",
-                "https://github.com/garden-co/jazz2",
-                candidate.to_str().unwrap_or(""),
-            ])
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status();
-        if let Ok(status) = status {
-            if status.success() {
-                target_root = Some(candidate);
-            } else {
-                println!("Failed to clone jazz2; update paths manually.");
-            }
-        }
-    }
-
-    let Some(target_root) = target_root else {
-        return Ok(());
-    };
-
-    let target_root = target_root
-        .canonicalize()
-        .unwrap_or_else(|_| target_root.clone());
-    let target_root_str = target_root.to_string_lossy().to_string();
-    let link_new = format!("link:{}", target_root_str);
-
-    for file in files.iter() {
-        if !file.exists() {
-            continue;
-        }
-        let mut text = fs::read_to_string(file)
-            .with_context(|| format!("failed to read {}", file.display()))?;
-        let had_rewrites = legacy_roots
-            .iter()
-            .any(|root| text.contains(root) || text.contains(&format!("link:{root}")));
-        if !had_rewrites {
-            continue;
-        }
-        for root in &legacy_roots {
-            text = text.replace(root.as_str(), &target_root_str);
-            text = text.replace(&format!("link:{root}"), &link_new);
-        }
-        fs::write(file, text).with_context(|| format!("failed to write {}", file.display()))?;
-        println!("Rewrote Jazz paths in {}", file.display());
-    }
-
-    Ok(())
-}
-
-fn home_path_variants(values: &[&str]) -> Vec<String> {
-    let mut variants: Vec<String> = values.iter().map(|value| (*value).to_string()).collect();
-    if let Some(home) = dirs::home_dir() {
-        for value in values {
-            if let Some(stripped) = value.strip_prefix("~/") {
-                variants.push(home.join(stripped).to_string_lossy().into_owned());
-            }
-        }
-    }
-    variants.sort();
-    variants.dedup();
-    variants
 }
 
 fn resolve_project_root(config_path: &PathBuf) -> Result<(PathBuf, PathBuf)> {

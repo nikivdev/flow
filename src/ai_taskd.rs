@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::ai_tasks;
 use crate::rl_signals;
+use crate::{ai_tasks, project_snapshot::AiTaskSnapshot};
 
 const MSGPACK_WIRE_PREFIX: u8 = 0xFF;
 
@@ -399,7 +399,7 @@ fn ensure_discovery_fresh(state: &mut TaskdState, key: &Path) -> Result<bool> {
 }
 
 fn refresh_discovery(state: &mut TaskdState, key: &Path) -> Result<()> {
-    let tasks = ai_tasks::discover_tasks(key)?;
+    let tasks = AiTaskSnapshot::from_canonical_root(key.to_path_buf())?.tasks;
     state.discoveries.insert(
         key.to_path_buf(),
         CachedDiscovery {

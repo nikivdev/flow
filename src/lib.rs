@@ -72,6 +72,7 @@ pub mod parallel;
 mod path_hygiene;
 pub mod pr_edit;
 pub mod processes;
+pub mod project_snapshot;
 pub mod projects;
 pub mod proxy;
 pub mod publish;

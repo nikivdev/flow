@@ -12,6 +12,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  deps-freshness:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate readme casing
+        run: scripts/ci/check-readme-case.sh
+
+      - name: Cache vendored deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vendor/flow-vendor
+            lib/vendor
+            lib/vendor-manifest
+          key: ${{ runner.os }}-${{ runner.arch }}-vendor-${{ hashFiles('vendor.lock.toml') }}
+
+      - name: Hydrate vendored deps
+        run: scripts/vendor/vendor-repo.sh hydrate
+
+      - name: Smoke vendor trims
+        run: scripts/vendor/apply-trims.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check dependency freshness
+        run: python3 scripts/deps_check.py
+
   build:
     timeout-minutes: 50
     strategy:

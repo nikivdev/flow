@@ -60,6 +60,13 @@ struct DeployLogState {
     last_deploy_unix: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+struct DeployProjectContext {
+    project_root: PathBuf,
+    config_path: PathBuf,
+    flow_config: Option<Config>,
+}
+
 impl HostConnection {
     /// Parse connection string like "user@host:port" or "user@host".
     pub fn parse(s: &str) -> Result<Self> {
@@ -302,15 +309,30 @@ fn record_deploy_marker(project_root: &Path) -> Result<()> {
 
 /// Run the deploy command.
 pub fn run(cmd: DeployCommand) -> Result<()> {
-    let project_root = std::env::current_dir()?;
-    let config_path = project_root.join("flow.toml");
-    let flow_config = if config_path.exists() {
-        Some(crate::config::load(&config_path)?)
-    } else {
-        None
-    };
-
     match cmd.action {
+        Some(DeployAction::Config) => configure_deploy(),
+        Some(DeployAction::Release(opts)) => release::run_task(opts),
+        Some(DeployAction::Shell) => open_shell(),
+        Some(DeployAction::SetHost { connection }) => set_host(&connection),
+        Some(DeployAction::ShowHost) => show_host(),
+        action => {
+            let ctx = load_deploy_project_context()?;
+            run_with_project_context(action, ctx)
+        }
+    }
+}
+
+fn run_with_project_context(
+    action: Option<DeployAction>,
+    ctx: DeployProjectContext,
+) -> Result<()> {
+    let DeployProjectContext {
+        project_root,
+        config_path,
+        flow_config,
+    } = ctx;
+
+    match action {
         None => {
             // Auto-detect platform from flow.toml, or run deploy task if configured.
             if let Some(cfg) = flow_config.as_ref() {
@@ -372,8 +394,6 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
         Some(DeployAction::Web) => deploy_web(&project_root, flow_config.as_ref()),
         Some(DeployAction::Setup) => setup_cloudflare(&project_root, flow_config.as_ref()),
         Some(DeployAction::Railway) => deploy_railway(&project_root, flow_config.as_ref()),
-        Some(DeployAction::Config) => configure_deploy(),
-        Some(DeployAction::Release(opts)) => release::run_task(opts),
         Some(DeployAction::Status) => show_status(&project_root, flow_config.as_ref()),
         Some(DeployAction::Logs {
             follow,
@@ -390,26 +410,43 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
         ),
         Some(DeployAction::Restart) => restart_service(&project_root, flow_config.as_ref()),
         Some(DeployAction::Stop) => stop_service(&project_root, flow_config.as_ref()),
-        Some(DeployAction::Shell) => open_shell(),
-        Some(DeployAction::SetHost { connection }) => set_host(&connection),
-        Some(DeployAction::ShowHost) => show_host(),
         Some(DeployAction::Health { url, status }) => {
             check_health(&project_root, flow_config.as_ref(), url, status)
         }
+        Some(DeployAction::Config)
+        | Some(DeployAction::Release(_))
+        | Some(DeployAction::Shell)
+        | Some(DeployAction::SetHost { .. })
+        | Some(DeployAction::ShowHost) => unreachable!("handled before project context load"),
     }
 }
 
 /// Run a production deploy (skips flow.deploy_task and prefers deploy-prod/prod tasks).
 pub fn run_prod(cmd: DeployCommand) -> Result<()> {
-    let project_root = std::env::current_dir()?;
-    let config_path = project_root.join("flow.toml");
-    let flow_config = if config_path.exists() {
-        Some(crate::config::load(&config_path)?)
-    } else {
-        None
-    };
-
     match cmd.action {
+        Some(DeployAction::Config) => configure_deploy(),
+        Some(DeployAction::Release(opts)) => release::run_task(opts),
+        Some(DeployAction::Shell) => open_shell(),
+        Some(DeployAction::SetHost { connection }) => set_host(&connection),
+        Some(DeployAction::ShowHost) => show_host(),
+        action => {
+            let ctx = load_deploy_project_context()?;
+            run_prod_with_project_context(action, ctx)
+        }
+    }
+}
+
+fn run_prod_with_project_context(
+    action: Option<DeployAction>,
+    ctx: DeployProjectContext,
+) -> Result<()> {
+    let DeployProjectContext {
+        project_root,
+        config_path,
+        flow_config,
+    } = ctx;
+
+    match action {
         None => {
             let cfg = flow_config
                 .as_ref()
@@ -496,8 +533,6 @@ pub fn run_prod(cmd: DeployCommand) -> Result<()> {
         Some(DeployAction::Web) => deploy_web(&project_root, flow_config.as_ref()),
         Some(DeployAction::Setup) => setup_cloudflare(&project_root, flow_config.as_ref()),
         Some(DeployAction::Railway) => deploy_railway(&project_root, flow_config.as_ref()),
-        Some(DeployAction::Config) => configure_deploy(),
-        Some(DeployAction::Release(opts)) => release::run_task(opts),
         Some(DeployAction::Status) => show_status(&project_root, flow_config.as_ref()),
         Some(DeployAction::Logs {
             follow,
@@ -514,19 +549,20 @@ pub fn run_prod(cmd: DeployCommand) -> Result<()> {
         ),
         Some(DeployAction::Restart) => restart_service(&project_root, flow_config.as_ref()),
         Some(DeployAction::Stop) => stop_service(&project_root, flow_config.as_ref()),
-        Some(DeployAction::Shell) => open_shell(),
-        Some(DeployAction::SetHost { connection }) => set_host(&connection),
-        Some(DeployAction::ShowHost) => show_host(),
         Some(DeployAction::Health { url, status }) => {
             check_health(&project_root, flow_config.as_ref(), url, status)
         }
+        Some(DeployAction::Config)
+        | Some(DeployAction::Release(_))
+        | Some(DeployAction::Shell)
+        | Some(DeployAction::SetHost { .. })
+        | Some(DeployAction::ShowHost) => unreachable!("handled before project context load"),
     }
 }
 
 fn configure_deploy() -> Result<()> {
     println!("Deploy config (Linux host via SSH).");
 
-    let _ = ensure_deploy_helper();
     let existing = load_deploy_config()?.host;
     let infra_default = infra_linux_connection_string();
 
@@ -560,6 +596,24 @@ fn configure_deploy() -> Result<()> {
     println!("✓ Host set: {}@{}:{}", conn.user, conn.host, conn.port);
     println!("Next: run `f setup release` to scaffold host config, then `f deploy`.");
     Ok(())
+}
+
+fn load_deploy_project_context() -> Result<DeployProjectContext> {
+    let cwd = std::env::current_dir()?;
+    let config_path = crate::project_snapshot::find_flow_toml_upwards(&cwd)
+        .unwrap_or_else(|| cwd.join("flow.toml"));
+    let project_root = config_path.parent().unwrap_or(&cwd).to_path_buf();
+    let flow_config = if config_path.exists() {
+        Some(crate::config::load(&config_path)?)
+    } else {
+        None
+    };
+
+    Ok(DeployProjectContext {
+        project_root,
+        config_path,
+        flow_config,
+    })
 }
 
 pub fn ensure_deploy_helper() -> Result<Option<PathBuf>> {

@@ -5,12 +5,13 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredAiTask {
     pub id: String,
     pub selector: String,
@@ -20,6 +21,12 @@ pub struct DiscoveredAiTask {
     pub path: PathBuf,
     pub relative_path: String,
     pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AiTaskDiscoveryArtifacts {
+    pub tasks: Vec<DiscoveredAiTask>,
+    pub watched_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,11 +50,31 @@ pub fn discover_tasks(root: &Path) -> Result<Vec<DiscoveredAiTask>> {
         std::env::current_dir()?.join(root)
     };
     let root = root.canonicalize().unwrap_or(root);
+    discover_tasks_from_root(root)
+}
+
+pub(crate) fn discover_tasks_from_root(root: PathBuf) -> Result<Vec<DiscoveredAiTask>> {
+    Ok(discover_tasks_from_root_artifacts(root)?.tasks)
+}
+
+pub(crate) fn discover_tasks_from_root_artifacts(
+    root: PathBuf,
+) -> Result<AiTaskDiscoveryArtifacts> {
     let task_root = root.join(".ai").join("tasks");
+    let mut watched_paths = vec![root.clone()];
+
+    let ai_root = root.join(".ai");
+    if ai_root.exists() {
+        watched_paths.push(ai_root);
+    }
 
     if !task_root.exists() {
-        return Ok(Vec::new());
+        return Ok(AiTaskDiscoveryArtifacts {
+            tasks: Vec::new(),
+            watched_paths,
+        });
     }
+    watched_paths.push(task_root.clone());
 
     let walker = WalkBuilder::new(&task_root)
         .hidden(false)
@@ -60,6 +87,12 @@ pub fn discover_tasks(root: &Path) -> Result<Vec<DiscoveredAiTask>> {
     let mut out = Vec::new();
     for entry in walker.flatten() {
         let path = entry.path();
+        if path.is_dir() {
+            if !watched_paths.iter().any(|existing| existing == path) {
+                watched_paths.push(path.to_path_buf());
+            }
+            continue;
+        }
         if !path.is_file() {
             continue;
         }
@@ -82,12 +115,16 @@ pub fn discover_tasks(root: &Path) -> Result<Vec<DiscoveredAiTask>> {
         if ext != "mbt" {
             continue;
         }
+        watched_paths.push(path.to_path_buf());
         let task = parse_task(&task_root, path)?;
         out.push(task);
     }
 
     out.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(out)
+    Ok(AiTaskDiscoveryArtifacts {
+        tasks: out,
+        watched_paths,
+    })
 }
 
 pub fn resolve_task_fast(root: &Path, selector: &str) -> Result<Option<DiscoveredAiTask>> {

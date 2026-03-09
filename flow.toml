@@ -84,6 +84,16 @@ command = "cargo run -- hub start"
 description = "Ensure the hub daemon is running locally"
 
 [[tasks]]
+name = "generate-help-full-json"
+command = "python3 ./scripts/generate_help_full_json.py"
+description = "Regenerate the embedded --help-full JSON cache."
+
+[[tasks]]
+name = "deps-check"
+command = "python3 ./scripts/deps_check.py $@"
+description = "Check vendored and workspace Cargo deps against the latest upstream releases."
+
+[[tasks]]
 name = "deploy-cli-release"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh"
 description = "Build the CLI/daemon with --release and copy the binary to ~/.local/bin/flow"
@@ -320,6 +330,16 @@ description = "Test log ingestion and query endpoints (requires 'f server' runni
 name = "bench-ai-runtime"
 command = "python3 ./scripts/bench-ai-runtime.py $@"
 description = "Benchmark MoonBit AI task runtime paths (moon-run vs cached vs daemon)"
+
+[[tasks]]
+name = "bench-cli-startup"
+command = "python3 ./scripts/bench-cli-startup.py $@"
+description = "Benchmark Flow CLI startup and cheap read-only command latency"
+
+[[tasks]]
+name = "bench-cli-gate"
+command = "sh -lc 'CARGO_INCREMENTAL=0 cargo build --release --bin f && python3 ./scripts/bench-cli-startup.py --flow-bin ./target/release/f --json-out ./out/bench/cli-startup.json \"$@\" && python3 ./scripts/check_cli_startup_thresholds.py ./out/bench/cli-startup.json' -- $@"
+description = "Benchmark release CLI startup and fail if repository latency thresholds regress."
 
 [[tasks]]
 name = "bench-ffi-boundary"

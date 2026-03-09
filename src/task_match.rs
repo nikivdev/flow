@@ -7,10 +7,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::cli::Cli;
 use crate::{
-    cli::TaskRunOpts,
-    config,
-    discover::{self, DiscoveredTask},
-    lmstudio, tasks,
+    cli::TaskRunOpts, config, discover::DiscoveredTask, lmstudio,
+    project_snapshot::ProjectSnapshot, tasks,
 };
 use clap::{CommandFactory, Parser};
 
@@ -121,8 +119,8 @@ fn passthrough_to_cli(args: &[String]) -> Result<()> {
 /// Match a user query to a task and optionally execute it.
 pub fn run(opts: MatchOpts) -> Result<()> {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let discovery = discover::discover_tasks(&root)?;
-    run_with_tasks(opts, discovery.tasks, true)
+    let snapshot = ProjectSnapshot::from_root_tasks_only(&root)?;
+    run_with_tasks(opts, snapshot.discovery.tasks, true)
 }
 
 /// Match a user query to a global task and optionally execute it.

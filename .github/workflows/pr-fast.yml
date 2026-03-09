@@ -21,7 +21,7 @@ env:
 jobs:
   check-linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,6 +40,9 @@ jobs:
 
       - name: Hydrate vendored deps
         run: scripts/vendor/vendor-repo.sh hydrate
+
+      - name: Smoke vendor trims
+        run: scripts/vendor/apply-trims.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -61,3 +64,14 @@ jobs:
 
       - name: Compile seq bridge tests
         run: cargo test -p seq_everruns_bridge --no-run
+
+      - name: Build release CLI
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo build --release --bin f
+
+      - name: Benchmark release CLI startup
+        run: python3 scripts/bench-cli-startup.py --iterations 5 --warmup 1 --flow-bin ./target/release/f --json-out out/bench/cli-startup.json
+
+      - name: Enforce startup latency thresholds
+        run: python3 scripts/check_cli_startup_thresholds.py out/bench/cli-startup.json

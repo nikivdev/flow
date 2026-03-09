@@ -12,8 +12,11 @@ use shellexpand::tilde;
 
 use crate::fixup;
 
+const CONFIG_CACHE_VERSION: u32 = 1;
+const CONFIG_CACHE_ENV_DISABLE: &str = "FLOW_DISABLE_CONFIG_CACHE";
+
 /// Top-level configuration for flowd, currently focused on managed servers.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub version: Option<u32>,
@@ -143,7 +146,7 @@ pub struct Config {
 }
 
 /// Commit explanation config — AI-generated markdown summaries per commit.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ExplainCommitsConfig {
     /// Whether auto-explain is enabled on sync (default: false).
     #[serde(default)]
@@ -163,7 +166,7 @@ pub struct ExplainCommitsConfig {
 }
 
 /// Everruns AI runtime defaults.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct EverrunsConfig {
     /// Everruns API base URL (for example: http://127.0.0.1:9300/api).
     #[serde(default, alias = "base-url", alias = "baseUrl")]
@@ -201,7 +204,7 @@ pub struct EverrunsConfig {
 }
 
 /// macOS launchd service management config.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct MacosConfig {
     /// Service patterns that are allowed (won't be flagged).
     /// Supports wildcards like "com.nikiv.*".
@@ -214,7 +217,7 @@ pub struct MacosConfig {
 }
 
 /// SSH config (mode, key name, etc.).
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SshConfig {
     /// ssh mode: "auto", "force", or "https"
     #[serde(default)]
@@ -228,7 +231,7 @@ pub struct SshConfig {
 }
 
 /// Configuration for commit workflow.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct CommitConfig {
     /// Pre-commit fixers to run before staging.
     /// Built-in: "mdx-comments", "trailing-whitespace", "end-of-file"
@@ -341,7 +344,7 @@ pub struct CommitConfig {
 }
 
 /// Quality gate configuration: enforce documentation and test requirements at commit time.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct QualityConfig {
     /// Gate mode: "warn" (default) | "block" | "off"
     #[serde(default)]
@@ -367,7 +370,7 @@ pub struct QualityConfig {
 }
 
 /// Testing gate configuration: enforce Bun test runner usage and quick local checks.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TestingConfig {
     /// Gate mode: "warn" (default) | "block" | "off"
     #[serde(default)]
@@ -396,7 +399,7 @@ pub struct TestingConfig {
 }
 
 /// Skill gate configuration: require specific workflow skills before commit.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SkillGateConfig {
     /// Gate mode: "warn" | "block" | "off"
     #[serde(default)]
@@ -413,7 +416,7 @@ pub struct SkillGateConfig {
 ///
 /// Defines machine-parseable rules that flow checks against staged changes.
 /// Findings are injected into AI review prompts and can block or warn on commit.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct InvariantsConfig {
     /// Gate mode: "warn" (default) | "block" | "off"
     #[serde(default)]
@@ -441,7 +444,7 @@ pub struct InvariantsConfig {
 }
 
 /// Dependency policy within invariants.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct InvariantsDepsConfig {
     /// Policy: "approval_required" (default) | "open"
     #[serde(default)]
@@ -452,7 +455,7 @@ pub struct InvariantsDepsConfig {
 }
 
 /// File-level invariant rules.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct InvariantsFilesConfig {
     /// Maximum lines per source file. Files exceeding this in the diff trigger a warning.
     #[serde(default, rename = "max_lines", alias = "max-lines")]
@@ -460,7 +463,7 @@ pub struct InvariantsFilesConfig {
 }
 
 /// Jujutsu (jj) workflow config.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct JjConfig {
     /// Default branch to rebase onto (e.g., "main").
     #[serde(
@@ -500,7 +503,7 @@ pub struct JjConfig {
 }
 
 /// Git workflow config.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct GitConfig {
     /// Default writable remote used by flow commit/sync (e.g., "origin", "fork", "myflow-i").
     #[serde(default)]
@@ -517,14 +520,14 @@ pub struct GitConfig {
 }
 
 /// TypeScript config loaded from ~/.config/flow/config.ts
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TsConfig {
     #[serde(default)]
     pub flow: Option<TsFlowConfig>,
 }
 
 /// Flow section from TypeScript config.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TsFlowConfig {
     #[serde(default)]
     pub commit: Option<TsCommitConfig>,
@@ -553,7 +556,7 @@ pub struct TsFlowConfig {
 }
 
 /// Env settings from TypeScript config.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TsEnvConfig {
     /// Preferred env backend: "cloud" or "local".
     #[serde(default)]
@@ -569,7 +572,7 @@ pub struct TsEnvConfig {
 }
 
 /// Agents settings from TypeScript config.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TsAgentsConfig {
     /// Tool to use: "claude", "gen", "opencode"
     #[serde(default)]
@@ -580,7 +583,7 @@ pub struct TsAgentsConfig {
 }
 
 /// Task-failure agent routing settings from TypeScript config.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TsTaskFailureAgentsConfig {
     /// Enable auto-routing on task failure.
     #[serde(default)]
@@ -600,7 +603,7 @@ pub struct TsTaskFailureAgentsConfig {
 }
 
 /// Commit settings from TypeScript config.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TsCommitConfig {
     /// Tool to use: "claude", "codex", "opencode"
     #[serde(default)]
@@ -684,7 +687,7 @@ pub struct TsCommitConfig {
 }
 
 /// Review settings from TypeScript config (overrides commit settings for review).
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TsReviewConfig {
     /// Tool to use for review: "claude", "codex", "opencode", "kimi"
     #[serde(default)]
@@ -743,7 +746,7 @@ impl Default for Config {
 }
 
 /// Flow-specific settings for autonomous agent workflows.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct FlowSettings {
     /// The primary task to run after code changes (e.g., "release", "deploy").
     #[serde(default, alias = "primary-task")]
@@ -757,7 +760,7 @@ pub struct FlowSettings {
 }
 
 /// Project lifecycle configuration for `f up` and `f down`.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct LifecycleConfig {
     /// Task to run for `f up` (default fallback order: "up", then "dev").
     #[serde(default, rename = "up_task", alias = "up-task", alias = "upTask")]
@@ -771,7 +774,7 @@ pub struct LifecycleConfig {
 }
 
 /// Optional local-domain automation used by lifecycle commands.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct LifecycleDomainsConfig {
     /// Hostname to map, for example: "myflow.localhost".
     #[serde(default, alias = "domain")]
@@ -801,7 +804,7 @@ pub struct LifecycleDomainsConfig {
 }
 
 /// Skills enforcement configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SkillsConfig {
     /// Auto-sync flow.toml tasks into .ai/skills.
     #[serde(
@@ -823,7 +826,7 @@ pub struct SkillsConfig {
 }
 
 /// Anonymous usage analytics settings.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AnalyticsConfig {
     /// Force analytics enabled/disabled regardless of local prompt state.
     #[serde(default)]
@@ -837,7 +840,7 @@ pub struct AnalyticsConfig {
 }
 
 /// Codex-focused skills settings.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SkillsCodexConfig {
     /// Generate `agents/openai.yaml` metadata for task-synced skills.
     #[serde(
@@ -866,7 +869,7 @@ pub struct SkillsCodexConfig {
 }
 
 /// Seq-backed skills fetch configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SkillsSeqConfig {
     /// Fetch mode ("local-cli" today; "remote-api" reserved).
     #[serde(default)]
@@ -928,7 +931,7 @@ pub struct SkillsSeqConfig {
     pub ecosystems: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ReleaseConfig {
     /// Default release provider (e.g., "registry", "task").
     #[serde(default)]
@@ -959,7 +962,7 @@ pub struct ReleaseConfig {
     pub registry: Option<RegistryReleaseConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct RegistryReleaseConfig {
     /// Base URL for the registry (e.g., "https://myflow.sh").
     #[serde(default)]
@@ -981,14 +984,14 @@ pub struct RegistryReleaseConfig {
     pub latest: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SetupConfig {
     /// Server setup defaults (used by f setup release).
     #[serde(default)]
     pub server: Option<SetupServerConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SetupServerConfig {
     /// Optional template flow.toml path to pull [host] defaults from.
     pub template: Option<String>,
@@ -998,7 +1001,7 @@ pub struct SetupServerConfig {
 }
 
 /// Task lookup policy for nested flow.toml discovery.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TaskResolutionConfig {
     /// Preferred scope order for ambiguous task names (e.g. ["mobile", "root"]).
     #[serde(
@@ -1022,7 +1025,7 @@ pub struct TaskResolutionConfig {
 }
 
 /// Global feature toggles.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct OptionsConfig {
     #[serde(default, rename = "trace_terminal_io")]
     pub trace_terminal_io: bool,
@@ -1177,7 +1180,7 @@ impl TaskResolutionConfig {
 }
 
 /// Configuration for a single managed HTTP server process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ServerConfig {
     /// Human-friendly name used in the TUI and HTTP API.
     pub name: String,
@@ -1294,7 +1297,7 @@ fn default_autostart() -> bool {
 }
 
 /// Local project automation task description.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TaskConfig {
     /// Unique identifier for the task (used when selecting it interactively).
     pub name: String,
@@ -1335,7 +1338,7 @@ pub struct TaskConfig {
 }
 
 /// Definition of a dependency that can be referenced by automation tasks.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum DependencySpec {
     /// Single command/binary that should be available on PATH.
@@ -1367,7 +1370,7 @@ where
 }
 
 /// Storage configuration describing remote environments providers.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
     /// Provider identifier understood by the hosted hub.
     pub provider: String,
@@ -1391,7 +1394,7 @@ fn default_storage_env_var() -> String {
 }
 
 /// Definition of an environment with named variables.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageEnvConfig {
     pub name: String,
     #[serde(default)]
@@ -1400,7 +1403,7 @@ pub struct StorageEnvConfig {
     pub variables: Vec<StorageVariable>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageVariable {
     pub key: String,
     #[serde(default)]
@@ -1428,7 +1431,7 @@ pub struct FloxInstallSpec {
     pub priority: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CommandFileConfig {
     pub path: String,
     #[serde(default)]
@@ -1436,7 +1439,7 @@ pub struct CommandFileConfig {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RemoteServerConfig {
     #[serde(flatten)]
     pub server: ServerConfig,
@@ -1449,7 +1452,7 @@ pub struct RemoteServerConfig {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerHubConfig {
     pub name: String,
     pub host: String,
@@ -1466,7 +1469,7 @@ fn default_server_hub_port() -> u16 {
 }
 
 /// File watcher configuration for local automation.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WatcherConfig {
     #[serde(default)]
     pub driver: WatcherDriver,
@@ -1486,7 +1489,7 @@ pub struct WatcherConfig {
     pub poltergeist: Option<PoltergeistConfig>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WatcherDriver {
     Shell,
@@ -1499,7 +1502,7 @@ impl Default for WatcherDriver {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PoltergeistConfig {
     #[serde(default = "default_poltergeist_binary")]
     pub binary: String,
@@ -1519,7 +1522,7 @@ impl Default for PoltergeistConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PoltergeistMode {
     Haunt,
@@ -1552,7 +1555,7 @@ impl PoltergeistMode {
 }
 
 /// Streaming configuration handled by the hub (stub for future OBS integration).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StreamConfig {
     pub provider: String,
     #[serde(default)]
@@ -1562,7 +1565,7 @@ pub struct StreamConfig {
 }
 
 /// Restart behavior for managed daemons.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DaemonRestartPolicy {
     Never,
@@ -1589,7 +1592,7 @@ pub enum DaemonRestartPolicy {
 /// health_url = "http://127.0.0.1:7201/health"
 /// working_dir = "~/code/myflow"
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DaemonConfig {
     /// Unique name for this daemon (used in `f daemon start <name>`).
     pub name: String,
@@ -1922,20 +1925,58 @@ pub fn expand_path(raw: &str) -> PathBuf {
     PathBuf::from(env_expanded)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConfigCacheEntry {
+    version: u32,
+    config: Config,
+    watched: Vec<ConfigPathStamp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConfigPathStamp {
+    path: PathBuf,
+    is_dir: bool,
+    len: u64,
+    modified_sec: u64,
+    modified_nsec: u32,
+}
+
+#[derive(Debug)]
+struct ConfigLoadArtifacts {
+    config: Config,
+    watched_paths: Vec<PathBuf>,
+}
+
 pub fn load<P: AsRef<Path>>(path: P) -> Result<Config> {
     let path = path.as_ref();
-    let mut visited = Vec::new();
-    let mut cfg = load_with_includes(path, &mut visited)?;
+    if config_cache_disabled() {
+        let mut cfg = load_uncached(path)?.config;
+        load_sibling_secrets(&mut cfg, path);
+        return Ok(cfg);
+    }
 
-    // Load secrets from secrets.toml in the same directory (never shown on stream)
-    if let Some(parent) = path.parent() {
-        let secrets_path = parent.join("secrets.toml");
-        if secrets_path.exists() {
-            if let Ok(secrets) = load_secrets(&secrets_path) {
-                merge_secrets(&mut cfg, secrets);
-                tracing::debug!(path = %secrets_path.display(), "loaded secrets file");
-            }
-        }
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve path {}", path.display()))?;
+    let cache_path = config_cache_path(&canonical);
+    if let Some(entry) = read_config_cache(&cache_path)
+        && config_stamps_match(&entry.watched)
+    {
+        let mut cfg = entry.config;
+        load_sibling_secrets(&mut cfg, &canonical);
+        return Ok(cfg);
+    }
+
+    let artifacts = load_uncached(&canonical)?;
+    let mut cfg = artifacts.config.clone();
+    load_sibling_secrets(&mut cfg, &canonical);
+    let cache = ConfigCacheEntry {
+        version: CONFIG_CACHE_VERSION,
+        config: artifacts.config,
+        watched: config_stamps_for_paths(&artifacts.watched_paths),
+    };
+    if let Err(err) = write_config_cache(&cache_path, &cache) {
+        tracing::debug!(path = %cache_path.display(), error = %err, "failed to write config cache");
     }
 
     Ok(cfg)
@@ -2015,7 +2056,33 @@ fn merge_secrets(cfg: &mut Config, secrets: Secrets) {
     let _ = cfg; // cfg itself doesn't need modification, env vars are set
 }
 
-fn load_with_includes(path: &Path, visited: &mut Vec<PathBuf>) -> Result<Config> {
+fn load_uncached(path: &Path) -> Result<ConfigLoadArtifacts> {
+    let mut visited = Vec::new();
+    let mut watched_paths = Vec::new();
+    let config = load_with_includes(path, &mut visited, &mut watched_paths)?;
+    Ok(ConfigLoadArtifacts {
+        config,
+        watched_paths,
+    })
+}
+
+fn load_sibling_secrets(cfg: &mut Config, path: &Path) {
+    if let Some(parent) = path.parent() {
+        let secrets_path = parent.join("secrets.toml");
+        if secrets_path.exists() {
+            if let Ok(secrets) = load_secrets(&secrets_path) {
+                merge_secrets(cfg, secrets);
+                tracing::debug!(path = %secrets_path.display(), "loaded secrets file");
+            }
+        }
+    }
+}
+
+fn load_with_includes(
+    path: &Path,
+    visited: &mut Vec<PathBuf>,
+    watched_paths: &mut Vec<PathBuf>,
+) -> Result<Config> {
     let canonical = path
         .canonicalize()
         .with_context(|| format!("failed to resolve path {}", path.display()))?;
@@ -2026,6 +2093,7 @@ fn load_with_includes(path: &Path, visited: &mut Vec<PathBuf>) -> Result<Config>
         );
     }
     visited.push(canonical.clone());
+    watched_paths.push(canonical.clone());
 
     let contents = fs::read_to_string(&canonical)
         .with_context(|| format!("failed to read flow config at {}", path.display()))?;
@@ -2061,7 +2129,7 @@ fn load_with_includes(path: &Path, visited: &mut Vec<PathBuf>) -> Result<Config>
                 "loading additional command file"
             );
         }
-        let included = load_with_includes(&include_path, visited)
+        let included = load_with_includes(&include_path, visited, watched_paths)
             .with_context(|| format!("failed to load commands file {}", include_path.display()))?;
         merge_config(&mut cfg, included);
     }
@@ -2070,7 +2138,96 @@ fn load_with_includes(path: &Path, visited: &mut Vec<PathBuf>) -> Result<Config>
     Ok(cfg)
 }
 
-fn resolve_include_path(base: &Path, include: &str) -> PathBuf {
+fn config_cache_disabled() -> bool {
+    matches!(
+        std::env::var(CONFIG_CACHE_ENV_DISABLE)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn config_cache_path(path: &Path) -> PathBuf {
+    let hash = blake3::hash(path.to_string_lossy().as_bytes()).to_hex();
+    global_state_dir()
+        .join("config-cache")
+        .join(format!("{hash}.msgpack"))
+}
+
+fn read_config_cache(path: &Path) -> Option<ConfigCacheEntry> {
+    let bytes = fs::read(path).ok()?;
+    let cache = rmp_serde::from_slice::<ConfigCacheEntry>(&bytes).ok()?;
+    if cache.version != CONFIG_CACHE_VERSION {
+        return None;
+    }
+    Some(cache)
+}
+
+fn write_config_cache(path: &Path, cache: &ConfigCacheEntry) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config cache dir {}", parent.display()))?;
+    }
+
+    let bytes = rmp_serde::to_vec(cache).context("failed to encode config cache")?;
+    let tmp_path = path.with_extension(format!("msgpack.tmp.{}", std::process::id()));
+    fs::write(&tmp_path, bytes)
+        .with_context(|| format!("failed to write config cache {}", tmp_path.display()))?;
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        if path.exists() {
+            let _ = fs::remove_file(path);
+            fs::rename(&tmp_path, path)
+                .with_context(|| format!("failed to finalize config cache {}", path.display()))?;
+        } else {
+            return Err(err)
+                .with_context(|| format!("failed to finalize config cache {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn config_stamps_for_paths(paths: &[PathBuf]) -> Vec<ConfigPathStamp> {
+    let mut stamps: Vec<ConfigPathStamp> = paths
+        .iter()
+        .filter_map(|path| ConfigPathStamp::capture(path))
+        .collect();
+    stamps.sort_by(|a, b| a.path.cmp(&b.path));
+    stamps.dedup_by(|a, b| a.path == b.path);
+    stamps
+}
+
+fn config_stamps_match(stamps: &[ConfigPathStamp]) -> bool {
+    stamps.iter().all(ConfigPathStamp::matches_current)
+}
+
+impl ConfigPathStamp {
+    fn capture(path: &Path) -> Option<Self> {
+        let metadata = fs::metadata(path).ok()?;
+        let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            is_dir: metadata.is_dir(),
+            len: metadata.len(),
+            modified_sec: modified.as_secs(),
+            modified_nsec: modified.subsec_nanos(),
+        })
+    }
+
+    fn matches_current(&self) -> bool {
+        let Some(current) = Self::capture(&self.path) else {
+            return false;
+        };
+        self.is_dir == current.is_dir
+            && self.len == current.len
+            && self.modified_sec == current.modified_sec
+            && self.modified_nsec == current.modified_nsec
+    }
+}
+
+pub(crate) fn resolve_include_path(base: &Path, include: &str) -> PathBuf {
     let include_path = PathBuf::from(include);
     if include_path.is_absolute() {
         include_path
