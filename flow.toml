@@ -169,6 +169,11 @@ command = "bash -c 'tarball=$(ls -t dist/flow_*_darwin_arm64.tar.gz | head -n1) 
 description = "Upload the latest darwin/arm64 release tarball to the release host"
 
 [[tasks]]
+name = "verify-install-latest-release"
+command = "bash ./scripts/verify-install-latest-release.sh"
+description = "Verify that curl -fsSL https://myflow.sh/install.sh | sh installs the current latest stable release in a fresh temp HOME"
+
+[[tasks]]
 name = "ci-blacksmith-status"
 command = "python3 ./scripts/ci_blacksmith.py status"
 description = "Show CI runner mode for canary/release workflows (github, blacksmith, or host)"
@@ -598,6 +603,33 @@ description = "Run the Siftly CLI wrapper for the zvec X workspace with the loca
 name = "siftly-x-deploy"
 command = "bash ~/repos/viperrcrypto/Siftly/scripts/run-local-bun.sh run siftly -- x deploy $@"
 description = "Install and build the zvec X workspace for use through the Siftly CLI with the local Bun debug build"
+
+[[tasks]]
+name = "codex-fork-status"
+command = "python3 ./scripts/codex_fork.py status \"$@\""
+description = "Show the Codex fork home checkout, worktree, and last-session state"
+
+[[tasks]]
+name = "codex-fork-sync"
+command = "python3 ./scripts/codex_fork.py sync \"$@\""
+description = "Fast-forward nikiv in ~/repos/nikivdev/codex to upstream/main and optionally push private"
+
+[[tasks]]
+name = "codex-fork-task"
+command = "python3 ./scripts/codex_fork.py task \"$@\""
+description = "Create or reuse a scoped Codex fork worktree and open the matching Codex session"
+interactive = true
+
+[[tasks]]
+name = "codex-fork-last"
+command = "python3 ./scripts/codex_fork.py last \"$@\""
+description = "Resume the last Codex fork session from the last used worktree"
+interactive = true
+
+[[tasks]]
+name = "codex-fork-promote"
+command = "python3 ./scripts/codex_fork.py promote \"$@\""
+description = "Create or update a review/nikiv-* branch from a codex/* worktree branch"
 
 [skills]
 sync_tasks = true

@@ -8,6 +8,7 @@
 //! - Copy session history to clipboard
 
 use std::collections::{HashMap, VecDeque};
+use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::debug;
@@ -161,6 +164,37 @@ struct SessionMessage {
     content: Option<serde_json::Value>,
 }
 
+#[derive(Debug)]
+struct CodexRecoverRow {
+    id: String,
+    updated_at: i64,
+    cwd: String,
+    title: Option<String>,
+    first_user_message: Option<String>,
+    git_branch: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexRecoverCandidate {
+    id: String,
+    updated_at: String,
+    updated_at_unix: i64,
+    cwd: String,
+    git_branch: Option<String>,
+    title: Option<String>,
+    first_user_message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexRecoverOutput {
+    target_path: String,
+    exact_cwd: bool,
+    query: Option<String>,
+    recommended_route: String,
+    summary: String,
+    candidates: Vec<CodexRecoverCandidate>,
+}
+
 /// Run a provider-specific action (for top-level `f codex` / `f claude` commands).
 pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Result<()> {
     match action {
@@ -176,6 +210,14 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
             count,
             path,
         }) => copy_context(session, provider, count, path)?,
+        Some(ProviderAiAction::Recover {
+            path,
+            exact_cwd,
+            limit,
+            json,
+            summary_only,
+            query,
+        }) => recover_codex_sessions(path, query, exact_cwd, limit, json, summary_only, provider)?,
     }
     Ok(())
 }
@@ -203,6 +245,22 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 count,
                 path,
             }) => copy_context(session, Provider::Claude, count, path)?,
+            Some(ProviderAiAction::Recover {
+                path,
+                exact_cwd,
+                limit,
+                json,
+                summary_only,
+                query,
+            }) => recover_codex_sessions(
+                path,
+                query,
+                exact_cwd,
+                limit,
+                json,
+                summary_only,
+                Provider::Claude,
+            )?,
         },
         AiAction::Codex { action } => match action {
             None => quick_start_session(Provider::Codex)?,
@@ -219,6 +277,22 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 count,
                 path,
             }) => copy_context(session, Provider::Codex, count, path)?,
+            Some(ProviderAiAction::Recover {
+                path,
+                exact_cwd,
+                limit,
+                json,
+                summary_only,
+                query,
+            }) => recover_codex_sessions(
+                path,
+                query,
+                exact_cwd,
+                limit,
+                json,
+                summary_only,
+                Provider::Codex,
+            )?,
         },
         AiAction::Everruns(opts) => crate::ai_everruns::run(opts)?,
         AiAction::Resume { session } => resume_session(session, Provider::All)?,
@@ -2302,6 +2376,397 @@ fn new_session(provider: Provider) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn recover_codex_sessions(
+    path: Option<String>,
+    query: Vec<String>,
+    exact_cwd: bool,
+    limit: usize,
+    json_output: bool,
+    summary_only: bool,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("recover is only supported for Codex sessions; use `f ai codex recover ...`");
+    }
+
+    let target_path = canonicalize_recover_path(path)?;
+    let query_text = normalize_recover_query(&query);
+    let rows = read_recent_codex_threads(&target_path, exact_cwd, limit.max(1), query_text.as_deref())?;
+    let output = build_recover_output(&target_path, exact_cwd, query_text, rows);
+
+    if summary_only {
+        println!("{}", output.summary);
+        return Ok(());
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("failed to encode recovery JSON")?
+        );
+        return Ok(());
+    }
+
+    print_recover_output(&output);
+    Ok(())
+}
+
+fn canonicalize_recover_path(path: Option<String>) -> Result<PathBuf> {
+    let raw = path.unwrap_or_else(|| ".".to_string());
+    let expanded = shellexpand::tilde(&raw).to_string();
+    let candidate = PathBuf::from(expanded);
+    let absolute = if candidate.is_absolute() {
+        candidate
+    } else {
+        env::current_dir()
+            .context("failed to determine current directory")?
+            .join(candidate)
+    };
+    Ok(absolute.canonicalize().unwrap_or(absolute))
+}
+
+fn normalize_recover_query(parts: &[String]) -> Option<String> {
+    let text = parts.join(" ").trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn codex_sqlite_home() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("CODEX_SQLITE_HOME") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = env::var_os("CODEX_HOME") {
+        return Ok(PathBuf::from(path));
+    }
+    let home = dirs::home_dir().context("failed to resolve home directory")?;
+    Ok(home.join(".codex"))
+}
+
+fn latest_codex_state_db() -> Result<PathBuf> {
+    let sqlite_home = codex_sqlite_home()?;
+    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(&sqlite_home)
+        .with_context(|| format!("failed to read {}", sqlite_home.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let file_name = path.file_name()?.to_str()?;
+            if !file_name.starts_with("state_") || !file_name.ends_with(".sqlite") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates
+        .into_iter()
+        .map(|(_, path)| path)
+        .next()
+        .context("no Codex state_*.sqlite database found")
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn read_recent_codex_threads(
+    target_path: &Path,
+    exact_cwd: bool,
+    limit: usize,
+    query: Option<&str>,
+) -> Result<Vec<CodexRecoverRow>> {
+    let db_path = latest_codex_state_db()?;
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+
+    let target = target_path.to_string_lossy().to_string();
+    let like_target = format!("{}/%", escape_like(&target));
+    let fetch_limit = (limit.max(3) * 12).min(120);
+
+    let sql_exact = r#"
+select
+  id,
+  updated_at,
+  cwd,
+  title,
+  first_user_message,
+  git_branch
+from threads
+where archived = 0
+  and cwd = ?1
+order by updated_at desc
+limit ?2
+"#;
+
+    let sql_tree = r#"
+select
+  id,
+  updated_at,
+  cwd,
+  title,
+  first_user_message,
+  git_branch
+from threads
+where archived = 0
+  and (cwd = ?1 or cwd like ?2 escape '\')
+order by updated_at desc
+limit ?3
+"#;
+
+    let mut rows = if exact_cwd {
+        let mut stmt = conn.prepare(sql_exact).context("failed to prepare exact recover query")?;
+        let iter = stmt.query_map(params![target, fetch_limit as i64], |row| {
+            Ok(CodexRecoverRow {
+                id: row.get(0)?,
+                updated_at: row.get(1)?,
+                cwd: row.get(2)?,
+                title: row.get(3)?,
+                first_user_message: row.get(4)?,
+                git_branch: row.get(5)?,
+            })
+        })?;
+        iter.collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        let mut stmt = conn.prepare(sql_tree).context("failed to prepare subtree recover query")?;
+        let iter = stmt.query_map(params![target, like_target, fetch_limit as i64], |row| {
+            Ok(CodexRecoverRow {
+                id: row.get(0)?,
+                updated_at: row.get(1)?,
+                cwd: row.get(2)?,
+                title: row.get(3)?,
+                first_user_message: row.get(4)?,
+                git_branch: row.get(5)?,
+            })
+        })?;
+        iter.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    rank_recover_rows(&mut rows, query);
+    rows.truncate(limit.max(1));
+    Ok(rows)
+}
+
+fn tokenize_recover_query(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '/' && ch != '-' && ch != '_' && ch != '#')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_lowercase())
+        .filter(|part| part.len() > 1)
+        .collect()
+}
+
+fn rank_recover_rows(rows: &mut Vec<CodexRecoverRow>, query: Option<&str>) {
+    let normalized_query = query.map(|q| q.to_lowercase()).unwrap_or_default();
+    let tokens = tokenize_recover_query(&normalized_query);
+
+    rows.sort_by(|a, b| {
+        let score_a = recover_row_score(a, &normalized_query, &tokens);
+        let score_b = recover_row_score(b, &normalized_query, &tokens);
+        score_b
+            .cmp(&score_a)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+            .then_with(|| a.cwd.cmp(&b.cwd))
+    });
+
+    if !tokens.is_empty() && rows.iter().all(|row| recover_row_score(row, &normalized_query, &tokens) == 0) {
+        rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    }
+}
+
+fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[String]) -> i64 {
+    if tokens.is_empty() && normalized_query.is_empty() {
+        return 0;
+    }
+
+    let cwd = row.cwd.to_lowercase();
+    let branch = row.git_branch.clone().unwrap_or_default().to_lowercase();
+    let title = row.title.clone().unwrap_or_default().to_lowercase();
+    let first = row
+        .first_user_message
+        .clone()
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let mut score = 0i64;
+
+    if !normalized_query.is_empty() {
+        if first.contains(normalized_query) {
+            score += 120;
+        }
+        if title.contains(normalized_query) {
+            score += 90;
+        }
+        if branch.contains(normalized_query) {
+            score += 70;
+        }
+        if cwd.contains(normalized_query) {
+            score += 60;
+        }
+    }
+
+    for token in tokens {
+        if first.contains(token) {
+            score += 18;
+        }
+        if title.contains(token) {
+            score += 14;
+        }
+        if branch.contains(token) {
+            score += 12;
+        }
+        if cwd.contains(token) {
+            score += 8;
+        }
+    }
+
+    score
+}
+
+fn build_recover_output(
+    target_path: &Path,
+    exact_cwd: bool,
+    query: Option<String>,
+    rows: Vec<CodexRecoverRow>,
+) -> CodexRecoverOutput {
+    let candidates: Vec<CodexRecoverCandidate> = rows
+        .into_iter()
+        .map(|row| CodexRecoverCandidate {
+            id: row.id,
+            updated_at: format_unix_ts(row.updated_at),
+            updated_at_unix: row.updated_at,
+            cwd: row.cwd,
+            git_branch: row.git_branch.filter(|value| !value.trim().is_empty()),
+            title: row.title.filter(|value| !value.trim().is_empty()),
+            first_user_message: row.first_user_message.filter(|value| !value.trim().is_empty()),
+        })
+        .collect();
+
+    let recommended_route =
+        infer_recover_route(target_path, query.as_deref().unwrap_or_default(), &candidates);
+    let summary = build_recover_summary(target_path, exact_cwd, &recommended_route, &candidates);
+
+    CodexRecoverOutput {
+        target_path: target_path.to_string_lossy().to_string(),
+        exact_cwd,
+        query,
+        recommended_route,
+        summary,
+        candidates,
+    }
+}
+
+fn infer_recover_route(_target_path: &Path, _query: &str, candidates: &[CodexRecoverCandidate]) -> String {
+    if let Some(candidate) = candidates.first() {
+        return format!("f ai codex resume {}", candidate.id);
+    }
+
+    "f ai codex new".to_string()
+}
+
+fn build_recover_summary(
+    target_path: &Path,
+    exact_cwd: bool,
+    recommended_route: &str,
+    candidates: &[CodexRecoverCandidate],
+) -> String {
+    let mut lines = Vec::new();
+    let mode = if exact_cwd { "exact cwd" } else { "repo-tree" };
+    lines.push(format!(
+        "Recovered recent Codex context for {} ({mode} lookup).",
+        target_path.display()
+    ));
+
+    if candidates.is_empty() {
+        lines.push("No recent matching Codex sessions found.".to_string());
+        lines.push(format!("Recommended route: {}", recommended_route));
+        return lines.join("\n");
+    }
+
+    for candidate in candidates.iter().take(3) {
+        let message = candidate
+            .first_user_message
+            .as_deref()
+            .or(candidate.title.as_deref())
+            .map(truncate_recover_text)
+            .unwrap_or_else(|| "(no stored prompt text)".to_string());
+        let branch = candidate
+            .git_branch
+            .as_deref()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        lines.push(format!(
+            "- {} | {} | {} | {} | {}",
+            truncate_recover_id(&candidate.id),
+            candidate.updated_at,
+            branch,
+            candidate.cwd,
+            message
+        ));
+    }
+
+    lines.push(format!("Recommended route: {}", recommended_route));
+    lines.join("\n")
+}
+
+fn truncate_recover_id(value: &str) -> String {
+    value.chars().take(8).collect()
+}
+
+fn truncate_recover_text(value: &str) -> String {
+    let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.chars().count() <= 110 {
+        return clean;
+    }
+    let truncated: String = clean.chars().take(107).collect();
+    format!("{truncated}...")
+}
+
+fn format_unix_ts(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .map(|value| value.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| ts.to_string())
+}
+
+fn print_recover_output(output: &CodexRecoverOutput) {
+    println!("Target path: {}", output.target_path);
+    println!(
+        "Search mode: {}",
+        if output.exact_cwd { "exact cwd" } else { "repo-tree" }
+    );
+    if let Some(query) = output.query.as_deref() {
+        println!("Query: {}", query);
+    }
+    println!("Recommended route: {}", output.recommended_route);
+    println!();
+    if output.candidates.is_empty() {
+        println!("No recent matching Codex sessions found.");
+        return;
+    }
+    println!("Recent sessions:");
+    for candidate in &output.candidates {
+        println!(
+            "- {} | {} | {}",
+            truncate_recover_id(&candidate.id),
+            candidate.updated_at,
+            candidate.cwd
+        );
+        if let Some(branch) = candidate.git_branch.as_deref() {
+            println!("  branch: {}", branch);
+        }
+        if let Some(first) = candidate.first_user_message.as_deref() {
+            println!("  first: {}", truncate_recover_text(first));
+        } else if let Some(title) = candidate.title.as_deref() {
+            println!("  title: {}", truncate_recover_text(title));
+        }
+    }
+    println!();
+    println!("Summary:");
+    println!("{}", output.summary);
 }
 
 /// Copy session history to clipboard.

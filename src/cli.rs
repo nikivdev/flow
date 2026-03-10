@@ -2508,6 +2508,27 @@ pub enum ProviderAiAction {
         #[arg(default_value = "1")]
         count: usize,
     },
+    /// Recover recent Codex session context for a repo or subpath.
+    Recover {
+        /// Path to recover context for (default: current directory).
+        #[arg(long)]
+        path: Option<String>,
+        /// Restrict lookup to an exact cwd match instead of a repo-tree prefix.
+        #[arg(long)]
+        exact_cwd: bool,
+        /// Maximum number of candidate sessions to return.
+        #[arg(long, default_value = "3")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long, conflicts_with = "summary_only")]
+        json: bool,
+        /// Emit only the compact recovery summary for prompt injection.
+        #[arg(long = "summary-only", conflicts_with = "json")]
+        summary_only: bool,
+        /// Optional query used to rank recent sessions.
+        #[arg(value_name = "QUERY", trailing_var_arg = true)]
+        query: Vec<String>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
