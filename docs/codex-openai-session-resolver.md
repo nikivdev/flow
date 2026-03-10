@@ -14,6 +14,28 @@ Relevant files:
 - On a successful match it runs `f ai codex resume <thread-id>` in that repo.
 - On no match it exits non-zero and prints a short recent-session list instead of opening the wrong conversation.
 
+## Explicit Recovery Prompts
+
+`l` and `L` now also treat explicit recovery phrases as a separate lightweight
+path.
+
+Examples:
+
+- `see this convo in ...`
+- `what was I doing in ...`
+- `recover recent context`
+- `continue the ... work`
+
+For those prompts, the launcher first runs:
+
+```bash
+f ai codex recover --summary-only --path <derived target> <prompt>
+```
+
+Then it prepends the short recovery summary to the new prompt and opens the
+session in the derived target repo/workspace. Normal prompts do not pay this
+cost.
+
 ## Why use Codex app-server
 
 This path uses `codex app-server` instead of parsing `f ai codex list` output.

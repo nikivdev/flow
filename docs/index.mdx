@@ -13,6 +13,7 @@ High-signal docs for the Codex/Claude workflow:
 - [`commands/fast.md`](commands/fast.md): low-latency AI task dispatch (`f fast`) via fast daemon client path.
 - [`commands/seq-rpc.md`](commands/seq-rpc.md): native `seqd` RPC bridge (`f seq-rpc`) for OS-level agent actions.
 - [`ci-cd-runbook.md`](ci-cd-runbook.md): CI/CD architecture, runner-mode operations, and failure debug checklist for canary/release pipelines.
+- [`install-script-latest-release-verification.md`](install-script-latest-release-verification.md): exact runbook for proving `curl -fsSL https://myflow.sh/install.sh | sh` installs the current latest stable release.
 - [`rise.md`](rise.md): full integration guide for installing and operating Rise via Flow (`f install rise`) across adopt/sync/dev/mobile/schema/sandbox workflows.
 - [`commands/domains.md`](commands/domains.md): shared local `*.localhost` proxy ownership via `f domains` (prevents per-repo port-80 collisions).
 - [`commands/clone.md`](commands/clone.md): git-like cloning (`f clone`) with GitHub URL/shorthand normalization to SSH, without forcing `~/repos`.
@@ -22,6 +23,7 @@ High-signal docs for the Codex/Claude workflow:
 - [`fast-commit-deep-review-loop.md`](fast-commit-deep-review-loop.md): recommended speed-first workflow for `~/code/myflow` (GLM/Cerebras fast lane + batched Codex deep reviews).
 - [`how-to-use-flow-ai-to-manage-claude-code-sessions.md`](how-to-use-flow-ai-to-manage-claude-code-sessions.md): practical session workflow for Claude + Codex in one repo loop.
 - [`codex-openai-session-resolver.md`](codex-openai-session-resolver.md): app-server-backed `L <query>` resolver for repo-scoped Codex session resume in `~/repos/openai/codex`.
+- [`codex-fork-tasks.md`](codex-fork-tasks.md): personal Codex fork automation tasks for `nikiv` sync, scoped worktree/session start, last-session reattach, and review-branch promotion.
 - [`session-history-mining.md`](session-history-mining.md): efficient cross-project session mining (`f sessions`) and prompt scaffolds for token-sensitive planning.
 - [`session-semantic-recovery-with-seq.md`](session-semantic-recovery-with-seq.md): recover lost Claude/Codex work after resets using Seq's zvec-backed semantic session search plus `f ai ... resume`.
 - [`how-to-make-a-project-flow-project.md`](how-to-make-a-project-flow-project.md): detailed onboarding and migration playbook for turning any repo into a Flow-native project.
@@ -43,6 +45,7 @@ High-signal docs for the Codex/Claude workflow:
 - [`rl-for-myflow-harbor.md`](rl-for-myflow-harbor.md): practical RL roadmap for turning myflow -> Harbor exports into a gated training/improvement loop.
 - [`rl-myflow-harbor-task-specs.md`](rl-myflow-harbor-task-specs.md): executable task contracts for validate/reward/canary/hardcase stages.
 - [`private-fork-flow.md`](private-fork-flow.md): generic AI runbook for private-fork setup and safe push routing via Flow `[git].remote`.
+- [`private-repo-fast.md`](private-repo-fast.md): fastest way to create a private GitHub repo from the current folder, including non-`~/repos` paths like `~/code/flow-extension` and separate `private` mirror remotes for existing public repos.
 - [`commands/jj.md`](commands/jj.md): Flow wrapper for `jj` workflows (`sync`, bookmarks, and workspace/lane management).
 - [`jj-workspaces-for-parallel-work.md`](jj-workspaces-for-parallel-work.md): practical parallel-branch workflow with isolated workspace lanes.
 - [`jj-review-workspaces.md`](jj-review-workspaces.md): stable JJ-native review workspaces for branch-specific inspection and edits without touching the current checkout.
