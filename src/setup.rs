@@ -23,10 +23,6 @@ pub fn run(opts: SetupOpts) -> Result<()> {
     let mut created_flow_toml = false;
     let mut upgraded_flow_toml = false;
 
-    if !start::is_bootstrapped(&project_root) || !config_path.exists() {
-        start::run_at(&project_root)?;
-    }
-
     match opts.target {
         Some(SetupTarget::Docs) => {
             return docs::create_docs_scaffold_at(&project_root, false);
@@ -38,6 +34,14 @@ pub fn run(opts: SetupOpts) -> Result<()> {
             return setup_release(&project_root, &config_path);
         }
         None => {}
+    }
+
+    if maybe_run_existing_setup_task(&config_path)? {
+        return Ok(());
+    }
+
+    if !start::is_bootstrapped(&project_root) || !config_path.exists() {
+        start::run_at(&project_root)?;
     }
 
     if !config_path.exists() {
@@ -142,6 +146,28 @@ pub fn run(opts: SetupOpts) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn maybe_run_existing_setup_task(config_path: &Path) -> Result<bool> {
+    if !config_path.exists() {
+        return Ok(false);
+    }
+
+    let (config_path, cfg) = load_project_config(config_path.to_path_buf())?;
+    if tasks::find_task(&cfg, "setup").is_none() {
+        return Ok(false);
+    }
+
+    tasks::run(TaskRunOpts {
+        config: config_path,
+        delegate_to_hub: false,
+        hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+        hub_port: 9050,
+        name: "setup".to_string(),
+        args: Vec::new(),
+    })?;
+
+    Ok(true)
 }
 
 fn refresh_skills_after_setup_task(project_root: &Path, config_path: &Path) -> Result<()> {
@@ -3191,5 +3217,46 @@ command = "bun install"
         let updated = fs::read_to_string(&config_path).expect("read updated flow.toml");
         assert!(updated.contains("[commit.testing]"));
         assert!(updated.contains("runner = \"bun\""));
+    }
+
+    #[test]
+    fn run_prefers_existing_setup_task_without_flow_bootstrap() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("flow.toml");
+        fs::write(
+            &config_path,
+            r#"version = 1
+
+[[tasks]]
+name = "setup"
+command = "printf ok > setup-ran.txt"
+"#,
+        )
+        .expect("write flow.toml");
+
+        run(SetupOpts {
+            config: config_path.clone(),
+            target: None,
+        })
+        .expect("setup should delegate to project task");
+
+        assert!(
+            dir.path().join("setup-ran.txt").exists(),
+            "project setup task should run"
+        );
+        assert!(
+            !dir.path().join(".ai").exists(),
+            "flow bootstrap should not create .ai when project setup exists"
+        );
+        assert!(
+            !dir.path().join(".gitignore").exists(),
+            "flow bootstrap should not rewrite .gitignore when project setup exists"
+        );
+
+        let flow_toml = fs::read_to_string(&config_path).expect("read flow.toml");
+        assert!(
+            !flow_toml.contains("[skills]"),
+            "flow setup baseline should not be injected when project setup exists"
+        );
     }
 }
