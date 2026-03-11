@@ -162,9 +162,7 @@ fn load_or_build_project_sections(
         Vec::new()
     };
 
-    if cache_dirty
-        && let Err(err) = write_cache_entry(&cache_path, &cache)
-    {
+    if cache_dirty && let Err(err) = write_cache_entry(&cache_path, &cache) {
         tracing::debug!(path = %cache_path.display(), error = %err, "failed to write project snapshot cache");
     }
 

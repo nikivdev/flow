@@ -201,9 +201,13 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
         None => quick_start_session(provider)?,
         Some(ProviderAiAction::List) => list_sessions(provider)?,
         Some(ProviderAiAction::Sessions) => provider_sessions(provider)?,
-        Some(ProviderAiAction::Continue { session }) => continue_session(session, provider)?,
+        Some(ProviderAiAction::Continue { session, path }) => {
+            continue_session(session, path, provider)?
+        }
         Some(ProviderAiAction::New) => new_session(provider)?,
-        Some(ProviderAiAction::Resume { session }) => resume_session(session, provider)?,
+        Some(ProviderAiAction::Resume { session, path }) => {
+            resume_session(session, path, provider)?
+        }
         Some(ProviderAiAction::Copy { session }) => copy_session(session, provider)?,
         Some(ProviderAiAction::Context {
             session,
@@ -232,12 +236,12 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             None => quick_start_session(Provider::Claude)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Claude)?,
             Some(ProviderAiAction::Sessions) => provider_sessions(Provider::Claude)?,
-            Some(ProviderAiAction::Continue { session }) => {
-                continue_session(session, Provider::Claude)?
+            Some(ProviderAiAction::Continue { session, path }) => {
+                continue_session(session, path, Provider::Claude)?
             }
             Some(ProviderAiAction::New) => new_session(Provider::Claude)?,
-            Some(ProviderAiAction::Resume { session }) => {
-                resume_session(session, Provider::Claude)?
+            Some(ProviderAiAction::Resume { session, path }) => {
+                resume_session(session, path, Provider::Claude)?
             }
             Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Claude)?,
             Some(ProviderAiAction::Context {
@@ -266,11 +270,13 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             None => quick_start_session(Provider::Codex)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Codex)?,
             Some(ProviderAiAction::Sessions) => provider_sessions(Provider::Codex)?,
-            Some(ProviderAiAction::Continue { session }) => {
-                continue_session(session, Provider::Codex)?
+            Some(ProviderAiAction::Continue { session, path }) => {
+                continue_session(session, path, Provider::Codex)?
             }
             Some(ProviderAiAction::New) => new_session(Provider::Codex)?,
-            Some(ProviderAiAction::Resume { session }) => resume_session(session, Provider::Codex)?,
+            Some(ProviderAiAction::Resume { session, path }) => {
+                resume_session(session, path, Provider::Codex)?
+            }
             Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Codex)?,
             Some(ProviderAiAction::Context {
                 session,
@@ -295,7 +301,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             )?,
         },
         AiAction::Everruns(opts) => crate::ai_everruns::run(opts)?,
-        AiAction::Resume { session } => resume_session(session, Provider::All)?,
+        AiAction::Resume { session, path } => resume_session(session, path, Provider::All)?,
         AiAction::Save { name, id } => save_session(&name, id)?,
         AiAction::Notes { session } => open_notes(&session)?,
         AiAction::Remove { session } => remove_session(&session)?,
@@ -1684,6 +1690,26 @@ fn read_sessions_for_project(provider: Provider) -> Result<Vec<AiSession>> {
     Ok(sessions)
 }
 
+fn resolve_session_target_path(path: Option<&str>) -> Result<PathBuf> {
+    match path.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => {
+            let expanded = PathBuf::from(shellexpand::tilde(raw).to_string());
+            let resolved = if expanded.is_absolute() {
+                expanded
+            } else {
+                env::current_dir()?.join(expanded)
+            };
+            Ok(resolved.canonicalize().unwrap_or(resolved))
+        }
+        None => env::current_dir().context("failed to get current directory"),
+    }
+}
+
+fn read_sessions_for_target(provider: Provider, path: Option<&str>) -> Result<Vec<AiSession>> {
+    let target = resolve_session_target_path(path)?;
+    read_sessions_for_path(provider, &target)
+}
+
 /// Read sessions for a project at a specific path.
 fn read_sessions_for_path(provider: Provider, path: &PathBuf) -> Result<Vec<AiSession>> {
     let mut sessions = Vec::new();
@@ -2304,14 +2330,49 @@ fn provider_sessions(provider: Provider) -> Result<()> {
     }
 }
 
-fn continue_session(session: Option<String>, provider: Provider) -> Result<()> {
+fn continue_session(
+    session: Option<String>,
+    path: Option<String>,
+    provider: Provider,
+) -> Result<()> {
     if session.is_some() {
-        return resume_session(session, provider);
+        return resume_session(session, path, provider);
     }
     if provider == Provider::All {
         bail!("continue requires a specific provider (claude or codex)");
     }
     ensure_provider_tty(provider, "continue")?;
+
+    if path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        let target = resolve_session_target_path(path.as_deref())?;
+        let sessions = read_sessions_for_target(provider, path.as_deref())?;
+        let sess = sessions.first().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No {} sessions found for {}",
+                provider_name(provider),
+                target.display()
+            )
+        })?;
+        println!(
+            "Resuming session {} from {}...",
+            &sess.session_id[..8.min(sess.session_id.len())],
+            target.display()
+        );
+        if launch_session(&sess.session_id, sess.provider)? {
+            return Ok(());
+        }
+        bail!(
+            "failed to continue {} session {} for {}",
+            provider_name(sess.provider),
+            sess.session_id,
+            target.display()
+        );
+    }
 
     let launched = match provider {
         Provider::Claude => launch_claude_continue()?,
@@ -2393,7 +2454,8 @@ fn recover_codex_sessions(
 
     let target_path = canonicalize_recover_path(path)?;
     let query_text = normalize_recover_query(&query);
-    let rows = read_recent_codex_threads(&target_path, exact_cwd, limit.max(1), query_text.as_deref())?;
+    let rows =
+        read_recent_codex_threads(&target_path, exact_cwd, limit.max(1), query_text.as_deref())?;
     let output = build_recover_output(&target_path, exact_cwd, query_text, rows);
 
     if summary_only {
@@ -2519,7 +2581,9 @@ limit ?3
 "#;
 
     let mut rows = if exact_cwd {
-        let mut stmt = conn.prepare(sql_exact).context("failed to prepare exact recover query")?;
+        let mut stmt = conn
+            .prepare(sql_exact)
+            .context("failed to prepare exact recover query")?;
         let iter = stmt.query_map(params![target, fetch_limit as i64], |row| {
             Ok(CodexRecoverRow {
                 id: row.get(0)?,
@@ -2532,7 +2596,9 @@ limit ?3
         })?;
         iter.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
-        let mut stmt = conn.prepare(sql_tree).context("failed to prepare subtree recover query")?;
+        let mut stmt = conn
+            .prepare(sql_tree)
+            .context("failed to prepare subtree recover query")?;
         let iter = stmt.query_map(params![target, like_target, fetch_limit as i64], |row| {
             Ok(CodexRecoverRow {
                 id: row.get(0)?,
@@ -2553,7 +2619,9 @@ limit ?3
 
 fn tokenize_recover_query(query: &str) -> Vec<String> {
     query
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '/' && ch != '-' && ch != '_' && ch != '#')
+        .split(|ch: char| {
+            !ch.is_ascii_alphanumeric() && ch != '/' && ch != '-' && ch != '_' && ch != '#'
+        })
         .filter(|part| !part.is_empty())
         .map(|part| part.to_lowercase())
         .filter(|part| part.len() > 1)
@@ -2573,7 +2641,11 @@ fn rank_recover_rows(rows: &mut Vec<CodexRecoverRow>, query: Option<&str>) {
             .then_with(|| a.cwd.cmp(&b.cwd))
     });
 
-    if !tokens.is_empty() && rows.iter().all(|row| recover_row_score(row, &normalized_query, &tokens) == 0) {
+    if !tokens.is_empty()
+        && rows
+            .iter()
+            .all(|row| recover_row_score(row, &normalized_query, &tokens) == 0)
+    {
         rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     }
 }
@@ -2642,12 +2714,17 @@ fn build_recover_output(
             cwd: row.cwd,
             git_branch: row.git_branch.filter(|value| !value.trim().is_empty()),
             title: row.title.filter(|value| !value.trim().is_empty()),
-            first_user_message: row.first_user_message.filter(|value| !value.trim().is_empty()),
+            first_user_message: row
+                .first_user_message
+                .filter(|value| !value.trim().is_empty()),
         })
         .collect();
 
-    let recommended_route =
-        infer_recover_route(target_path, query.as_deref().unwrap_or_default(), &candidates);
+    let recommended_route = infer_recover_route(
+        target_path,
+        query.as_deref().unwrap_or_default(),
+        &candidates,
+    );
     let summary = build_recover_summary(target_path, exact_cwd, &recommended_route, &candidates);
 
     CodexRecoverOutput {
@@ -2660,7 +2737,11 @@ fn build_recover_output(
     }
 }
 
-fn infer_recover_route(_target_path: &Path, _query: &str, candidates: &[CodexRecoverCandidate]) -> String {
+fn infer_recover_route(
+    _target_path: &Path,
+    _query: &str,
+    candidates: &[CodexRecoverCandidate],
+) -> String {
     if let Some(candidate) = candidates.first() {
         return format!("f ai codex resume {}", candidate.id);
     }
@@ -2736,7 +2817,11 @@ fn print_recover_output(output: &CodexRecoverOutput) {
     println!("Target path: {}", output.target_path);
     println!(
         "Search mode: {}",
-        if output.exact_cwd { "exact cwd" } else { "repo-tree" }
+        if output.exact_cwd {
+            "exact cwd"
+        } else {
+            "repo-tree"
+        }
     );
     if let Some(query) = output.query.as_deref() {
         println!("Query: {}", query);
@@ -4247,9 +4332,9 @@ fn get_session_last_timestamp_for_session(session: &CrossProjectSession) -> Resu
 }
 
 /// Resume a session by name or ID.
-fn resume_session(session: Option<String>, provider: Provider) -> Result<()> {
+fn resume_session(session: Option<String>, path: Option<String>, provider: Provider) -> Result<()> {
     let index = load_index()?;
-    let sessions = read_sessions_for_project(provider)?;
+    let sessions = read_sessions_for_target(provider, path.as_deref())?;
     let explicit_session_requested = session.is_some();
     let default_provider = if provider == Provider::All {
         Provider::Claude

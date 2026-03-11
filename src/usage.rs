@@ -848,8 +848,8 @@ sample_rate = 0.25
         )
         .expect("write commands flow");
 
-        let analytics =
-            load_minimal_analytics_config(&root.join("flow.toml"), &mut Vec::new()).expect("analytics");
+        let analytics = load_minimal_analytics_config(&root.join("flow.toml"), &mut Vec::new())
+            .expect("analytics");
         assert_eq!(analytics.enabled, Some(true));
         assert_eq!(
             analytics.endpoint.as_deref(),
