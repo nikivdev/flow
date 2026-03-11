@@ -2375,7 +2375,11 @@ pub enum AiAction {
     /// Resume an AI session by name or ID.
     Resume {
         /// Session name or ID to resume.
+        #[arg(value_name = "SESSION")]
         session: Option<String>,
+        /// Project path to resume from instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
     },
     /// Save/bookmark the current or most recent session with a name.
     Save {
@@ -2483,14 +2487,22 @@ pub enum ProviderAiAction {
     /// Continue the most recent session for this provider.
     Continue {
         /// Session name or ID to continue (optional).
+        #[arg(value_name = "SESSION")]
         session: Option<String>,
+        /// Project path to continue from instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
     },
     /// Start a new session (ignores existing sessions).
     New,
     /// Resume a session.
     Resume {
         /// Session name or ID to resume.
+        #[arg(value_name = "SESSION")]
         session: Option<String>,
+        /// Project path to resume from instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
     },
     /// Copy session history to clipboard.
     Copy {
@@ -4264,4 +4276,54 @@ pub struct DocsHubOpts {
     /// Sync content and exit without running the dev server.
     #[arg(long)]
     pub sync_only: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_codex_resume_with_path_override() {
+        let cli = Cli::parse_from([
+            "f",
+            "ai",
+            "codex",
+            "resume",
+            "--path",
+            "~/work/example-project",
+            "session-123",
+        ]);
+
+        match cli.command {
+            Some(Commands::Ai(AiCommand {
+                action:
+                    Some(AiAction::Codex {
+                        action: Some(ProviderAiAction::Resume { session, path }),
+                    }),
+            })) => {
+                assert_eq!(session.as_deref(), Some("session-123"));
+                assert_eq!(path.as_deref(), Some("~/work/example-project"));
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_continue_with_path_override() {
+        let cli = Cli::parse_from(["f", "ai", "codex", "continue", "--path", "/tmp/rev"]);
+
+        match cli.command {
+            Some(Commands::Ai(AiCommand {
+                action:
+                    Some(AiAction::Codex {
+                        action: Some(ProviderAiAction::Continue { session, path }),
+                    }),
+            })) => {
+                assert_eq!(session, None);
+                assert_eq!(path.as_deref(), Some("/tmp/rev"));
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
 }

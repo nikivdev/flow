@@ -3,6 +3,7 @@
 Manage Claude Code and Codex sessions for the current project.
 
 Flow reads local session stores, filters by current project path, and gives you one interface for list/search/resume/copy/save.
+When you need to reopen a repo's session from another working directory, use `--path <project-root>` on `resume` or provider-specific `continue`.
 
 ## Quick Start
 
@@ -15,6 +16,8 @@ f ai claude list
 f ai codex list
 f ai claude resume <session-id-or-name>
 f ai codex resume <session-id-or-name>
+f ai codex resume --path ~/work/example-project
+f ai codex continue --path ~/work/example-project
 
 # Save a memorable alias for a session
 f ai save reclaim-fix --id a38cf8bf-f4e2-4308-8b27-0254f89c4385
@@ -60,6 +63,20 @@ codex resume <id> --dangerously-bypass-approvals-and-sandbox
 ```
 
 No fallback is applied on resume failure; Flow returns non-zero.
+
+### Cross-directory resume
+
+You can target another repo without changing directory:
+
+```bash
+f ai codex resume --path ~/work/example-project
+f ai codex resume --path ~/work/example-project 019c61c5-0aef-71a1-b058-5c9ab43013d4
+f ai codex continue --path ~/work/example-project
+```
+
+- `resume --path <repo>` resolves the requested session against that repo instead of the current cwd
+- `continue --path <repo>` resumes the latest session for that repo
+- explicit full Codex IDs still work directly even when your current cwd is different
 
 ## Session Selectors
 

@@ -322,10 +322,7 @@ pub fn run(cmd: DeployCommand) -> Result<()> {
     }
 }
 
-fn run_with_project_context(
-    action: Option<DeployAction>,
-    ctx: DeployProjectContext,
-) -> Result<()> {
+fn run_with_project_context(action: Option<DeployAction>, ctx: DeployProjectContext) -> Result<()> {
     let DeployProjectContext {
         project_root,
         config_path,
