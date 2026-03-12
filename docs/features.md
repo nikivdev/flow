@@ -109,6 +109,15 @@ f ai resume my-session
 
 # Resume Claude-only sessions
 f ai claude resume
+
+# Search Codex sessions globally by prompt text and resume the best match
+f ai codex find "make plan to get designer"
+
+# Search Codex sessions globally by prompt text and copy the best match
+f ai codex findAndCopy "make plan to get designer"
+
+# Narrow the Codex search to a repo path or workspace subtree
+f ai codex find --path ~/repos/acme/app "arranged tooling"
 ```
 
 Important resume rules:

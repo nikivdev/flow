@@ -16,7 +16,7 @@ use flowd::{
     log_server, macos, notify, otp, palette, parallel, processes, projects, proxy, publish, push,
     recipe, registry, release, repos, reviews_todo, seq_rpc, services, setup, skills, ssh_keys,
     storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade, upstream,
-    usage, web,
+    url_inspect, usage, web,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,6 +509,9 @@ fn main() -> Result<()> {
             Some(Commands::Skills(cmd)) => {
                 skills::run(cmd)?;
             }
+            Some(Commands::Url(cmd)) => {
+                url_inspect::run(cmd)?;
+            }
             Some(Commands::Deps(cmd)) => {
                 deps::run(cmd)?;
             }
@@ -709,6 +712,7 @@ fn startup_policy_for(command: Option<&Commands>) -> StartupPolicy {
         Some(Commands::Info) => StartupPolicy::NONE,
         Some(Commands::Upstream(_)) => StartupPolicy::NONE,
         Some(Commands::Latest) => StartupPolicy::NONE,
+        Some(Commands::Url(_)) => StartupPolicy::SECRETS_ONLY,
         Some(Commands::Analytics(cmd)) => match cmd.action.as_ref() {
             None
             | Some(&AnalyticsAction::Status)
@@ -1072,7 +1076,8 @@ mod tests {
     use super::{StartupPolicy, startup_policy_for};
     use flowd::cli::{
         AiAction, AiCommand, AnalyticsCommand, Commands, GlobalAction, GlobalCommand, SessionsOpts,
-        StatusOpts, TasksAction, TasksBuildAiOpts, TasksCommand, TasksListOpts,
+        StatusOpts, TasksAction, TasksBuildAiOpts, TasksCommand, TasksListOpts, UrlAction,
+        UrlCommand, UrlCrawlOpts, UrlCrawlSource, UrlInspectOpts, UrlInspectProvider,
     };
 
     #[test]
@@ -1096,6 +1101,40 @@ mod tests {
                 action: None,
             }))),
             StartupPolicy::NONE
+        );
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Url(UrlCommand {
+                action: UrlAction::Inspect(UrlInspectOpts {
+                    url: "https://example.com".to_string(),
+                    json: false,
+                    full: false,
+                    provider: UrlInspectProvider::Auto,
+                    timeout_s: 20.0,
+                }),
+            }))),
+            StartupPolicy::SECRETS_ONLY
+        );
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Url(UrlCommand {
+                action: UrlAction::Crawl(UrlCrawlOpts {
+                    url: "https://developers.cloudflare.com".to_string(),
+                    json: false,
+                    full: false,
+                    limit: 10,
+                    depth: 2,
+                    records: 5,
+                    source: UrlCrawlSource::All,
+                    render: false,
+                    include_external_links: false,
+                    include_subdomains: false,
+                    include_patterns: Vec::new(),
+                    exclude_patterns: Vec::new(),
+                    max_age_s: None,
+                    wait_timeout_s: 60.0,
+                    poll_interval_s: 2.0,
+                }),
+            }))),
+            StartupPolicy::SECRETS_ONLY
         );
     }
 

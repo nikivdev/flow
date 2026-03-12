@@ -16,6 +16,9 @@ f ai
 f ai claude list
 f ai codex list
 f ai cursor list
+f codex resolve "latest"
+f codex resolve "https://linear.app/.../project/.../overview" --json
+f codex open "continue the deploy work"
 f ai claude resume <session-id-or-name>
 f ai codex resume <session-id-or-name>
 f ai codex resume --path ~/work/example-project
@@ -69,6 +72,50 @@ codex resume <id> --dangerously-bypass-approvals-and-sandbox
 ```
 
 No fallback is applied on resume failure; Flow returns non-zero.
+
+### Codex open and resolve
+
+Use `open` when you want one Codex entrypoint that stays conservative about context:
+
+```bash
+f codex open
+f codex open "continue the deploy work"
+f codex open "resume latest"
+f codex open --path ~/work/example-project "what was I doing here"
+f codex resolve "https://linear.app/fl2024008/project/llm-proxy-v1-6cd0a041bd76/overview" --json
+```
+
+Behavior:
+
+- no query: start a fresh Codex session in the target repo
+- explicit session lookup queries like `latest`, `resume session`, ordinals, or session IDs: resume the matching Codex session
+- explicit recovery prompts like `what was I doing` or `continue the ... work`: build a compact recovery handoff and start a new session
+- matching reference resolvers: inject only compact resolver output, then append the user request
+- otherwise: start a new session with the raw query and no extra wrapper text
+
+This keeps prompt cost flat unless Flow has a strong reason to recover or unroll context.
+
+### Optional `flow.toml` resolver config
+
+You can teach `f codex open` and `f codex resolve` to unroll repo-specific references:
+
+```toml
+[codex]
+auto_resolve_references = true
+
+[[codex.reference_resolver]]
+name = "linear"
+match = ["https://linear.app/*/issue/*", "https://linear.app/*/project/*"]
+command = "forge linear inspect {{ref}} --json"
+inject_as = "linear"
+```
+
+Notes:
+
+- configure this in repo `flow.toml` or global `~/.config/flow/flow.toml`
+- `{{ref}}`, `{{query}}`, and `{{cwd}}` are available in resolver commands
+- built-in Linear URL parsing works even without a custom resolver
+- resolver output is compacted before prompt injection
 
 ### Cursor behavior
 

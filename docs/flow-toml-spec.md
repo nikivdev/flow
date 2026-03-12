@@ -36,6 +36,13 @@ install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/sk
 # generate_openai_yaml = true
 # force_reload_after_sync = true
 # task_skill_allow_implicit_invocation = false
+[codex]               # optional: Codex-first open/resolve behavior
+# auto_resolve_references = true
+[[codex.reference_resolver]]
+# name = "linear"
+# match = ["https://linear.app/*/issue/*", "https://linear.app/*/project/*"]
+# command = "forge linear inspect {{ref}} --json"
+# inject_as = "linear"
 [skills.seq]          # optional: seq-backed dependency skill fetching defaults
 # seq_repo = "~/code/seq"
 # out_dir = ".ai/skills"
@@ -130,6 +137,10 @@ fr = "f run"
 - `alias`/`aliases`: emitted by `f setup` as shell `alias` lines.
 - `[skills]`: optional skill enforcement; `sync_tasks` generates `.ai/skills` from tasks and `install` ensures registry skills are present (skills are gitignored by default).
 - `[skills.codex]`: optional Codex tuning; task skill `agents/openai.yaml` generation, post-sync force reload, and implicit invocation policy defaults.
+- `[codex]`: optional Codex-first control-plane settings for `f codex open` / `f codex resolve`.
+  - `auto_resolve_references`: when true, matched resolver output is compacted and injected into new-session prompts.
+  - `[[codex.reference_resolver]]`: repo-specific reference unrollers with wildcard `match` patterns and a shell `command` template.
+  - command templates support `{{ref}}`, `{{query}}`, and `{{cwd}}`.
 - `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
 - `[commit]`: optional commit workflow defaults; plain `f commit` uses fast commit + deferred Codex deep review by default. Set `quick-default = false` to make plain `f commit` run blocking review instead.
 - `[task_resolution]`: optional policy for nested task discovery (`f <scope>:<task>`, preferred scopes, and per-task routes when plain names collide).
@@ -161,6 +172,15 @@ install = ["quality-bun-feature-delivery"]
 generate_openai_yaml = true
 force_reload_after_sync = true
 task_skill_allow_implicit_invocation = false
+
+[codex]
+auto_resolve_references = true
+
+[[codex.reference_resolver]]
+name = "linear"
+match = ["https://linear.app/*/issue/*", "https://linear.app/*/project/*"]
+command = "forge linear inspect {{ref}} --json"
+inject_as = "linear"
 
 [commit.testing]
 mode = "block"

@@ -23,6 +23,7 @@ use serde_json::json;
 use tracing::debug;
 
 use crate::cli::{AiAction, ProviderAiAction};
+use crate::{config, project_snapshot, url_inspect};
 
 /// AI provider type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +172,7 @@ struct SessionMessage {
     content: Option<serde_json::Value>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CodexRecoverRow {
     id: String,
     updated_at: i64,
@@ -202,6 +203,45 @@ struct CodexRecoverOutput {
     candidates: Vec<CodexRecoverCandidate>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CodexResolvedReference {
+    name: String,
+    source: String,
+    matched: String,
+    command: Option<String>,
+    output: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CodexOpenPlan {
+    action: String,
+    reason: String,
+    target_path: String,
+    launch_path: String,
+    query: Option<String>,
+    session_id: Option<String>,
+    prompt: Option<String>,
+    references: Vec<CodexResolvedReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinearUrlReference {
+    url: String,
+    workspace_slug: String,
+    resource_kind: LinearUrlKind,
+    resource_value: String,
+    view: Option<String>,
+    title_hint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinearUrlKind {
+    Issue,
+    Project,
+}
+
 /// Run a provider-specific action (for top-level `f codex` / `f claude` commands).
 pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Result<()> {
     if provider == Provider::Cursor {
@@ -216,7 +256,11 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
             Some(ProviderAiAction::Sessions)
             | Some(ProviderAiAction::Continue { .. })
             | Some(ProviderAiAction::New)
-            | Some(ProviderAiAction::Resume { .. }) => {
+            | Some(ProviderAiAction::Open { .. })
+            | Some(ProviderAiAction::Resolve { .. })
+            | Some(ProviderAiAction::Resume { .. })
+            | Some(ProviderAiAction::Find { .. })
+            | Some(ProviderAiAction::FindAndCopy { .. }) => {
                 bail!(
                     "Cursor transcripts are readable only; use `f cursor list`, `f cursor copy`, or `f cursor context`"
                 );
@@ -236,9 +280,30 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
             continue_session(session, path, provider)?
         }
         Some(ProviderAiAction::New) => new_session(provider)?,
+        Some(ProviderAiAction::Open {
+            path,
+            exact_cwd,
+            query,
+        }) => open_codex_session(path, query, exact_cwd, provider)?,
+        Some(ProviderAiAction::Resolve {
+            path,
+            exact_cwd,
+            json,
+            query,
+        }) => resolve_codex_input(path, query, exact_cwd, json, provider)?,
         Some(ProviderAiAction::Resume { session, path }) => {
             resume_session(session, path, provider)?
         }
+        Some(ProviderAiAction::Find {
+            path,
+            exact_cwd,
+            query,
+        }) => find_codex_session(path, query, exact_cwd, provider)?,
+        Some(ProviderAiAction::FindAndCopy {
+            path,
+            exact_cwd,
+            query,
+        }) => find_and_copy_codex_session(path, query, exact_cwd, provider)?,
         Some(ProviderAiAction::Copy { session }) => copy_session(session, provider)?,
         Some(ProviderAiAction::Context {
             session,
@@ -272,9 +337,22 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 continue_session(session, path, Provider::Claude)?
             }
             Some(ProviderAiAction::New) => new_session(Provider::Claude)?,
+            Some(ProviderAiAction::Open { .. }) | Some(ProviderAiAction::Resolve { .. }) => {
+                bail!("open/resolve is only supported for Codex sessions; use `f codex ...`");
+            }
             Some(ProviderAiAction::Resume { session, path }) => {
                 resume_session(session, path, Provider::Claude)?
             }
+            Some(ProviderAiAction::Find {
+                path,
+                exact_cwd,
+                query,
+            }) => find_codex_session(path, query, exact_cwd, Provider::Claude)?,
+            Some(ProviderAiAction::FindAndCopy {
+                path,
+                exact_cwd,
+                query,
+            }) => find_and_copy_codex_session(path, query, exact_cwd, Provider::Claude)?,
             Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Claude)?,
             Some(ProviderAiAction::Context {
                 session,
@@ -306,9 +384,30 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 continue_session(session, path, Provider::Codex)?
             }
             Some(ProviderAiAction::New) => new_session(Provider::Codex)?,
+            Some(ProviderAiAction::Open {
+                path,
+                exact_cwd,
+                query,
+            }) => open_codex_session(path, query, exact_cwd, Provider::Codex)?,
+            Some(ProviderAiAction::Resolve {
+                path,
+                exact_cwd,
+                json,
+                query,
+            }) => resolve_codex_input(path, query, exact_cwd, json, Provider::Codex)?,
             Some(ProviderAiAction::Resume { session, path }) => {
                 resume_session(session, path, Provider::Codex)?
             }
+            Some(ProviderAiAction::Find {
+                path,
+                exact_cwd,
+                query,
+            }) => find_codex_session(path, query, exact_cwd, Provider::Codex)?,
+            Some(ProviderAiAction::FindAndCopy {
+                path,
+                exact_cwd,
+                query,
+            }) => find_and_copy_codex_session(path, query, exact_cwd, Provider::Codex)?,
             Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Codex)?,
             Some(ProviderAiAction::Context {
                 session,
@@ -2131,7 +2230,10 @@ fn resolve_session_target_path(path: Option<&str>) -> Result<PathBuf> {
             };
             Ok(resolved.canonicalize().unwrap_or(resolved))
         }
-        None => env::current_dir().context("failed to get current directory"),
+        None => {
+            let resolved = env::current_dir().context("failed to get current directory")?;
+            Ok(resolved.canonicalize().unwrap_or(resolved))
+        }
     }
 }
 
@@ -2823,24 +2925,44 @@ fn run_session_fzf(entries: &[FzfSessionEntry]) -> Result<Option<&FzfSessionEntr
 
 /// Launch a session with the appropriate CLI. Returns true if successful, false if failed.
 fn launch_session(session_id: &str, provider: Provider) -> Result<bool> {
+    launch_session_for_target(session_id, provider, None, None)
+}
+
+fn launch_session_for_target(
+    session_id: &str,
+    provider: Provider,
+    prompt: Option<&str>,
+    target_path: Option<&Path>,
+) -> Result<bool> {
     let status = match provider {
         Provider::Claude | Provider::All => {
             // Claude uses: claude --resume <session_id> --dangerously-skip-permissions
-            Command::new("claude")
+            let mut command = Command::new("claude");
+            command
                 .arg("--resume")
                 .arg(session_id)
-                .arg("--dangerously-skip-permissions")
+                .arg("--dangerously-skip-permissions");
+            if let Some(path) = target_path {
+                command.current_dir(path);
+            }
+            command
                 .status()
                 .with_context(|| "failed to launch claude")?
         }
         Provider::Codex => {
-            // Codex uses: codex resume <session_id> --dangerously-bypass-approvals-and-sandbox
+            // Codex uses: codex resume --dangerously-bypass-approvals-and-sandbox <session_id> [prompt]
             let mut command = Command::new("codex");
+            command.arg("resume");
+            if let Some(path) = target_path {
+                command.current_dir(path);
+            }
+            apply_codex_trust_overrides_for(&mut command, target_path);
             command
-                .arg("resume")
-                .arg(session_id)
-                .arg("--dangerously-bypass-approvals-and-sandbox");
-            apply_codex_trust_overrides(&mut command);
+                .arg("--dangerously-bypass-approvals-and-sandbox")
+                .arg(session_id);
+            if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
+                command.arg(prompt);
+            }
             command.status().with_context(|| "failed to launch codex")?
         }
         Provider::Cursor => {
@@ -2892,18 +3014,24 @@ fn detect_git_root(path: &Path) -> Option<PathBuf> {
 }
 
 fn codex_trusted_paths() -> Vec<PathBuf> {
-    let mut paths = BTreeSet::new();
-    if let Ok(raw_cwd) = env::current_dir() {
-        paths.insert(raw_cwd.clone());
-        if let Some(raw_git_root) = detect_git_root(&raw_cwd) {
-            paths.insert(raw_git_root);
-        }
+    env::current_dir()
+        .ok()
+        .map(|path| codex_trusted_paths_for(&path))
+        .unwrap_or_default()
+}
 
-        if let Ok(canonical_cwd) = raw_cwd.canonicalize() {
-            paths.insert(canonical_cwd.clone());
-            if let Some(canonical_git_root) = detect_git_root(&canonical_cwd) {
-                paths.insert(canonical_git_root);
-            }
+fn codex_trusted_paths_for(seed: &Path) -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+    let raw_cwd = seed.to_path_buf();
+    paths.insert(raw_cwd.clone());
+    if let Some(raw_git_root) = detect_git_root(&raw_cwd) {
+        paths.insert(raw_git_root);
+    }
+
+    if let Ok(canonical_cwd) = raw_cwd.canonicalize() {
+        paths.insert(canonical_cwd.clone());
+        if let Some(canonical_git_root) = detect_git_root(&canonical_cwd) {
+            paths.insert(canonical_git_root);
         }
     }
     paths.into_iter().collect()
@@ -2936,6 +3064,15 @@ fn apply_codex_trust_overrides(command: &mut Command) {
     }
 }
 
+fn apply_codex_trust_overrides_for(command: &mut Command, target_path: Option<&Path>) {
+    let paths = target_path
+        .map(codex_trusted_paths_for)
+        .unwrap_or_else(codex_trusted_paths);
+    if let Some(override_value) = codex_projects_override(&paths) {
+        command.arg("--config").arg(override_value);
+    }
+}
+
 fn launch_codex_resume_picker() -> Result<bool> {
     let mut command = Command::new("codex");
     command
@@ -2948,13 +3085,16 @@ fn launch_codex_resume_picker() -> Result<bool> {
     Ok(status.success())
 }
 
-fn launch_codex_continue_last() -> Result<bool> {
+fn launch_codex_continue_last_for_target(target_path: Option<&Path>) -> Result<bool> {
     let mut command = Command::new("codex");
+    command.arg("resume");
+    if let Some(path) = target_path {
+        command.current_dir(path);
+    }
+    apply_codex_trust_overrides_for(&mut command, target_path);
     command
-        .arg("resume")
         .arg("--last")
         .arg("--dangerously-bypass-approvals-and-sandbox");
-    apply_codex_trust_overrides(&mut command);
     let status = command
         .status()
         .with_context(|| "failed to launch codex resume --last")?;
@@ -3035,7 +3175,7 @@ fn continue_session(
             &sess.session_id[..8.min(sess.session_id.len())],
             target.display()
         );
-        if launch_session(&sess.session_id, sess.provider)? {
+        if launch_session_for_target(&sess.session_id, sess.provider, None, Some(&target))? {
             return Ok(());
         }
         bail!(
@@ -3048,7 +3188,7 @@ fn continue_session(
 
     let launched = match provider {
         Provider::Claude => launch_claude_continue()?,
-        Provider::Codex => launch_codex_continue_last()?,
+        Provider::Codex => launch_codex_continue_last_for_target(None)?,
         Provider::Cursor => false,
         Provider::All => false,
     };
@@ -3087,18 +3227,38 @@ pub fn quick_start_session(provider: Provider) -> Result<()> {
 
 /// Start a new session with dangerous flags (ignores existing sessions).
 fn new_session(provider: Provider) -> Result<()> {
+    new_session_for_target(provider, None, None)
+}
+
+fn new_session_for_target(
+    provider: Provider,
+    prompt: Option<&str>,
+    target_path: Option<&Path>,
+) -> Result<()> {
     let status = match provider {
-        Provider::Claude | Provider::All => Command::new("claude")
-            .arg("--dangerously-skip-permissions")
-            .status()
-            .with_context(|| "failed to launch claude")?,
+        Provider::Claude | Provider::All => {
+            let mut command = Command::new("claude");
+            command.arg("--dangerously-skip-permissions");
+            if let Some(path) = target_path {
+                command.current_dir(path);
+            }
+            command
+                .status()
+                .with_context(|| "failed to launch claude")?
+        }
         Provider::Codex => {
             let mut command = Command::new("codex");
+            if let Some(path) = target_path {
+                command.current_dir(path);
+            }
+            apply_codex_trust_overrides_for(&mut command, target_path);
             command
                 .arg("--yolo")
                 .arg("--sandbox")
                 .arg("danger-full-access");
-            apply_codex_trust_overrides(&mut command);
+            if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
+                command.arg(prompt);
+            }
             command.status().with_context(|| "failed to launch codex")?
         }
         Provider::Cursor => {
@@ -3121,6 +3281,85 @@ fn new_session(provider: Provider) -> Result<()> {
     Ok(())
 }
 
+fn find_codex_session(
+    path: Option<String>,
+    query: Vec<String>,
+    exact_cwd: bool,
+    provider: Provider,
+) -> Result<()> {
+    let selected = find_best_codex_session_match(path, query, exact_cwd, provider, "find", true)?;
+    resume_session(Some(selected.id.clone()), None, Provider::Codex)
+}
+
+fn find_and_copy_codex_session(
+    path: Option<String>,
+    query: Vec<String>,
+    exact_cwd: bool,
+    provider: Provider,
+) -> Result<()> {
+    let selected =
+        find_best_codex_session_match(path, query, exact_cwd, provider, "findAndCopy", false)?;
+    copy_session_history_to_clipboard(&selected.id, Provider::Codex)?;
+    println!(
+        "Session {} found and copied to clipboard",
+        truncate_recover_id(&selected.id)
+    );
+    Ok(())
+}
+
+fn find_best_codex_session_match(
+    path: Option<String>,
+    query: Vec<String>,
+    exact_cwd: bool,
+    provider: Provider,
+    action_name: &str,
+    verbose: bool,
+) -> Result<CodexRecoverRow> {
+    if provider != Provider::Codex {
+        bail!(
+            "{} is only supported for Codex sessions; use `f ai codex {} ...`",
+            action_name,
+            action_name
+        );
+    }
+
+    let query_text = normalize_recover_query(&query).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} requires a query, for example: `f ai codex {} \"make plan to get designer\"`",
+            action_name,
+            action_name
+        )
+    })?;
+    let target_path = path
+        .map(|value| canonicalize_recover_path(Some(value)))
+        .transpose()?;
+    let rows = search_codex_threads_for_find(target_path.as_deref(), exact_cwd, &query_text, 5)?;
+    let selected = rows.first().ok_or_else(|| match target_path.as_ref() {
+        Some(target_path) => anyhow::anyhow!(
+            "No matching Codex sessions found for {:?} under {}",
+            query_text,
+            target_path.display()
+        ),
+        None => anyhow::anyhow!("No matching Codex sessions found for {:?}", query_text),
+    })?;
+
+    if verbose {
+        println!(
+            "Matched Codex session {} | {} | {}",
+            truncate_recover_id(&selected.id),
+            format_unix_ts(selected.updated_at),
+            selected.cwd
+        );
+        if let Some(first) = selected.first_user_message.as_deref() {
+            println!("Prompt: {}", truncate_recover_text(first));
+        } else if let Some(title) = selected.title.as_deref() {
+            println!("Title: {}", truncate_recover_text(title));
+        }
+    }
+
+    Ok(selected.clone())
+}
+
 fn recover_codex_sessions(
     path: Option<String>,
     query: Vec<String>,
@@ -3134,10 +3373,35 @@ fn recover_codex_sessions(
         bail!("recover is only supported for Codex sessions; use `f ai codex recover ...`");
     }
 
-    let target_path = canonicalize_recover_path(path)?;
     let query_text = normalize_recover_query(&query);
-    let rows =
-        read_recent_codex_threads(&target_path, exact_cwd, limit.max(1), query_text.as_deref())?;
+    let requested_target_path = canonicalize_recover_path(path)?;
+    let explicit_session_hint = query_text.as_deref().and_then(extract_codex_session_hint);
+    let (target_path, rows) = if let Some(session_hint) = explicit_session_hint.as_deref() {
+        let rows = read_codex_threads_by_session_hint(session_hint, limit.max(1))?;
+        if let Some(first) = rows.first() {
+            (canonicalize_recover_path(Some(first.cwd.clone()))?, rows)
+        } else {
+            (
+                requested_target_path.clone(),
+                read_recent_codex_threads(
+                    &requested_target_path,
+                    exact_cwd,
+                    limit.max(1),
+                    query_text.as_deref(),
+                )?,
+            )
+        }
+    } else {
+        (
+            requested_target_path.clone(),
+            read_recent_codex_threads(
+                &requested_target_path,
+                exact_cwd,
+                limit.max(1),
+                query_text.as_deref(),
+            )?,
+        )
+    };
     let output = build_recover_output(&target_path, exact_cwd, query_text, rows);
 
     if summary_only {
@@ -3174,6 +3438,62 @@ fn canonicalize_recover_path(path: Option<String>) -> Result<PathBuf> {
 fn normalize_recover_query(parts: &[String]) -> Option<String> {
     let text = parts.join(" ").trim().to_string();
     if text.is_empty() { None } else { Some(text) }
+}
+
+fn recover_query_tokens(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|part| {
+            part.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+                .to_ascii_lowercase()
+        })
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn looks_like_git_sha(token: &str) -> bool {
+    (7..=40).contains(&token.len()) && token.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn looks_like_codex_session_token(token: &str) -> bool {
+    if token.len() < 8 || token.len() > 36 || !token.contains('-') {
+        return false;
+    }
+
+    let mut hex_chars = 0usize;
+    for ch in token.chars() {
+        if ch == '-' {
+            continue;
+        }
+        if !ch.is_ascii_hexdigit() {
+            return false;
+        }
+        hex_chars += 1;
+    }
+
+    if hex_chars < 8 {
+        return false;
+    }
+
+    if token.len() == 36 {
+        let segments: Vec<_> = token.split('-').collect();
+        if segments.len() != 5 {
+            return false;
+        }
+        let expected = [8usize, 4, 4, 4, 12];
+        return segments
+            .iter()
+            .zip(expected)
+            .all(|(segment, expected_len)| segment.len() == expected_len);
+    }
+
+    true
+}
+
+fn extract_codex_session_hint(query: &str) -> Option<String> {
+    recover_query_tokens(query)
+        .into_iter()
+        .find(|token| !looks_like_git_sha(token) && looks_like_codex_session_token(token))
 }
 
 fn codex_sqlite_home() -> Result<PathBuf> {
@@ -3299,6 +3619,162 @@ limit ?3
     Ok(rows)
 }
 
+fn read_codex_threads_by_session_hint(
+    session_hint: &str,
+    limit: usize,
+) -> Result<Vec<CodexRecoverRow>> {
+    let db_path = latest_codex_state_db()?;
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+    let normalized_hint = session_hint.trim().to_ascii_lowercase();
+    if normalized_hint.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let sql = r#"
+select
+  id,
+  updated_at,
+  cwd,
+  title,
+  first_user_message,
+  git_branch
+from threads
+where archived = 0
+  and (lower(id) = ?1 or lower(id) like ?2 escape '\')
+order by
+  case when lower(id) = ?1 then 0 else 1 end,
+  updated_at desc
+limit ?3
+"#;
+
+    let mut stmt = conn
+        .prepare(sql)
+        .context("failed to prepare explicit session recover query")?;
+    let prefix_like = format!("{}%", escape_like(&normalized_hint));
+    let iter = stmt.query_map(
+        params![normalized_hint, prefix_like, limit.max(1) as i64],
+        |row| {
+            Ok(CodexRecoverRow {
+                id: row.get(0)?,
+                updated_at: row.get(1)?,
+                cwd: row.get(2)?,
+                title: row.get(3)?,
+                first_user_message: row.get(4)?,
+                git_branch: row.get(5)?,
+            })
+        },
+    )?;
+    Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn search_codex_threads_for_find(
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<CodexRecoverRow>> {
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return Ok(vec![]);
+    }
+
+    if let Some(session_hint) = extract_codex_session_hint(&normalized_query) {
+        let rows = read_codex_threads_by_session_hint(&session_hint, limit.max(1))?;
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+    }
+
+    let db_path = latest_codex_state_db()?;
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+
+    let mut sql = String::from(
+        r#"
+select
+  id,
+  updated_at,
+  cwd,
+  title,
+  first_user_message,
+  git_branch
+from threads
+where archived = 0
+"#,
+    );
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(target_path) = target_path {
+        let target = target_path.to_string_lossy().to_string();
+        if exact_cwd {
+            sql.push_str("  and cwd = ?\n");
+            params_vec.push(Box::new(target));
+        } else {
+            sql.push_str("  and (cwd = ? or cwd like ? escape '\\')\n");
+            params_vec.push(Box::new(target.clone()));
+            params_vec.push(Box::new(format!("{}/%", escape_like(&target))));
+        }
+    }
+
+    let search_terms = codex_find_search_terms(&normalized_query);
+    let mut clauses = Vec::new();
+    for term in search_terms {
+        let pattern = format!("%{}%", escape_like(&term));
+        for column in ["id", "first_user_message", "title", "git_branch", "cwd"] {
+            clauses.push(format!("lower(coalesce({column}, '')) like ? escape '\\'"));
+            params_vec.push(Box::new(pattern.clone()));
+        }
+    }
+    if !clauses.is_empty() {
+        sql.push_str("  and (");
+        sql.push_str(&clauses.join(" or "));
+        sql.push_str(")\n");
+    }
+
+    sql.push_str("order by updated_at desc\nlimit ?\n");
+    let fetch_limit = (limit.max(5) * 20).min(200);
+    params_vec.push(Box::new(fetch_limit as i64));
+
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn
+        .prepare(&sql)
+        .context("failed to prepare Codex find query")?;
+    let iter = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(CodexRecoverRow {
+            id: row.get(0)?,
+            updated_at: row.get(1)?,
+            cwd: row.get(2)?,
+            title: row.get(3)?,
+            first_user_message: row.get(4)?,
+            git_branch: row.get(5)?,
+        })
+    })?;
+    let mut rows = iter.collect::<rusqlite::Result<Vec<_>>>()?;
+    rank_recover_rows(&mut rows, Some(&normalized_query));
+    rows.truncate(limit.max(1));
+    Ok(rows)
+}
+
+fn codex_find_search_terms(query: &str) -> Vec<String> {
+    let normalized = query.trim().to_lowercase();
+    if normalized.is_empty() {
+        return vec![];
+    }
+
+    let mut terms = vec![normalized.clone()];
+    let mut seen = BTreeSet::from([normalized]);
+    for token in tokenize_recover_query(query) {
+        if token.len() <= 2 {
+            continue;
+        }
+        if seen.insert(token.clone()) {
+            terms.push(token);
+        }
+    }
+    terms
+}
+
 fn tokenize_recover_query(query: &str) -> Vec<String> {
     query
         .split(|ch: char| {
@@ -3337,6 +3813,7 @@ fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[St
         return 0;
     }
 
+    let id = row.id.to_lowercase();
     let cwd = row.cwd.to_lowercase();
     let branch = row.git_branch.clone().unwrap_or_default().to_lowercase();
     let title = row.title.clone().unwrap_or_default().to_lowercase();
@@ -3349,6 +3826,13 @@ fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[St
     let mut score = 0i64;
 
     if !normalized_query.is_empty() {
+        if id == normalized_query {
+            score += 600;
+        } else if id.starts_with(normalized_query) {
+            score += 500;
+        } else if id.contains(normalized_query) {
+            score += 300;
+        }
         if first.contains(normalized_query) {
             score += 120;
         }
@@ -3364,6 +3848,11 @@ fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[St
     }
 
     for token in tokens {
+        if id.starts_with(token) {
+            score += 90;
+        } else if id.contains(token) {
+            score += 60;
+        }
         if first.contains(token) {
             score += 18;
         }
@@ -3420,15 +3909,35 @@ fn build_recover_output(
 }
 
 fn infer_recover_route(
-    _target_path: &Path,
+    target_path: &Path,
     _query: &str,
     candidates: &[CodexRecoverCandidate],
 ) -> String {
     if let Some(candidate) = candidates.first() {
+        let candidate_cwd = Path::new(&candidate.cwd);
+        if candidate_cwd != target_path {
+            return format!(
+                "cd {} && f ai codex resume {}",
+                shell_escape_path(candidate_cwd),
+                candidate.id
+            );
+        }
         return format!("f ai codex resume {}", candidate.id);
     }
 
     "f ai codex new".to_string()
+}
+
+fn shell_escape_path(path: &Path) -> String {
+    let display = path.to_string_lossy();
+    if display
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "/-._~".contains(ch))
+    {
+        return display.to_string();
+    }
+
+    format!("'{}'", display.replace('\'', "'\"'\"'"))
 }
 
 fn build_recover_summary(
@@ -3534,6 +4043,893 @@ fn print_recover_output(output: &CodexRecoverOutput) {
     println!();
     println!("Summary:");
     println!("{}", output.summary);
+}
+
+fn open_codex_session(
+    path: Option<String>,
+    query: Vec<String>,
+    exact_cwd: bool,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("open is only supported for Codex sessions; use `f codex open ...`");
+    }
+    ensure_provider_tty(Provider::Codex, "open")?;
+
+    let plan = build_codex_open_plan(path, query, exact_cwd)?;
+    execute_codex_open_plan(&plan)
+}
+
+fn resolve_codex_input(
+    path: Option<String>,
+    query: Vec<String>,
+    exact_cwd: bool,
+    json_output: bool,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("resolve is only supported for Codex sessions; use `f codex resolve ...`");
+    }
+
+    let (query, json_output) = normalize_codex_resolve_args(query, json_output);
+    let plan = build_codex_open_plan(path, query, exact_cwd)?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&plan).context("failed to encode Codex resolve JSON")?
+        );
+        return Ok(());
+    }
+
+    print_codex_open_plan(&plan);
+    Ok(())
+}
+
+fn normalize_codex_resolve_args(query: Vec<String>, json_output: bool) -> (Vec<String>, bool) {
+    if json_output {
+        return (query, true);
+    }
+
+    let mut normalized = query;
+    let mut resolved_json = false;
+    while matches!(normalized.last().map(String::as_str), Some("--json")) {
+        normalized.pop();
+        resolved_json = true;
+    }
+
+    (normalized, resolved_json)
+}
+
+fn build_codex_open_plan(
+    path: Option<String>,
+    query: Vec<String>,
+    exact_cwd: bool,
+) -> Result<CodexOpenPlan> {
+    let target_path = resolve_session_target_path(path.as_deref())?;
+    let query_text = normalize_recover_query(&query);
+    let codex_cfg = load_codex_config_for_path(&target_path);
+    let auto_resolve_references = codex_cfg.auto_resolve_references.unwrap_or(true);
+
+    let Some(query_text) = query_text else {
+        return Ok(CodexOpenPlan {
+            action: "new".to_string(),
+            reason: "no query provided".to_string(),
+            target_path: target_path.display().to_string(),
+            launch_path: target_path.display().to_string(),
+            query: None,
+            session_id: None,
+            prompt: None,
+            references: Vec::new(),
+        });
+    };
+
+    let normalized_query = query_text.to_ascii_lowercase();
+
+    if looks_like_recovery_prompt(&normalized_query) {
+        return build_codex_recovery_plan(&target_path, exact_cwd, &query_text);
+    }
+
+    if let Some((session, reason)) =
+        resolve_codex_session_lookup(&target_path, exact_cwd, &query_text, &normalized_query)?
+    {
+        return Ok(CodexOpenPlan {
+            action: "resume".to_string(),
+            reason,
+            target_path: target_path.display().to_string(),
+            launch_path: session.cwd.clone(),
+            query: Some(query_text),
+            session_id: Some(session.id),
+            prompt: None,
+            references: Vec::new(),
+        });
+    }
+
+    if looks_like_session_lookup_query(&normalized_query) {
+        bail!(
+            "{}",
+            build_codex_open_no_match_message(&target_path, exact_cwd, &query_text)?
+        );
+    }
+
+    let references = if auto_resolve_references {
+        resolve_codex_references(&target_path, &query_text, &codex_cfg.reference_resolvers)?
+    } else {
+        Vec::new()
+    };
+    let prompt = build_codex_prompt(&query_text, &references);
+
+    Ok(CodexOpenPlan {
+        action: "new".to_string(),
+        reason: if references.is_empty() {
+            "start a new session from the current query".to_string()
+        } else {
+            "start a new session with compact resolved context".to_string()
+        },
+        target_path: target_path.display().to_string(),
+        launch_path: target_path.display().to_string(),
+        query: Some(query_text),
+        session_id: None,
+        prompt,
+        references,
+    })
+}
+
+fn execute_codex_open_plan(plan: &CodexOpenPlan) -> Result<()> {
+    let launch_path = PathBuf::from(&plan.launch_path);
+    match plan.action.as_str() {
+        "resume" => {
+            let session_id = plan
+                .session_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("missing session id for resume plan"))?;
+            println!(
+                "Opening Codex session {} in {}...",
+                truncate_recover_id(session_id),
+                launch_path.display()
+            );
+            if launch_session_for_target(
+                session_id,
+                Provider::Codex,
+                plan.prompt.as_deref(),
+                Some(&launch_path),
+            )? {
+                Ok(())
+            } else {
+                bail!("failed to resume codex session {}", session_id);
+            }
+        }
+        "new" | "recover-new" => {
+            println!("Starting Codex in {}...", launch_path.display());
+            new_session_for_target(Provider::Codex, plan.prompt.as_deref(), Some(&launch_path))
+        }
+        other => bail!("unsupported codex open action: {}", other),
+    }
+}
+
+fn print_codex_open_plan(plan: &CodexOpenPlan) {
+    println!("# codex resolve");
+    println!("action: {}", plan.action);
+    println!("reason: {}", plan.reason);
+    println!("target: {}", plan.target_path);
+    println!("launch: {}", plan.launch_path);
+    if let Some(session_id) = plan.session_id.as_deref() {
+        println!("session: {}", truncate_recover_id(session_id));
+    }
+    if !plan.references.is_empty() {
+        println!("references:");
+        for reference in &plan.references {
+            println!(
+                "- {} [{}] {}",
+                reference.name, reference.source, reference.matched
+            );
+        }
+    }
+    if let Some(prompt) = plan.prompt.as_deref() {
+        println!("prompt:");
+        println!("{}", compact_codex_context_block(prompt, 12, 900));
+    }
+}
+
+fn load_codex_config_for_path(target_path: &Path) -> config::CodexConfig {
+    let mut resolved = config::CodexConfig::default();
+
+    let global_path = config::default_config_path();
+    if global_path.exists()
+        && let Ok(cfg) = config::load(&global_path)
+        && let Some(codex_cfg) = cfg.codex
+    {
+        resolved.merge(codex_cfg);
+    }
+
+    if let Some(local_path) = project_snapshot::find_flow_toml_upwards(target_path)
+        && local_path != global_path
+        && let Ok(cfg) = config::load(&local_path)
+        && let Some(codex_cfg) = cfg.codex
+    {
+        resolved.merge(codex_cfg);
+    }
+
+    resolved
+}
+
+fn looks_like_recovery_prompt(normalized_query: &str) -> bool {
+    normalized_query.contains("see this convo")
+        || normalized_query.contains("what was i doing")
+        || normalized_query.contains("recover recent context")
+        || normalized_query.contains("recover context")
+        || (normalized_query.contains("continue the")
+            && (normalized_query.contains(" work")
+                || normalized_query.contains(" session")
+                || normalized_query.contains(" convo")
+                || normalized_query.contains(" conversation")))
+}
+
+fn looks_like_session_lookup_query(normalized_query: &str) -> bool {
+    extract_codex_session_hint(normalized_query).is_some()
+        || normalized_query.contains("after")
+        || normalized_query.contains("before")
+        || parse_ordinal_index(normalized_query).is_some()
+        || looks_like_latest_query(normalized_query)
+        || (contains_lookup_subject(normalized_query)
+            && starts_with_session_control_phrase(normalized_query))
+}
+
+fn contains_lookup_subject(query: &str) -> bool {
+    [
+        "session",
+        "sessions",
+        "conversation",
+        "conversations",
+        "convo",
+        "convos",
+    ]
+    .iter()
+    .any(|value| query.split_whitespace().any(|word| word == *value))
+}
+
+fn starts_with_session_control_phrase(query: &str) -> bool {
+    [
+        "open ",
+        "resume ",
+        "continue ",
+        "connect ",
+        "find ",
+        "recover ",
+        "show ",
+        "see ",
+        "copy ",
+        "summarize ",
+        "what was i doing",
+    ]
+    .iter()
+    .any(|prefix| query.starts_with(prefix))
+}
+
+fn resolve_codex_session_lookup(
+    target_path: &Path,
+    exact_cwd: bool,
+    query_text: &str,
+    normalized_query: &str,
+) -> Result<Option<(CodexRecoverRow, String)>> {
+    if let Some(session_hint) = extract_codex_session_hint(normalized_query) {
+        let rows = read_codex_threads_by_session_hint(&session_hint, 1)?;
+        if let Some(row) = rows.into_iter().next() {
+            return Ok(Some((
+                row,
+                format!("explicit session id/prefix `{}`", session_hint),
+            )));
+        }
+    }
+
+    if let Some((row, reason)) =
+        resolve_directional_session_lookup(target_path, exact_cwd, normalized_query)?
+    {
+        return Ok(Some((row, reason)));
+    }
+
+    if let Some(index) = parse_ordinal_index(normalized_query) {
+        let rows = read_recent_codex_threads(target_path, exact_cwd, index + 1, None)?;
+        if let Some(row) = rows.into_iter().nth(index) {
+            return Ok(Some((row, format!("ordinal session match #{}", index + 1))));
+        }
+    }
+
+    if looks_like_latest_query(normalized_query) {
+        let rows = read_recent_codex_threads(target_path, exact_cwd, 1, None)?;
+        if let Some(row) = rows.into_iter().next() {
+            return Ok(Some((row, "latest recent session".to_string())));
+        }
+    }
+
+    if looks_like_session_lookup_query(normalized_query) {
+        let rows = search_codex_threads_for_find(Some(target_path), exact_cwd, query_text, 1)?;
+        if let Some(row) = rows.into_iter().next() {
+            return Ok(Some((row, "matched session search query".to_string())));
+        }
+    }
+
+    Ok(None)
+}
+
+fn resolve_directional_session_lookup(
+    target_path: &Path,
+    exact_cwd: bool,
+    normalized_query: &str,
+) -> Result<Option<(CodexRecoverRow, String)>> {
+    let Some((direction, anchor_text)) = split_directional_query(normalized_query) else {
+        return Ok(None);
+    };
+    let recent_rows = read_recent_codex_threads(target_path, exact_cwd, 50, None)?;
+    if recent_rows.is_empty() {
+        return Ok(None);
+    }
+
+    let anchor = if let Some(index) = parse_ordinal_index(&anchor_text) {
+        recent_rows.get(index).cloned()
+    } else if anchor_text.is_empty() || looks_like_latest_query(&anchor_text) {
+        recent_rows.first().cloned()
+    } else if let Some(session_hint) = extract_codex_session_hint(&anchor_text) {
+        read_codex_threads_by_session_hint(&session_hint, 1)?
+            .into_iter()
+            .next()
+    } else {
+        search_codex_threads_for_find(Some(target_path), exact_cwd, &anchor_text, 1)?
+            .into_iter()
+            .next()
+    };
+
+    let Some(anchor) = anchor else {
+        return Ok(None);
+    };
+    let Some(anchor_index) = recent_rows.iter().position(|row| row.id == anchor.id) else {
+        return Ok(None);
+    };
+    let selected = if direction == "after" {
+        recent_rows.get(anchor_index + 1).cloned()
+    } else {
+        anchor_index
+            .checked_sub(1)
+            .and_then(|index| recent_rows.get(index).cloned())
+    };
+
+    Ok(selected.map(|row| {
+        (
+            row,
+            format!("{} session relative to `{}`", direction, anchor_text.trim()),
+        )
+    }))
+}
+
+fn split_directional_query(query: &str) -> Option<(String, String)> {
+    for direction in ["after", "before"] {
+        if let Some(index) = find_word_boundary(query, direction) {
+            let anchor = query[index + direction.len()..].trim().to_string();
+            return Some((direction.to_string(), anchor));
+        }
+    }
+    None
+}
+
+fn find_word_boundary(text: &str, needle: &str) -> Option<usize> {
+    let haystack = text.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let last = haystack.len().checked_sub(needle_bytes.len())?;
+    for start in 0..=last {
+        if &haystack[start..start + needle_bytes.len()] != needle_bytes {
+            continue;
+        }
+        let before_ok = start == 0 || !haystack[start - 1].is_ascii_alphanumeric();
+        let after_index = start + needle_bytes.len();
+        let after_ok =
+            after_index >= haystack.len() || !haystack[after_index].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return Some(start);
+        }
+    }
+    None
+}
+
+fn parse_ordinal_index(query: &str) -> Option<usize> {
+    let filtered = strip_codex_control_words(query);
+    if filtered.len() == 1 {
+        if let Ok(value) = filtered[0].parse::<usize>() {
+            if value > 0 {
+                return Some(value - 1);
+            }
+        }
+        let ordinal = match filtered[0].as_str() {
+            "1st" | "first" | "one" => Some(0),
+            "2nd" | "second" | "two" => Some(1),
+            "3rd" | "third" | "three" => Some(2),
+            "4th" | "fourth" | "four" => Some(3),
+            "5th" | "fifth" | "five" => Some(4),
+            "6th" | "sixth" | "six" => Some(5),
+            "7th" | "seventh" | "seven" => Some(6),
+            "8th" | "eighth" | "eight" => Some(7),
+            "9th" | "ninth" | "nine" => Some(8),
+            "10th" | "tenth" | "ten" => Some(9),
+            _ => None,
+        };
+        if ordinal.is_some() {
+            return ordinal;
+        }
+    }
+    None
+}
+
+fn looks_like_latest_query(query: &str) -> bool {
+    let filtered = strip_codex_control_words(query);
+    filtered.is_empty()
+        && (query.contains("most recent")
+            || query.contains("latest")
+            || query.contains("newest")
+            || query.contains("last"))
+}
+
+fn strip_codex_control_words(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .filter(|part| {
+            !matches!(
+                part.as_str(),
+                "connect"
+                    | "open"
+                    | "resume"
+                    | "continue"
+                    | "session"
+                    | "sessions"
+                    | "conversation"
+                    | "conversations"
+                    | "convo"
+                    | "convos"
+                    | "after"
+                    | "before"
+                    | "most"
+                    | "recent"
+                    | "latest"
+                    | "newest"
+                    | "last"
+                    | "active"
+                    | "the"
+                    | "a"
+                    | "an"
+                    | "to"
+                    | "from"
+                    | "for"
+                    | "please"
+            )
+        })
+        .collect()
+}
+
+fn build_codex_recovery_plan(
+    target_path: &Path,
+    exact_cwd: bool,
+    query_text: &str,
+) -> Result<CodexOpenPlan> {
+    let rows = read_recent_codex_threads(target_path, exact_cwd, 3, Some(query_text))?;
+    let output = build_recover_output(target_path, exact_cwd, Some(query_text.to_string()), rows);
+    let launch_path = output
+        .candidates
+        .first()
+        .map(|value| value.cwd.clone())
+        .unwrap_or_else(|| target_path.display().to_string());
+
+    if output.candidates.is_empty() {
+        bail!("{}", output.summary);
+    }
+
+    let prompt = build_recovery_prompt(query_text, &output);
+    Ok(CodexOpenPlan {
+        action: "recover-new".to_string(),
+        reason: "explicit recovery prompt".to_string(),
+        target_path: target_path.display().to_string(),
+        launch_path,
+        query: Some(query_text.to_string()),
+        session_id: None,
+        prompt: Some(prompt),
+        references: Vec::new(),
+    })
+}
+
+fn build_recovery_prompt(query_text: &str, output: &CodexRecoverOutput) -> String {
+    let mut lines = vec!["Recovered recent Codex context:".to_string()];
+    for candidate in output.candidates.iter().take(2) {
+        let preview = candidate
+            .first_user_message
+            .as_deref()
+            .or(candidate.title.as_deref())
+            .map(truncate_recover_text)
+            .unwrap_or_else(|| "(no stored prompt text)".to_string());
+        lines.push(format!(
+            "- {} | {} | {} | {}",
+            truncate_recover_id(&candidate.id),
+            candidate.updated_at,
+            candidate.cwd,
+            preview
+        ));
+    }
+    lines.push(String::new());
+    lines.push("User request:".to_string());
+    lines.push(query_text.trim().to_string());
+    compact_codex_context_block(&lines.join("\n"), 10, 1100)
+}
+
+fn build_codex_open_no_match_message(
+    target_path: &Path,
+    exact_cwd: bool,
+    query_text: &str,
+) -> Result<String> {
+    let output = build_recover_output(
+        target_path,
+        exact_cwd,
+        Some(query_text.to_string()),
+        read_recent_codex_threads(target_path, exact_cwd, 5, None)?,
+    );
+    Ok(format!(
+        "No Codex session matched {:?}.\n{}",
+        query_text, output.summary
+    ))
+}
+
+fn resolve_codex_references(
+    target_path: &Path,
+    query_text: &str,
+    resolvers: &[config::CodexReferenceResolverConfig],
+) -> Result<Vec<CodexResolvedReference>> {
+    let candidates = extract_reference_candidates(query_text);
+    let mut matches = Vec::new();
+
+    for resolver in resolvers {
+        if let Some(reference) =
+            resolve_external_reference(target_path, query_text, &candidates, resolver)?
+        {
+            matches.push(reference);
+        }
+        if matches.len() >= 2 {
+            return Ok(matches);
+        }
+    }
+
+    if let Some(reference) = resolve_builtin_linear_reference(query_text, &candidates)
+        && !matches
+            .iter()
+            .any(|value| value.matched == reference.matched)
+    {
+        matches.push(reference);
+    }
+
+    if let Some(reference) = resolve_builtin_url_reference(target_path, &candidates, &matches)
+        && !matches
+            .iter()
+            .any(|value| value.matched == reference.matched)
+    {
+        matches.push(reference);
+    }
+
+    Ok(matches)
+}
+
+fn resolve_external_reference(
+    target_path: &Path,
+    query_text: &str,
+    candidates: &[String],
+    resolver: &config::CodexReferenceResolverConfig,
+) -> Result<Option<CodexResolvedReference>> {
+    for candidate in candidates {
+        if !resolver
+            .matches
+            .iter()
+            .any(|pattern| wildcard_match(pattern, candidate))
+        {
+            continue;
+        }
+
+        let command_text = render_reference_resolver_command(
+            &resolver.command,
+            candidate,
+            query_text,
+            target_path,
+        );
+        let args = shell_words::split(&command_text)
+            .with_context(|| format!("invalid resolver command: {}", command_text))?;
+        let Some((program, rest)) = args.split_first() else {
+            bail!("empty resolver command for {}", resolver.name);
+        };
+        let output = Command::new(program)
+            .args(rest)
+            .current_dir(target_path)
+            .output()
+            .with_context(|| format!("failed to run resolver {}", resolver.name))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "resolver {} failed for {}: {}",
+                resolver.name,
+                candidate,
+                if stderr.is_empty() {
+                    format!("exit status {}", output.status)
+                } else {
+                    stderr
+                }
+            );
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout.is_empty() {
+            bail!(
+                "resolver {} returned empty output for {}",
+                resolver.name,
+                candidate
+            );
+        }
+
+        return Ok(Some(CodexResolvedReference {
+            name: resolver
+                .inject_as
+                .clone()
+                .unwrap_or_else(|| resolver.name.clone()),
+            source: "resolver".to_string(),
+            matched: candidate.clone(),
+            command: Some(command_text),
+            output: compact_codex_context_block(&stdout, 12, 1200),
+        }));
+    }
+
+    Ok(None)
+}
+
+fn render_reference_resolver_command(
+    template: &str,
+    matched: &str,
+    query_text: &str,
+    target_path: &Path,
+) -> String {
+    template
+        .replace("{{ref}}", &shell_words::quote(matched))
+        .replace("{{query}}", &shell_words::quote(query_text))
+        .replace(
+            "{{cwd}}",
+            &shell_words::quote(&target_path.display().to_string()),
+        )
+}
+
+fn resolve_builtin_linear_reference(
+    query_text: &str,
+    candidates: &[String],
+) -> Option<CodexResolvedReference> {
+    for candidate in candidates {
+        if let Some(reference) = parse_linear_url_reference(candidate) {
+            return Some(CodexResolvedReference {
+                name: "linear".to_string(),
+                source: "builtin".to_string(),
+                matched: candidate.clone(),
+                command: None,
+                output: render_linear_url_reference(&reference),
+            });
+        }
+    }
+    let _ = query_text;
+    None
+}
+
+fn resolve_builtin_url_reference(
+    target_path: &Path,
+    candidates: &[String],
+    existing: &[CodexResolvedReference],
+) -> Option<CodexResolvedReference> {
+    for candidate in candidates {
+        if !looks_like_http_url(candidate) {
+            continue;
+        }
+        if existing.iter().any(|value| value.matched == *candidate) {
+            continue;
+        }
+        let Ok(output) = url_inspect::inspect_compact(candidate, target_path) else {
+            continue;
+        };
+        return Some(CodexResolvedReference {
+            name: "url".to_string(),
+            source: "builtin".to_string(),
+            matched: candidate.clone(),
+            command: None,
+            output: compact_codex_context_block(&output, 10, 900),
+        });
+    }
+    None
+}
+
+fn extract_reference_candidates(query_text: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+
+    let trimmed = trim_reference_token(query_text);
+    if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+        candidates.push(trimmed.to_string());
+    }
+
+    for token in query_text.split_whitespace() {
+        let trimmed = trim_reference_token(token);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_string()) {
+            candidates.push(trimmed.to_string());
+        }
+    }
+
+    candidates
+}
+
+fn trim_reference_token(value: &str) -> &str {
+    value.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | '.' | ';'
+        )
+    })
+}
+
+fn looks_like_http_url(value: &str) -> bool {
+    let trimmed = trim_reference_token(value);
+    trimmed.starts_with("https://") || trimmed.starts_with("http://")
+}
+
+fn wildcard_match(pattern: &str, candidate: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let candidate = candidate.to_ascii_lowercase();
+    if !pattern.contains('*') {
+        return pattern == candidate;
+    }
+
+    let mut remainder = candidate.as_str();
+    let mut anchored = true;
+    for segment in pattern.split('*') {
+        if segment.is_empty() {
+            anchored = false;
+            continue;
+        }
+        if anchored {
+            let Some(stripped) = remainder.strip_prefix(segment) else {
+                return false;
+            };
+            remainder = stripped;
+        } else if let Some(index) = remainder.find(segment) {
+            remainder = &remainder[index + segment.len()..];
+        } else {
+            return false;
+        }
+        anchored = false;
+    }
+
+    pattern.ends_with('*') || remainder.is_empty()
+}
+
+fn parse_linear_url_reference(value: &str) -> Option<LinearUrlReference> {
+    let trimmed = trim_reference_token(value);
+    let relative = trimmed.strip_prefix("https://linear.app/")?;
+    let relative = relative
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(relative)
+        .trim_matches('/');
+    let segments: Vec<_> = relative
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() < 3 {
+        return None;
+    }
+
+    let workspace_slug = segments[0].to_string();
+    match segments[1] {
+        "issue" => Some(LinearUrlReference {
+            url: trimmed.to_string(),
+            workspace_slug,
+            resource_kind: LinearUrlKind::Issue,
+            resource_value: segments[2].to_string(),
+            view: None,
+            title_hint: segments[2].to_string(),
+        }),
+        "project" => {
+            let project_slug = segments[2].to_string();
+            let title_hint = humanize_linear_slug(&project_slug);
+            Some(LinearUrlReference {
+                url: trimmed.to_string(),
+                workspace_slug,
+                resource_kind: LinearUrlKind::Project,
+                resource_value: project_slug,
+                view: segments.get(3).map(|value| (*value).to_string()),
+                title_hint,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn humanize_linear_slug(value: &str) -> String {
+    let mut parts: Vec<_> = value.split('-').filter(|part| !part.is_empty()).collect();
+    if parts
+        .last()
+        .is_some_and(|part| part.len() >= 8 && part.chars().all(|ch| ch.is_ascii_hexdigit()))
+    {
+        parts.pop();
+    }
+    if parts.is_empty() {
+        value.to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn render_linear_url_reference(reference: &LinearUrlReference) -> String {
+    let mut lines = vec![format!("- Linear URL: {}", reference.url)];
+    lines.push(format!("- Linear workspace: {}", reference.workspace_slug));
+    match reference.resource_kind {
+        LinearUrlKind::Issue => {
+            lines.push(format!("- Linear issue: {}", reference.resource_value));
+        }
+        LinearUrlKind::Project => {
+            lines.push(format!(
+                "- Linear project slug: {}",
+                reference.resource_value
+            ));
+            lines.push(format!("- Linear project hint: {}", reference.title_hint));
+            if let Some(view) = reference.view.as_deref() {
+                lines.push(format!("- Linear project view: {}", view));
+            }
+        }
+    }
+    compact_codex_context_block(&lines.join("\n"), 8, 700)
+}
+
+fn build_codex_prompt(query_text: &str, references: &[CodexResolvedReference]) -> Option<String> {
+    let trimmed_query = query_text.trim();
+    if references.is_empty() {
+        if trimmed_query.is_empty() {
+            return None;
+        }
+        return Some(trimmed_query.to_string());
+    }
+
+    let mut lines = vec!["Resolved context:".to_string()];
+    for reference in references.iter().take(2) {
+        lines.push(format!("[{}]", reference.name));
+        lines.push(reference.output.clone());
+    }
+    if !trimmed_query.is_empty() {
+        lines.push(String::new());
+        lines.push("User request:".to_string());
+        lines.push(trimmed_query.to_string());
+    }
+    Some(compact_codex_context_block(&lines.join("\n"), 16, 1500))
+}
+
+fn compact_codex_context_block(value: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut lines = Vec::new();
+    let mut chars = 0usize;
+    for line in value
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+    {
+        let line_chars = line.chars().count();
+        if lines.len() >= max_lines || chars + line_chars > max_chars {
+            break;
+        }
+        lines.push(line.to_string());
+        chars += line_chars;
+    }
+    let mut out = lines.join("\n");
+    if out.chars().count() > max_chars {
+        out = out
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>()
+            + "…";
+    }
+    out
 }
 
 /// Copy session history to clipboard.
@@ -3680,6 +5076,12 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
     println!("Copied session history ({} lines) to clipboard", line_count);
 
     Ok(())
+}
+
+fn copy_session_history_to_clipboard(session_id: &str, provider: Provider) -> Result<usize> {
+    let history = read_session_history(session_id, provider)?;
+    copy_to_clipboard(&history)?;
+    Ok(history.lines().count())
 }
 
 /// Copy the most recent session for a provider directly (no fzf selection).
@@ -4336,7 +5738,7 @@ fn read_last_context(
 
 /// Copy text to system clipboard.
 fn copy_to_clipboard(text: &str) -> Result<()> {
-    if std::env::var("FLOW_NO_CLIPBOARD").is_ok() || !std::io::stdin().is_terminal() {
+    if std::env::var("FLOW_NO_CLIPBOARD").is_ok() {
         return Ok(());
     }
     #[cfg(target_os = "macos")]
@@ -4350,7 +5752,10 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
             stdin.write_all(text.as_bytes())?;
         }
 
-        child.wait()?;
+        let status = child.wait()?;
+        if !status.success() {
+            bail!("pbcopy exited with status {}", status);
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -4376,7 +5781,10 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
             stdin.write_all(text.as_bytes())?;
         }
 
-        child.wait()?;
+        let status = child.wait()?;
+        if !status.success() {
+            bail!("clipboard command exited with status {}", status);
+        }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -6499,6 +7907,27 @@ mod tests {
     }
 
     #[test]
+    fn normalize_codex_resolve_args_accepts_trailing_json_flag() {
+        let (query, json_output) = normalize_codex_resolve_args(
+            vec![
+                "https://developers.cloudflare.com/changelog/post/2026-03-10-br-crawl-endpoint/"
+                    .to_string(),
+                "--json".to_string(),
+            ],
+            false,
+        );
+
+        assert!(json_output);
+        assert_eq!(
+            query,
+            vec![
+                "https://developers.cloudflare.com/changelog/post/2026-03-10-br-crawl-endpoint/"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn append_history_message_skips_consecutive_duplicates() {
         let mut history = String::new();
         let mut last_entry = None;
@@ -6509,5 +7938,141 @@ mod tests {
         append_history_message(&mut history, &mut last_entry, "assistant", "reply");
 
         assert_eq!(history, "Human: same\n\nAssistant: reply\n\n");
+    }
+
+    #[test]
+    fn codex_find_search_terms_keep_phrase_and_meaningful_tokens() {
+        assert_eq!(
+            codex_find_search_terms("make plan to get designer"),
+            vec![
+                "make plan to get designer".to_string(),
+                "make".to_string(),
+                "plan".to_string(),
+                "get".to_string(),
+                "designer".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rank_recover_rows_prefers_matching_session_id_prefix() {
+        let mut rows = vec![
+            CodexRecoverRow {
+                id: "019caaaa-0000-7000-8000-aaaaaaaaaaaa".to_string(),
+                updated_at: 10,
+                cwd: "/tmp/repo".to_string(),
+                title: Some("one remaining unrelated issue".to_string()),
+                first_user_message: Some("npm run lint still fails".to_string()),
+                git_branch: Some("main".to_string()),
+            },
+            CodexRecoverRow {
+                id: "019cdcff-0b3a-7a80-b22b-5ac4ff076eff".to_string(),
+                updated_at: 5,
+                cwd: "/tmp/other".to_string(),
+                title: Some("something else".to_string()),
+                first_user_message: Some("different prompt".to_string()),
+                git_branch: Some("feature".to_string()),
+            },
+        ];
+
+        rank_recover_rows(&mut rows, Some("019cdcff"));
+
+        assert_eq!(rows[0].id, "019cdcff-0b3a-7a80-b22b-5ac4ff076eff");
+    }
+
+    #[test]
+    fn extract_codex_session_hint_prefers_uuid_like_token() {
+        assert_eq!(
+            extract_codex_session_hint(
+                "see 019cdcff-0b3a-7a80-b22b-5ac4ff076eff for work done on that"
+            ),
+            Some("019cdcff-0b3a-7a80-b22b-5ac4ff076eff".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_codex_session_hint_ignores_git_sha_like_token() {
+        assert_eq!(
+            extract_codex_session_hint("see 3a4c62bfd29335a0170397b028a440c49858f1f5 for that"),
+            None
+        );
+    }
+
+    #[test]
+    fn infer_recover_route_changes_directory_for_cross_repo_candidate() {
+        let output = build_recover_output(
+            Path::new("/tmp/current"),
+            false,
+            Some("019cdcff-0b3a-7a80-b22b-5ac4ff076eff".to_string()),
+            vec![CodexRecoverRow {
+                id: "019cdcff-0b3a-7a80-b22b-5ac4ff076eff".to_string(),
+                updated_at: 5,
+                cwd: "/tmp/other".to_string(),
+                title: Some("something else".to_string()),
+                first_user_message: Some("different prompt".to_string()),
+                git_branch: Some("feature".to_string()),
+            }],
+        );
+
+        assert_eq!(
+            output.recommended_route,
+            "cd /tmp/other && f ai codex resume 019cdcff-0b3a-7a80-b22b-5ac4ff076eff"
+        );
+    }
+
+    #[test]
+    fn session_lookup_detection_stays_conservative_for_general_session_work() {
+        assert!(!looks_like_session_lookup_query(
+            "improve session support in flow"
+        ));
+        assert!(!looks_like_session_lookup_query(
+            "conversation summary pipeline cleanup"
+        ));
+    }
+
+    #[test]
+    fn session_lookup_detection_accepts_explicit_control_prompts() {
+        assert!(looks_like_session_lookup_query("resume session"));
+        assert!(looks_like_session_lookup_query("show conversation"));
+        assert!(looks_like_session_lookup_query("latest"));
+        assert!(looks_like_session_lookup_query("after latest"));
+    }
+
+    #[test]
+    fn wildcard_match_handles_linear_style_patterns() {
+        assert!(wildcard_match(
+            "https://linear.app/*/project/*",
+            "https://linear.app/fl2024008/project/llm-proxy-v1-6cd0a041bd76/overview"
+        ));
+        assert!(wildcard_match(
+            "https://linear.app/*/issue/*",
+            "https://linear.app/fl2024008/issue/IDE-331/test-title"
+        ));
+        assert!(!wildcard_match(
+            "https://linear.app/*/issue/*",
+            "https://github.com/openai/codex"
+        ));
+    }
+
+    #[test]
+    fn parse_linear_url_reference_extracts_project_shape() {
+        let reference = parse_linear_url_reference(
+            "https://linear.app/fl2024008/project/llm-proxy-v1-6cd0a041bd76/overview",
+        )
+        .expect("linear project url should parse");
+
+        assert_eq!(reference.workspace_slug, "fl2024008");
+        assert_eq!(reference.resource_kind, LinearUrlKind::Project);
+        assert_eq!(reference.resource_value, "llm-proxy-v1-6cd0a041bd76");
+        assert_eq!(reference.view.as_deref(), Some("overview"));
+        assert_eq!(reference.title_hint, "llm proxy v1");
+    }
+
+    #[test]
+    fn build_codex_prompt_keeps_plain_query_plain() {
+        assert_eq!(
+            build_codex_prompt("improve codex open perf", &[]).as_deref(),
+            Some("improve codex open perf")
+        );
     }
 }

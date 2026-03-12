@@ -90,8 +90,23 @@ struct SyncRecorder {
     remote_updates: Vec<SyncRemoteUpdate>,
 }
 
+// Use the Claude family alias so sync always targets the latest Opus model.
+const SYNC_CLAUDE_MODEL: &str = "opus";
+
 fn sync_should_push(cmd: &SyncCommand) -> bool {
     cmd.push && !cmd.no_push
+}
+
+fn sync_claude_command(prompt: &str) -> Command {
+    let mut cmd = Command::new("claude");
+    cmd.args([
+        "--print",
+        "--model",
+        SYNC_CLAUDE_MODEL,
+        "--dangerously-skip-permissions",
+        prompt,
+    ]);
+    cmd
 }
 
 impl SyncRecorder {
@@ -1644,6 +1659,16 @@ fn short_commit_id(sha: &str) -> &str {
     }
 }
 
+fn normalize_sync_commit_line(hash: &str, description: &str) -> String {
+    let hash = hash.trim();
+    let description = description.trim();
+    if description.is_empty() {
+        format!("{hash} (no description)")
+    } else {
+        format!("{hash} {description}")
+    }
+}
+
 fn build_synced_commit_list(recorder: &SyncRecorder) -> Vec<String> {
     let mut seen_hashes: HashSet<String> = HashSet::new();
     let mut commits: Vec<String> = Vec::new();
@@ -1664,6 +1689,88 @@ fn build_synced_commit_list(recorder: &SyncRecorder) -> Vec<String> {
         }
     }
     commits
+}
+
+fn jj_resolve_commit_id(repo_root: &Path, revset: &str) -> Option<String> {
+    jj_capture_in(
+        repo_root,
+        &[
+            "log",
+            "-r",
+            revset,
+            "--limit",
+            "1",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ],
+    )
+    .ok()
+    .and_then(|out| out.lines().next().map(str::trim).map(str::to_string))
+    .filter(|value| !value.is_empty())
+}
+
+fn jj_collect_sync_destination_commits(
+    repo_root: &Path,
+    source_revset: &str,
+    dest_revset: &str,
+) -> Result<Vec<String>> {
+    let revset = format!("({})..({})", source_revset, dest_revset);
+    let lines = jj_capture_in(
+        repo_root,
+        &[
+            "log",
+            "-r",
+            &revset,
+            "--no-graph",
+            "--reversed",
+            "-T",
+            r#"commit_id.shortest(8) ++ "\t" ++ description.first_line() ++ "\n""#,
+        ],
+    )?;
+
+    Ok(lines
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_end();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let (hash, description) = trimmed.split_once('\t').unwrap_or((trimmed, ""));
+            Some(normalize_sync_commit_line(hash, description))
+        })
+        .collect())
+}
+
+fn record_jj_synced_destination_commits(
+    repo_root: &Path,
+    recorder: &mut SyncRecorder,
+    source_revset: &str,
+    dest_revset: &str,
+) {
+    let commits = match jj_collect_sync_destination_commits(repo_root, source_revset, dest_revset) {
+        Ok(commits) => commits,
+        Err(_) => return,
+    };
+    if commits.is_empty() {
+        return;
+    }
+
+    let (branch, remote) = match dest_revset.rsplit_once('@') {
+        Some((branch, remote)) if !branch.trim().is_empty() && !remote.trim().is_empty() => {
+            (branch.to_string(), format!("synced:{remote}"))
+        }
+        _ => ("dest".to_string(), "synced".to_string()),
+    };
+
+    recorder.add_remote_update(SyncRemoteUpdate {
+        remote,
+        branch,
+        before_tip: jj_resolve_commit_id(repo_root, source_revset),
+        after_tip: jj_resolve_commit_id(repo_root, dest_revset).unwrap_or_default(),
+        commit_count: commits.len(),
+        commits,
+    });
 }
 
 fn copy_sync_output_to_clipboard(text: &str) -> Result<bool> {
@@ -2018,9 +2125,12 @@ fn run_jj_sync(
     let mut needs_git_export = false;
     if let Some(dest) = dest_ref.clone() {
         let has_branch_bookmark = jj_bookmark_exists(repo_root, &current_branch);
+        let branch_sync_source = jj_branch_sync_source_rev(repo_root, &current_branch);
+
+        record_jj_synced_destination_commits(repo_root, recorder, &branch_sync_source, &dest);
 
         if cmd.stash_commits {
-            if jj_has_divergence(repo_root, &current_branch, &dest)? {
+            if jj_has_divergence(repo_root, &branch_sync_source, &dest)? {
                 let stash_name = jj_stash_commits(repo_root, &current_branch, &dest)?;
                 println!("==> Stashed local JJ commits to {}", stash_name);
                 recorder.record("stash", format!("jj stash {}", stash_name));
@@ -2033,7 +2143,7 @@ fn run_jj_sync(
 
         if !did_stash_commits {
             if has_branch_bookmark {
-                if jj_has_divergence(repo_root, &current_branch, &dest)? {
+                if jj_has_divergence(repo_root, &branch_sync_source, &dest)? {
                     println!(
                         "==> Rebasing branch {} with jj onto {}...",
                         current_branch, dest
@@ -2061,22 +2171,22 @@ fn run_jj_sync(
                             "rebase",
                             "--ignore-immutable",
                             "-b",
-                            &current_branch,
+                            branch_sync_source.as_str(),
                             "-d",
                             &dest,
                         ]
                     } else {
-                        vec!["rebase", "-b", &current_branch, "-d", &dest]
+                        vec!["rebase", "-b", branch_sync_source.as_str(), "-d", &dest]
                     };
                     recorder.record(
                         "jj",
                         if preempt_ignore_immutable {
                             format!(
                                 "jj rebase --ignore-immutable -b {} -d {}",
-                                current_branch, dest
+                                branch_sync_source, dest
                             )
                         } else {
-                            format!("jj rebase -b {} -d {}", current_branch, dest)
+                            format!("jj rebase -b {} -d {}", branch_sync_source, dest)
                         },
                     );
                     if let Err(err) = jj_run_in(repo_root, &initial_rebase_args) {
@@ -2092,7 +2202,7 @@ fn run_jj_sync(
                                     "rebase",
                                     "--ignore-immutable",
                                     "-b",
-                                    &current_branch,
+                                    branch_sync_source.as_str(),
                                     "-d",
                                     &dest,
                                 ],
@@ -2934,8 +3044,27 @@ fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn jj_has_divergence(repo_root: &Path, current: &str, dest: &str) -> Result<bool> {
-    let revset = format!("{}..{}", dest, current);
+fn jj_revset_string_literal(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{}\"", value))
+}
+
+fn jj_local_bookmark_revset(name: &str) -> String {
+    format!(
+        "bookmarks(exact:{}) & mutable()",
+        jj_revset_string_literal(name)
+    )
+}
+
+fn jj_branch_sync_source_rev(repo_root: &Path, branch: &str) -> String {
+    if jj_bookmark_exists(repo_root, branch) {
+        jj_local_bookmark_revset(branch)
+    } else {
+        "@".to_string()
+    }
+}
+
+fn jj_has_divergence(repo_root: &Path, source_revset: &str, dest: &str) -> Result<bool> {
+    let revset = format!("({})..({})", dest, source_revset);
     let output = jj_capture_in(
         repo_root,
         &["log", "-r", &revset, "--no-graph", "-T", "commit_id"],
@@ -2960,9 +3089,10 @@ fn branch_tip_matches_remote(repo_root: &Path, branch: &str, remote: &str) -> bo
 fn jj_stash_commits(repo_root: &Path, current: &str, dest: &str) -> Result<String> {
     let ts = Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let stash_name = format!("f-sync-stash/{}/{}", current, ts);
+    let source_revset = jj_branch_sync_source_rev(repo_root, current);
     jj_run_in(
         repo_root,
-        &["bookmark", "create", &stash_name, "-r", current],
+        &["bookmark", "create", &stash_name, "-r", &source_revset],
     )?;
     jj_run_in(repo_root, &["bookmark", "set", current, "-r", dest])?;
     jj_run_in(repo_root, &["edit", current])?;
@@ -3020,7 +3150,7 @@ fn prompt_for_rebase_action() -> Result<bool> {
         println!();
     }
 
-    print!("  Try auto-fix with Claude? [y/N] ");
+    print!("  Try auto-fix with Claude Opus? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
     read_yes_no()
@@ -3127,7 +3257,7 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
     // Try Claude for code conflicts
     let content = std::fs::read_to_string(file).unwrap_or_default();
     if content.contains("<<<<<<<") {
-        println!("  Trying Claude for {}...", file);
+        println!("  Trying Claude Opus for {}...", file);
 
         // Load sync context if available
         let context = ai_context::load_command_context("sync").unwrap_or_default();
@@ -3147,9 +3277,7 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
             }
         );
 
-        let output = Command::new("claude")
-            .args(["--print", "--dangerously-skip-permissions", &prompt])
-            .output();
+        let output = sync_claude_command(&prompt).output();
 
         if let Ok(out) = output {
             if out.status.success() {
@@ -3171,7 +3299,7 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
 /// Prompt user to try auto-fix for push failures.
 fn prompt_for_push_fix() -> Result<bool> {
     println!();
-    print!("  Try auto-fix with Claude? [y/N] ");
+    print!("  Try auto-fix with Claude Opus? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
     read_yes_no()
 }
@@ -3192,7 +3320,7 @@ fn prompt_for_auto_fix() -> Result<bool> {
     }
     println!();
 
-    print!("  Try auto-fix with Claude? [y/N] ");
+    print!("  Try auto-fix with Claude Opus? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
     read_yes_no()
 }
@@ -3254,7 +3382,7 @@ fn try_resolve_conflicts() -> Result<bool> {
 
     // Try Claude for remaining conflicts
     println!(
-        "  Trying Claude for {} remaining conflicts...",
+        "  Trying Claude Opus for {} remaining conflicts...",
         needs_claude.len()
     );
 
@@ -3279,9 +3407,7 @@ fn try_resolve_conflicts() -> Result<bool> {
                 }
             );
 
-            let output = Command::new("claude")
-                .args(["--print", "--dangerously-skip-permissions", &prompt])
-                .output();
+            let output = sync_claude_command(&prompt).output();
 
             if let Ok(out) = output {
                 if out.status.success() {
@@ -3651,7 +3777,7 @@ fn push_with_autofix(branch: &str, remote: &str, auto_fix: bool, max_attempts: u
         }
 
         println!(
-            "\n==> Push failed (attempt {}/{}), attempting auto-fix with Claude...",
+            "\n==> Push failed (attempt {}/{}), attempting auto-fix with Claude Opus...",
             attempts, max_attempts
         );
 
@@ -3730,7 +3856,7 @@ fn push_with_autofix_force(
         }
 
         println!(
-            "\n==> Push failed (attempt {}/{}), attempting auto-fix with Claude...",
+            "\n==> Push failed (attempt {}/{}), attempting auto-fix with Claude Opus...",
             attempts, max_attempts
         );
 
@@ -3761,8 +3887,7 @@ fn try_claude_fix(error_output: &str) -> Result<bool> {
     let prompt = build_fix_prompt(error_output);
 
     // Run claude with the fix prompt
-    let status = Command::new("claude")
-        .args(["--print", "--dangerously-skip-permissions", &prompt])
+    let status = sync_claude_command(&prompt)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -3929,5 +4054,49 @@ mod tests {
         assert_eq!(parse_tracking_ref("origin"), None);
         assert_eq!(parse_tracking_ref("/main"), None);
         assert_eq!(parse_tracking_ref("origin/"), None);
+    }
+
+    #[test]
+    fn jj_local_bookmark_revset_uses_exact_mutable_selector() {
+        assert_eq!(
+            jj_local_bookmark_revset("main"),
+            r#"bookmarks(exact:"main") & mutable()"#
+        );
+        assert_eq!(
+            jj_local_bookmark_revset("feature/sync-fix"),
+            r#"bookmarks(exact:"feature/sync-fix") & mutable()"#
+        );
+    }
+
+    #[test]
+    fn normalize_sync_commit_line_fills_missing_description() {
+        assert_eq!(
+            normalize_sync_commit_line("abc12345", "Fix sync output"),
+            "abc12345 Fix sync output"
+        );
+        assert_eq!(
+            normalize_sync_commit_line("abc12345", ""),
+            "abc12345 (no description)"
+        );
+    }
+
+    #[test]
+    fn sync_claude_command_uses_latest_opus_alias() {
+        let cmd = sync_claude_command("resolve this");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args,
+            vec![
+                "--print",
+                "--model",
+                "opus",
+                "--dangerously-skip-permissions",
+                "resolve this",
+            ]
+        );
     }
 }

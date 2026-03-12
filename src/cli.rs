@@ -407,6 +407,11 @@ pub enum Commands {
     )]
     Skills(SkillsCommand),
     #[command(
+        about = "Inspect a URL into a thin, AI-friendly summary.",
+        long_about = "Fetches and normalizes a URL with Cloudflare Browser Rendering markdown first when configured, then the local scraper backend, then a direct fetch fallback. Defaults to a compact summary so it can be safely pasted into AI sessions."
+    )]
+    Url(UrlCommand),
+    #[command(
         about = "Install or update project dependencies.",
         long_about = "Detects the package manager from lockfiles and runs install/update at the project root."
     )]
@@ -2517,6 +2522,59 @@ pub enum ProviderAiAction {
         #[arg(long)]
         path: Option<String>,
     },
+    /// Open a Codex session with fast repo-scoped recovery and reference unrolling.
+    Open {
+        /// Project path to open from instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Restrict session lookup to an exact cwd match instead of a repo-tree prefix.
+        #[arg(long, requires = "path")]
+        exact_cwd: bool,
+        /// Query or initial prompt.
+        #[arg(value_name = "QUERY", trailing_var_arg = true)]
+        query: Vec<String>,
+    },
+    /// Resolve how `f codex open` would interpret a query.
+    Resolve {
+        /// Project path to resolve from instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Restrict session lookup to an exact cwd match instead of a repo-tree prefix.
+        #[arg(long, requires = "path")]
+        exact_cwd: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Query or reference text to resolve.
+        #[arg(value_name = "QUERY", trailing_var_arg = true)]
+        query: Vec<String>,
+    },
+    /// Search Codex sessions by prompt text and resume the best match.
+    #[command(alias = "search")]
+    Find {
+        /// Limit search to sessions from this path or repo subtree (default: all Codex sessions).
+        #[arg(long)]
+        path: Option<String>,
+        /// Restrict --path lookup to an exact cwd instead of a repo-tree prefix.
+        #[arg(long, requires = "path")]
+        exact_cwd: bool,
+        /// Prompt or transcript text to search for.
+        #[arg(value_name = "QUERY", trailing_var_arg = true)]
+        query: Vec<String>,
+    },
+    /// Search Codex sessions by prompt text and copy the best match to clipboard.
+    #[command(name = "findAndCopy", alias = "find-and-copy", alias = "find-copy")]
+    FindAndCopy {
+        /// Limit search to sessions from this path or repo subtree (default: all Codex sessions).
+        #[arg(long)]
+        path: Option<String>,
+        /// Restrict --path lookup to an exact cwd instead of a repo-tree prefix.
+        #[arg(long, requires = "path")]
+        exact_cwd: bool,
+        /// Prompt or transcript text to search for.
+        #[arg(value_name = "QUERY", trailing_var_arg = true)]
+        query: Vec<String>,
+    },
     /// Copy session history to clipboard.
     Copy {
         /// Session name or ID to copy.
@@ -3180,6 +3238,101 @@ pub enum SkillsFetchAction {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UrlCommand {
+    #[command(subcommand)]
+    pub action: UrlAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum UrlAction {
+    /// Inspect a URL and return a compact normalized summary.
+    Inspect(UrlInspectOpts),
+    /// Crawl a site and return a compact multi-page summary.
+    Crawl(UrlCrawlOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UrlInspectOpts {
+    /// URL to inspect.
+    pub url: String,
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Include the full markdown/content body when available.
+    #[arg(long)]
+    pub full: bool,
+    /// Provider to use. `auto` tries Cloudflare first, then scraper, then direct fetch.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub provider: UrlInspectProvider,
+    /// Request timeout in seconds.
+    #[arg(long, default_value_t = 20.0)]
+    pub timeout_s: f64,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UrlCrawlOpts {
+    /// Starting URL to crawl.
+    pub url: String,
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Include full markdown for returned records.
+    #[arg(long)]
+    pub full: bool,
+    /// Maximum number of pages to crawl.
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
+    /// Maximum crawl depth from the starting URL.
+    #[arg(long, default_value_t = 2)]
+    pub depth: usize,
+    /// Maximum number of completed records to return in the final summary.
+    #[arg(long, default_value_t = 5)]
+    pub records: usize,
+    /// Crawl source: all discovered URLs, only sitemaps, or only links.
+    #[arg(long, value_enum, default_value = "all")]
+    pub source: UrlCrawlSource,
+    /// Render pages in a browser before extraction. Disabled by default for faster static crawls.
+    #[arg(long, default_value_t = false)]
+    pub render: bool,
+    /// Include external links during crawl.
+    #[arg(long)]
+    pub include_external_links: bool,
+    /// Include subdomains during crawl.
+    #[arg(long)]
+    pub include_subdomains: bool,
+    /// Only include URLs matching these wildcard patterns.
+    #[arg(long = "include-pattern")]
+    pub include_patterns: Vec<String>,
+    /// Exclude URLs matching these wildcard patterns.
+    #[arg(long = "exclude-pattern")]
+    pub exclude_patterns: Vec<String>,
+    /// Max crawl cache age in seconds.
+    #[arg(long)]
+    pub max_age_s: Option<u64>,
+    /// Max time to wait for crawl completion in seconds.
+    #[arg(long, default_value_t = 60.0)]
+    pub wait_timeout_s: f64,
+    /// Poll interval while waiting for completion, in seconds.
+    #[arg(long, default_value_t = 2.0)]
+    pub poll_interval_s: f64,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlInspectProvider {
+    Auto,
+    Cloudflare,
+    Scraper,
+    Direct,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlCrawlSource {
+    All,
+    Sitemaps,
+    Links,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -4335,6 +4488,201 @@ mod tests {
             })) => {
                 assert_eq!(session, None);
                 assert_eq!(path.as_deref(), Some("/tmp/rev"));
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_find_with_path_and_query() {
+        let cli = Cli::parse_from([
+            "f",
+            "ai",
+            "codex",
+            "find",
+            "--path",
+            "~/repos/acme/app",
+            "make",
+            "plan",
+            "designer",
+        ]);
+
+        match cli.command {
+            Some(Commands::Ai(AiCommand {
+                action:
+                    Some(AiAction::Codex {
+                        action:
+                            Some(ProviderAiAction::Find {
+                                path,
+                                exact_cwd,
+                                query,
+                            }),
+                    }),
+            })) => {
+                assert_eq!(path.as_deref(), Some("~/repos/acme/app"));
+                assert!(!exact_cwd);
+                assert_eq!(query, vec!["make", "plan", "designer"]);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_find_and_copy_with_query() {
+        let cli = Cli::parse_from([
+            "f",
+            "ai",
+            "codex",
+            "findAndCopy",
+            "make",
+            "plan",
+            "designer",
+        ]);
+
+        match cli.command {
+            Some(Commands::Ai(AiCommand {
+                action:
+                    Some(AiAction::Codex {
+                        action:
+                            Some(ProviderAiAction::FindAndCopy {
+                                path,
+                                exact_cwd,
+                                query,
+                            }),
+                    }),
+            })) => {
+                assert_eq!(path, None);
+                assert!(!exact_cwd);
+                assert_eq!(query, vec!["make", "plan", "designer"]);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_open_with_path_and_query() {
+        let cli = Cli::parse_from([
+            "f",
+            "codex",
+            "open",
+            "--path",
+            "~/repos/acme/app",
+            "continue",
+            "the",
+            "deploy",
+            "work",
+        ]);
+
+        match cli.command {
+            Some(Commands::Codex {
+                action:
+                    Some(ProviderAiAction::Open {
+                        path,
+                        exact_cwd,
+                        query,
+                    }),
+            }) => {
+                assert_eq!(path.as_deref(), Some("~/repos/acme/app"));
+                assert!(!exact_cwd);
+                assert_eq!(query, vec!["continue", "the", "deploy", "work"]);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_resolve_json() {
+        let cli = Cli::parse_from([
+            "f",
+            "ai",
+            "codex",
+            "resolve",
+            "--json",
+            "https://linear.app/fl2024008/project/llm-proxy-v1-6cd0a041bd76/overview",
+        ]);
+
+        match cli.command {
+            Some(Commands::Ai(AiCommand {
+                action:
+                    Some(AiAction::Codex {
+                        action:
+                            Some(ProviderAiAction::Resolve {
+                                path,
+                                exact_cwd,
+                                json,
+                                query,
+                            }),
+                    }),
+            })) => {
+                assert_eq!(path, None);
+                assert!(!exact_cwd);
+                assert!(json);
+                assert_eq!(
+                    query,
+                    vec!["https://linear.app/fl2024008/project/llm-proxy-v1-6cd0a041bd76/overview"]
+                );
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_url_crawl_with_filters() {
+        let cli = Cli::parse_from([
+            "f",
+            "url",
+            "crawl",
+            "https://developers.cloudflare.com/",
+            "--limit",
+            "6",
+            "--records",
+            "3",
+            "--include-pattern",
+            "https://developers.cloudflare.com/browser-rendering/*",
+            "--exclude-pattern",
+            "*/changelog/*",
+            "--render",
+        ]);
+
+        match cli.command {
+            Some(Commands::Url(UrlCommand {
+                action:
+                    UrlAction::Crawl(UrlCrawlOpts {
+                        url,
+                        json,
+                        full,
+                        limit,
+                        depth,
+                        records,
+                        source,
+                        render,
+                        include_external_links,
+                        include_subdomains,
+                        include_patterns,
+                        exclude_patterns,
+                        max_age_s,
+                        wait_timeout_s,
+                        poll_interval_s,
+                    }),
+            })) => {
+                assert_eq!(url, "https://developers.cloudflare.com/");
+                assert!(!json);
+                assert!(!full);
+                assert_eq!(limit, 6);
+                assert_eq!(depth, 2);
+                assert_eq!(records, 3);
+                assert_eq!(source, UrlCrawlSource::All);
+                assert!(render);
+                assert!(!include_external_links);
+                assert!(!include_subdomains);
+                assert_eq!(
+                    include_patterns,
+                    vec!["https://developers.cloudflare.com/browser-rendering/*"]
+                );
+                assert_eq!(exclude_patterns, vec!["*/changelog/*"]);
+                assert_eq!(max_age_s, None);
+                assert_eq!(wait_timeout_s, 60.0);
+                assert_eq!(poll_interval_s, 2.0);
             }
             other => panic!("unexpected parsed command: {other:?}"),
         }
