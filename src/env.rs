@@ -4,13 +4,21 @@
 //! using the cloud API, with optional local storage when needed.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Local, TimeZone, Utc};
+use crypto_secretbox::{
+    XSalsa20Poly1305,
+    aead::{Aead, KeyInit},
+};
+use rand::{TryRng, rngs::SysRng};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use which::which;
@@ -20,6 +28,7 @@ use crate::cli::{EnvAction, ProjectEnvAction, TokenAction};
 use crate::config;
 use crate::deploy;
 use crate::env_setup::{EnvSetupDefaults, run_env_setup};
+use crate::sealer_crypto::{get_sealer_id, new_x25519_private_key, seal, unseal};
 use crate::storage::{
     create_jazz_app_credentials, get_project_name as storage_project_name, sanitize_name,
 };
@@ -27,6 +36,9 @@ use uuid::Uuid;
 
 const DEFAULT_API_URL: &str = "https://myflow.sh";
 const LOCAL_ENV_DIR: &str = "env-local";
+const LOCAL_KEYCHAIN_REF_PREFIX: &str = "flow-keychain-ref://v1/";
+const ENV_SEALER_SECRET_PREFIX: &str = "sealerSecret_z";
+const SEALED_ENV_ALGORITHM: &str = "xsalsa20poly1305+flow-sealer-v1";
 
 /// Auth config stored in ~/.config/flow/auth.toml
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -73,6 +85,103 @@ struct SetEnvResponse {
 #[derive(Debug, Deserialize)]
 struct PersonalEnvResponse {
     env: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EnvSealerIdentity {
+    sealer_secret: String,
+    sealer_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectSealersResponse {
+    members: Vec<ProjectSealerMember>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectSealerMember {
+    #[serde(default)]
+    sealers: Vec<ProjectSealerEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectSealerEntry {
+    sealer_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SealedEnvResponse {
+    items: HashMap<String, SealedEnvItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SealedEnvItem {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    available_recipient_count: usize,
+    content: Option<SealedEnvContent>,
+    #[serde(default)]
+    recipients: Vec<SealedEnvRecipientGrant>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SealedEnvContent {
+    algorithm: String,
+    ciphertext_b64: String,
+    nonce_b64: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SealedEnvRecipientGrant {
+    recipient_id: String,
+    sender_id: Option<String>,
+    wrapped_key_b64: String,
+    nonce_material_b64: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SealedEnvWriteRequest {
+    environment: String,
+    items: HashMap<String, SealedEnvWriteItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SealedEnvWriteItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    classification: String,
+    content: SealedEnvWriteContent,
+    recipients: Vec<SealedEnvWriteRecipient>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SealedEnvWriteContent {
+    algorithm: String,
+    ciphertext_b64: String,
+    nonce_b64: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SealedEnvWriteRecipient {
+    recipient_id: String,
+    recipient_kind: String,
+    sender_id: String,
+    wrapped_key_b64: String,
+    nonce_material_b64: String,
+}
+
+#[derive(Debug, Default)]
+struct ProjectCloudEnvEntries {
+    vars: HashMap<String, String>,
+    descriptions: HashMap<String, String>,
 }
 
 /// Get the auth config path.
@@ -145,6 +254,19 @@ fn keychain_service(api_url: &str) -> String {
 
 fn keychain_service_ai(api_url: &str) -> String {
     format!("flow-ai-token:{}", api_url)
+}
+
+fn local_env_keychain_service(target: &EnvTarget, environment: &str) -> String {
+    let env_name = if environment.trim().is_empty() {
+        "production"
+    } else {
+        environment
+    };
+    format!(
+        "flow-local-env:{}:{}",
+        sanitize_env_segment(&env_target_label(target)),
+        sanitize_env_segment(env_name)
+    )
 }
 
 fn set_keychain_token(api_url: &str, token: &str) -> Result<()> {
@@ -241,6 +363,96 @@ fn get_keychain_ai_token(api_url: &str) -> Result<Option<String>> {
     }
 
     bail!("failed to read AI token from Keychain: {}", stderr.trim());
+}
+
+fn set_local_keychain_env_var(
+    target: &EnvTarget,
+    environment: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("local keychain-backed envs require macOS");
+    }
+
+    let service = local_env_keychain_service(target, environment);
+    let status = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-a",
+            key,
+            "-s",
+            &service,
+            "-w",
+            value,
+            "-U",
+        ])
+        .status()
+        .context("failed to store local env var in Keychain")?;
+    if !status.success() {
+        bail!("failed to store local env var in Keychain");
+    }
+    Ok(())
+}
+
+fn get_local_keychain_env_var(
+    target: &EnvTarget,
+    environment: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    if !cfg!(target_os = "macos") {
+        return Ok(None);
+    }
+
+    let service = local_env_keychain_service(target, environment);
+    let output = Command::new("security")
+        .args(["find-generic-password", "-a", key, "-s", &service, "-w"])
+        .output()
+        .context("failed to read local env var from Keychain")?;
+
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(value));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("could not be found") || stderr.contains("SecKeychainSearchCopyNext") {
+        return Ok(None);
+    }
+
+    bail!(
+        "failed to read local env var from Keychain: {}",
+        stderr.trim()
+    );
+}
+
+fn delete_local_keychain_env_var(target: &EnvTarget, environment: &str, key: &str) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    let service = local_env_keychain_service(target, environment);
+    let output = Command::new("security")
+        .args(["delete-generic-password", "-a", key, "-s", &service])
+        .output()
+        .context("failed to delete local env var from Keychain")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("could not be found") || stderr.contains("SecKeychainSearchCopyNext") {
+        return Ok(());
+    }
+
+    bail!(
+        "failed to delete local env var from Keychain: {}",
+        stderr.trim()
+    );
 }
 
 fn store_auth_token(auth: &mut AuthConfig, token: String) -> Result<()> {
@@ -592,8 +804,238 @@ fn local_env_enabled() -> bool {
 fn local_env_root() -> Result<PathBuf> {
     let base = config::ensure_global_config_dir()?;
     let path = base.join(LOCAL_ENV_DIR);
-    fs::create_dir_all(&path)?;
+    ensure_private_dir(&path)?;
     Ok(path)
+}
+
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn write_private_file(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(content.as_bytes())?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(path, content)?;
+    }
+
+    Ok(())
+}
+
+fn env_sealer_state_dir() -> Result<PathBuf> {
+    let path = config::ensure_global_state_dir()?.join("env");
+    ensure_private_dir(&path)?;
+    Ok(path)
+}
+
+fn env_sealer_identity_path() -> Result<PathBuf> {
+    Ok(env_sealer_state_dir()?.join("sealer.json"))
+}
+
+fn load_env_sealer_identity() -> Result<Option<EnvSealerIdentity>> {
+    let path = env_sealer_identity_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut identity: EnvSealerIdentity =
+        serde_json::from_str(&content).context("failed to parse env sealer identity")?;
+    if identity.sealer_secret.trim().is_empty() {
+        bail!("env sealer identity is missing its secret");
+    }
+
+    let derived_id = get_sealer_id(&identity.sealer_secret).context("invalid env sealer secret")?;
+    if identity.sealer_id != derived_id {
+        identity.sealer_id = derived_id;
+        let updated = serde_json::to_string_pretty(&identity)?;
+        write_private_file(&path, &updated)?;
+    }
+
+    Ok(Some(identity))
+}
+
+fn load_or_create_env_sealer_identity() -> Result<EnvSealerIdentity> {
+    if let Some(identity) = load_env_sealer_identity()? {
+        return Ok(identity);
+    }
+
+    let identity = create_env_sealer_identity()?;
+    let path = env_sealer_identity_path()?;
+    let content = serde_json::to_string_pretty(&identity)?;
+    write_private_file(&path, &content)?;
+    Ok(identity)
+}
+
+fn create_env_sealer_identity() -> Result<EnvSealerIdentity> {
+    let private_key = new_x25519_private_key();
+    let sealer_secret = format!(
+        "{}{}",
+        ENV_SEALER_SECRET_PREFIX,
+        bs58::encode(&private_key).into_string()
+    );
+    let sealer_id = get_sealer_id(&sealer_secret).context("failed to derive env sealer id")?;
+    Ok(EnvSealerIdentity {
+        sealer_secret,
+        sealer_id,
+    })
+}
+
+fn default_env_sealer_label() -> Option<String> {
+    let host = std::env::var("FLOW_ENV_SEALER_LABEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok());
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("USERNAME").ok());
+
+    match (host, user) {
+        (Some(host), Some(user)) => Some(format!("{} ({})", host.trim(), user.trim())),
+        (Some(host), None) => Some(host.trim().to_string()),
+        (None, Some(user)) => Some(format!("Flow ({})", user.trim())),
+        (None, None) => None,
+    }
+}
+
+fn seal_project_env_value(
+    value: &str,
+    identity: &EnvSealerIdentity,
+    recipient_ids: &[String],
+) -> Result<SealedEnvWriteItem> {
+    let mut content_key = [0u8; 32];
+    SysRng
+        .try_fill_bytes(&mut content_key)
+        .context("failed to generate env content key")?;
+    let mut content_nonce = [0u8; 24];
+    SysRng
+        .try_fill_bytes(&mut content_nonce)
+        .context("failed to generate env content nonce")?;
+
+    let cipher = XSalsa20Poly1305::new(&content_key.into());
+    let ciphertext = cipher
+        .encrypt(&content_nonce.into(), value.as_bytes())
+        .map_err(|_| anyhow::anyhow!("failed to encrypt env value"))?;
+
+    let mut recipients = Vec::new();
+    let mut seen = HashSet::new();
+    for recipient_id in recipient_ids {
+        if !seen.insert(recipient_id.clone()) {
+            continue;
+        }
+
+        let mut nonce_material = [0u8; 32];
+        SysRng
+            .try_fill_bytes(&mut nonce_material)
+            .context("failed to generate env recipient nonce")?;
+        let wrapped_key = seal(
+            &content_key,
+            &identity.sealer_secret,
+            recipient_id,
+            &nonce_material,
+        )
+        .context("failed to wrap env content key")?;
+        recipients.push(SealedEnvWriteRecipient {
+            recipient_id: recipient_id.clone(),
+            recipient_kind: "sealer".to_string(),
+            sender_id: identity.sealer_id.clone(),
+            wrapped_key_b64: STANDARD.encode(&wrapped_key),
+            nonce_material_b64: STANDARD.encode(nonce_material),
+        });
+    }
+
+    Ok(SealedEnvWriteItem {
+        description: None,
+        classification: "secret".to_string(),
+        content: SealedEnvWriteContent {
+            algorithm: SEALED_ENV_ALGORITHM.to_string(),
+            ciphertext_b64: STANDARD.encode(ciphertext),
+            nonce_b64: STANDARD.encode(content_nonce),
+        },
+        recipients,
+    })
+}
+
+fn decrypt_project_env_value(
+    item: &SealedEnvItem,
+    identity: &EnvSealerIdentity,
+) -> Result<Option<String>> {
+    let content = item
+        .content
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("sealed env item is missing content"))?;
+    if content.algorithm != SEALED_ENV_ALGORITHM {
+        bail!("unsupported sealed env algorithm: {}", content.algorithm);
+    }
+
+    let grant = match item
+        .recipients
+        .iter()
+        .find(|grant| grant.recipient_id == identity.sealer_id)
+    {
+        Some(grant) => grant,
+        None => return Ok(None),
+    };
+
+    let sender_id = grant
+        .sender_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("sealed env grant is missing sender id"))?;
+    let wrapped_key = STANDARD
+        .decode(grant.wrapped_key_b64.as_bytes())
+        .context("failed to decode sealed env wrapped key")?;
+    let nonce_material = STANDARD
+        .decode(grant.nonce_material_b64.as_bytes())
+        .context("failed to decode sealed env nonce material")?;
+    let content_key = unseal(
+        &wrapped_key,
+        &identity.sealer_secret,
+        sender_id,
+        &nonce_material,
+    )
+    .context("failed to unwrap env content key")?;
+    let content_key: [u8; 32] = content_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid env content key length"))?;
+
+    let ciphertext = STANDARD
+        .decode(content.ciphertext_b64.as_bytes())
+        .context("failed to decode sealed env ciphertext")?;
+    let nonce = STANDARD
+        .decode(content.nonce_b64.as_bytes())
+        .context("failed to decode sealed env nonce")?;
+    let nonce: [u8; 24] = nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid env content nonce length"))?;
+    let cipher = XSalsa20Poly1305::new(&content_key.into());
+    let plaintext = cipher
+        .decrypt(&nonce.into(), ciphertext.as_ref())
+        .map_err(|_| anyhow::anyhow!("failed to decrypt sealed env value"))?;
+    let value = String::from_utf8(plaintext).context("sealed env value is not valid UTF-8")?;
+    Ok(Some(value))
 }
 
 fn sanitize_env_segment(value: &str) -> String {
@@ -625,17 +1067,110 @@ fn local_env_path(target: &EnvTarget, environment: &str) -> Result<PathBuf> {
         environment
     });
     let dir = root.join(target_label);
-    fs::create_dir_all(&dir)?;
+    ensure_private_dir(&dir)?;
     Ok(dir.join(format!("{env_label}.env")))
 }
 
-fn read_local_env_vars(target: &EnvTarget, environment: &str) -> Result<HashMap<String, String>> {
+fn local_personal_keychain_supported(target: &EnvTarget) -> bool {
+    cfg!(target_os = "macos") && matches!(target, EnvTarget::Personal { .. })
+}
+
+fn local_personal_keychain_write_enabled(target: &EnvTarget) -> bool {
+    if !local_personal_keychain_supported(target) {
+        return false;
+    }
+
+    !std::env::var("FLOW_ENV_LOCAL_PLAINTEXT")
+        .ok()
+        .map(|value| {
+            let value = value.to_ascii_lowercase();
+            value == "1" || value == "true" || value == "yes"
+        })
+        .unwrap_or(false)
+}
+
+fn local_keychain_ref(key: &str) -> String {
+    format!("{LOCAL_KEYCHAIN_REF_PREFIX}{key}")
+}
+
+fn is_local_keychain_ref(value: &str) -> bool {
+    value.starts_with(LOCAL_KEYCHAIN_REF_PREFIX)
+}
+
+fn read_local_env_vars_raw(
+    target: &EnvTarget,
+    environment: &str,
+) -> Result<HashMap<String, String>> {
     let path = local_env_path(target, environment)?;
     if !path.exists() {
         return Ok(HashMap::new());
     }
     let content = fs::read_to_string(&path)?;
     Ok(parse_env_file(&content))
+}
+
+fn migrate_local_env_vars_to_keychain_if_needed(
+    target: &EnvTarget,
+    environment: &str,
+    vars: &mut HashMap<String, String>,
+) -> Result<()> {
+    if !local_personal_keychain_write_enabled(target) {
+        return Ok(());
+    }
+
+    let mut changed = false;
+    let snapshot = vars.clone();
+    for (key, value) in snapshot {
+        if is_local_keychain_ref(&value) {
+            continue;
+        }
+        set_local_keychain_env_var(target, environment, &key, &value)?;
+        vars.insert(key.clone(), local_keychain_ref(&key));
+        changed = true;
+    }
+
+    if changed {
+        write_local_env_vars_raw(target, environment, vars)?;
+    }
+
+    Ok(())
+}
+
+fn resolve_local_env_vars(
+    target: &EnvTarget,
+    environment: &str,
+    vars: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    if !local_personal_keychain_supported(target)
+        || !vars.values().any(|value| is_local_keychain_ref(value))
+    {
+        return Ok(vars.clone());
+    }
+
+    require_env_read_unlock()?;
+
+    let mut resolved = HashMap::new();
+    for (key, value) in vars {
+        if is_local_keychain_ref(value) {
+            let secret = get_local_keychain_env_var(target, environment, key)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "local env var '{}' is referenced from Keychain but the Keychain entry is missing",
+                    key
+                )
+            })?;
+            resolved.insert(key.clone(), secret);
+        } else {
+            resolved.insert(key.clone(), value.clone());
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn read_local_env_vars(target: &EnvTarget, environment: &str) -> Result<HashMap<String, String>> {
+    let mut vars = read_local_env_vars_raw(target, environment)?;
+    migrate_local_env_vars_to_keychain_if_needed(target, environment, &mut vars)?;
+    resolve_local_env_vars(target, environment, &vars)
 }
 
 /// Returns true if the user has a cloud auth token configured.
@@ -659,7 +1194,7 @@ pub fn fetch_local_personal_env_vars(keys: &[String]) -> Result<HashMap<String, 
     Ok(filtered)
 }
 
-fn write_local_env_vars(
+fn write_local_env_vars_raw(
     target: &EnvTarget,
     environment: &str,
     vars: &HashMap<String, String>,
@@ -679,7 +1214,7 @@ fn write_local_env_vars(
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         content.push_str(&format!("{key}=\"{escaped}\"\n"));
     }
-    fs::write(&path, content)?;
+    write_private_file(&path, &content)?;
     Ok(path)
 }
 
@@ -689,9 +1224,17 @@ fn set_local_env_var(
     key: &str,
     value: &str,
 ) -> Result<PathBuf> {
-    let mut vars = read_local_env_vars(target, environment)?;
-    vars.insert(key.to_string(), value.to_string());
-    write_local_env_vars(target, environment, &vars)
+    let mut vars = read_local_env_vars_raw(target, environment)?;
+
+    if local_personal_keychain_write_enabled(target) {
+        migrate_local_env_vars_to_keychain_if_needed(target, environment, &mut vars)?;
+        set_local_keychain_env_var(target, environment, key, value)?;
+        vars.insert(key.to_string(), local_keychain_ref(key));
+    } else {
+        vars.insert(key.to_string(), value.to_string());
+    }
+
+    write_local_env_vars_raw(target, environment, &vars)
 }
 
 fn delete_local_env_vars(
@@ -703,11 +1246,15 @@ fn delete_local_env_vars(
         bail!("No keys specified");
     }
 
-    let mut vars = read_local_env_vars(target, environment)?;
+    let mut vars = read_local_env_vars_raw(target, environment)?;
     for key in keys {
         vars.remove(key);
+        if local_personal_keychain_supported(target) {
+            delete_local_keychain_env_var(target, environment, key)?;
+        }
     }
-    write_local_env_vars(target, environment, &vars)
+    migrate_local_env_vars_to_keychain_if_needed(target, environment, &mut vars)?;
+    write_local_env_vars_raw(target, environment, &vars)
 }
 
 fn is_local_fallback_error(err: &anyhow::Error) -> bool {
@@ -806,6 +1353,509 @@ fn is_cloud_source(source: Option<&str>) -> bool {
     matches!(
         source.map(|s| s.to_ascii_lowercase()).as_deref(),
         Some("cloud") | Some("remote") | Some("myflow")
+    )
+}
+
+fn project_plaintext_cloud_mirror_required_for_config(cfg: &config::Config) -> bool {
+    cfg.host
+        .as_ref()
+        .map(|host| {
+            is_cloud_source(host.env_source.as_deref())
+                && host
+                    .service_token
+                    .as_deref()
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+fn project_plaintext_cloud_mirror_required() -> bool {
+    if std::env::var("FLOW_ENV_CLOUD_PLAINTEXT_MIRROR")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes"
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    let Some(flow_path) = find_flow_toml(&cwd) else {
+        return false;
+    };
+    let Ok(cfg) = config::load(&flow_path) else {
+        return false;
+    };
+    project_plaintext_cloud_mirror_required_for_config(&cfg)
+}
+
+fn select_requested_env_keys(
+    vars: HashMap<String, String>,
+    keys: &[String],
+) -> HashMap<String, String> {
+    if keys.is_empty() {
+        return vars;
+    }
+
+    let requested: HashSet<_> = keys.iter().cloned().collect();
+    vars.into_iter()
+        .filter(|(key, _)| requested.contains(key))
+        .collect()
+}
+
+fn ensure_cloud_env_sealer_registered(
+    api_url: &str,
+    token: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<EnvSealerIdentity> {
+    let identity = load_or_create_env_sealer_identity()?;
+    let url = Url::parse(&format!("{}/api/env/sealers/self", api_url))?;
+    let mut body = serde_json::json!({
+        "sealerId": identity.sealer_id,
+    });
+    if let Some(label) = default_env_sealer_label() {
+        body["label"] = serde_json::json!(label);
+    }
+
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to cloud")?;
+
+    if resp.status() == 404 {
+        return Ok(identity);
+    }
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    Ok(identity)
+}
+
+fn fetch_project_member_sealer_ids(
+    project_name: &str,
+    self_sealer_id: &str,
+    api_url: &str,
+    token: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<Vec<String>> {
+    let url = Url::parse(&format!(
+        "{}/api/env/projects/{}/sealers",
+        api_url, project_name
+    ))?;
+    let resp = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .context("failed to connect to cloud")?;
+
+    if resp.status() == 404 {
+        return Ok(vec![self_sealer_id.to_string()]);
+    }
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    let data: ProjectSealersResponse = resp.json().context("failed to parse response")?;
+    let mut recipient_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for member in data.members {
+        for sealer in member.sealers {
+            if seen.insert(sealer.sealer_id.clone()) {
+                recipient_ids.push(sealer.sealer_id);
+            }
+        }
+    }
+    if seen.insert(self_sealer_id.to_string()) {
+        recipient_ids.push(self_sealer_id.to_string());
+    }
+    Ok(recipient_ids)
+}
+
+fn fetch_sealed_project_env_payload(
+    project_name: &str,
+    environment: &str,
+    keys: &[String],
+    api_url: &str,
+    token: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<Option<SealedEnvResponse>> {
+    let mut url = Url::parse(&format!("{}/api/env/sealed/{}", api_url, project_name))?;
+    url.query_pairs_mut()
+        .append_pair("environment", environment);
+    if !keys.is_empty() {
+        url.query_pairs_mut().append_pair("keys", &keys.join(","));
+    }
+
+    let resp = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .context("failed to connect to cloud")?;
+
+    if resp.status() == 404 {
+        return Ok(None);
+    }
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    let data: SealedEnvResponse = resp.json().context("failed to parse response")?;
+    Ok(Some(data))
+}
+
+fn fetch_legacy_project_cloud_entries(
+    project_name: &str,
+    environment: &str,
+    keys: &[String],
+    api_url: &str,
+    token: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<ProjectCloudEnvEntries> {
+    let mut url = Url::parse(&format!("{}/api/env/{}", api_url, project_name))?;
+    url.query_pairs_mut()
+        .append_pair("environment", environment);
+    if !keys.is_empty() {
+        url.query_pairs_mut().append_pair("keys", &keys.join(","));
+    }
+
+    let resp = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .context("failed to connect to cloud")?;
+
+    if resp.status() == 404 {
+        return Ok(ProjectCloudEnvEntries::default());
+    }
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    let data: EnvResponse = resp.json().context("failed to parse response")?;
+    Ok(ProjectCloudEnvEntries {
+        vars: data.env,
+        descriptions: data.descriptions,
+    })
+}
+
+fn write_legacy_project_cloud_entries(
+    project_name: &str,
+    environment: &str,
+    vars: &HashMap<String, String>,
+    descriptions: &HashMap<String, String>,
+    api_url: &str,
+    token: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<()> {
+    if vars.is_empty() {
+        return Ok(());
+    }
+
+    let url = Url::parse(&format!("{}/api/env/{}", api_url, project_name))?;
+    let mut body = serde_json::json!({
+        "vars": vars,
+        "environment": environment,
+    });
+    if !descriptions.is_empty() {
+        body["descriptions"] = serde_json::json!(descriptions);
+    }
+
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to cloud")?;
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    let _: SetEnvResponse = resp.json().context("failed to parse response")?;
+    Ok(())
+}
+
+fn delete_legacy_project_cloud_entries(
+    project_name: &str,
+    environment: &str,
+    keys: &[String],
+    api_url: &str,
+    token: &str,
+    client: &reqwest::blocking::Client,
+    ignore_missing_project: bool,
+) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let url = Url::parse(&format!("{}/api/env/{}", api_url, project_name))?;
+    let body = serde_json::json!({
+        "keys": keys,
+        "environment": environment,
+    });
+
+    let resp = client
+        .delete(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to cloud")?;
+
+    if resp.status() == 404 && ignore_missing_project {
+        return Ok(());
+    }
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    Ok(())
+}
+
+fn fetch_project_cloud_env_entries(
+    project_name: &str,
+    environment: &str,
+    keys: &[String],
+    api_url: &str,
+    token: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<ProjectCloudEnvEntries> {
+    let identity = ensure_cloud_env_sealer_registered(api_url, token, client)?;
+    let sealed =
+        fetch_sealed_project_env_payload(project_name, environment, keys, api_url, token, client)?;
+
+    let mut entries = ProjectCloudEnvEntries::default();
+    let mut inaccessible_keys = Vec::new();
+
+    if let Some(sealed) = sealed {
+        for (key, item) in sealed.items {
+            if item.content.is_none() {
+                continue;
+            }
+
+            match decrypt_project_env_value(&item, &identity)? {
+                Some(value) => {
+                    entries.vars.insert(key.clone(), value);
+                    if let Some(description) = item.description {
+                        entries.descriptions.insert(key, description);
+                    }
+                }
+                None => {
+                    if item.available_recipient_count > 0 || !item.recipients.is_empty() {
+                        inaccessible_keys.push(key);
+                    }
+                }
+            }
+        }
+    }
+
+    let legacy_keys: Vec<String> = if keys.is_empty() {
+        Vec::new()
+    } else {
+        keys.iter()
+            .filter(|key| !entries.vars.contains_key(key.as_str()))
+            .cloned()
+            .collect()
+    };
+    let legacy = fetch_legacy_project_cloud_entries(
+        project_name,
+        environment,
+        &legacy_keys,
+        api_url,
+        token,
+        client,
+    )?;
+    for (key, value) in legacy.vars {
+        entries.vars.entry(key).or_insert(value);
+    }
+    for (key, description) in legacy.descriptions {
+        entries.descriptions.entry(key).or_insert(description);
+    }
+
+    inaccessible_keys.retain(|key| !entries.vars.contains_key(key));
+    inaccessible_keys.sort();
+    inaccessible_keys.dedup();
+    if !inaccessible_keys.is_empty() {
+        bail!(
+            "Some project env vars exist but are not shared with this device: {}. Re-save them from a device with access, or register this device's sealer and re-share them.",
+            inaccessible_keys.join(", ")
+        );
+    }
+
+    Ok(entries)
+}
+
+fn write_project_cloud_env_entries(
+    project_name: &str,
+    environment: &str,
+    vars: &HashMap<String, String>,
+    descriptions: &HashMap<String, String>,
+    api_url: &str,
+    token: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<bool> {
+    if vars.is_empty() {
+        return Ok(false);
+    }
+
+    let identity = ensure_cloud_env_sealer_registered(api_url, token, client)?;
+    let recipient_ids =
+        fetch_project_member_sealer_ids(project_name, &identity.sealer_id, api_url, token, client)?;
+
+    let mut items = HashMap::new();
+    for (key, value) in vars {
+        let mut item = seal_project_env_value(value, &identity, &recipient_ids)?;
+        item.description = descriptions.get(key).cloned();
+        items.insert(key.clone(), item);
+    }
+
+    let url = Url::parse(&format!("{}/api/env/sealed/{}", api_url, project_name))?;
+    let body = SealedEnvWriteRequest {
+        environment: environment.to_string(),
+        items,
+    };
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to cloud")?;
+
+    if resp.status() == 404 {
+        bail!(
+            "The cloud env server does not support sealed project env storage yet. Deploy the updated MyFlow env API before writing project envs."
+        );
+    }
+
+    if resp.status() == 401 {
+        bail!("Unauthorized. Check your token with `f env login`.");
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    let mirror_plaintext = project_plaintext_cloud_mirror_required();
+    if mirror_plaintext {
+        write_legacy_project_cloud_entries(
+            project_name,
+            environment,
+            vars,
+            descriptions,
+            api_url,
+            token,
+            client,
+        )
+        .context("sealed write succeeded, but writing the required plaintext host mirror failed")?;
+    } else {
+        let keys: Vec<String> = vars.keys().cloned().collect();
+        delete_legacy_project_cloud_entries(
+            project_name,
+            environment,
+            &keys,
+            api_url,
+            token,
+            client,
+            true,
+        )
+        .context("sealed write succeeded, but removing the legacy plaintext mirror failed")?;
+    }
+
+    Ok(mirror_plaintext)
+}
+
+fn delete_project_cloud_env_entries(
+    project_name: &str,
+    environment: &str,
+    keys: &[String],
+    api_url: &str,
+    token: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let url = Url::parse(&format!("{}/api/env/sealed/{}", api_url, project_name))?;
+    let body = serde_json::json!({
+        "keys": keys,
+        "environment": environment,
+    });
+    let resp = client
+        .delete(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&body)
+        .send()
+        .context("failed to connect to cloud")?;
+
+    match resp.status() {
+        status if status == 404 => {}
+        status if status == 401 => bail!("Unauthorized. Check your token with `f env login`."),
+        status if !status.is_success() => {
+            let body = resp.text().unwrap_or_default();
+            bail!("API error {}: {}", status, body);
+        }
+        _ => {}
+    }
+
+    delete_legacy_project_cloud_entries(
+        project_name,
+        environment,
+        keys,
+        api_url,
+        token,
+        client,
+        true,
     )
 }
 
@@ -1267,33 +2317,33 @@ fn delete_project_env_vars(keys: &[String], environment: &str) -> Result<()> {
     let api_url = get_api_url(&auth);
     let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
     let target = resolve_env_target()?;
-
-    let url = match &target {
+    match &target {
         EnvTarget::Personal { space } => {
             let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
             if let Some(space) = space {
                 url.query_pairs_mut().append_pair("space", space);
             }
-            url
+            let body = serde_json::json!({
+                "keys": keys,
+                "environment": environment,
+            });
+
+            let resp = client
+                .delete(url)
+                .header("Authorization", format!("Bearer {}", token))
+                .json(&body)
+                .send()
+                .context("failed to connect to cloud")?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().unwrap_or_default();
+                bail!("API error {}: {}", status, body);
+            }
         }
-        EnvTarget::Project { name } => Url::parse(&format!("{}/api/env/{}", api_url, name))?,
-    };
-    let body = serde_json::json!({
-        "keys": keys,
-        "environment": environment,
-    });
-
-    let resp = client
-        .delete(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .json(&body)
-        .send()
-        .context("failed to connect to cloud")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        bail!("API error {}: {}", status, body);
+        EnvTarget::Project { name } => {
+            delete_project_cloud_env_entries(name, environment, keys, &api_url, token, &client)?;
+        }
     }
 
     let target_label = match target {
@@ -1451,44 +2501,57 @@ fn push_vars(environment: &str, vars: HashMap<String, String>) -> Result<()> {
     );
 
     let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
-
-    let url = match &target {
+    let mirrored_plaintext = match &target {
         EnvTarget::Personal { space } => {
             let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
             if let Some(space) = space {
                 url.query_pairs_mut().append_pair("space", space);
             }
-            url
+            let body = serde_json::json!({
+                "vars": &vars,
+                "environment": environment,
+            });
+
+            let resp = client
+                .post(url)
+                .header("Authorization", format!("Bearer {}", token))
+                .json(&body)
+                .send()
+                .context("failed to connect to cloud")?;
+
+            if resp.status() == 401 {
+                bail!("Unauthorized. Check your token with `f env login`.");
+            }
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().unwrap_or_default();
+                bail!("API error {}: {}", status, body);
+            }
+
+            false
         }
-        EnvTarget::Project { name } => Url::parse(&format!("{}/api/env/{}", api_url, name))?,
+        EnvTarget::Project { name } => write_project_cloud_env_entries(
+            name,
+            environment,
+            &vars,
+            &HashMap::new(),
+            &api_url,
+            token,
+            &client,
+        )?,
     };
-    let body = serde_json::json!({
-        "vars": vars,
-        "environment": environment,
-    });
 
-    let resp = client
-        .post(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .json(&body)
-        .send()
-        .context("failed to connect to cloud")?;
-
-    if resp.status() == 401 {
-        bail!("Unauthorized. Check your token with `f env login`.");
+    if mirrored_plaintext {
+        println!(
+            "✓ Pushed {} env vars to cloud (sealed, plus required plaintext host mirror)",
+            vars.len()
+        );
+    } else if matches!(target, EnvTarget::Project { .. }) {
+        println!("✓ Pushed {} env vars to cloud (sealed)", vars.len());
+    } else {
+        println!("✓ Pushed {} env vars to cloud", vars.len());
     }
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        bail!("API error {}: {}", status, body);
-    }
-
-    if matches!(target, EnvTarget::Project { .. }) {
-        let _: SetEnvResponse = resp.json().context("failed to parse response")?;
-    }
-
-    println!("✓ Pushed {} env vars to cloud", vars.len());
 
     Ok(())
 }
@@ -2131,8 +3194,7 @@ fn list(environment: &str) -> Result<()> {
 
     let api_url = get_api_url(&auth);
     let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
-
-    let url = match &target {
+    let (vars, descriptions, backend_label) = match &target {
         EnvTarget::Personal { space } => {
             let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
             url.query_pairs_mut()
@@ -2140,51 +3202,39 @@ fn list(environment: &str) -> Result<()> {
             if let Some(space) = space {
                 url.query_pairs_mut().append_pair("space", space);
             }
-            url
+            let resp = client
+                .get(url)
+                .header("Authorization", format!("Bearer {}", token))
+                .send()
+                .context("failed to connect to cloud")?;
+
+            if resp.status() == 401 {
+                bail!("Unauthorized. Check your token with `f env login`.");
+            }
+
+            if resp.status() == 404 {
+                bail!("Personal env vars not found.");
+            }
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().unwrap_or_default();
+                bail!("API error {}: {}", status, body);
+            }
+
+            let data: PersonalEnvResponse = resp.json().context("failed to parse response")?;
+            (data.env, None, "cloud")
         }
         EnvTarget::Project { name } => {
-            let mut url = Url::parse(&format!("{}/api/env/{}", api_url, name))?;
-            url.query_pairs_mut()
-                .append_pair("environment", environment);
-            url
-        }
-    };
-    let resp = client
-        .get(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .context("failed to connect to cloud")?;
-
-    if resp.status() == 401 {
-        bail!("Unauthorized. Check your token with `f env login`.");
-    }
-
-    if resp.status() == 404 {
-        match target {
-            EnvTarget::Personal { .. } => bail!("Personal env vars not found."),
-            EnvTarget::Project { .. } => bail!("Project '{}' not found.", label),
-        }
-    }
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        bail!("API error {}: {}", status, body);
-    }
-
-    let (vars, descriptions) = match target {
-        EnvTarget::Personal { .. } => {
-            let data: PersonalEnvResponse = resp.json().context("failed to parse response")?;
-            (data.env, None)
-        }
-        EnvTarget::Project { .. } => {
-            let data: EnvResponse = resp.json().context("failed to parse response")?;
-            (data.env, Some(data.descriptions))
+            let entries =
+                fetch_project_cloud_env_entries(name, environment, &[], &api_url, token, &client)?;
+            (entries.vars, Some(entries.descriptions), "cloud (sealed)")
         }
     };
 
     println!("Space: {}", label);
     println!("Environment: {}", environment);
+    println!("Backend: {}", backend_label);
     println!("─────────────────────────────");
 
     if vars.is_empty() {
@@ -2373,58 +3423,82 @@ fn set_project_env_var_internal(
     let resolved_value = value.to_string();
 
     let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
+    let mut vars = HashMap::new();
+    vars.insert(key.to_string(), resolved_value.clone());
+    let mut descriptions = HashMap::new();
+    if let Some(desc) = description {
+        descriptions.insert(key.to_string(), desc.to_string());
+    }
 
-    let url = match &target {
+    let mirrored_plaintext = match &target {
         EnvTarget::Personal { space } => {
             let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
             if let Some(space) = space {
                 url.query_pairs_mut().append_pair("space", space);
             }
-            url
+
+            let body = serde_json::json!({
+                "vars": &vars,
+                "environment": environment,
+            });
+
+            let resp = client
+                .post(url)
+                .header("Authorization", format!("Bearer {}", token))
+                .json(&body)
+                .send()
+                .context("failed to connect to cloud")?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().unwrap_or_default();
+                let err = anyhow::anyhow!("API error {}: {}", status, body);
+                if is_local_fallback_error(&err)
+                    && std::io::stdin().is_terminal()
+                    && prompt_confirm("Cloud unavailable. Store locally instead? (y/N): ")?
+                {
+                    let path = set_local_env_var(&target, environment, key, value)?;
+                    println!(
+                        "✓ Set env var locally: {} ({} stored at {})",
+                        key,
+                        environment,
+                        path.display()
+                    );
+                    return Ok(());
+                }
+                return Err(err);
+            }
+
+            false
         }
-        EnvTarget::Project { name } => Url::parse(&format!("{}/api/env/{}", api_url, name))?,
+        EnvTarget::Project { name } => match write_project_cloud_env_entries(
+            name,
+            environment,
+            &vars,
+            &descriptions,
+            &api_url,
+            token,
+            &client,
+        ) {
+            Ok(mirror) => mirror,
+            Err(err) => {
+                if is_local_fallback_error(&err)
+                    && std::io::stdin().is_terminal()
+                    && prompt_confirm("Cloud unavailable. Store locally instead? (y/N): ")?
+                {
+                    let path = set_local_env_var(&target, environment, key, value)?;
+                    println!(
+                        "✓ Set env var locally: {} ({} stored at {})",
+                        key,
+                        environment,
+                        path.display()
+                    );
+                    return Ok(());
+                }
+                return Err(err);
+            }
+        },
     };
-    let mut vars = HashMap::new();
-    vars.insert(key.to_string(), resolved_value.clone());
-
-    let mut body = serde_json::json!({
-        "vars": vars,
-        "environment": environment,
-    });
-
-    // Add description if provided
-    if let Some(desc) = description {
-        let mut descriptions = HashMap::new();
-        descriptions.insert(key.to_string(), desc.to_string());
-        body["descriptions"] = serde_json::json!(descriptions);
-    }
-
-    let resp = client
-        .post(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .json(&body)
-        .send()
-        .context("failed to connect to cloud")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        let err = anyhow::anyhow!("API error {}: {}", status, body);
-        if is_local_fallback_error(&err)
-            && std::io::stdin().is_terminal()
-            && prompt_confirm("Cloud unavailable. Store locally instead? (y/N): ")?
-        {
-            let path = set_local_env_var(&target, environment, key, value)?;
-            println!(
-                "✓ Set env var locally: {} ({} stored at {})",
-                key,
-                environment,
-                path.display()
-            );
-            return Ok(());
-        }
-        return Err(err);
-    }
 
     let masked = if resolved_value.len() > 8 {
         format!("{}...", &resolved_value[..4])
@@ -2433,9 +3507,30 @@ fn set_project_env_var_internal(
     };
 
     if let Some(desc) = description {
-        println!("✓ Set {}={} ({}) - {}", key, masked, environment, desc);
+        if mirrored_plaintext && matches!(target, EnvTarget::Project { .. }) {
+            println!(
+                "✓ Set {}={} ({}) - {} [sealed + plaintext host mirror]",
+                key, masked, environment, desc
+            );
+        } else if matches!(target, EnvTarget::Project { .. }) {
+            println!(
+                "✓ Set {}={} ({}) - {} [sealed]",
+                key, masked, environment, desc
+            );
+        } else {
+            println!("✓ Set {}={} ({}) - {}", key, masked, environment, desc);
+        }
     } else {
-        println!("✓ Set {}={} ({})", key, masked, environment);
+        if mirrored_plaintext && matches!(target, EnvTarget::Project { .. }) {
+            println!(
+                "✓ Set {}={} ({}) [sealed + plaintext host mirror]",
+                key, masked, environment
+            );
+        } else if matches!(target, EnvTarget::Project { .. }) {
+            println!("✓ Set {}={} ({}) [sealed]", key, masked, environment);
+        } else {
+            println!("✓ Set {}={} ({})", key, masked, environment);
+        }
     }
 
     Ok(())
@@ -2547,7 +3642,8 @@ fn fetch_env_vars(
     include_environment: bool,
 ) -> Result<HashMap<String, String>> {
     if local_env_enabled() {
-        return read_local_env_vars(target, environment);
+        let vars = read_local_env_vars(target, environment)?;
+        return Ok(select_requested_env_keys(vars, keys));
     }
 
     let auth = load_auth_config()?;
@@ -2557,7 +3653,8 @@ fn fetch_env_vars(
             if std::io::stdin().is_terminal()
                 && prompt_confirm("Not logged in to cloud. Read local envs instead? (y/N): ")?
             {
-                return read_local_env_vars(target, environment);
+                let vars = read_local_env_vars(target, environment)?;
+                return Ok(select_requested_env_keys(vars, keys));
             }
             bail!("Not logged in. Run `f env login` first.");
         }
@@ -2566,6 +3663,30 @@ fn fetch_env_vars(
 
     let api_url = get_api_url(&auth);
     let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
+
+    if let EnvTarget::Project { name } = target {
+        let entries = match fetch_project_cloud_env_entries(
+            name,
+            environment,
+            keys,
+            &api_url,
+            token,
+            &client,
+        ) {
+            Ok(entries) => entries,
+            Err(err) => {
+                if is_local_fallback_error(&err)
+                    && std::io::stdin().is_terminal()
+                    && prompt_confirm("Cloud unavailable. Read local envs instead? (y/N): ")?
+                {
+                    let vars = read_local_env_vars(target, environment)?;
+                    return Ok(select_requested_env_keys(vars, keys));
+                }
+                return Err(err);
+            }
+        };
+        return Ok(entries.vars);
+    }
 
     let mut url = match target {
         EnvTarget::Personal { space } => {
@@ -2601,7 +3722,8 @@ fn fetch_env_vars(
         if std::io::stdin().is_terminal()
             && prompt_confirm("Cloud auth failed. Read local envs instead? (y/N): ")?
         {
-            return read_local_env_vars(target, environment);
+            let vars = read_local_env_vars(target, environment)?;
+            return Ok(select_requested_env_keys(vars, keys));
         }
         bail!("Unauthorized. Check your token with `f env login`.");
     }
@@ -2623,7 +3745,8 @@ fn fetch_env_vars(
             && std::io::stdin().is_terminal()
             && prompt_confirm("Cloud unavailable. Read local envs instead? (y/N): ")?
         {
-            return read_local_env_vars(target, environment);
+            let vars = read_local_env_vars(target, environment)?;
+            return Ok(select_requested_env_keys(vars, keys));
         }
         return Err(err);
     }
@@ -2946,8 +4069,16 @@ fn token_revoke(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::project_env_backend_from_config;
+    use super::{
+        SealedEnvContent, SealedEnvItem, SealedEnvRecipientGrant, create_env_sealer_identity,
+        decrypt_project_env_value, ensure_private_dir, is_local_keychain_ref, local_keychain_ref,
+        project_env_backend_from_config, project_plaintext_cloud_mirror_required_for_config,
+        seal_project_env_value, write_private_file,
+    };
     use crate::config::Config;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
 
     #[test]
     fn project_env_backend_detects_local_host_source() {
@@ -2989,5 +4120,117 @@ env_source = "cloud"
         .expect("mixed env_source config should parse");
 
         assert_eq!(project_env_backend_from_config(&cfg), None);
+    }
+
+    #[test]
+    fn plaintext_cloud_mirror_requires_cloud_host_with_service_token() {
+        let cfg: Config = toml::from_str(
+            r#"
+[host]
+env_source = "cloud"
+service_token = "cloud_test_123"
+"#,
+        )
+        .expect("host cloud config should parse");
+
+        assert!(project_plaintext_cloud_mirror_required_for_config(&cfg));
+    }
+
+    #[test]
+    fn plaintext_cloud_mirror_ignores_non_cloud_or_missing_token() {
+        let no_token: Config = toml::from_str(
+            r#"
+[host]
+env_source = "cloud"
+"#,
+        )
+        .expect("host cloud config without token should parse");
+        let local: Config = toml::from_str(
+            r#"
+[host]
+env_source = "local"
+service_token = "cloud_test_123"
+"#,
+        )
+        .expect("host local config should parse");
+
+        assert!(!project_plaintext_cloud_mirror_required_for_config(
+            &no_token
+        ));
+        assert!(!project_plaintext_cloud_mirror_required_for_config(&local));
+    }
+
+    #[test]
+    fn local_keychain_refs_use_reserved_prefix() {
+        let reference = local_keychain_ref("DESIGNER_LINEAR_API_KEY");
+        assert!(is_local_keychain_ref(&reference));
+        assert!(!is_local_keychain_ref("example_secret_value"));
+    }
+
+    #[test]
+    fn sealed_project_env_roundtrip_decrypts_for_registered_recipient() {
+        let identity = create_env_sealer_identity().expect("create identity");
+        let write_item = seal_project_env_value(
+            "example_secret_value",
+            &identity,
+            std::slice::from_ref(&identity.sealer_id),
+        )
+        .expect("seal env value");
+        let read_item = SealedEnvItem {
+            description: Some("Linear API key".to_string()),
+            available_recipient_count: write_item.recipients.len(),
+            content: Some(SealedEnvContent {
+                algorithm: write_item.content.algorithm,
+                ciphertext_b64: write_item.content.ciphertext_b64,
+                nonce_b64: write_item.content.nonce_b64,
+            }),
+            recipients: write_item
+                .recipients
+                .into_iter()
+                .map(|recipient| SealedEnvRecipientGrant {
+                    recipient_id: recipient.recipient_id,
+                    sender_id: Some(recipient.sender_id),
+                    wrapped_key_b64: recipient.wrapped_key_b64,
+                    nonce_material_b64: recipient.nonce_material_b64,
+                })
+                .collect(),
+        };
+
+        let value = decrypt_project_env_value(&read_item, &identity).expect("decrypt env value");
+        assert_eq!(value.as_deref(), Some("example_secret_value"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_dir_enforces_owner_only_permissions() {
+        let dir = tempdir().expect("tempdir");
+        let nested = dir.path().join("a").join("b");
+
+        ensure_private_dir(&nested).expect("create private dir");
+
+        let mode = nested.metadata().expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_file_enforces_owner_only_permissions() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("secrets").join("production.env");
+
+        write_private_file(&path, "API_KEY=\"secret\"\n").expect("write private file");
+
+        let file_mode = path.metadata().expect("metadata").permissions().mode() & 0o777;
+        let dir_mode = path
+            .parent()
+            .expect("parent")
+            .metadata()
+            .expect("dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(dir_mode, 0o700);
     }
 }

@@ -30,6 +30,7 @@ Complete documentation for all `f` (flow) commands.
 | [`parallel`](parallel.md) | Run tasks in parallel |
 | [`docs`](docs.md) | Manage auto-generated documentation |
 | [`web`](web.md) | Open the Flow web UI for a project |
+| [`url`](url.md) | Inspect or crawl URLs into compact AI-friendly summaries |
 
 ## Getting Started
 
@@ -82,6 +83,7 @@ f commit --help
 ### AI & Development
 
 - **[ai](ai.md)** - Manage AI coding sessions
+- **[url](url.md)** - Inspect or crawl URLs into compact summaries for AI use
 - **[agent](agent.md)** - Invoke AI subagents
 - **[match](match.md)** - Match natural language to tasks
 - **[sessions](sessions.md)** - Search AI sessions across projects

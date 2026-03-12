@@ -429,9 +429,9 @@ url = "https://my-worker.mycompany.workers.dev"
 ```
 
 ```bash
-# Store secrets in cloud
-f env set OPENAI_API_KEY=sk-... -d "OpenAI API key"
-f env set WEBHOOK_SECRET=whsec_... -d "Webhook signing secret"
+# Store project secrets
+f env project set -e production OPENAI_API_KEY=sk-...
+f env project set -e production WEBHOOK_SECRET=whsec_...
 
 # Deploy with secrets
 f deploy cloudflare --secrets

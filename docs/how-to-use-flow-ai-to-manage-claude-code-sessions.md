@@ -42,6 +42,12 @@ f ai claude resume a38cf8bf-f4e2-4308-8b27-0254f89c4385
 f ai codex resume 019c61c5-0aef-71a1-b058-5c9ab43013d4
 f ai resume my-feature
 
+# Search Codex sessions globally by prompt text and resume the best match
+f ai codex find "make plan to get designer"
+
+# Search Codex sessions globally by prompt text and copy the best match
+f ai codex findAndCopy "make plan to get designer"
+
 # Save alias
 f ai save my-feature --id <session-id>
 

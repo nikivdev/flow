@@ -108,6 +108,7 @@ pub mod traces;
 pub mod undo;
 pub mod upgrade;
 pub mod upstream;
+pub mod url_inspect;
 pub mod usage;
 pub mod vcs;
 pub mod watchers;

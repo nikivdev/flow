@@ -45,6 +45,9 @@ pub struct Config {
     /// Project lifecycle orchestration for `f up` / `f down`.
     #[serde(default)]
     pub lifecycle: Option<LifecycleConfig>,
+    /// Codex-first control plane settings.
+    #[serde(default)]
+    pub codex: Option<CodexConfig>,
     #[serde(default)]
     pub options: OptionsConfig,
     #[serde(default, alias = "server", alias = "server-local")]
@@ -706,6 +709,7 @@ impl Default for Config {
             env_space_kind: None,
             flow: FlowSettings::default(),
             lifecycle: None,
+            codex: None,
             options: OptionsConfig::default(),
             servers: Vec::new(),
             remote_servers: Vec::new(),
@@ -866,6 +870,61 @@ pub struct SkillsCodexConfig {
         alias = "taskSkillAllowImplicitInvocation"
     )]
     pub task_skill_allow_implicit_invocation: Option<bool>,
+}
+
+/// Codex-first control plane settings.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct CodexConfig {
+    /// Whether `f codex open` should auto-run reference resolvers when patterns match.
+    #[serde(
+        default,
+        rename = "auto_resolve_references",
+        alias = "auto-resolve-references",
+        alias = "autoResolveReferences"
+    )]
+    pub auto_resolve_references: Option<bool>,
+    /// External reference resolvers that can unroll URLs or other tokens into compact context.
+    #[serde(
+        default,
+        rename = "reference_resolver",
+        alias = "reference-resolver",
+        alias = "referenceResolver"
+    )]
+    pub reference_resolvers: Vec<CodexReferenceResolverConfig>,
+}
+
+impl CodexConfig {
+    pub(crate) fn merge(&mut self, other: CodexConfig) {
+        if other.auto_resolve_references.is_some() {
+            self.auto_resolve_references = other.auto_resolve_references;
+        }
+        for resolver in other.reference_resolvers {
+            if let Some(existing) = self
+                .reference_resolvers
+                .iter_mut()
+                .find(|value| value.name == resolver.name)
+            {
+                *existing = resolver;
+            } else {
+                self.reference_resolvers.push(resolver);
+            }
+        }
+    }
+}
+
+/// External resolver registration for `f codex resolve` and `f codex open`.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct CodexReferenceResolverConfig {
+    /// Human-friendly resolver name.
+    pub name: String,
+    /// Wildcard patterns that match candidate reference tokens.
+    #[serde(default, rename = "match", alias = "matches")]
+    pub matches: Vec<String>,
+    /// Shell command template to run when a pattern matches.
+    pub command: String,
+    /// Optional label used when injecting the resolver output into the prompt.
+    #[serde(default, rename = "inject_as", alias = "inject-as", alias = "injectAs")]
+    pub inject_as: Option<String>,
 }
 
 /// Seq-backed skills fetch configuration.
@@ -2251,6 +2310,11 @@ fn merge_config(base: &mut Config, other: Config) {
     if base.flow.deploy_task.is_none() {
         base.flow.deploy_task = other.flow.deploy_task;
     }
+    if base.codex.is_none() {
+        base.codex = other.codex;
+    } else if let (Some(base_codex), Some(other_codex)) = (base.codex.as_mut(), other.codex) {
+        base_codex.merge(other_codex);
+    }
     merge_release_config(base, other.release);
     if base.setup.is_none() {
         base.setup = other.setup;
@@ -2925,6 +2989,35 @@ task_skill_allow_implicit_invocation = false
         assert_eq!(codex.generate_openai_yaml, Some(true));
         assert_eq!(codex.force_reload_after_sync, Some(true));
         assert_eq!(codex.task_skill_allow_implicit_invocation, Some(false));
+    }
+
+    #[test]
+    fn codex_reference_resolver_config_parses() {
+        let toml = r#"
+[codex]
+auto_resolve_references = true
+
+[[codex.reference_resolver]]
+name = "linear"
+match = ["https://linear.app/*/issue/*", "https://linear.app/*/project/*"]
+command = "forge linear inspect {{ref}} --json"
+inject_as = "linear"
+"#;
+        let cfg: Config = toml::from_str(toml).expect("codex config should parse");
+        let codex = cfg.codex.expect("codex config expected");
+        assert_eq!(codex.auto_resolve_references, Some(true));
+        assert_eq!(codex.reference_resolvers.len(), 1);
+        let resolver = &codex.reference_resolvers[0];
+        assert_eq!(resolver.name, "linear");
+        assert_eq!(
+            resolver.matches,
+            vec![
+                "https://linear.app/*/issue/*".to_string(),
+                "https://linear.app/*/project/*".to_string(),
+            ]
+        );
+        assert_eq!(resolver.command, "forge linear inspect {{ref}} --json");
+        assert_eq!(resolver.inject_as.as_deref(), Some("linear"));
     }
 
     #[test]

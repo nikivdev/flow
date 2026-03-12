@@ -9,7 +9,8 @@ Manage environment variables via cloud or local storage. Supports:
 - Personal/global variables
 - Multiple environments (dev, staging, production)
 - Direct injection into commands
-- Touch ID gating for env reads on macOS (cloud only)
+- Touch ID gating for cloud reads and keychain-backed personal local reads on macOS
+- Client-side sealed project env sharing in the cloud
 
 ## Storage Backends
 
@@ -17,6 +18,11 @@ Manage environment variables via cloud or local storage. Supports:
 |---------|----------|--------|
 | `cloud` | Cloud (myflow.sh) | Default, requires login |
 | `local` | `~/.config/flow/env-local/` | No account needed |
+
+Cloud behavior:
+- Personal cloud envs use Flow's existing server-managed secret storage.
+- Project cloud envs are sealed client-side before upload and decrypted locally on read.
+- If a host deploy is configured with `env_source = "cloud"` plus a `service_token`, Flow keeps a compatibility plaintext mirror for those project keys until the host fetch path is upgraded.
 
 Force local backend:
 
@@ -51,13 +57,17 @@ then `f env` will also use the local backend automatically in that project.
     └── production.env
 ```
 
-Files are plain `.env` format (not encrypted).
+Storage behavior:
+- Project-local envs are private `.env` files under `~/.config/flow/env-local/`.
+- On macOS, personal-local env values are stored in Keychain by default; `personal/production.env` keeps Flow-managed references, not raw secret values.
+- If `FLOW_ENV_LOCAL_PLAINTEXT=1` is set, Flow falls back to plaintext personal local storage.
+- Local env paths are written with owner-only permissions.
 
 ## Quick Start
 
 ```bash
 # Store a personal secret
-f env set API_KEY=sk-xxx -d "OpenAI API key"
+f env set API_KEY=sk-xxx
 
 # List variables (default action when logged in)
 f env
@@ -115,9 +125,6 @@ Store a personal environment variable:
 # Basic set
 f env set API_KEY=sk-xxx
 
-# With description
-f env set API_KEY=sk-xxx -d "OpenAI API key"
-
 # Personal envs always use the production personal store
 f env set GITHUB_TOKEN=ghp_xxx
 ```
@@ -126,7 +133,6 @@ f env set GITHUB_TOKEN=ghp_xxx
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--description <DESC>` | `-d` | Optional description for this env var |
 | `--personal` | | Compatibility flag; `set` already targets personal envs |
 
 ## Project Set
@@ -137,6 +143,11 @@ Store a project-scoped environment variable:
 f env project set -e dev DATABASE_URL=postgres://localhost/app
 f env project set -e production PUBLIC_API_BASE_URL=https://api.example.com
 ```
+
+Notes:
+- Project cloud writes are sealed by default.
+- On a new device, the first project read/write auto-registers that device as a sealer.
+- If a key exists in cloud but was never shared to this device, Flow will ask you to re-save it from a device that already has access.
 
 ---
 

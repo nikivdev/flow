@@ -16,6 +16,14 @@ Flow supports:
 - `cloud` (myflow.sh): shared/team-friendly.
 - `local` (`~/.config/flow/env-local/`): offline/no-account.
 
+Cloud behavior:
+- Project env values are sealed client-side before upload and decrypted locally
+  on read.
+- Personal cloud values still use the existing server-managed secret store.
+- If a host deploy still relies on `env_source = "cloud"` plus a service token,
+  Flow keeps a compatibility plaintext mirror for those project keys until the
+  host fetch path is upgraded.
+
 Set backend in `~/.config/flow/config.ts`:
 
 ```ts
@@ -69,6 +77,10 @@ f env set --personal DEEPGRAM_API_KEY=<redacted>
 # Read when needed
 f env get --personal DEEPGRAM_API_KEY -f value
 ```
+
+On macOS with the `local` backend, personal env values are stored in Keychain by
+default and Flow keeps only references under `~/.config/flow/env-local/personal/`.
+Use `FLOW_ENV_LOCAL_PLAINTEXT=1` only as a compatibility escape hatch.
 
 ## Environment Names
 
@@ -134,7 +146,7 @@ f deploy
 
 ## Local Backend Storage Layout
 
-When backend is `local`, Flow writes plain `.env` files:
+When backend is `local`, Flow uses this layout:
 
 ```
 ~/.config/flow/env-local/
@@ -146,7 +158,10 @@ When backend is `local`, Flow writes plain `.env` files:
     └── production.env
 ```
 
-These files are not encrypted.
+Behavior:
+- Project-local envs remain private `.env` files on disk.
+- On macOS, personal-local env values are Keychain-backed by default; the file stores Flow-managed references instead of raw secret values.
+- Flow writes local env dirs/files with owner-only permissions.
 
 ## Quick Troubleshooting
 
