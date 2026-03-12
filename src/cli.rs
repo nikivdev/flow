@@ -204,7 +204,7 @@ pub enum Commands {
     Projects,
     #[command(
         about = "Fuzzy search AI sessions across all projects and copy context.",
-        long_about = "Browse AI sessions (Claude, Codex) across all projects. On selection, copies the session context since last checkpoint to clipboard for passing to another session.",
+        long_about = "Browse AI sessions (Claude, Codex, Cursor) across all projects. On selection, copies the session context since last checkpoint to clipboard for passing to another session.",
         alias = "ss"
     )]
     Sessions(SessionsOpts),
@@ -345,6 +345,14 @@ pub enum Commands {
     Ai(AiCommand),
     #[command(about = "Start or continue Codex session.", alias = "cx")]
     Codex {
+        #[command(subcommand)]
+        action: Option<ProviderAiAction>,
+    },
+    #[command(
+        about = "Read Cursor agent transcripts for this project.",
+        alias = "cu"
+    )]
+    Cursor {
         #[command(subcommand)]
         action: Option<ProviderAiAction>,
     },
@@ -1196,7 +1204,7 @@ pub struct ActiveOpts {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct SessionsOpts {
-    /// Filter by provider (claude, codex, or all).
+    /// Filter by provider (claude, codex, cursor, or all).
     #[arg(long, short, default_value = "all")]
     pub provider: String,
     /// Number of exchanges to copy (default: all since checkpoint).
@@ -2356,9 +2364,14 @@ pub struct AiCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum AiAction {
-    /// List all AI sessions for this project (Claude + Codex).
+    /// List all AI sessions for this project (Claude + Codex + Cursor).
     #[command(alias = "ls")]
     List,
+    /// Cursor: inspect and read agent transcripts for this project.
+    Cursor {
+        #[command(subcommand)]
+        action: Option<ProviderAiAction>,
+    },
     /// Claude Code: continue last session or start new one.
     Claude {
         #[command(subcommand)]

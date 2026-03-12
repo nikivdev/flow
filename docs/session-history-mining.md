@@ -1,6 +1,6 @@
-# Session History Mining for Claude/Codex
+# Session History Mining for Claude/Codex/Cursor
 
-Use this when you want an AI agent to study recent Claude/Codex work before proposing a plan.
+Use this when you want an AI agent to study recent Claude/Codex/Cursor work before proposing a plan.
 
 This is optimized for:
 - cross-project history review
@@ -15,7 +15,7 @@ Use Flow's cross-project session browser:
 f sessions
 ```
 
-`f sessions` scans Claude + Codex sessions across projects, lets you pick one, and copies context to clipboard.
+`f sessions` scans Claude + Codex + Cursor sessions across projects, lets you pick one, and copies context to clipboard.
 
 ## Core Commands
 
@@ -28,6 +28,9 @@ f sessions --provider claude --list
 
 # Only Codex sessions
 f sessions --provider codex --list
+
+# Only Cursor sessions
+f sessions --provider cursor --list
 
 # Copy selected session context (interactive picker via fzf)
 f sessions --provider all
@@ -63,9 +66,11 @@ If you need more detail from a known session in the current repo:
 ```bash
 f ai claude list
 f ai codex list
+f ai cursor list
 
 # Copy the last 6 exchanges from a selected Claude session for this repo
 f ai claude context - /absolute/path/to/repo 6
+f ai cursor context - /absolute/path/to/repo 6
 ```
 
 Use this after `f sessions` when you want to zoom in on one thread.
@@ -77,6 +82,7 @@ Use this after `f sessions` when you want to zoom in on one thread.
 2. Pull 2 to 4 high-signal contexts:
    `f sessions --provider claude --count 6`
    `f sessions --provider codex --count 6`
+   `f sessions --provider cursor --count 6`
 3. For stale/long sessions, prefer condensed transfer:
    `f sessions --provider all --handoff`
 4. Paste each copied output into labeled blocks in your prompt.
@@ -91,7 +97,7 @@ I have ~$500 of Claude tokens expiring in <N> day(s) and want to use them effici
 
 Goal:
 - study goose and propose a concrete execution plan for token usage
-- use ideas from recent Claude/Codex histories
+- use ideas from recent Claude/Codex/Cursor histories
 - rank ideas by expected impact and execution cost
 
 Constraints:
@@ -108,6 +114,9 @@ Session context 2:
 Session context 3 (optional handoff):
 <paste from f sessions --provider all --handoff>
 
+Session context 4 (optional Cursor):
+<paste from f sessions --provider cursor --count 6>
+
 Deliver:
 1. top opportunities (ranked)
 2. 48-hour execution plan
@@ -119,6 +128,7 @@ Deliver:
 
 - Prefer `--count` over `--full` unless you are reconstructing full intent.
 - Prefer `--handoff` for large stale sessions before pasting into expensive models.
+- Cursor transcripts use file-modified time rather than per-message timestamps, so repeated copies may include the whole latest transcript after a new edit.
 - Merge duplicate context manually before sending to avoid repeated tokens.
 - Request ranked outputs with hard deliverables (plan, commands, owners, fallback).
 

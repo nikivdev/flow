@@ -476,6 +476,9 @@ fn main() -> Result<()> {
             Some(Commands::Codex { action }) => {
                 ai::run_provider(ai::Provider::Codex, action)?;
             }
+            Some(Commands::Cursor { action }) => {
+                ai::run_provider(ai::Provider::Cursor, action)?;
+            }
             Some(Commands::Claude { action }) => {
                 ai::run_provider(ai::Provider::Claude, action)?;
             }
@@ -747,6 +750,7 @@ fn startup_policy_for(command: Option<&Commands>) -> StartupPolicy {
         },
         Some(Commands::Ai(_)) => StartupPolicy::FULL,
         Some(Commands::Codex { .. }) => StartupPolicy::FULL,
+        Some(Commands::Cursor { .. }) => StartupPolicy::FULL,
         Some(Commands::Claude { .. }) => StartupPolicy::FULL,
         Some(Commands::Commit(_))
         | Some(Commands::CommitQueue(_))
