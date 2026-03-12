@@ -1,4 +1,4 @@
-//! AI session management for Claude Code and Codex integration.
+//! AI session management for Claude Code, Codex, and Cursor integration.
 //!
 //! Tracks and manages AI coding sessions per project, allowing users to:
 //! - List sessions for the current project (Claude, Codex, or both)
@@ -7,7 +7,7 @@
 //! - Add notes to sessions
 //! - Copy session history to clipboard
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
@@ -29,6 +29,7 @@ use crate::cli::{AiAction, ProviderAiAction};
 pub enum Provider {
     Claude,
     Codex,
+    Cursor,
     All,
 }
 
@@ -122,7 +123,7 @@ fn default_provider() -> String {
 struct AiSession {
     /// Session ID (UUID)
     session_id: String,
-    /// Which provider (claude, codex)
+    /// Which provider (claude, codex, cursor)
     provider: Provider,
     /// First message timestamp
     timestamp: Option<String>,
@@ -156,6 +157,12 @@ struct CodexEntry {
     payload: Option<serde_json::Value>,
     role: Option<String>,
     content: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CursorEntry {
+    role: Option<String>,
+    message: Option<SessionMessage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +204,30 @@ struct CodexRecoverOutput {
 
 /// Run a provider-specific action (for top-level `f codex` / `f claude` commands).
 pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Result<()> {
+    if provider == Provider::Cursor {
+        match action {
+            None | Some(ProviderAiAction::List) => list_sessions(Provider::Cursor)?,
+            Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Cursor)?,
+            Some(ProviderAiAction::Context {
+                session,
+                count,
+                path,
+            }) => copy_context(session, Provider::Cursor, count, path)?,
+            Some(ProviderAiAction::Sessions)
+            | Some(ProviderAiAction::Continue { .. })
+            | Some(ProviderAiAction::New)
+            | Some(ProviderAiAction::Resume { .. }) => {
+                bail!(
+                    "Cursor transcripts are readable only; use `f cursor list`, `f cursor copy`, or `f cursor context`"
+                );
+            }
+            Some(ProviderAiAction::Recover { .. }) => {
+                bail!("recover is only supported for Codex sessions; use `f ai codex recover ...`");
+            }
+        }
+        return Ok(());
+    }
+
     match action {
         None => quick_start_session(provider)?,
         Some(ProviderAiAction::List) => list_sessions(provider)?,
@@ -232,6 +263,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
 
     match action {
         AiAction::List => list_sessions(Provider::All)?,
+        AiAction::Cursor { action } => run_provider(Provider::Cursor, action)?,
         AiAction::Claude { action } => match action {
             None => quick_start_session(Provider::Claude)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Claude)?,
@@ -529,7 +561,7 @@ pub fn get_context_since_checkpoint() -> Result<Option<String>> {
 pub fn get_context_since_checkpoint_for_path(project_path: &PathBuf) -> Result<Option<String>> {
     let checkpoints = load_checkpoints(project_path).unwrap_or_default();
 
-    // Get sessions for both Claude and Codex
+    // Get sessions for Claude, Codex, and Cursor
     let sessions = read_sessions_for_path(Provider::All, project_path)?;
 
     if sessions.is_empty() {
@@ -553,6 +585,7 @@ pub fn get_context_since_checkpoint_for_path(project_path: &PathBuf) -> Result<O
         let provider_name = match session.provider {
             Provider::Claude => "Claude Code",
             Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
             Provider::All => "AI",
         };
 
@@ -649,6 +682,7 @@ pub fn get_sessions_for_gitedit_between(
         let provider_name = match session.provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
+            Provider::Cursor => "cursor",
             Provider::All => "unknown",
         };
 
@@ -716,6 +750,21 @@ fn get_session_exchanges_since(
         }
         return Ok(vec![]);
     }
+    if provider == Provider::Cursor {
+        let session_file = find_cursor_session_file(session_id);
+        if let Some(session_file) = session_file {
+            let (exchanges, _) = read_cursor_exchanges(&session_file, since_ts, until_ts)?;
+            return Ok(exchanges
+                .into_iter()
+                .map(|(user, assistant, ts)| GitEditExchange {
+                    user_message: user,
+                    assistant_message: assistant,
+                    timestamp: ts,
+                })
+                .collect());
+        }
+        return Ok(vec![]);
+    }
 
     let path_str = project_path.to_string_lossy().to_string();
     let project_folder = path_to_project_name(&path_str);
@@ -755,21 +804,16 @@ fn get_session_exchanges_since(
                 let Some(content_text) = msg.content.as_ref().and_then(extract_message_text) else {
                     return;
                 };
-
-                if content_text.trim().is_empty() {
+                let Some(clean_text) = normalize_session_message(role, &content_text) else {
                     return;
-                }
+                };
 
                 match role {
                     "user" => {
-                        current_user = Some(content_text);
+                        current_user = Some(clean_text);
                         current_ts = entry_ts.clone();
                     }
                     "assistant" => {
-                        let clean_text = strip_thinking_blocks(&content_text);
-                        if clean_text.trim().is_empty() {
-                            return;
-                        }
                         if let Some(user_msg) = current_user.take() {
                             let ts = current_ts.take().or(entry_ts).unwrap_or_default();
                             exchanges.push(GitEditExchange {
@@ -832,6 +876,13 @@ fn get_session_last_timestamp(
         };
         return get_codex_last_timestamp(&session_file);
     }
+    if provider == Provider::Cursor {
+        let session_file = find_cursor_session_file(session_id);
+        let Some(session_file) = session_file else {
+            return Ok(None);
+        };
+        return get_cursor_last_timestamp(&session_file);
+    }
 
     let path_str = project_path.to_string_lossy().to_string();
     let project_folder = path_to_project_name(&path_str);
@@ -839,6 +890,7 @@ fn get_session_last_timestamp(
     let projects_dir = match provider {
         Provider::Claude | Provider::All => get_claude_projects_dir(),
         Provider::Codex => get_codex_projects_dir(),
+        Provider::Cursor => get_cursor_projects_dir(),
     };
 
     let session_file = projects_dir
@@ -874,6 +926,47 @@ fn read_context_since(
         })?;
         return read_codex_context_since(&session_file, since_ts);
     }
+    if provider == Provider::Cursor {
+        let session_file = find_cursor_session_file(session_id).ok_or_else(|| {
+            anyhow::anyhow!("Session file not found for Cursor session {}", session_id)
+        })?;
+        let (exchanges, last_ts) = read_cursor_exchanges(&session_file, since_ts, None)?;
+
+        if exchanges.is_empty() {
+            return Ok((String::new(), last_ts));
+        }
+
+        const MAX_EXCHANGES: usize = 5;
+        const MAX_USER_CHARS: usize = 500;
+        const MAX_ASSIST_CHARS: usize = 300;
+
+        let total_exchanges = exchanges.len();
+        let exchanges_to_use: Vec<_> = if total_exchanges > MAX_EXCHANGES {
+            exchanges
+                .into_iter()
+                .skip(total_exchanges - MAX_EXCHANGES)
+                .collect()
+        } else {
+            exchanges
+        };
+
+        let mut context = String::new();
+        if total_exchanges > MAX_EXCHANGES {
+            context.push_str(&format!("[+{} earlier]\n", total_exchanges - MAX_EXCHANGES));
+        }
+
+        for (user_msg, assistant_msg, _ts) in &exchanges_to_use {
+            let user_intent = extract_intent(user_msg, MAX_USER_CHARS);
+            let assist_summary = extract_intent(assistant_msg, MAX_ASSIST_CHARS);
+            context.push_str(">");
+            context.push_str(&user_intent);
+            context.push('\n');
+            context.push_str(&assist_summary);
+            context.push_str("\n\n");
+        }
+
+        return Ok((context.trim().to_string(), last_ts));
+    }
 
     let path_str = project_path.to_string_lossy().to_string();
     let project_folder = path_to_project_name(&path_str);
@@ -881,6 +974,7 @@ fn read_context_since(
     let projects_dir = match provider {
         Provider::Claude | Provider::All => get_claude_projects_dir(),
         Provider::Codex => get_codex_projects_dir(),
+        Provider::Cursor => get_cursor_projects_dir(),
     };
 
     let session_file = projects_dir
@@ -911,40 +1005,19 @@ fn read_context_since(
             if let Some(ref msg) = entry.message {
                 let role = msg.role.as_deref().unwrap_or("unknown");
 
-                let content_text = if let Some(ref content) = msg.content {
-                    match content {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Array(arr) => arr
-                            .iter()
-                            .filter_map(|v| {
-                                if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                                    Some(text.to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        _ => return,
-                    }
-                } else {
+                let Some(content_text) = msg.content.as_ref().and_then(extract_message_text) else {
+                    return;
+                };
+                let Some(clean_text) = normalize_session_message(role, &content_text) else {
                     return;
                 };
 
-                if content_text.is_empty() {
-                    return;
-                }
-
                 match role {
                     "user" => {
-                        current_user = Some(content_text);
+                        current_user = Some(clean_text);
                         current_ts = entry_ts.clone();
                     }
                     "assistant" => {
-                        let clean_text = strip_thinking_blocks(&content_text);
-                        if clean_text.trim().is_empty() {
-                            return;
-                        }
                         if let Some(user_msg) = current_user.take() {
                             let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
                             exchanges.push((user_msg, clean_text, ts.clone()));
@@ -1127,6 +1200,34 @@ fn read_codex_last_context(session_file: &PathBuf, count: usize) -> Result<Strin
     Ok(context)
 }
 
+fn read_cursor_last_context(session_file: &PathBuf, count: usize) -> Result<String> {
+    let (exchanges, _last_ts) = read_cursor_exchanges(session_file, None, None)?;
+
+    if exchanges.is_empty() {
+        bail!("No exchanges found in session");
+    }
+
+    let start = exchanges.len().saturating_sub(count);
+    let last_exchanges = &exchanges[start..];
+
+    let mut context = String::new();
+    for (user_msg, assistant_msg, _ts) in last_exchanges {
+        context.push_str("Human: ");
+        context.push_str(user_msg);
+        context.push_str("\n\n");
+        context.push_str("Assistant: ");
+        context.push_str(assistant_msg);
+        context.push_str("\n\n");
+    }
+
+    while context.ends_with('\n') {
+        context.pop();
+    }
+    context.push('\n');
+
+    Ok(context)
+}
+
 fn read_codex_exchanges(
     session_file: &PathBuf,
     since_ts: Option<&str>,
@@ -1155,23 +1256,15 @@ fn read_codex_exchanges(
         }
 
         if let Some((role, text)) = extract_codex_message(&entry) {
-            if text.trim().is_empty() {
-                return;
-            }
-
             match role.as_str() {
                 "user" => {
                     current_user = Some(text);
                     current_ts = entry_ts.clone();
                 }
                 "assistant" => {
-                    let clean_text = strip_thinking_blocks(&text);
-                    if clean_text.trim().is_empty() {
-                        return;
-                    }
                     if let Some(user_msg) = current_user.take() {
                         let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
-                        exchanges.push((user_msg, clean_text, ts.clone()));
+                        exchanges.push((user_msg, text, ts.clone()));
                         last_ts = Some(ts);
                     }
                 }
@@ -1185,6 +1278,53 @@ fn read_codex_exchanges(
     })?;
 
     Ok((exchanges, last_ts))
+}
+
+fn read_cursor_exchanges(
+    session_file: &PathBuf,
+    since_ts: Option<&str>,
+    until_ts: Option<&str>,
+) -> Result<(Vec<(String, String, String)>, Option<String>)> {
+    let session_ts = get_cursor_last_timestamp(session_file)?;
+    if since_ts.is_some() || until_ts.is_some() {
+        let window = parse_timestamp_window(since_ts, until_ts);
+        if session_ts
+            .as_deref()
+            .map(|ts| !timestamp_in_window_cached(ts, &window))
+            .unwrap_or(false)
+        {
+            return Ok((Vec::new(), session_ts));
+        }
+    }
+
+    let mut exchanges: Vec<(String, String, String)> = Vec::new();
+    let mut current_user: Option<String> = None;
+
+    for_each_nonempty_jsonl_line(session_file, |line| {
+        let entry: CursorEntry = match crate::json_parse::parse_json_line(line) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let Some((role, text)) = extract_cursor_message(&entry) else {
+            return;
+        };
+
+        match role.as_str() {
+            "user" => {
+                current_user = Some(text);
+            }
+            "assistant" => {
+                if let Some(user_msg) = current_user.take() {
+                    let ts = session_ts.clone().unwrap_or_default();
+                    exchanges.push((user_msg, text, ts));
+                }
+            }
+            _ => {}
+        }
+    })?;
+
+    Ok((exchanges, session_ts))
 }
 
 fn parse_timestamp_for_compare(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -1282,6 +1422,10 @@ fn get_codex_last_timestamp(session_file: &PathBuf) -> Result<Option<String>> {
     Ok(last_ts)
 }
 
+fn get_cursor_last_timestamp(session_file: &PathBuf) -> Result<Option<String>> {
+    Ok(get_cursor_file_timestamp(session_file))
+}
+
 fn extract_codex_message(entry: &CodexEntry) -> Option<(String, String)> {
     let entry_type = entry.entry_type.as_deref();
 
@@ -1293,19 +1437,22 @@ fn extract_codex_message(entry: &CodexEntry) -> Option<(String, String)> {
         let role = payload.get("role").and_then(|v| v.as_str())?.to_string();
         let content = payload.get("content")?;
         let text = extract_codex_content_text(content)?;
-        return Some((role, text));
+        let clean_text = normalize_session_message(&role, &text)?;
+        return Some((role, clean_text));
     }
 
     if entry_type == Some("event_msg") {
         let payload = entry.payload.as_ref()?;
         let payload_type = payload.get("type").and_then(|v| v.as_str());
         if payload_type == Some("user_message") {
-            let text = payload.get("message").and_then(|v| v.as_str())?.to_string();
-            return Some(("user".to_string(), text));
+            let text = payload.get("message").and_then(|v| v.as_str())?;
+            let clean_text = normalize_session_message("user", text)?;
+            return Some(("user".to_string(), clean_text));
         }
         if payload_type == Some("agent_message") {
-            let text = payload.get("message").and_then(|v| v.as_str())?.to_string();
-            return Some(("assistant".to_string(), text));
+            let text = payload.get("message").and_then(|v| v.as_str())?;
+            let clean_text = normalize_session_message("assistant", text)?;
+            return Some(("assistant".to_string(), clean_text));
         }
     }
 
@@ -1313,10 +1460,32 @@ fn extract_codex_message(entry: &CodexEntry) -> Option<(String, String)> {
         let role = entry.role.as_deref()?.to_string();
         let content = entry.content.as_ref()?;
         let text = extract_codex_content_text(content)?;
-        return Some((role, text));
+        let clean_text = normalize_session_message(&role, &text)?;
+        return Some((role, clean_text));
     }
 
     None
+}
+
+fn normalize_cursor_role(role: &str) -> &str {
+    match role {
+        "assistant" | "assistanlft" => "assistant",
+        "user" => "user",
+        other => other,
+    }
+}
+
+fn extract_cursor_message(entry: &CursorEntry) -> Option<(String, String)> {
+    let role = normalize_cursor_role(entry.role.as_deref()?);
+    if role != "user" && role != "assistant" {
+        return None;
+    }
+
+    let message = entry.message.as_ref()?;
+    let content = message.content.as_ref()?;
+    let text = extract_message_text(content)?;
+    let clean_text = normalize_session_message(role, &text)?;
+    Some((role.to_string(), clean_text))
 }
 
 /// Get recent AI session context for the current project.
@@ -1325,7 +1494,7 @@ fn extract_codex_message(entry: &CodexEntry) -> Option<(String, String)> {
 pub fn get_recent_session_context(max_exchanges: usize) -> Result<Option<String>> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
 
-    // Get sessions for both Claude and Codex
+    // Get sessions for Claude, Codex, and Cursor
     let sessions = read_sessions_for_path(Provider::All, &cwd)?;
 
     if sessions.is_empty() {
@@ -1349,6 +1518,7 @@ pub fn get_recent_session_context(max_exchanges: usize) -> Result<Option<String>
                 let provider_name = match recent_session.provider {
                     Provider::Claude => "Claude Code",
                     Provider::Codex => "Codex",
+                    Provider::Cursor => "Cursor",
                     Provider::All => "AI",
                 };
                 Ok(Some(format!(
@@ -1420,6 +1590,7 @@ pub fn get_sessions_for_web(project_path: &PathBuf) -> Result<Vec<WebSession>> {
         let provider = match session.provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
+            Provider::Cursor => "cursor",
             Provider::All => "unknown",
         };
         let name = index
@@ -1475,6 +1646,7 @@ fn read_session_messages_for_path(
 ) -> Result<SessionMessages> {
     match provider {
         Provider::Codex => read_codex_messages(session_id),
+        Provider::Cursor => read_cursor_messages(session_id),
         Provider::Claude | Provider::All => read_claude_messages_for_path(project_path, session_id),
     }
 }
@@ -1509,10 +1681,10 @@ fn read_claude_messages_for_path(project_path: &Path, session_id: &str) -> Resul
         let Some(content_text) = content_text else {
             return;
         };
-        if content_text.trim().is_empty() {
+        let Some(clean_text) = normalize_session_message(role, &content_text) else {
             return;
-        }
-        push_message(&mut messages, role, &content_text);
+        };
+        push_message(&mut messages, role, &clean_text);
         if let Some(ts) = entry.timestamp.clone() {
             if started_at.is_none() {
                 started_at = Some(ts.clone());
@@ -1544,15 +1716,7 @@ fn read_codex_messages(session_id: &str) -> Result<SessionMessages> {
         let Some((role, text)) = extract_codex_message(&entry) else {
             return;
         };
-        let clean_text = if role == "assistant" {
-            strip_thinking_blocks(&text)
-        } else {
-            text
-        };
-        if clean_text.trim().is_empty() {
-            return;
-        }
-        push_message(&mut messages, &role, &clean_text);
+        push_message(&mut messages, &role, &text);
         if let Some(ts) = extract_codex_timestamp(&entry) {
             if started_at.is_none() {
                 started_at = Some(ts.clone());
@@ -1560,6 +1724,37 @@ fn read_codex_messages(session_id: &str) -> Result<SessionMessages> {
             last_message_at = Some(ts);
         }
     })?;
+
+    Ok(SessionMessages {
+        messages,
+        started_at,
+        last_message_at,
+    })
+}
+
+fn read_cursor_messages(session_id: &str) -> Result<SessionMessages> {
+    let session_file = find_cursor_session_file(session_id)
+        .ok_or_else(|| anyhow::anyhow!("Cursor session file not found"))?;
+    let mut messages = Vec::new();
+    let mut started_at = get_cursor_file_timestamp(&session_file);
+    let mut last_message_at = started_at.clone();
+
+    for_each_nonempty_jsonl_line(&session_file, |line| {
+        let entry: CursorEntry = match crate::json_parse::parse_json_line(line) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let Some((role, text)) = extract_cursor_message(&entry) else {
+            return;
+        };
+        push_message(&mut messages, &role, &text);
+    })?;
+
+    if started_at.is_none() && !messages.is_empty() {
+        started_at = Some(chrono::Utc::now().to_rfc3339());
+        last_message_at = started_at.clone();
+    }
 
     Ok(SessionMessages {
         messages,
@@ -1613,9 +1808,127 @@ fn extract_message_text(content_value: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn strip_tagged_block(text: &str, open_tag: &str, close_tag: &str) -> String {
+    let mut result = text.to_string();
+    while let Some(start) = result.find(open_tag) {
+        if let Some(end) = result[start..].find(close_tag) {
+            let end_pos = start + end + close_tag.len();
+            result = format!("{}{}", &result[..start], &result[end_pos..]);
+        } else {
+            result = result[..start].to_string();
+            break;
+        }
+    }
+    result
+}
+
+fn truncate_before_heading(text: &str, heading: &str) -> String {
+    let mut offset = 0usize;
+    for line in text.lines() {
+        if line.trim_start().starts_with(heading) {
+            return text[..offset].trim().to_string();
+        }
+        offset += line.len();
+        if offset < text.len() {
+            offset += 1;
+        }
+    }
+    text.trim().to_string()
+}
+
+fn collapse_blank_lines(text: &str) -> String {
+    let mut out = String::new();
+    let mut saw_blank = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.trim().is_empty() {
+            if saw_blank || out.is_empty() {
+                continue;
+            }
+            saw_blank = true;
+            out.push('\n');
+            continue;
+        }
+
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+        saw_blank = false;
+    }
+
+    out.trim().to_string()
+}
+
+fn strip_known_transcript_scaffolding(role: &str, text: &str) -> String {
+    let mut cleaned = strip_system_reminders(text);
+
+    cleaned = strip_tagged_block(&cleaned, "<environment_context>", "</environment_context>");
+    cleaned = strip_tagged_block(
+        &cleaned,
+        "<permissions instructions>",
+        "</permissions instructions>",
+    );
+    cleaned = strip_tagged_block(&cleaned, "<collaboration_mode>", "</collaboration_mode>");
+
+    let trimmed = cleaned.trim_start();
+    if trimmed.starts_with("# AGENTS.md instructions for ")
+        || trimmed.starts_with("# agents.md instructions for ")
+    {
+        return String::new();
+    }
+
+    cleaned = truncate_before_heading(&cleaned, "Workflow context:");
+    cleaned = truncate_before_heading(&cleaned, "Start by checking:");
+    cleaned = truncate_before_heading(&cleaned, "Designer stack notes:");
+
+    if role == "assistant" {
+        let trimmed = cleaned.trim_start();
+        if trimmed.starts_with("Using `")
+            && (trimmed.contains("workflow")
+                || trimmed.contains("dispatch")
+                || trimmed.contains("because this is"))
+        {
+            return String::new();
+        }
+    }
+
+    collapse_blank_lines(&cleaned)
+}
+
+fn normalize_session_message(role: &str, text: &str) -> Option<String> {
+    if role != "user" && role != "assistant" {
+        return None;
+    }
+
+    let cleaned = if role == "assistant" {
+        strip_thinking_blocks(text)
+    } else {
+        text.to_string()
+    };
+    let cleaned = strip_known_transcript_scaffolding(role, &cleaned);
+    let cleaned = cleaned.trim();
+
+    if cleaned.is_empty() || is_session_boilerplate(cleaned) {
+        return None;
+    }
+
+    Some(cleaned.to_string())
+}
+
+fn get_cursor_file_timestamp(path: &Path) -> Option<String> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    Some(DateTime::<Utc>::from(modified).to_rfc3339())
+}
+
 fn push_message(messages: &mut Vec<WebSessionMessage>, role: &str, content: &str) {
     if let Some(last) = messages.last_mut() {
         if last.role == role {
+            if last.content.trim() == content.trim() {
+                return;
+            }
             last.content.push_str("\n\n");
             last.content.push_str(content);
             return;
@@ -1655,9 +1968,122 @@ fn get_codex_sessions_dir() -> PathBuf {
     home.join(".codex").join("sessions")
 }
 
+fn get_cursor_projects_dir() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".cursor").join("projects")
+}
+
 /// Convert a path to project folder name (replaces / with -).
 fn path_to_project_name(path: &str) -> String {
     path.replace('/', "-")
+}
+
+fn path_to_cursor_project_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim_start_matches('/')
+        .replace('/', "-")
+}
+
+fn cursor_project_key_matches_path(project_key: &str, path: &Path) -> bool {
+    let prefix = path_to_cursor_project_key(path);
+    project_key == prefix
+        || project_key
+            .strip_prefix(&prefix)
+            .map(|rest| rest.starts_with('-'))
+            .unwrap_or(false)
+}
+
+fn decode_cursor_project_path(project_key: &str) -> Option<PathBuf> {
+    let mut segments = project_key.split('-');
+    let root = segments.next()?;
+    let second = segments.next()?;
+    let mut current = PathBuf::from("/").join(root).join(second);
+    if !current.exists() {
+        return None;
+    }
+
+    let remaining: Vec<String> = segments.map(|segment| segment.to_string()).collect();
+    let mut index = 0usize;
+
+    while index < remaining.len() {
+        let entries = fs::read_dir(&current).ok()?;
+        let mut best_match: Option<(usize, PathBuf)> = None;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let Some(name) = entry.file_name().to_str().map(|value| value.to_string()) else {
+                continue;
+            };
+            let name_segments: Vec<&str> = name.split('-').collect();
+            if name_segments.len() > remaining.len().saturating_sub(index) {
+                continue;
+            }
+
+            let matches = name_segments
+                .iter()
+                .zip(remaining[index..].iter())
+                .all(|(expected, actual)| *expected == actual);
+            if !matches {
+                continue;
+            }
+
+            let consumed = name_segments.len();
+            let should_replace = best_match
+                .as_ref()
+                .map(|(best_consumed, _)| consumed > *best_consumed)
+                .unwrap_or(true);
+            if should_replace {
+                best_match = Some((consumed, path));
+            }
+        }
+
+        let Some((consumed, next_path)) = best_match else {
+            return None;
+        };
+        current = next_path;
+        index += consumed;
+    }
+
+    Some(current)
+}
+
+fn collect_cursor_project_session_files(project_dir: &Path) -> Vec<PathBuf> {
+    let transcripts_dir = project_dir.join("agent-transcripts");
+    if !transcripts_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(&transcripts_dir) else {
+        return files;
+    };
+
+    for entry in entries.flatten() {
+        let session_dir = entry.path();
+        if !session_dir.is_dir() {
+            continue;
+        }
+
+        let Ok(session_entries) = fs::read_dir(&session_dir) else {
+            continue;
+        };
+        for session_entry in session_entries.flatten() {
+            let file_path = session_entry.path();
+            if file_path
+                .extension()
+                .map(|ext| ext == "jsonl")
+                .unwrap_or(false)
+            {
+                files.push(file_path);
+            }
+        }
+    }
+
+    files
 }
 
 /// Read sessions for the current project, filtered by provider.
@@ -1670,6 +2096,10 @@ fn read_sessions_for_project(provider: Provider) -> Result<Vec<AiSession>> {
 
     if provider == Provider::Codex || provider == Provider::All {
         sessions.extend(read_provider_sessions(Provider::Codex)?);
+    }
+
+    if provider == Provider::Cursor || provider == Provider::All {
+        sessions.extend(read_provider_sessions(Provider::Cursor)?);
     }
 
     // Sort by last message timestamp descending (most recent first)
@@ -1722,6 +2152,10 @@ fn read_sessions_for_path(provider: Provider, path: &PathBuf) -> Result<Vec<AiSe
         sessions.extend(read_provider_sessions_for_path(Provider::Codex, path)?);
     }
 
+    if provider == Provider::Cursor || provider == Provider::All {
+        sessions.extend(read_provider_sessions_for_path(Provider::Cursor, path)?);
+    }
+
     // Sort by last message timestamp descending (most recent first)
     sessions.sort_by(|a, b| {
         let ts_a = a
@@ -1745,6 +2179,9 @@ fn read_provider_sessions_for_path(provider: Provider, path: &PathBuf) -> Result
     if provider == Provider::Codex {
         return read_codex_sessions_for_path(path);
     }
+    if provider == Provider::Cursor {
+        return read_cursor_sessions_for_path(path);
+    }
 
     let path_str = path.to_string_lossy().to_string();
     let project_name = path_to_project_name(&path_str);
@@ -1752,6 +2189,7 @@ fn read_provider_sessions_for_path(provider: Provider, path: &PathBuf) -> Result
     let projects_dir = match provider {
         Provider::Claude => get_claude_projects_dir(),
         Provider::Codex => get_codex_projects_dir(),
+        Provider::Cursor => get_cursor_projects_dir(),
         Provider::All => return Ok(vec![]),
     };
 
@@ -1792,6 +2230,10 @@ fn read_provider_sessions(provider: Provider) -> Result<Vec<AiSession>> {
         let cwd = std::env::current_dir().context("failed to get current directory")?;
         return read_codex_sessions_for_path(&cwd);
     }
+    if provider == Provider::Cursor {
+        let cwd = std::env::current_dir().context("failed to get current directory")?;
+        return read_cursor_sessions_for_path(&cwd);
+    }
 
     let cwd = std::env::current_dir()?;
     let cwd_str = cwd.to_string_lossy().to_string();
@@ -1800,6 +2242,7 @@ fn read_provider_sessions(provider: Provider) -> Result<Vec<AiSession>> {
     let projects_dir = match provider {
         Provider::Claude => get_claude_projects_dir(),
         Provider::Codex => get_codex_projects_dir(),
+        Provider::Cursor => get_cursor_projects_dir(),
         Provider::All => return Ok(vec![]), // Should use read_sessions_for_project instead
     };
 
@@ -1849,6 +2292,9 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
         let (session, _cwd) = parse_codex_session_file(path, session_id)?;
         return Some(session);
     }
+    if provider == Provider::Cursor {
+        return parse_cursor_session_file(path, session_id);
+    }
 
     let mut timestamp = None;
     let mut last_message_at = None;
@@ -1868,12 +2314,9 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
                 if role == Some("user") || role == Some("assistant") {
                     if let Some(ref content) = msg.content {
                         if let Some(text) = extract_message_text(content) {
-                            let clean_text = if role == Some("assistant") {
-                                strip_thinking_blocks(&text)
-                            } else {
-                                text
-                            };
-                            if !clean_text.trim().is_empty() {
+                            if let Some(clean_text) =
+                                normalize_session_message(role.unwrap_or("unknown"), &text)
+                            {
                                 last_message = Some(clean_text);
                                 if let Some(ts) = entry.timestamp.clone() {
                                     last_message_at = Some(ts);
@@ -1889,17 +2332,8 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
                 if let Some(ref msg) = entry.message {
                     if msg.role.as_deref() == Some("user") {
                         if let Some(ref content) = msg.content {
-                            first_message = match content {
-                                serde_json::Value::String(s) => Some(s.clone()),
-                                serde_json::Value::Array(arr) => {
-                                    // Content might be array of content blocks
-                                    arr.first()
-                                        .and_then(|v| v.get("text"))
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string())
-                                }
-                                _ => None,
-                            };
+                            first_message = extract_message_text(content)
+                                .and_then(|text| normalize_session_message("user", &text));
                         }
                     }
                 }
@@ -1946,14 +2380,9 @@ fn parse_codex_session_file(
             timestamp = entry.timestamp.clone();
         }
 
-        if let Some((role, text)) = extract_codex_message(&entry) {
-            let clean_text = if role == "assistant" {
-                strip_thinking_blocks(&text)
-            } else {
-                text
-            };
-            if !clean_text.trim().is_empty() {
-                last_message = Some(clean_text);
+        if let Some((_role, text)) = extract_codex_message(&entry) {
+            if !text.trim().is_empty() {
+                last_message = Some(text);
                 if let Some(ts) = extract_codex_timestamp(&entry) {
                     last_message_at = Some(ts);
                 }
@@ -2010,6 +2439,38 @@ fn parse_codex_session_file(
     Some((session, cwd))
 }
 
+fn parse_cursor_session_file(path: &PathBuf, fallback_id: &str) -> Option<AiSession> {
+    let timestamp = get_cursor_file_timestamp(path);
+    let mut last_message = None;
+    let mut first_message = None;
+
+    for_each_nonempty_jsonl_line(path, |line| {
+        let entry: CursorEntry = match crate::json_parse::parse_json_line(line) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let Some((role, text)) = extract_cursor_message(&entry) else {
+            return;
+        };
+        last_message = Some(text.clone());
+        if first_message.is_none() && role == "user" {
+            first_message = Some(text);
+        }
+    })
+    .ok()?;
+
+    Some(AiSession {
+        session_id: fallback_id.to_string(),
+        provider: Provider::Cursor,
+        timestamp: timestamp.clone(),
+        last_message_at: timestamp,
+        last_message,
+        first_message,
+        error_summary: None,
+    })
+}
+
 fn read_codex_sessions_for_path(path: &PathBuf) -> Result<Vec<AiSession>> {
     let sessions_dir = get_codex_sessions_dir();
     if !sessions_dir.exists() {
@@ -2031,6 +2492,54 @@ fn read_codex_sessions_for_path(path: &PathBuf) -> Result<Vec<AiSession>> {
             }
         }
     }
+
+    Ok(sessions)
+}
+
+fn read_cursor_sessions_for_path(path: &PathBuf) -> Result<Vec<AiSession>> {
+    let projects_dir = get_cursor_projects_dir();
+    if !projects_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut sessions = Vec::new();
+    let entries = fs::read_dir(&projects_dir)
+        .with_context(|| format!("failed to read {}", projects_dir.display()))?;
+
+    for entry in entries.flatten() {
+        let project_dir = entry.path();
+        if !project_dir.is_dir() {
+            continue;
+        }
+
+        let Some(project_key) = project_dir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !cursor_project_key_matches_path(project_key, path) {
+            continue;
+        }
+
+        for file_path in collect_cursor_project_session_files(&project_dir) {
+            let filename = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if let Some(session) = parse_cursor_session_file(&file_path, filename) {
+                sessions.push(session);
+            }
+        }
+    }
+
+    sessions.sort_by(|a, b| {
+        let ts_a = a
+            .last_message_at
+            .as_deref()
+            .or(a.timestamp.as_deref())
+            .unwrap_or("");
+        let ts_b = b
+            .last_message_at
+            .as_deref()
+            .or(b.timestamp.as_deref())
+            .unwrap_or("");
+        ts_b.cmp(ts_a)
+    });
 
     Ok(sessions)
 }
@@ -2058,6 +2567,73 @@ fn collect_codex_session_files(root: &PathBuf) -> Vec<PathBuf> {
     out
 }
 
+fn codex_session_id_from_path(path: &Path) -> Option<String> {
+    let filename = path.file_stem()?.to_str()?;
+    Some(filename.split('_').next().unwrap_or(filename).to_string())
+}
+
+fn cursor_session_id_from_path(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+fn resolve_explicit_native_session(query: &str, provider: Provider) -> Option<(String, Provider)> {
+    if matches!(provider, Provider::Codex | Provider::All) {
+        if let Some(path) = find_codex_session_file(query) {
+            if let Some(session_id) = codex_session_id_from_path(&path) {
+                return Some((session_id, Provider::Codex));
+            }
+        }
+    }
+
+    if matches!(provider, Provider::Cursor | Provider::All) {
+        if let Some(path) = find_cursor_session_file(query) {
+            if let Some(session_id) = cursor_session_id_from_path(&path) {
+                return Some((session_id, Provider::Cursor));
+            }
+        }
+    }
+
+    None
+}
+
+fn resolve_session_selection(
+    query: &str,
+    sessions: &[AiSession],
+    index: &SessionIndex,
+    provider: Provider,
+) -> Result<(String, Provider)> {
+    if let Some((_, saved)) = index
+        .sessions
+        .iter()
+        .find(|(name, _)| name.as_str() == query)
+    {
+        if let Some(session) = sessions.iter().find(|s| s.session_id == saved.id) {
+            return Ok((saved.id.clone(), session.provider));
+        }
+        if let Some((session_id, session_provider)) =
+            resolve_explicit_native_session(&saved.id, provider)
+        {
+            return Ok((session_id, session_provider));
+        }
+        return Ok((saved.id.clone(), Provider::Claude));
+    }
+
+    if let Some(session) = sessions
+        .iter()
+        .find(|s| s.session_id == *query || s.session_id.starts_with(query))
+    {
+        return Ok((session.session_id.clone(), session.provider));
+    }
+
+    if let Some((session_id, session_provider)) = resolve_explicit_native_session(query, provider) {
+        return Ok((session_id, session_provider));
+    }
+
+    bail!("Session not found: {}", query);
+}
+
 /// Get the most recent session ID for this project.
 fn get_most_recent_session_id() -> Result<Option<String>> {
     let sessions = read_sessions_for_project(Provider::All)?;
@@ -2083,11 +2659,16 @@ fn list_sessions(provider: Provider) -> Result<()> {
         let provider_name = match provider {
             Provider::Claude => "Claude",
             Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
             Provider::All => "AI",
         };
         println!("No {} sessions found for this project.", provider_name);
-        println!("\nTip: Run `claude` or `codex` in this directory to start a session,");
-        println!("     then use `f ai save <name>` to bookmark it.");
+        if provider == Provider::Cursor {
+            println!("\nTip: open this repo in Cursor and use its agent to create transcripts.");
+        } else {
+            println!("\nTip: Run `claude` or `codex` in this directory to start a session,");
+            println!("     then use `f ai save <name>` to bookmark it.");
+        }
         return Ok(());
     }
 
@@ -2135,6 +2716,7 @@ fn list_sessions(provider: Provider) -> Result<()> {
             match session.provider {
                 Provider::Claude => "claude | ",
                 Provider::Codex => "codex | ",
+                Provider::Cursor => "cursor | ",
                 Provider::All => "",
             }
         } else {
@@ -2185,6 +2767,17 @@ fn list_sessions(provider: Provider) -> Result<()> {
 
     // Run fzf
     if let Some(selected) = run_session_fzf(&entries)? {
+        if selected.provider == Provider::Cursor {
+            let history = read_session_history(&selected.session_id, selected.provider)?;
+            copy_to_clipboard(&history)?;
+            let line_count = history.lines().count();
+            println!(
+                "Copied Cursor session {} ({} lines) to clipboard",
+                &selected.session_id[..8.min(selected.session_id.len())],
+                line_count
+            );
+            return Ok(());
+        }
         println!(
             "Resuming session {}...",
             &selected.session_id[..8.min(selected.session_id.len())]
@@ -2242,12 +2835,18 @@ fn launch_session(session_id: &str, provider: Provider) -> Result<bool> {
         }
         Provider::Codex => {
             // Codex uses: codex resume <session_id> --dangerously-bypass-approvals-and-sandbox
-            Command::new("codex")
+            let mut command = Command::new("codex");
+            command
                 .arg("resume")
                 .arg(session_id)
-                .arg("--dangerously-bypass-approvals-and-sandbox")
-                .status()
-                .with_context(|| "failed to launch codex")?
+                .arg("--dangerously-bypass-approvals-and-sandbox");
+            apply_codex_trust_overrides(&mut command);
+            command.status().with_context(|| "failed to launch codex")?
+        }
+        Provider::Cursor => {
+            bail!(
+                "Cursor transcripts are readable only; use `f cursor list`, `f cursor copy`, or `f cursor context`"
+            );
         }
     };
 
@@ -2272,20 +2871,91 @@ fn launch_claude_resume_picker() -> Result<bool> {
     Ok(status.success())
 }
 
+fn detect_git_root(path: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(trimmed))
+}
+
+fn codex_trusted_paths() -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+    if let Ok(raw_cwd) = env::current_dir() {
+        paths.insert(raw_cwd.clone());
+        if let Some(raw_git_root) = detect_git_root(&raw_cwd) {
+            paths.insert(raw_git_root);
+        }
+
+        if let Ok(canonical_cwd) = raw_cwd.canonicalize() {
+            paths.insert(canonical_cwd.clone());
+            if let Some(canonical_git_root) = detect_git_root(&canonical_cwd) {
+                paths.insert(canonical_git_root);
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
+fn codex_projects_override(paths: &[PathBuf]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+
+    let projects = paths
+        .iter()
+        .map(|path| {
+            let escaped = path
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            format!("\"{escaped}\"={{ trust_level=\"trusted\" }}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Some(format!("projects={{ {projects} }}"))
+}
+
+fn apply_codex_trust_overrides(command: &mut Command) {
+    if let Some(override_value) = codex_projects_override(&codex_trusted_paths()) {
+        command.arg("--config").arg(override_value);
+    }
+}
+
 fn launch_codex_resume_picker() -> Result<bool> {
-    let status = Command::new("codex")
+    let mut command = Command::new("codex");
+    command
         .arg("resume")
-        .arg("--dangerously-bypass-approvals-and-sandbox")
+        .arg("--dangerously-bypass-approvals-and-sandbox");
+    apply_codex_trust_overrides(&mut command);
+    let status = command
         .status()
         .with_context(|| "failed to launch codex resume")?;
     Ok(status.success())
 }
 
 fn launch_codex_continue_last() -> Result<bool> {
-    let status = Command::new("codex")
+    let mut command = Command::new("codex");
+    command
         .arg("resume")
         .arg("--last")
-        .arg("--dangerously-bypass-approvals-and-sandbox")
+        .arg("--dangerously-bypass-approvals-and-sandbox");
+    apply_codex_trust_overrides(&mut command);
+    let status = command
         .status()
         .with_context(|| "failed to launch codex resume --last")?;
     Ok(status.success())
@@ -2295,6 +2965,7 @@ fn provider_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
+        Provider::Cursor => "cursor",
         Provider::All => "ai",
     }
 }
@@ -2320,6 +2991,7 @@ fn provider_sessions(provider: Provider) -> Result<()> {
     let launched = match provider {
         Provider::Claude => launch_claude_resume_picker()?,
         Provider::Codex => launch_codex_resume_picker()?,
+        Provider::Cursor => false,
         Provider::All => false,
     };
 
@@ -2377,6 +3049,7 @@ fn continue_session(
     let launched = match provider {
         Provider::Claude => launch_claude_continue()?,
         Provider::Codex => launch_codex_continue_last()?,
+        Provider::Cursor => false,
         Provider::All => false,
     };
 
@@ -2419,17 +3092,26 @@ fn new_session(provider: Provider) -> Result<()> {
             .arg("--dangerously-skip-permissions")
             .status()
             .with_context(|| "failed to launch claude")?,
-        Provider::Codex => Command::new("codex")
-            .arg("--yolo")
-            .arg("--sandbox")
-            .arg("danger-full-access")
-            .status()
-            .with_context(|| "failed to launch codex")?,
+        Provider::Codex => {
+            let mut command = Command::new("codex");
+            command
+                .arg("--yolo")
+                .arg("--sandbox")
+                .arg("danger-full-access");
+            apply_codex_trust_overrides(&mut command);
+            command.status().with_context(|| "failed to launch codex")?
+        }
+        Provider::Cursor => {
+            bail!(
+                "Cursor transcripts are readable only; use `f cursor list`, `f cursor copy`, or `f cursor context`"
+            );
+        }
     };
 
     let name = match provider {
         Provider::Claude | Provider::All => "claude",
         Provider::Codex => "codex",
+        Provider::Cursor => "cursor",
     };
 
     if !status.success() {
@@ -2872,15 +3554,19 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
         if q == "codex" || q == "x" {
             return copy_last_session(Provider::Codex, None);
         }
+        if q == "cursor" || q == "u" {
+            return copy_last_session(Provider::Cursor, None);
+        }
     }
 
     let index = load_index()?;
     let sessions = read_sessions_for_project(provider)?;
 
-    if sessions.is_empty() {
+    if sessions.is_empty() && session.is_none() {
         let provider_name = match provider {
             Provider::Claude => "Claude",
             Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
             Provider::All => "AI",
         };
         println!("No {} sessions found for this project.", provider_name);
@@ -2893,27 +3579,7 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
 
     // Find the session ID and provider
     let (session_id, session_provider) = if let Some(ref query) = session {
-        // Try to find by name or ID
-        if let Some((_, saved)) = index
-            .sessions
-            .iter()
-            .find(|(name, _)| name.as_str() == query)
-        {
-            // Find the provider for this session
-            let prov = sessions
-                .iter()
-                .find(|s| s.session_id == saved.id)
-                .map(|s| s.provider)
-                .unwrap_or(Provider::Claude);
-            (saved.id.clone(), prov)
-        } else if let Some(s) = sessions
-            .iter()
-            .find(|s| s.session_id == *query || s.session_id.starts_with(query))
-        {
-            (s.session_id.clone(), s.provider)
-        } else {
-            bail!("Session not found: {}", query);
-        }
+        resolve_session_selection(query, &sessions, &index, provider)?
     } else {
         // Show fzf selection
         let mut entries: Vec<FzfSessionEntry> = Vec::new();
@@ -2956,6 +3622,7 @@ fn copy_session(session: Option<String>, provider: Provider) -> Result<()> {
                 match session.provider {
                     Provider::Claude => "claude | ",
                     Provider::Codex => "codex | ",
+                    Provider::Cursor => "cursor | ",
                     Provider::All => "",
                 }
             } else {
@@ -3032,6 +3699,7 @@ fn copy_last_session(provider: Provider, search: Option<String>) -> Result<()> {
         let provider_name = match provider {
             Provider::Claude => "Claude",
             Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
             Provider::All => "AI",
         };
         println!("No {} sessions found for this project.", provider_name);
@@ -3103,6 +3771,57 @@ fn copy_session_by_search(provider: Provider, query: &str) -> Result<()> {
         }
     }
 
+    // Search Cursor sessions
+    if provider == Provider::Cursor || provider == Provider::All {
+        let projects_dir = get_cursor_projects_dir();
+        if projects_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&projects_dir) {
+                for entry in entries.flatten() {
+                    let project_dir = entry.path();
+                    if !project_dir.is_dir() {
+                        continue;
+                    }
+                    for file_path in collect_cursor_project_session_files(&project_dir) {
+                        if let Ok(content) = fs::read_to_string(&file_path) {
+                            if content.to_lowercase().contains(&query_lower) {
+                                let session_id =
+                                    file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+
+                                let history = read_session_history(session_id, Provider::Cursor)?;
+                                copy_to_clipboard(&history)?;
+
+                                let line_count = history.lines().count();
+                                let id_short = &session_id[..8.min(session_id.len())];
+                                let project_name = project_dir
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .and_then(decode_cursor_project_path)
+                                    .and_then(|path| {
+                                        path.file_name()
+                                            .and_then(|name| name.to_str())
+                                            .map(str::to_string)
+                                    })
+                                    .unwrap_or_else(|| {
+                                        project_dir
+                                            .file_name()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("unknown")
+                                            .to_string()
+                                    });
+
+                                println!(
+                                    "Copied session {} from {} ({} lines) to clipboard",
+                                    id_short, project_name, line_count
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Search Claude sessions
     if provider == Provider::Claude || provider == Provider::All {
         let projects_dir = get_claude_projects_dir();
@@ -3154,12 +3873,46 @@ fn copy_session_by_search(provider: Provider, query: &str) -> Result<()> {
     Ok(())
 }
 
+fn append_history_message(
+    history: &mut String,
+    last_entry: &mut Option<(String, String)>,
+    role: &str,
+    content: &str,
+) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let role_label = match role {
+        "user" => "Human",
+        "assistant" => "Assistant",
+        _ => return,
+    };
+
+    let content_key = trimmed.to_string();
+    if let Some((last_role, last_content)) = last_entry.as_ref() {
+        if last_role == role_label && last_content == &content_key {
+            return;
+        }
+    }
+
+    history.push_str(role_label);
+    history.push_str(": ");
+    history.push_str(trimmed);
+    history.push_str("\n\n");
+    *last_entry = Some((role_label.to_string(), content_key));
+}
+
 /// Read full session history from JSONL file and format as conversation.
 fn read_session_history(session_id: &str, provider: Provider) -> Result<String> {
     let session_file = if provider == Provider::Codex {
         // Codex stores sessions in ~/.codex/sessions/ with different structure
         find_codex_session_file(session_id)
             .ok_or_else(|| anyhow::anyhow!("Codex session file not found: {}", session_id))?
+    } else if provider == Provider::Cursor {
+        find_cursor_session_file(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Cursor session file not found: {}", session_id))?
     } else {
         let cwd = std::env::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
@@ -3175,11 +3928,29 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
     }
 
     let mut history = String::new();
+    let mut last_entry: Option<(String, String)> = None;
 
     for_each_nonempty_jsonl_line(&session_file, |line| {
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
             return;
         };
+
+        // Cursor format (top-level role + nested message.content)
+        if let Some(role) = entry
+            .get("role")
+            .and_then(|r| r.as_str())
+            .map(normalize_cursor_role)
+        {
+            let content_text = extract_content_text(
+                entry
+                    .get("message")
+                    .and_then(|message| message.get("content")),
+            );
+            if let Some(cleaned) = normalize_session_message(role, &content_text) {
+                append_history_message(&mut history, &mut last_entry, role, &cleaned);
+            }
+            return;
+        }
 
         // Try Claude format first (entry.message.role + entry.message.content)
         if let Some(msg) = entry.get("message") {
@@ -3187,16 +3958,9 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
                 .get("role")
                 .and_then(|r| r.as_str())
                 .unwrap_or("unknown");
-            let role_label = match role {
-                "user" => "Human",
-                "assistant" => "Assistant",
-                _ => role,
-            };
-
             let content_text = extract_content_text(msg.get("content"));
-            let cleaned = strip_system_reminders(&content_text);
-            if !cleaned.is_empty() && !is_session_boilerplate(&cleaned) {
-                history.push_str(&format!("{}: {}\n\n", role_label, cleaned));
+            if let Some(cleaned) = normalize_session_message(role, &content_text) {
+                append_history_message(&mut history, &mut last_entry, role, &cleaned);
             }
             return;
         }
@@ -3209,16 +3973,12 @@ fn read_session_history(session_id: &str, provider: Provider) -> Result<String> 
                         .get("role")
                         .and_then(|r| r.as_str())
                         .unwrap_or("unknown");
-                    let role_label = match role {
-                        "user" => "Human",
-                        "assistant" => "Assistant",
-                        _ => role,
-                    };
-
-                    let content_text = extract_content_text(payload.get("content"));
-                    let cleaned = strip_system_reminders(&content_text);
-                    if !cleaned.is_empty() && !is_session_boilerplate(&cleaned) {
-                        history.push_str(&format!("{}: {}\n\n", role_label, cleaned));
+                    let content_text = payload
+                        .get("content")
+                        .and_then(extract_codex_content_text)
+                        .unwrap_or_default();
+                    if let Some(cleaned) = normalize_session_message(role, &content_text) {
+                        append_history_message(&mut history, &mut last_entry, role, &cleaned);
                     }
                 }
             }
@@ -3294,10 +4054,6 @@ fn is_session_boilerplate(text: &str) -> bool {
     if trimmed.starts_with("developer:") {
         return true;
     }
-    // Skip short status messages (likely action summaries)
-    if trimmed.len() < 50 && !trimmed.contains(' ') {
-        return true;
-    }
     // Skip skill usage announcements
     if trimmed.starts_with("Using ") && trimmed.contains("skill") {
         return true;
@@ -3362,10 +4118,11 @@ fn copy_context(
     let index = load_index()?;
     let sessions = read_sessions_for_path(provider, &project_path)?;
 
-    if sessions.is_empty() {
+    if sessions.is_empty() && session.is_none() {
         let provider_name = match provider {
             Provider::Claude => "Claude",
             Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
             Provider::All => "AI",
         };
         println!("No {} sessions found for this project.", provider_name);
@@ -3374,26 +4131,7 @@ fn copy_context(
 
     // Find the session ID and provider
     let (session_id, session_provider) = if let Some(ref query) = session {
-        // Try to find by name or ID
-        if let Some((_, saved)) = index
-            .sessions
-            .iter()
-            .find(|(name, _)| name.as_str() == query)
-        {
-            let prov = sessions
-                .iter()
-                .find(|s| s.session_id == saved.id)
-                .map(|s| s.provider)
-                .unwrap_or(Provider::Claude);
-            (saved.id.clone(), prov)
-        } else if let Some(s) = sessions
-            .iter()
-            .find(|s| s.session_id == *query || s.session_id.starts_with(query))
-        {
-            (s.session_id.clone(), s.provider)
-        } else {
-            bail!("Session not found: {}", query);
-        }
+        resolve_session_selection(query, &sessions, &index, provider)?
     } else {
         // Show fzf selection
         let mut entries: Vec<FzfSessionEntry> = Vec::new();
@@ -3435,6 +4173,7 @@ fn copy_context(
                 match session.provider {
                     Provider::Claude => "claude | ",
                     Provider::Codex => "codex | ",
+                    Provider::Cursor => "cursor | ",
                     Provider::All => "",
                 }
             } else {
@@ -3511,6 +4250,12 @@ fn read_last_context(
         })?;
         return read_codex_last_context(&session_file, count);
     }
+    if provider == Provider::Cursor {
+        let session_file = find_cursor_session_file(session_id).ok_or_else(|| {
+            anyhow::anyhow!("Session file not found for Cursor session {}", session_id)
+        })?;
+        return read_cursor_last_context(&session_file, count);
+    }
 
     let path_str = project_path.to_string_lossy().to_string();
     let project_folder = path_to_project_name(&path_str);
@@ -3518,6 +4263,7 @@ fn read_last_context(
     let projects_dir = match provider {
         Provider::Claude | Provider::All => get_claude_projects_dir(),
         Provider::Codex => get_codex_projects_dir(),
+        Provider::Cursor => get_cursor_projects_dir(),
     };
 
     let session_file = projects_dir
@@ -3541,20 +4287,15 @@ fn read_last_context(
                 let Some(content_text) = msg.content.as_ref().and_then(extract_message_text) else {
                     return;
                 };
-
-                if content_text.trim().is_empty() {
+                let Some(clean_text) = normalize_session_message(role, &content_text) else {
                     return;
-                }
+                };
 
                 match role {
                     "user" => {
-                        current_user = Some(content_text);
+                        current_user = Some(clean_text);
                     }
                     "assistant" => {
-                        let clean_text = strip_thinking_blocks(&content_text);
-                        if clean_text.trim().is_empty() {
-                            return;
-                        }
                         if let Some(user_msg) = current_user.take() {
                             if exchanges.len() == keep {
                                 exchanges.pop_front();
@@ -3779,7 +4520,8 @@ fn extract_codex_user_message(entry: &CodexEntry) -> Option<String> {
         if payload.get("role").and_then(|v| v.as_str()) != Some("user") {
             return None;
         }
-        return extract_codex_content_text(payload.get("content")?);
+        let text = extract_codex_content_text(payload.get("content")?)?;
+        return normalize_session_message("user", &text);
     }
 
     if entry_type == Some("event_msg") {
@@ -3789,13 +4531,14 @@ fn extract_codex_user_message(entry: &CodexEntry) -> Option<String> {
             return payload
                 .get("message")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .and_then(|s| normalize_session_message("user", s));
         }
     }
 
     if entry_type == Some("message") && entry.role.as_deref() == Some("user") {
         if let Some(content) = entry.content.as_ref() {
-            return extract_codex_content_text(content);
+            let text = extract_codex_content_text(content)?;
+            return normalize_session_message("user", &text);
         }
     }
 
@@ -3922,6 +4665,7 @@ fn summary_key(session: &CrossProjectSession) -> String {
     let provider = match session.provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
+        Provider::Cursor => "cursor",
         Provider::All => "ai",
     };
     format!("{}:{}", provider, session.session_id)
@@ -4228,6 +4972,7 @@ pub fn get_latest_session_ref_for_path(project_path: &PathBuf) -> Result<Option<
     let provider = match session.provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
+        Provider::Cursor => "cursor",
         Provider::All => "ai",
     };
     Ok(Some(format!("{}:{}", provider, session.session_id)))
@@ -4246,6 +4991,7 @@ pub fn get_latest_session_history_for_path(
     let provider = match session.provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
+        Provider::Cursor => "cursor",
         Provider::All => "unknown",
     };
 
@@ -4397,8 +5143,19 @@ fn resume_session(session: Option<String>, path: Option<String>, provider: Provi
                     "claude resume requires an interactive terminal (TTY); run this in a terminal tab (e.g. Zed/Ghostty)"
                 );
             }
+            Provider::Cursor => {
+                bail!(
+                    "cursor transcripts are readable only; use `f cursor list`, `f cursor copy`, or `f cursor context`"
+                );
+            }
             Provider::All => {}
         }
+    }
+
+    if session_provider == Provider::Cursor {
+        bail!(
+            "cursor transcripts are readable only; use `f cursor list`, `f cursor copy`, or `f cursor context`"
+        );
     }
 
     println!(
@@ -4453,7 +5210,7 @@ fn save_session(name: &str, id: Option<String>) -> Result<()> {
     let session_id = match id {
         Some(id) => id,
         None => get_most_recent_session_id()?
-            .ok_or_else(|| anyhow::anyhow!("No sessions found. Run claude first."))?,
+            .ok_or_else(|| anyhow::anyhow!("No sessions found. Start an AI session first."))?,
     };
 
     let mut index = load_index()?;
@@ -4466,9 +5223,15 @@ fn save_session(name: &str, id: Option<String>) -> Result<()> {
         );
     }
 
+    let session_provider = read_sessions_for_project(Provider::All)?
+        .into_iter()
+        .find(|session| session.session_id == session_id)
+        .map(|session| session.provider)
+        .unwrap_or(Provider::Claude);
+
     let saved = SavedSession {
         id: session_id.clone(),
-        provider: "claude".to_string(), // Default to claude for manually saved sessions
+        provider: provider_name(session_provider).to_string(),
         description: None,
         saved_at: chrono::Utc::now().to_rfc3339(),
         last_resumed: None,
@@ -4635,6 +5398,7 @@ fn auto_import_sessions() -> Result<()> {
         let provider_str = match session.provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
+            Provider::Cursor => "cursor",
             Provider::All => "claude",
         };
         let saved = SavedSession {
@@ -4697,6 +5461,7 @@ fn import_sessions() -> Result<()> {
         let provider_str = match session.provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
+            Provider::Cursor => "cursor",
             Provider::All => "claude",
         };
         let saved = SavedSession {
@@ -4856,6 +5621,7 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
     let provider = match opts.provider.to_lowercase().as_str() {
         "claude" => Provider::Claude,
         "codex" => Provider::Codex,
+        "cursor" => Provider::Cursor,
         _ => Provider::All,
     };
 
@@ -4901,6 +5667,7 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
             let provider_tag = match session.provider {
                 Provider::Claude => "claude",
                 Provider::Codex => "codex",
+                Provider::Cursor => "cursor",
                 Provider::All => "ai",
             };
             println!(
@@ -4935,6 +5702,7 @@ pub fn run_sessions(opts: &SessionsOpts) -> Result<()> {
             let provider_tag = match session.provider {
                 Provider::Claude => "claude",
                 Provider::Codex => "codex",
+                Provider::Cursor => "cursor",
                 Provider::All => "",
             };
             let display = format!(
@@ -5133,6 +5901,52 @@ fn scan_all_project_sessions(provider: Provider) -> Result<Vec<CrossProjectSessi
         }
     }
 
+    // Scan Cursor agent transcripts.
+    if provider == Provider::Cursor || provider == Provider::All {
+        let cursor_dir = get_cursor_projects_dir();
+        if cursor_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&cursor_dir) {
+                for entry in entries.flatten() {
+                    let project_dir = entry.path();
+                    if !project_dir.is_dir() {
+                        continue;
+                    }
+
+                    let Some(project_key) = project_dir.file_name().and_then(|name| name.to_str())
+                    else {
+                        continue;
+                    };
+                    let Some(project_path) = decode_cursor_project_path(project_key) else {
+                        continue;
+                    };
+                    let project_name = project_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(project_key)
+                        .to_string();
+
+                    for file_path in collect_cursor_project_session_files(&project_dir) {
+                        let filename = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                        let Some(session) = parse_cursor_session_file(&file_path, filename) else {
+                            continue;
+                        };
+
+                        all_sessions.push(CrossProjectSession {
+                            session_id: session.session_id,
+                            provider: Provider::Cursor,
+                            project_path: project_path.clone(),
+                            project_name: project_name.clone(),
+                            timestamp: session.timestamp,
+                            first_message: session.first_message,
+                            error_summary: session.error_summary,
+                            session_path: Some(file_path),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Sort by timestamp descending (most recent first)
     all_sessions.sort_by(|a, b| {
         let ts_a = a.timestamp.as_deref().unwrap_or("");
@@ -5241,10 +6055,24 @@ fn read_cross_project_context(
         };
         return read_codex_cross_project_context(session, &session_file, since_ts, max_count);
     }
+    if session.provider == Provider::Cursor {
+        let session_file = session
+            .session_path
+            .clone()
+            .or_else(|| find_cursor_session_file(&session.session_id));
+        let Some(session_file) = session_file else {
+            bail!(
+                "Session file not found for Cursor session {}",
+                session.session_id
+            );
+        };
+        return read_cursor_cross_project_context(session, &session_file, since_ts, max_count);
+    }
 
     let projects_dir = match session.provider {
         Provider::Claude | Provider::All => get_claude_projects_dir(),
         Provider::Codex => get_codex_projects_dir(),
+        Provider::Cursor => get_cursor_projects_dir(),
     };
 
     let project_folder = session.project_path.to_string_lossy().replace('/', "-");
@@ -5276,40 +6104,19 @@ fn read_cross_project_context(
             if let Some(ref msg) = entry.message {
                 let role = msg.role.as_deref().unwrap_or("unknown");
 
-                let content_text = if let Some(ref content) = msg.content {
-                    match content {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Array(arr) => arr
-                            .iter()
-                            .filter_map(|v| {
-                                if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                                    Some(text.to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        _ => return,
-                    }
-                } else {
+                let Some(content_text) = msg.content.as_ref().and_then(extract_message_text) else {
+                    return;
+                };
+                let Some(clean_text) = normalize_session_message(role, &content_text) else {
                     return;
                 };
 
-                if content_text.is_empty() {
-                    return;
-                }
-
                 match role {
                     "user" => {
-                        current_user = Some(content_text);
+                        current_user = Some(clean_text);
                         current_ts = entry_ts.clone();
                     }
                     "assistant" => {
-                        let clean_text = strip_thinking_blocks(&content_text);
-                        if clean_text.trim().is_empty() {
-                            return;
-                        }
                         if let Some(user_msg) = current_user.take() {
                             let ts = current_ts.take().or(entry_ts.clone()).unwrap_or_default();
                             exchanges.push((user_msg, clean_text, ts.clone()));
@@ -5345,6 +6152,7 @@ fn read_cross_project_context(
         match session.provider {
             Provider::Claude => "Claude Code",
             Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
             Provider::All => "AI",
         }
     );
@@ -5392,6 +6200,30 @@ fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
     None
 }
 
+fn find_cursor_session_file(session_id: &str) -> Option<PathBuf> {
+    let root = get_cursor_projects_dir();
+    if !root.exists() {
+        return None;
+    }
+
+    let entries = fs::read_dir(&root).ok()?;
+    for entry in entries.flatten() {
+        let project_dir = entry.path();
+        if !project_dir.is_dir() {
+            continue;
+        }
+
+        for file_path in collect_cursor_project_session_files(&project_dir) {
+            let filename = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if filename.contains(session_id) {
+                return Some(file_path);
+            }
+        }
+    }
+
+    None
+}
+
 fn read_codex_cross_project_context(
     session: &CrossProjectSession,
     session_file: &PathBuf,
@@ -5417,6 +6249,51 @@ fn read_codex_cross_project_context(
         match session.provider {
             Provider::Claude => "Claude Code",
             Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
+            Provider::All => "AI",
+        }
+    );
+
+    for (user_msg, assistant_msg, _ts) in exchanges_to_use {
+        context.push_str("H: ");
+        context.push_str(user_msg);
+        context.push_str("\n\n");
+        context.push_str("A: ");
+        context.push_str(assistant_msg);
+        context.push_str("\n\n");
+    }
+
+    context.push_str("=== End Context ===\n");
+
+    Ok((context, last_ts))
+}
+
+fn read_cursor_cross_project_context(
+    session: &CrossProjectSession,
+    session_file: &PathBuf,
+    since_ts: Option<&str>,
+    max_count: Option<usize>,
+) -> Result<(String, Option<String>)> {
+    let (exchanges, last_ts) = read_cursor_exchanges(session_file, since_ts, None)?;
+
+    if exchanges.is_empty() {
+        return Ok((String::new(), last_ts));
+    }
+
+    let exchanges_to_use = if let Some(count) = max_count {
+        let start = exchanges.len().saturating_sub(count);
+        &exchanges[start..]
+    } else {
+        &exchanges[..]
+    };
+
+    let mut context = format!(
+        "=== Context from {} ({}) ===\n\n",
+        session.project_name,
+        match session.provider {
+            Provider::Claude => "Claude Code",
+            Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
             Provider::All => "AI",
         }
     );
@@ -5502,10 +6379,18 @@ fn get_session_last_timestamp_for_path(
         };
         return get_codex_last_timestamp(&session_file);
     }
+    if provider == Provider::Cursor {
+        let session_file = find_cursor_session_file(session_id);
+        let Some(session_file) = session_file else {
+            return Ok(None);
+        };
+        return get_cursor_last_timestamp(&session_file);
+    }
 
     let projects_dir = match provider {
         Provider::Claude | Provider::All => get_claude_projects_dir(),
         Provider::Codex => get_codex_projects_dir(),
+        Provider::Cursor => get_cursor_projects_dir(),
     };
 
     let project_folder = project_path.to_string_lossy().replace('/', "-");
@@ -5527,4 +6412,102 @@ fn get_session_last_timestamp_for_path(
     })?;
 
     Ok(last_ts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn decode_cursor_project_path_handles_hyphenated_components() {
+        let root = tempfile::Builder::new()
+            .prefix("cursorproject")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let repo_path = root
+            .path()
+            .join("review")
+            .join("nikiv-designer-dev-deploy")
+            .join("ide")
+            .join("designer");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let project_key = format!(
+            "tmp-{}-review-nikiv-designer-dev-deploy-ide-designer",
+            root.path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("tempdir name")
+        );
+
+        let decoded = decode_cursor_project_path(&project_key).expect("decoded path");
+        assert_eq!(decoded, repo_path);
+    }
+
+    #[test]
+    fn parse_cursor_session_file_extracts_messages() {
+        let root = tempdir().expect("tempdir");
+        let session_file = root.path().join("cursor-session.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello cursor\"}]}}\n",
+                "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"world\"}]}}\n"
+            ),
+        )
+        .expect("write session file");
+
+        let session =
+            parse_cursor_session_file(&session_file, "cursor-session").expect("parsed session");
+        assert_eq!(session.session_id, "cursor-session");
+        assert_eq!(session.provider, Provider::Cursor);
+        assert_eq!(session.first_message.as_deref(), Some("hello cursor"));
+        assert_eq!(session.last_message.as_deref(), Some("world"));
+        assert!(session.timestamp.is_some());
+        assert_eq!(session.last_message_at, session.timestamp);
+    }
+
+    #[test]
+    fn normalize_session_message_strips_setup_scaffolding() {
+        let workflow_text = concat!(
+            "ai sidebar improvements\n\n",
+            "Workflow context:\n",
+            "- Repo: ~/code/example-project\n",
+            "- Review branch: review/example-feature\n",
+            "\nStart by checking:\n1. flow status\n"
+        );
+        assert_eq!(
+            normalize_session_message("user", workflow_text).as_deref(),
+            Some("ai sidebar improvements")
+        );
+
+        let agents_text = concat!(
+            "# AGENTS.md instructions for /tmp/repo\n\n",
+            "<INSTRUCTIONS>\n",
+            "Do important things.\n",
+            "</INSTRUCTIONS>"
+        );
+        assert_eq!(normalize_session_message("user", agents_text), None);
+
+        let assistant_setup = "Using `example-dispatch`, then `example-workflow` because this is a stacked review workspace.";
+        assert_eq!(
+            normalize_session_message("assistant", assistant_setup),
+            None
+        );
+    }
+
+    #[test]
+    fn append_history_message_skips_consecutive_duplicates() {
+        let mut history = String::new();
+        let mut last_entry = None;
+
+        append_history_message(&mut history, &mut last_entry, "user", "same");
+        append_history_message(&mut history, &mut last_entry, "user", "same");
+        append_history_message(&mut history, &mut last_entry, "assistant", "reply");
+        append_history_message(&mut history, &mut last_entry, "assistant", "reply");
+
+        assert_eq!(history, "Human: same\n\nAssistant: reply\n\n");
+    }
 }

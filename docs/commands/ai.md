@@ -1,23 +1,27 @@
 # f ai
 
-Manage Claude Code and Codex sessions for the current project.
+Manage Claude Code, Codex, and Cursor sessions for the current project.
 
 Flow reads local session stores, filters by current project path, and gives you one interface for list/search/resume/copy/save.
 When you need to reopen a repo's session from another working directory, use `--path <project-root>` on `resume` or provider-specific `continue`.
+Cursor transcripts are supported for reading only.
 
 ## Quick Start
 
 ```bash
-# Fuzzy-pick a recent session (Claude + Codex) and resume
+# Fuzzy-pick a recent session (Claude + Codex + Cursor)
 f ai
 
-# Provider-specific list/resume
+# Provider-specific list/read
 f ai claude list
 f ai codex list
+f ai cursor list
 f ai claude resume <session-id-or-name>
 f ai codex resume <session-id-or-name>
 f ai codex resume --path ~/work/example-project
 f ai codex continue --path ~/work/example-project
+f ai cursor context - /path/to/repo 3
+f cursor copy
 
 # Save a memorable alias for a session
 f ai save reclaim-fix --id a38cf8bf-f4e2-4308-8b27-0254f89c4385
@@ -27,6 +31,7 @@ f ai save reclaim-fix --id a38cf8bf-f4e2-4308-8b27-0254f89c4385
 
 - Claude: `~/.claude/projects/<project-path>/*.jsonl`
 - Codex: `~/.codex/sessions/**/*.jsonl` (Flow matches by `session_meta.cwd`)
+- Cursor: `~/.cursor/projects/<project-key>/agent-transcripts/<session-id>/<session-id>.jsonl`
 - Saved aliases: `.ai/sessions/claude/index.json` in your repo
 
 ## Resume Behavior (Important)
@@ -38,6 +43,7 @@ Resume is interactive by design.
 - `f ai claude resume ...` requires a terminal TTY.
 - `f ai codex resume ...` requires a terminal TTY.
 - In non-interactive shells, Flow exits with a clear error and non-zero status.
+- Cursor does not currently expose a Flow resume/continue path; use `list`, `copy`, or `context`.
 
 ### Claude exact-ID behavior
 
@@ -63,6 +69,15 @@ codex resume <id> --dangerously-bypass-approvals-and-sandbox
 ```
 
 No fallback is applied on resume failure; Flow returns non-zero.
+
+### Cursor behavior
+
+Cursor transcripts are read-only in Flow:
+
+- `f ai cursor list` opens a picker and copies the selected transcript
+- `f ai cursor copy` copies the latest Cursor transcript for this repo
+- `f ai cursor context ...` copies the last N exchanges
+- `f cursor ...` is a shortcut for the same provider-specific read commands
 
 ### Cross-directory resume
 
@@ -94,6 +109,7 @@ f ai resume my-feature
 f ai resume a38cf8bf
 f ai claude resume 2
 f ai codex resume 019c61c5-0aef-71a1-b058-5c9ab43013d4
+f ai cursor context 382ef1a3 /path/to/repo 2
 ```
 
 ## Content Copy Commands
@@ -112,6 +128,7 @@ Use `-` as session placeholder to trigger fuzzy selection:
 
 ```bash
 f ai claude context - /path/to/repo 3
+f ai cursor context - /path/to/repo 3
 ```
 
 ## Project Workflow (Recommended)
