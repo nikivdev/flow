@@ -55,7 +55,7 @@ pub struct DaemonStatusView {
     pub pid: Option<u32>,
     #[serde(default)]
     pub healthy: Option<bool>,
-    pub health_url: Option<String>,
+    pub health_target: Option<String>,
     pub description: Option<String>,
 }
 
@@ -99,6 +99,58 @@ pub fn run(cmd: SupervisorCommand) -> Result<()> {
 pub fn ensure_running(boot: bool, announce: bool) -> Result<()> {
     let socket_path = resolve_socket_path(None)?;
     ensure_supervisor_running(&socket_path, announce, boot)?;
+    Ok(())
+}
+
+pub fn ensure_daemon_running(name: &str, config_path: Option<&Path>, announce: bool) -> Result<()> {
+    let socket_path = resolve_socket_path(None)?;
+    ensure_supervisor_running(&socket_path, announce, false)?;
+    let request = IpcRequest {
+        action: SupervisorIpcAction::StartDaemon {
+            name: name.to_string(),
+            config_path: config_path.map(|p| p.display().to_string()),
+        },
+    };
+    let response = send_request(&socket_path, &request)?;
+    if !response.ok {
+        bail!(
+            "{}",
+            response
+                .message
+                .unwrap_or_else(|| format!("failed to start daemon {}", name))
+        );
+    }
+    if announce {
+        if let Some(message) = response.message {
+            println!("OK {}", message);
+        }
+    }
+    Ok(())
+}
+
+pub fn stop_daemon_managed(name: &str, config_path: Option<&Path>, announce: bool) -> Result<()> {
+    let socket_path = resolve_socket_path(None)?;
+    ensure_supervisor_running(&socket_path, announce, false)?;
+    let request = IpcRequest {
+        action: SupervisorIpcAction::StopDaemon {
+            name: name.to_string(),
+            config_path: config_path.map(|p| p.display().to_string()),
+        },
+    };
+    let response = send_request(&socket_path, &request)?;
+    if !response.ok {
+        bail!(
+            "{}",
+            response
+                .message
+                .unwrap_or_else(|| format!("failed to stop daemon {}", name))
+        );
+    }
+    if announce {
+        if let Some(message) = response.message {
+            println!("OK {}", message);
+        }
+    }
     Ok(())
 }
 
@@ -688,13 +740,13 @@ fn build_status_views(config_path: Option<&Path>) -> Result<Vec<DaemonStatusView
         let status = daemon::get_daemon_status(&daemon_cfg);
         let name = daemon_cfg.name.clone();
         let description = daemon_cfg.description.clone();
-        let health_url = daemon_cfg.effective_health_url();
+        let health_target = daemon_cfg.health_target_label();
         views.push(DaemonStatusView {
             name,
             running: status.running,
             pid: status.pid,
             healthy: status.healthy,
-            health_url,
+            health_target,
             description,
         });
     }
@@ -1144,12 +1196,12 @@ fn print_status_views(daemons: &[DaemonStatusView], filter: Option<&str>) {
         };
         let state = if daemon.running { "running" } else { "stopped" };
         print!("  {} {}: {}", icon, daemon.name, state);
-        if let Some(url) = &daemon.health_url {
+        if let Some(target) = &daemon.health_target {
             if daemon.running {
                 if daemon.healthy == Some(false) {
-                    print!(" (unhealthy: {})", url.replace("/health", ""));
+                    print!(" (unhealthy: {})", target);
                 } else {
-                    print!(" ({})", url.replace("/health", ""));
+                    print!(" ({})", target);
                 }
             }
         }

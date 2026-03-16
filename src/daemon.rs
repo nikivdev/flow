@@ -16,6 +16,7 @@ use reqwest::blocking::Client;
 
 use crate::{
     cli::{DaemonAction, DaemonCommand},
+    codexd,
     config::{self, DaemonConfig, DaemonRestartPolicy},
     env, supervisor,
 };
@@ -62,11 +63,9 @@ pub fn start_daemon_with_path(name: &str, config_path: Option<&Path>) -> Result<
 
 fn start_daemon_inner(daemon: &DaemonConfig) -> Result<()> {
     // Check if already running
-    if let Some(url) = daemon.effective_health_url() {
-        if check_health(&url) {
-            println!("✓ {} is already running", daemon.name);
-            return Ok(());
-        }
+    if daemon_health_status(daemon) == Some(true) {
+        println!("✓ {} is already running", daemon.name);
+        return Ok(());
     }
 
     // Check if there's a stale PID
@@ -106,17 +105,13 @@ fn start_daemon_inner(daemon: &DaemonConfig) -> Result<()> {
     // Wait a moment and check health
     wait_for_daemon_ready(daemon, &spawned.stdout_log)?;
 
-    if let Some(url) = daemon.effective_health_url() {
-        if check_health(&url) {
-            println!("✓ {} started successfully", daemon.name);
-        } else {
-            println!(
-                "⚠ {} started but health check failed (may need more time)",
-                daemon.name
-            );
-        }
-    } else {
-        println!("✓ {} started (no health check configured)", daemon.name);
+    match daemon_health_status(daemon) {
+        Some(true) => println!("✓ {} started successfully", daemon.name),
+        Some(false) => println!(
+            "⚠ {} started but health check failed (may need more time)",
+            daemon.name
+        ),
+        None => println!("✓ {} started (no health check configured)", daemon.name),
     }
 
     Ok(())
@@ -193,9 +188,9 @@ pub fn show_status_with_path(config_path: Option<&Path>) -> Result<()> {
 
         print!("  {} {}: {}", icon, daemon.name, state);
 
-        if let Some(url) = daemon.effective_health_url() {
+        if let Some(target) = daemon.health_target_label() {
             if status.running {
-                print!(" ({})", url.replace("/health", ""));
+                print!(" ({})", target);
             }
         }
 
@@ -223,12 +218,12 @@ pub fn show_status_for_with_path(name: &str, config_path: Option<&Path>) -> Resu
     println!();
     print!("  {} {}: {}", icon, daemon.name, state);
 
-    if let Some(url) = daemon.effective_health_url() {
+    if let Some(target) = daemon.health_target_label() {
         if status.running {
             if status.healthy == Some(false) {
-                print!(" (unhealthy: {})", url.replace("/health", ""));
+                print!(" (unhealthy: {})", target);
             } else {
-                print!(" ({})", url.replace("/health", ""));
+                print!(" ({})", target);
             }
         }
     }
@@ -287,7 +282,7 @@ pub fn get_daemon_status(daemon: &DaemonConfig) -> DaemonStatus {
         .map(|pid| process_alive(pid).unwrap_or(false))
         .unwrap_or(false);
 
-    let healthy = daemon.effective_health_url().map(|url| check_health(&url));
+    let healthy = daemon_health_status(daemon);
     let running = if healthy.is_some() {
         // Prefer PID when available; a transient health blip shouldn't mark the process as stopped.
         if pid.is_some() {
@@ -419,32 +414,45 @@ fn wait_for_daemon_ready(daemon: &DaemonConfig, stdout_log: &Path) -> Result<()>
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    let Some(pattern) = daemon.ready_output.as_ref() else {
-        return Ok(());
-    };
-
-    let regex = Regex::new(pattern).with_context(|| "invalid ready_output regex")?;
     let timeout = Duration::from_secs(30);
     let start = std::time::Instant::now();
     let mut seen_len = 0usize;
+    let mut ready_output_matched = daemon.ready_output.is_none();
+    let regex = match daemon.ready_output.as_ref() {
+        Some(pattern) => Some(Regex::new(pattern).with_context(|| "invalid ready_output regex")?),
+        None => None,
+    };
 
     while start.elapsed() < timeout {
-        if let Ok(contents) = fs::read_to_string(stdout_log) {
-            if contents.len() > seen_len {
-                let slice = &contents[seen_len..];
-                if regex.is_match(slice) {
-                    return Ok(());
+        if let Some(regex) = regex.as_ref() {
+            if let Ok(contents) = fs::read_to_string(stdout_log) {
+                if contents.len() > seen_len {
+                    let slice = &contents[seen_len..];
+                    if regex.is_match(slice) {
+                        ready_output_matched = true;
+                    }
+                    seen_len = contents.len();
                 }
-                seen_len = contents.len();
+            }
+        }
+
+        if ready_output_matched {
+            match daemon_health_status(daemon) {
+                Some(true) | None => return Ok(()),
+                Some(false) => {}
             }
         }
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    eprintln!(
-        "WARN ready_output '{}' not found for {} (continuing).",
-        pattern, daemon.name
-    );
+    if let Some(pattern) = daemon.ready_output.as_ref() {
+        if !ready_output_matched {
+            eprintln!(
+                "WARN ready_output '{}' not found for {} (continuing).",
+                pattern, daemon.name
+            );
+        }
+    }
     Ok(())
 }
 /// Find a daemon config by name from merged configs.
@@ -482,6 +490,12 @@ pub fn load_merged_config_with_path(config_path: Option<&Path>) -> Result<config
                     merged.daemons.push(server.to_daemon_config());
                 }
             }
+        }
+    }
+
+    if !merged.daemons.iter().any(|daemon| daemon.name == "codexd") {
+        if let Ok(daemon) = codexd::builtin_daemon_config() {
+            merged.daemons.push(daemon);
         }
     }
 
@@ -548,6 +562,31 @@ fn check_health(url: &str) -> bool {
         .and_then(|resp| resp.error_for_status())
         .map(|_| true)
         .unwrap_or(false)
+}
+
+fn check_health_socket(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        if !path.exists() {
+            return false;
+        }
+        std::os::unix::net::UnixStream::connect(path).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn daemon_health_status(daemon: &DaemonConfig) -> Option<bool> {
+    if let Some(url) = daemon.effective_health_url() {
+        return Some(check_health(&url));
+    }
+    if let Some(socket_path) = daemon.effective_health_socket() {
+        return Some(check_health_socket(&socket_path));
+    }
+    None
 }
 
 // ============================================================================

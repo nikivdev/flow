@@ -38,10 +38,12 @@ install = ["linear"]  # optional: ensure skills are installed (local ~/.codex/sk
 # task_skill_allow_implicit_invocation = false
 [codex]               # optional: Codex-first open/resolve behavior
 # auto_resolve_references = true
+# prompt_context_budget_chars = 1200
+# max_resolved_references = 2
 [[codex.reference_resolver]]
 # name = "linear"
 # match = ["https://linear.app/*/issue/*", "https://linear.app/*/project/*"]
-# command = "forge linear inspect {{ref}} --json"
+# command = "my-linear-tool inspect {{ref}} --json"
 # inject_as = "linear"
 [skills.seq]          # optional: seq-backed dependency skill fetching defaults
 # seq_repo = "~/code/seq"
@@ -139,6 +141,9 @@ fr = "f run"
 - `[skills.codex]`: optional Codex tuning; task skill `agents/openai.yaml` generation, post-sync force reload, and implicit invocation policy defaults.
 - `[codex]`: optional Codex-first control-plane settings for `f codex open` / `f codex resolve`.
   - `auto_resolve_references`: when true, matched resolver output is compacted and injected into new-session prompts.
+  - `prompt_context_budget_chars`: hard cap for injected context before the raw user request is appended.
+  - `max_resolved_references`: maximum number of resolved references Flow may inject into one prompt.
+  - `runtime_skills`: when true, `f codex open` may materialize Flow-managed per-launch runtime skills for wrapper transports.
   - `[[codex.reference_resolver]]`: repo-specific reference unrollers with wildcard `match` patterns and a shell `command` template.
   - command templates support `{{ref}}`, `{{query}}`, and `{{cwd}}`.
 - `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
@@ -175,12 +180,18 @@ task_skill_allow_implicit_invocation = false
 
 [codex]
 auto_resolve_references = true
+prompt_context_budget_chars = 900
+max_resolved_references = 1
+runtime_skills = true
 
 [[codex.reference_resolver]]
 name = "linear"
 match = ["https://linear.app/*/issue/*", "https://linear.app/*/project/*"]
-command = "forge linear inspect {{ref}} --json"
+command = "my-linear-tool inspect {{ref}} --json"
 inject_as = "linear"
+
+[options]
+codex_bin = "~/code/flow/scripts/codex-flow-wrapper"
 
 [commit.testing]
 mode = "block"

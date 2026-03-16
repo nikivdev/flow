@@ -1283,7 +1283,6 @@ pub enum ShellAction {
     /// Refresh the current shell session.
     Reset,
     /// Disable fish terminal query to avoid PDA warning.
-    #[command(alias = "fix-terminal")]
     FixTerminal,
 }
 
@@ -2499,6 +2498,13 @@ pub enum ProviderAiAction {
     /// List sessions for this provider.
     #[command(alias = "ls")]
     List,
+    /// Print the most recent session ID for this provider.
+    #[command(name = "latest-id", alias = "latest")]
+    LatestId {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Open provider-native interactive session picker.
     #[command(alias = "sess")]
     Sessions,
@@ -2521,6 +2527,22 @@ pub enum ProviderAiAction {
         /// Project path to resume from instead of the current directory.
         #[arg(long)]
         path: Option<String>,
+    },
+    /// Connect to an existing Codex session selected by natural-language query.
+    #[command(alias = "home")]
+    Connect {
+        /// Project path or repo root to search instead of the configured Codex home-session path.
+        #[arg(long, alias = "repo")]
+        path: Option<String>,
+        /// Restrict --path lookup to an exact cwd match instead of a repo-tree prefix.
+        #[arg(long, requires = "path")]
+        exact_cwd: bool,
+        /// Emit machine-readable JSON for the selected session instead of resuming it.
+        #[arg(long, alias = "print")]
+        json: bool,
+        /// Natural-language query describing the target session. Defaults to the latest session.
+        #[arg(value_name = "QUERY", trailing_var_arg = true)]
+        query: Vec<String>,
     },
     /// Open a Codex session with fast repo-scoped recovery and reference unrolling.
     Open {
@@ -2548,6 +2570,34 @@ pub enum ProviderAiAction {
         /// Query or reference text to resolve.
         #[arg(value_name = "QUERY", trailing_var_arg = true)]
         query: Vec<String>,
+    },
+    /// Print effective Codex control-plane settings for this path.
+    Doctor {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Manage the Flow codexd query daemon.
+    Daemon {
+        #[command(subcommand)]
+        action: Option<CodexDaemonAction>,
+    },
+    /// Build and inspect local Codex skill scorecards from Flow history.
+    #[command(name = "skill-eval")]
+    SkillEval {
+        #[command(subcommand)]
+        action: Option<CodexSkillEvalAction>,
+    },
+    /// Discover and sync external Codex skill sources.
+    #[command(name = "skill-source")]
+    SkillSource {
+        #[command(subcommand)]
+        action: Option<CodexSkillSourceAction>,
+    },
+    /// Inspect or manage Flow-managed Codex runtime helpers.
+    Runtime {
+        #[command(subcommand)]
+        action: Option<CodexRuntimeAction>,
     },
     /// Search Codex sessions by prompt text and resume the best match.
     #[command(alias = "search")]
@@ -2591,6 +2641,20 @@ pub enum ProviderAiAction {
         #[arg(default_value = "1")]
         count: usize,
     },
+    /// Print a cleaned session excerpt to stdout.
+    Show {
+        /// Session name or ID to print. Defaults to the latest session for --path/current dir.
+        session: Option<String>,
+        /// Path to project directory (default: current directory).
+        #[arg(long)]
+        path: Option<String>,
+        /// Number of exchanges to include (default: 12).
+        #[arg(long, default_value = "12", conflicts_with = "full")]
+        count: usize,
+        /// Print the full cleaned transcript instead of just the trailing exchanges.
+        #[arg(long)]
+        full: bool,
+    },
     /// Recover recent Codex session context for a repo or subpath.
     Recover {
         /// Path to recover context for (default: current directory).
@@ -2611,6 +2675,128 @@ pub enum ProviderAiAction {
         /// Optional query used to rank recent sessions.
         #[arg(value_name = "QUERY", trailing_var_arg = true)]
         query: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexDaemonAction {
+    /// Start codexd under Flow supervision.
+    Start,
+    /// Stop codexd.
+    Stop,
+    /// Restart codexd.
+    Restart,
+    /// Show codexd status.
+    Status,
+    /// Run codexd in the foreground (internal).
+    #[command(hide = true)]
+    Serve {
+        /// Override the codexd socket path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Ping codexd and exit non-zero if unavailable (internal).
+    #[command(hide = true)]
+    Ping,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexSkillEvalAction {
+    /// Rebuild the local scorecard for this repo/path from recent Flow Codex history.
+    Run {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Maximum number of recent events to use when rebuilding.
+        #[arg(long, default_value = "200")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the current scorecard for this repo/path.
+    Show {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show recent logged skill-eval events.
+    Events {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Maximum number of events to print.
+        #[arg(long, default_value = "12")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Refresh scorecards for the most recent repos seen in Flow Codex history.
+    Cron {
+        /// Maximum number of logged events to scan for target repos.
+        #[arg(long, default_value = "400")]
+        limit: usize,
+        /// Maximum number of repo targets to rebuild in one pass.
+        #[arg(long, default_value = "12")]
+        max_targets: usize,
+        /// Only consider repos seen within this many recent hours.
+        #[arg(long, default_value = "168")]
+        within_hours: u64,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexSkillSourceAction {
+    /// List discovered external skills available for Codex runtime injection.
+    List {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Copy discovered external skills into ~/.codex/skills for persistent use.
+    Sync {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Restrict sync to the named discovered skills.
+        #[arg(long = "skill")]
+        skills: Vec<String>,
+        /// Overwrite an existing ~/.codex/skills/<name> directory.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexRuntimeAction {
+    /// Show recent Flow-managed Codex runtime skill activations.
+    Show,
+    /// Remove Flow-managed runtime skill state and stale symlinks.
+    Clear,
+    /// Write a markdown plan to ~/plan and print the final path.
+    WritePlan {
+        /// Human-readable title used to derive the filename.
+        #[arg(long)]
+        title: Option<String>,
+        /// Explicit filename stem to use instead of deriving from the title.
+        #[arg(long)]
+        stem: Option<String>,
+        /// Destination directory (defaults to ~/plan).
+        #[arg(long)]
+        dir: Option<String>,
+        /// Codex session id to append as a footer (defaults to $CODEX_THREAD_ID).
+        #[arg(long)]
+        source_session: Option<String>,
     },
 }
 

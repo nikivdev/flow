@@ -883,6 +883,38 @@ pub struct CodexConfig {
         alias = "autoResolveReferences"
     )]
     pub auto_resolve_references: Option<bool>,
+    /// Whether Flow may materialize per-launch runtime skills for Codex wrapper transports.
+    #[serde(
+        default,
+        rename = "runtime_skills",
+        alias = "runtime-skills",
+        alias = "runtimeSkills"
+    )]
+    pub runtime_skills: Option<bool>,
+    /// Default repo path used for home-session style Codex lookups.
+    #[serde(
+        default,
+        rename = "home_session_path",
+        alias = "home-session-path",
+        alias = "homeSessionPath"
+    )]
+    pub home_session_path: Option<String>,
+    /// Hard cap for injected prompt context before Codex sees the query.
+    #[serde(
+        default,
+        rename = "prompt_context_budget_chars",
+        alias = "prompt-context-budget-chars",
+        alias = "promptContextBudgetChars"
+    )]
+    pub prompt_context_budget_chars: Option<usize>,
+    /// Limit how many resolved references Flow may inject for one prompt.
+    #[serde(
+        default,
+        rename = "max_resolved_references",
+        alias = "max-resolved-references",
+        alias = "maxResolvedReferences"
+    )]
+    pub max_resolved_references: Option<usize>,
     /// External reference resolvers that can unroll URLs or other tokens into compact context.
     #[serde(
         default,
@@ -891,12 +923,32 @@ pub struct CodexConfig {
         alias = "referenceResolver"
     )]
     pub reference_resolvers: Vec<CodexReferenceResolverConfig>,
+    /// External skill repositories that Flow may scan/sync for Codex runtime injection.
+    #[serde(
+        default,
+        rename = "skill_source",
+        alias = "skill-source",
+        alias = "skillSource"
+    )]
+    pub skill_sources: Vec<CodexSkillSourceConfig>,
 }
 
 impl CodexConfig {
     pub(crate) fn merge(&mut self, other: CodexConfig) {
         if other.auto_resolve_references.is_some() {
             self.auto_resolve_references = other.auto_resolve_references;
+        }
+        if other.runtime_skills.is_some() {
+            self.runtime_skills = other.runtime_skills;
+        }
+        if other.home_session_path.is_some() {
+            self.home_session_path = other.home_session_path;
+        }
+        if other.prompt_context_budget_chars.is_some() {
+            self.prompt_context_budget_chars = other.prompt_context_budget_chars;
+        }
+        if other.max_resolved_references.is_some() {
+            self.max_resolved_references = other.max_resolved_references;
         }
         for resolver in other.reference_resolvers {
             if let Some(existing) = self
@@ -909,7 +961,30 @@ impl CodexConfig {
                 self.reference_resolvers.push(resolver);
             }
         }
+        for source in other.skill_sources {
+            if let Some(existing) = self
+                .skill_sources
+                .iter_mut()
+                .find(|value| value.name == source.name)
+            {
+                *existing = source;
+            } else {
+                self.skill_sources.push(source);
+            }
+        }
     }
+}
+
+/// External skill repository registration for Codex runtime helpers.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct CodexSkillSourceConfig {
+    /// Human-friendly source name.
+    pub name: String,
+    /// Local path to the source repo or skill root.
+    pub path: String,
+    /// Whether this source is enabled for discovery/sync.
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 /// External resolver registration for `f codex resolve` and `f codex open`.
@@ -1274,6 +1349,7 @@ impl ServerConfig {
             restart: Some(DaemonRestartPolicy::OnFailure),
             description: Some(format!("Dev server: {}", self.name)),
             health_url: None,
+            health_socket: None,
             host: None,
             boot: false,
             autostop: false,
@@ -1666,6 +1742,9 @@ pub struct DaemonConfig {
     /// Health check URL to determine if daemon is running.
     #[serde(default, alias = "health")]
     pub health_url: Option<String>,
+    /// Unix socket path to probe to determine if a daemon is running.
+    #[serde(default, alias = "health-socket", alias = "health_socket")]
+    pub health_socket: Option<String>,
     /// Port the daemon listens on (extracted from health_url if not specified).
     #[serde(default)]
     pub port: Option<u16>,
@@ -1714,9 +1793,23 @@ impl DaemonConfig {
         self.port.map(|p| format!("http://{}:{}/health", host, p))
     }
 
+    /// Get the effective unix socket health target, if configured.
+    pub fn effective_health_socket(&self) -> Option<PathBuf> {
+        self.health_socket.as_ref().map(|path| expand_path(path))
+    }
+
     /// Get the effective host.
     pub fn effective_host(&self) -> &str {
         self.host.as_deref().unwrap_or("127.0.0.1")
+    }
+
+    /// Human-readable health target for status output.
+    pub fn health_target_label(&self) -> Option<String> {
+        if let Some(url) = self.effective_health_url() {
+            return Some(url.replace("/health", ""));
+        }
+        self.effective_health_socket()
+            .map(|path| format!("unix:{}", path.display()))
     }
 }
 
@@ -1786,6 +1879,21 @@ pub fn global_config_dir() -> PathBuf {
         .join(".config/flow")
 }
 
+fn legacy_global_state_dir_for(config_dir: &Path) -> PathBuf {
+    config_dir.with_file_name("flow-state")
+}
+
+fn select_global_state_dir(config_dir: &Path) -> PathBuf {
+    let legacy_dir = legacy_global_state_dir_for(config_dir);
+    if is_dir_path(&legacy_dir) {
+        return legacy_dir;
+    }
+    if is_dir_path(config_dir) || !config_dir.exists() {
+        return config_dir.to_path_buf();
+    }
+    legacy_dir
+}
+
 /// Ensure the global config directory exists (moves aside files that block it).
 pub fn ensure_global_config_dir() -> Result<PathBuf> {
     let dir = global_config_dir();
@@ -1799,11 +1907,21 @@ pub fn ensure_global_config_dir() -> Result<PathBuf> {
 /// Global state directory for runtime data.
 pub fn global_state_dir() -> PathBuf {
     let config_dir = global_config_dir();
-    if is_dir_path(&config_dir) {
-        return config_dir;
-    }
+    select_global_state_dir(&config_dir)
+}
 
-    config_dir.with_file_name("flow-state")
+/// Global state directory candidates (primary first) for migration-safe readers.
+pub fn global_state_dir_candidates() -> Vec<PathBuf> {
+    let config_dir = global_config_dir();
+    let legacy_dir = legacy_global_state_dir_for(&config_dir);
+    let primary = select_global_state_dir(&config_dir);
+    let mut candidates = vec![primary.clone()];
+    for candidate in [config_dir, legacy_dir] {
+        if candidate != primary && is_dir_path(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
 }
 
 /// Ensure the global state directory exists.
@@ -2502,6 +2620,7 @@ pub fn load_or_default<P: AsRef<Path>>(path: P) -> Config {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     fn fixture_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -2606,6 +2725,34 @@ mod tests {
 
         assert_eq!(expand_path("~/projects/demo"), expected);
         assert_eq!(expand_path("$HOME/projects/demo"), expected);
+    }
+
+    #[test]
+    fn global_state_dir_prefers_config_dir_for_fresh_homes() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join(".config/flow");
+        assert_eq!(select_global_state_dir(&config_dir), config_dir);
+    }
+
+    #[test]
+    fn global_state_dir_preserves_legacy_state_root_when_present() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join(".config/flow");
+        let legacy_dir = dir.path().join(".config/flow-state");
+        fs::create_dir_all(&legacy_dir).expect("legacy dir");
+        assert_eq!(select_global_state_dir(&config_dir), legacy_dir);
+    }
+
+    #[test]
+    fn global_state_dir_falls_back_when_config_path_is_blocked() {
+        let dir = tempdir().expect("tempdir");
+        let config_dir = dir.path().join(".config/flow");
+        fs::create_dir_all(config_dir.parent().expect("config parent")).expect("parent dir");
+        fs::write(&config_dir, "blocked").expect("blocking file");
+        assert_eq!(
+            select_global_state_dir(&config_dir),
+            dir.path().join(".config/flow-state")
+        );
     }
 
     #[test]
@@ -2996,16 +3143,27 @@ task_skill_allow_implicit_invocation = false
         let toml = r#"
 [codex]
 auto_resolve_references = true
+runtime_skills = true
+home_session_path = "~/repos/openai/codex"
+prompt_context_budget_chars = 900
+max_resolved_references = 1
 
 [[codex.reference_resolver]]
 name = "linear"
 match = ["https://linear.app/*/issue/*", "https://linear.app/*/project/*"]
-command = "forge linear inspect {{ref}} --json"
+command = "my-linear-tool inspect {{ref}} --json"
 inject_as = "linear"
 "#;
         let cfg: Config = toml::from_str(toml).expect("codex config should parse");
         let codex = cfg.codex.expect("codex config expected");
         assert_eq!(codex.auto_resolve_references, Some(true));
+        assert_eq!(codex.runtime_skills, Some(true));
+        assert_eq!(
+            codex.home_session_path.as_deref(),
+            Some("~/repos/openai/codex")
+        );
+        assert_eq!(codex.prompt_context_budget_chars, Some(900));
+        assert_eq!(codex.max_resolved_references, Some(1));
         assert_eq!(codex.reference_resolvers.len(), 1);
         let resolver = &codex.reference_resolvers[0];
         assert_eq!(resolver.name, "linear");
@@ -3016,8 +3174,27 @@ inject_as = "linear"
                 "https://linear.app/*/project/*".to_string(),
             ]
         );
-        assert_eq!(resolver.command, "forge linear inspect {{ref}} --json");
+        assert_eq!(resolver.command, "my-linear-tool inspect {{ref}} --json");
         assert_eq!(resolver.inject_as.as_deref(), Some("linear"));
+    }
+
+    #[test]
+    fn codex_skill_source_config_parses() {
+        let toml = r#"
+[codex]
+
+[[codex.skill_source]]
+name = "vercel-labs-skills"
+path = "~/repos/vercel-labs/skills"
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(toml).expect("codex skill_source should parse");
+        let codex = cfg.codex.expect("codex config expected");
+        assert_eq!(codex.skill_sources.len(), 1);
+        let source = &codex.skill_sources[0];
+        assert_eq!(source.name, "vercel-labs-skills");
+        assert_eq!(source.path, "~/repos/vercel-labs/skills");
+        assert_eq!(source.enabled, Some(true));
     }
 
     #[test]

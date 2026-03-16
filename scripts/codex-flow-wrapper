@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+
+RUNTIME_PREFIX = "flow-runtime-"
+
+
+def real_codex_bin() -> str:
+    value = os.environ.get("FLOW_CODEX_REAL_BIN", "").strip()
+    return value or "codex"
+
+
+def agents_skill_root() -> Path:
+    return Path.home() / ".agents" / "skills"
+
+
+def load_runtime_state() -> dict | None:
+    raw_path = os.environ.get("FLOW_CODEX_RUNTIME_STATE", "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def remove_path(path: Path) -> None:
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            for child in path.iterdir():
+                remove_path(child)
+            path.rmdir()
+    except FileNotFoundError:
+        pass
+
+
+def materialize_runtime_skills(state: dict) -> list[Path]:
+    token = str(state.get("token", "")).strip()
+    skills = state.get("skills", [])
+    if not token or not isinstance(skills, list) or not skills:
+        return []
+
+    root = agents_skill_root()
+    root.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = []
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        name = str(skill.get("name", "")).strip()
+        source = str(skill.get("path", "")).strip()
+        if not name or not source:
+            continue
+        source_path = Path(source).expanduser()
+        if not source_path.is_dir():
+            continue
+        target = root / name
+        if target.exists() or target.is_symlink():
+            remove_path(target)
+        os.symlink(source_path, target, target_is_directory=True)
+        created.append(target)
+    return created
+
+
+def cleanup_runtime_symlinks(paths: list[Path]) -> None:
+    for path in paths:
+        remove_path(path)
+
+
+def main() -> int:
+    state = load_runtime_state()
+    created = materialize_runtime_skills(state) if state else []
+
+    env = dict(os.environ)
+    runtime_state_path = env.get("FLOW_CODEX_RUNTIME_STATE", "").strip()
+    if runtime_state_path:
+        env["FLOW_CODEX_RUNTIME_STATE_PATH"] = runtime_state_path
+    env.pop("FLOW_CODEX_RUNTIME_STATE", None)
+    proc = None
+
+    def forward_signal(signum: int, _frame) -> None:
+        nonlocal proc
+        if proc is not None:
+            proc.send_signal(signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, forward_signal)
+
+    try:
+        proc = subprocess.Popen([real_codex_bin(), *sys.argv[1:]], env=env)
+        return proc.wait()
+    finally:
+        cleanup_runtime_symlinks(created)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
