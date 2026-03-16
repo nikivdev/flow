@@ -13,17 +13,24 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::debug;
 
-use crate::cli::{AiAction, ProviderAiAction};
-use crate::{config, project_snapshot, url_inspect};
+use crate::cli::{
+    AiAction, CodexDaemonAction, CodexRuntimeAction, CodexSkillEvalAction, CodexSkillSourceAction,
+    ProviderAiAction,
+};
+use crate::commit::configured_codex_bin_for_workdir;
+use crate::{codex_runtime, codex_skill_eval};
+use crate::{codexd, config, project_snapshot, url_inspect};
 
 /// AI provider type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,8 +179,8 @@ struct SessionMessage {
     content: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
-struct CodexRecoverRow {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CodexRecoverRow {
     id: String,
     updated_at: i64,
     cwd: String,
@@ -217,6 +224,7 @@ struct CodexResolvedReference {
 #[serde(rename_all = "camelCase")]
 struct CodexOpenPlan {
     action: String,
+    route: String,
     reason: String,
     target_path: String,
     launch_path: String,
@@ -224,6 +232,19 @@ struct CodexOpenPlan {
     session_id: Option<String>,
     prompt: Option<String>,
     references: Vec<CodexResolvedReference>,
+    runtime_state_path: Option<String>,
+    runtime_skills: Vec<String>,
+    prompt_context_budget_chars: usize,
+    max_resolved_references: usize,
+    prompt_chars: usize,
+    injected_context_chars: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexSessionReferenceRequest {
+    session_hint: String,
+    count: usize,
+    user_request: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,17 +263,67 @@ enum LinearUrlKind {
     Project,
 }
 
+const CODEX_QUERY_CACHE_VERSION: u32 = 1;
+const CODEX_QUERY_CACHE_ENV_DISABLE: &str = "FLOW_DISABLE_CODEX_QUERY_CACHE";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CodexStateDbStamp {
+    path: String,
+    len: u64,
+    modified_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexQueryCacheEntry {
+    version: u32,
+    stamp: CodexStateDbStamp,
+    rows: Vec<CodexRecoverRow>,
+}
+
 /// Run a provider-specific action (for top-level `f codex` / `f claude` commands).
 pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Result<()> {
     if provider == Provider::Cursor {
         match action {
             None | Some(ProviderAiAction::List) => list_sessions(Provider::Cursor)?,
+            Some(ProviderAiAction::LatestId { path }) => {
+                print_latest_session_id(Provider::Cursor, path)?
+            }
+            Some(ProviderAiAction::Connect { .. }) => {
+                bail!("connect is only supported for Codex sessions; use `f codex connect ...`");
+            }
             Some(ProviderAiAction::Copy { session }) => copy_session(session, Provider::Cursor)?,
             Some(ProviderAiAction::Context {
                 session,
                 count,
                 path,
             }) => copy_context(session, Provider::Cursor, count, path)?,
+            Some(ProviderAiAction::Show {
+                session,
+                path,
+                count,
+                full,
+            }) => show_session(session, Provider::Cursor, count, path, full)?,
+            Some(ProviderAiAction::Runtime { .. }) => {
+                bail!(
+                    "runtime helpers are only supported for Codex sessions; use `f codex runtime ...`"
+                );
+            }
+            Some(ProviderAiAction::Doctor { .. }) => {
+                bail!("doctor is only supported for Codex sessions; use `f codex doctor`");
+            }
+            Some(ProviderAiAction::Daemon { .. }) => {
+                bail!("daemon is only supported for Codex sessions; use `f codex daemon ...`");
+            }
+            Some(ProviderAiAction::SkillEval { .. }) => {
+                bail!(
+                    "skill-eval is only supported for Codex sessions; use `f codex skill-eval ...`"
+                );
+            }
+            Some(ProviderAiAction::SkillSource { .. }) => {
+                bail!(
+                    "skill-source is only supported for Codex sessions; use `f codex skill-source ...`"
+                );
+            }
             Some(ProviderAiAction::Sessions)
             | Some(ProviderAiAction::Continue { .. })
             | Some(ProviderAiAction::New)
@@ -275,22 +346,36 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
     match action {
         None => quick_start_session(provider)?,
         Some(ProviderAiAction::List) => list_sessions(provider)?,
+        Some(ProviderAiAction::LatestId { path }) => print_latest_session_id(provider, path)?,
         Some(ProviderAiAction::Sessions) => provider_sessions(provider)?,
         Some(ProviderAiAction::Continue { session, path }) => {
             continue_session(session, path, provider)?
         }
         Some(ProviderAiAction::New) => new_session(provider)?,
+        Some(ProviderAiAction::Connect {
+            path,
+            exact_cwd,
+            json,
+            query,
+        }) => connect_codex_session(path, query, exact_cwd, json, provider)?,
         Some(ProviderAiAction::Open {
             path,
             exact_cwd,
             query,
         }) => open_codex_session(path, query, exact_cwd, provider)?,
+        Some(ProviderAiAction::Daemon { action }) => codex_daemon_command(action, provider)?,
+        Some(ProviderAiAction::SkillEval { action }) => codex_skill_eval_command(action, provider)?,
+        Some(ProviderAiAction::SkillSource { action }) => {
+            codex_skill_source_command(action, provider)?
+        }
+        Some(ProviderAiAction::Doctor { path }) => codex_doctor(path, provider)?,
         Some(ProviderAiAction::Resolve {
             path,
             exact_cwd,
             json,
             query,
         }) => resolve_codex_input(path, query, exact_cwd, json, provider)?,
+        Some(ProviderAiAction::Runtime { action }) => codex_runtime_command(action, provider)?,
         Some(ProviderAiAction::Resume { session, path }) => {
             resume_session(session, path, provider)?
         }
@@ -310,6 +395,12 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
             count,
             path,
         }) => copy_context(session, provider, count, path)?,
+        Some(ProviderAiAction::Show {
+            session,
+            path,
+            count,
+            full,
+        }) => show_session(session, provider, count, path, full)?,
         Some(ProviderAiAction::Recover {
             path,
             exact_cwd,
@@ -332,13 +423,40 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Claude { action } => match action {
             None => quick_start_session(Provider::Claude)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Claude)?,
+            Some(ProviderAiAction::LatestId { path }) => {
+                print_latest_session_id(Provider::Claude, path)?
+            }
             Some(ProviderAiAction::Sessions) => provider_sessions(Provider::Claude)?,
             Some(ProviderAiAction::Continue { session, path }) => {
                 continue_session(session, path, Provider::Claude)?
             }
             Some(ProviderAiAction::New) => new_session(Provider::Claude)?,
+            Some(ProviderAiAction::Connect { .. }) => {
+                bail!("connect is only supported for Codex sessions; use `f codex connect ...`");
+            }
             Some(ProviderAiAction::Open { .. }) | Some(ProviderAiAction::Resolve { .. }) => {
                 bail!("open/resolve is only supported for Codex sessions; use `f codex ...`");
+            }
+            Some(ProviderAiAction::Runtime { .. }) => {
+                bail!(
+                    "runtime helpers are only supported for Codex sessions; use `f codex runtime ...`"
+                );
+            }
+            Some(ProviderAiAction::Doctor { .. }) => {
+                bail!("doctor is only supported for Codex sessions; use `f codex doctor`");
+            }
+            Some(ProviderAiAction::Daemon { .. }) => {
+                bail!("daemon is only supported for Codex sessions; use `f codex daemon ...`");
+            }
+            Some(ProviderAiAction::SkillEval { .. }) => {
+                bail!(
+                    "skill-eval is only supported for Codex sessions; use `f codex skill-eval ...`"
+                );
+            }
+            Some(ProviderAiAction::SkillSource { .. }) => {
+                bail!(
+                    "skill-source is only supported for Codex sessions; use `f codex skill-source ...`"
+                );
             }
             Some(ProviderAiAction::Resume { session, path }) => {
                 resume_session(session, path, Provider::Claude)?
@@ -359,6 +477,12 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 count,
                 path,
             }) => copy_context(session, Provider::Claude, count, path)?,
+            Some(ProviderAiAction::Show {
+                session,
+                path,
+                count,
+                full,
+            }) => show_session(session, Provider::Claude, count, path, full)?,
             Some(ProviderAiAction::Recover {
                 path,
                 exact_cwd,
@@ -379,22 +503,44 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
         AiAction::Codex { action } => match action {
             None => quick_start_session(Provider::Codex)?,
             Some(ProviderAiAction::List) => list_sessions(Provider::Codex)?,
+            Some(ProviderAiAction::LatestId { path }) => {
+                print_latest_session_id(Provider::Codex, path)?
+            }
             Some(ProviderAiAction::Sessions) => provider_sessions(Provider::Codex)?,
             Some(ProviderAiAction::Continue { session, path }) => {
                 continue_session(session, path, Provider::Codex)?
             }
             Some(ProviderAiAction::New) => new_session(Provider::Codex)?,
+            Some(ProviderAiAction::Connect {
+                path,
+                exact_cwd,
+                json,
+                query,
+            }) => connect_codex_session(path, query, exact_cwd, json, Provider::Codex)?,
             Some(ProviderAiAction::Open {
                 path,
                 exact_cwd,
                 query,
             }) => open_codex_session(path, query, exact_cwd, Provider::Codex)?,
+            Some(ProviderAiAction::Daemon { action }) => {
+                codex_daemon_command(action, Provider::Codex)?
+            }
+            Some(ProviderAiAction::SkillEval { action }) => {
+                codex_skill_eval_command(action, Provider::Codex)?
+            }
+            Some(ProviderAiAction::SkillSource { action }) => {
+                codex_skill_source_command(action, Provider::Codex)?
+            }
+            Some(ProviderAiAction::Doctor { path }) => codex_doctor(path, Provider::Codex)?,
             Some(ProviderAiAction::Resolve {
                 path,
                 exact_cwd,
                 json,
                 query,
             }) => resolve_codex_input(path, query, exact_cwd, json, Provider::Codex)?,
+            Some(ProviderAiAction::Runtime { action }) => {
+                codex_runtime_command(action, Provider::Codex)?
+            }
             Some(ProviderAiAction::Resume { session, path }) => {
                 resume_session(session, path, Provider::Codex)?
             }
@@ -414,6 +560,12 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 count,
                 path,
             }) => copy_context(session, Provider::Codex, count, path)?,
+            Some(ProviderAiAction::Show {
+                session,
+                path,
+                count,
+                full,
+            }) => show_session(session, Provider::Codex, count, path, full)?,
             Some(ProviderAiAction::Recover {
                 path,
                 exact_cwd,
@@ -2742,6 +2894,46 @@ fn get_most_recent_session_id() -> Result<Option<String>> {
     Ok(sessions.first().map(|s| s.session_id.clone()))
 }
 
+fn format_session_ref(session: &AiSession, include_provider: bool) -> String {
+    if !include_provider {
+        return session.session_id.clone();
+    }
+
+    let provider = match session.provider {
+        Provider::Claude => "claude",
+        Provider::Codex => "codex",
+        Provider::Cursor => "cursor",
+        Provider::All => "ai",
+    };
+    format!("{provider}:{}", session.session_id)
+}
+
+fn print_latest_session_id(provider: Provider, path: Option<String>) -> Result<()> {
+    let target = resolve_session_target_path(path.as_deref())?;
+    if provider == Provider::Codex {
+        let rows = read_recent_codex_threads(&target, false, 1, None)?;
+        let Some(row) = rows.first() else {
+            bail!("No Codex sessions found for {}", target.display());
+        };
+        println!("{}", row.id);
+        return Ok(());
+    }
+
+    let sessions = read_sessions_for_path(provider, &target)?;
+    let Some(session) = sessions.first() else {
+        let provider_name = match provider {
+            Provider::Claude => "Claude",
+            Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
+            Provider::All => "AI",
+        };
+        bail!("No {provider_name} sessions found for {}", target.display());
+    };
+
+    println!("{}", format_session_ref(session, false));
+    Ok(())
+}
+
 /// Entry for fzf selection
 struct FzfSessionEntry {
     display: String,
@@ -2925,7 +3117,7 @@ fn run_session_fzf(entries: &[FzfSessionEntry]) -> Result<Option<&FzfSessionEntr
 
 /// Launch a session with the appropriate CLI. Returns true if successful, false if failed.
 fn launch_session(session_id: &str, provider: Provider) -> Result<bool> {
-    launch_session_for_target(session_id, provider, None, None)
+    launch_session_for_target(session_id, provider, None, None, None)
 }
 
 fn launch_session_for_target(
@@ -2933,6 +3125,7 @@ fn launch_session_for_target(
     provider: Provider,
     prompt: Option<&str>,
     target_path: Option<&Path>,
+    runtime_state_path: Option<&str>,
 ) -> Result<bool> {
     let status = match provider {
         Provider::Claude | Provider::All => {
@@ -2951,12 +3144,16 @@ fn launch_session_for_target(
         }
         Provider::Codex => {
             // Codex uses: codex resume --dangerously-bypass-approvals-and-sandbox <session_id> [prompt]
-            let mut command = Command::new("codex");
+            let workdir = target_path
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let mut command = Command::new(configured_codex_bin_for_workdir(&workdir));
             command.arg("resume");
             if let Some(path) = target_path {
                 command.current_dir(path);
             }
             apply_codex_trust_overrides_for(&mut command, target_path);
+            apply_codex_runtime_state_to_command(&mut command, runtime_state_path);
             command
                 .arg("--dangerously-bypass-approvals-and-sandbox")
                 .arg(session_id);
@@ -3073,8 +3270,34 @@ fn apply_codex_trust_overrides_for(command: &mut Command, target_path: Option<&P
     }
 }
 
+fn apply_codex_runtime_state_to_command(command: &mut Command, runtime_state_path: Option<&str>) {
+    if let Some(path) = runtime_state_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.env("FLOW_CODEX_RUNTIME_STATE", path);
+    }
+}
+
+fn codex_runtime_transport_enabled(target_path: &Path) -> bool {
+    if let Ok(value) = env::var("FLOW_CODEX_RUNTIME_TRANSPORT") {
+        let normalized = value.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "1" | "true" | "yes" | "on") {
+            return true;
+        }
+    }
+
+    let bin = configured_codex_bin_for_workdir(target_path);
+    Path::new(&bin)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(bin.as_str())
+        .contains("codex-flow-wrapper")
+}
+
 fn launch_codex_resume_picker() -> Result<bool> {
-    let mut command = Command::new("codex");
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut command = Command::new(configured_codex_bin_for_workdir(&cwd));
     command
         .arg("resume")
         .arg("--dangerously-bypass-approvals-and-sandbox");
@@ -3086,7 +3309,10 @@ fn launch_codex_resume_picker() -> Result<bool> {
 }
 
 fn launch_codex_continue_last_for_target(target_path: Option<&Path>) -> Result<bool> {
-    let mut command = Command::new("codex");
+    let workdir = target_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mut command = Command::new(configured_codex_bin_for_workdir(&workdir));
     command.arg("resume");
     if let Some(path) = target_path {
         command.current_dir(path);
@@ -3175,7 +3401,7 @@ fn continue_session(
             &sess.session_id[..8.min(sess.session_id.len())],
             target.display()
         );
-        if launch_session_for_target(&sess.session_id, sess.provider, None, Some(&target))? {
+        if launch_session_for_target(&sess.session_id, sess.provider, None, Some(&target), None)? {
             return Ok(());
         }
         bail!(
@@ -3227,13 +3453,14 @@ pub fn quick_start_session(provider: Provider) -> Result<()> {
 
 /// Start a new session with dangerous flags (ignores existing sessions).
 fn new_session(provider: Provider) -> Result<()> {
-    new_session_for_target(provider, None, None)
+    new_session_for_target(provider, None, None, None)
 }
 
 fn new_session_for_target(
     provider: Provider,
     prompt: Option<&str>,
     target_path: Option<&Path>,
+    runtime_state_path: Option<&str>,
 ) -> Result<()> {
     let status = match provider {
         Provider::Claude | Provider::All => {
@@ -3247,11 +3474,15 @@ fn new_session_for_target(
                 .with_context(|| "failed to launch claude")?
         }
         Provider::Codex => {
-            let mut command = Command::new("codex");
+            let workdir = target_path
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let mut command = Command::new(configured_codex_bin_for_workdir(&workdir));
             if let Some(path) = target_path {
                 command.current_dir(path);
             }
             apply_codex_trust_overrides_for(&mut command, target_path);
+            apply_codex_runtime_state_to_command(&mut command, runtime_state_path);
             command
                 .arg("--yolo")
                 .arg("--sandbox")
@@ -3496,6 +3727,129 @@ fn extract_codex_session_hint(query: &str) -> Option<String> {
         .find(|token| !looks_like_git_sha(token) && looks_like_codex_session_token(token))
 }
 
+fn extract_codex_session_reference_request(
+    query_text: &str,
+    normalized_query: &str,
+) -> Option<CodexSessionReferenceRequest> {
+    if starts_with_codex_session_lookup_only_phrase(normalized_query) {
+        return None;
+    }
+    let session_hint = extract_codex_session_hint(normalized_query)?;
+    let user_request = extract_codex_session_reference_user_request(query_text, &session_hint)?;
+    let count = extract_codex_session_reference_count(query_text, &session_hint);
+    Some(CodexSessionReferenceRequest {
+        session_hint,
+        count,
+        user_request,
+    })
+}
+
+fn starts_with_codex_session_lookup_only_phrase(query: &str) -> bool {
+    [
+        "open ",
+        "resume ",
+        "continue ",
+        "connect ",
+        "find ",
+        "copy ",
+        "show ",
+    ]
+    .iter()
+    .any(|prefix| query.starts_with(prefix))
+}
+
+fn extract_codex_session_reference_user_request(
+    query_text: &str,
+    session_hint: &str,
+) -> Option<String> {
+    let query_lower = query_text.to_ascii_lowercase();
+    let hint_lower = session_hint.to_ascii_lowercase();
+    let start = query_lower.find(&hint_lower)?;
+    let after_hint = query_text.get(start + session_hint.len()..)?.trim_start();
+    let remainder = strip_codex_session_window_prefix(after_hint)
+        .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '-'))
+        .trim();
+    if remainder.is_empty() {
+        None
+    } else {
+        Some(remainder.to_string())
+    }
+}
+
+fn extract_codex_session_reference_count(query_text: &str, session_hint: &str) -> usize {
+    let query_lower = query_text.to_ascii_lowercase();
+    let hint_lower = session_hint.to_ascii_lowercase();
+    let after_hint = query_lower
+        .find(&hint_lower)
+        .and_then(|start| query_text.get(start + session_hint.len()..))
+        .unwrap_or(query_text);
+    let captures = codex_session_window_regex().captures(after_hint);
+    captures
+        .and_then(|caps| caps.get(1))
+        .and_then(|value| value.as_str().parse::<usize>().ok())
+        .map(|value| value.clamp(1, 50))
+        .unwrap_or(12)
+}
+
+fn strip_codex_session_window_prefix(value: &str) -> &str {
+    if let Some(matched) = codex_session_window_regex().find(value) {
+        &value[matched.end()..]
+    } else {
+        value
+    }
+}
+
+fn codex_session_window_regex() -> &'static Regex {
+    static WINDOW_RE: OnceLock<Regex> = OnceLock::new();
+    WINDOW_RE.get_or_init(|| {
+        Regex::new(r"(?i)^\s*(?:last|past)\s+(\d{1,3})\s+(?:messages?|exchanges?|turns?)\b")
+            .expect("valid session window regex")
+    })
+}
+
+fn resolve_builtin_codex_session_reference(
+    request: &CodexSessionReferenceRequest,
+) -> Result<CodexResolvedReference> {
+    let row = read_codex_threads_by_session_hint(&request.session_hint, 1)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No Codex session found for {}", request.session_hint))?;
+    let excerpt = read_last_context(
+        &row.id,
+        Provider::Codex,
+        request.count,
+        &PathBuf::from(&row.cwd),
+    )?;
+    Ok(CodexResolvedReference {
+        name: "codex-session".to_string(),
+        source: "session".to_string(),
+        matched: row.id.clone(),
+        command: None,
+        output: render_codex_session_reference(&row, request.count, &excerpt),
+    })
+}
+
+fn render_codex_session_reference(row: &CodexRecoverRow, count: usize, excerpt: &str) -> String {
+    let mut lines = vec![
+        format!("- Codex session: {}", row.id),
+        format!("- Repo cwd: {}", row.cwd),
+        format!("- Updated: {}", format_unix_ts(row.updated_at)),
+        format!("- Included excerpt: last {} exchanges", count),
+    ];
+    if let Some(title) = row.title.as_deref() {
+        lines.push(format!("- Title: {}", truncate_recover_text(title)));
+    }
+    if let Some(first) = row.first_user_message.as_deref() {
+        lines.push(format!(
+            "- First user message: {}",
+            truncate_recover_text(first)
+        ));
+    }
+    lines.push("Recent transcript excerpt:".to_string());
+    lines.extend(excerpt.lines().map(str::to_string));
+    compact_codex_context_block(&lines.join("\n"), 32, 3200)
+}
+
 fn codex_sqlite_home() -> Result<PathBuf> {
     if let Some(path) = env::var_os("CODEX_SQLITE_HOME") {
         return Ok(PathBuf::from(path));
@@ -3531,6 +3885,172 @@ fn latest_codex_state_db() -> Result<PathBuf> {
         .context("no Codex state_*.sqlite database found")
 }
 
+fn codex_query_cache_disabled() -> bool {
+    matches!(
+        env::var(CODEX_QUERY_CACHE_ENV_DISABLE)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn codex_query_cache_root() -> Result<PathBuf> {
+    Ok(config::ensure_global_state_dir()?
+        .join("codex")
+        .join("query-cache"))
+}
+
+fn codex_query_cache_entry_count() -> usize {
+    let Ok(root) = codex_query_cache_root() else {
+        return 0;
+    };
+    fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| {
+            entry.path().extension().and_then(|value| value.to_str()) == Some("msgpack")
+        })
+        .count()
+}
+
+fn codex_query_cache_store() -> &'static Mutex<HashMap<PathBuf, CodexQueryCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CodexQueryCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0)
+}
+
+fn codex_state_db_stamp(path: &Path) -> Result<CodexStateDbStamp> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to stat Codex state db {}", path.display()))?;
+    let modified = metadata
+        .modified()
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(CodexStateDbStamp {
+        path: path.display().to_string(),
+        len: metadata.len(),
+        modified_unix_secs: modified,
+    })
+}
+
+fn codex_query_cache_path(
+    stamp: &CodexStateDbStamp,
+    scope: &str,
+    key_material: &str,
+) -> Result<PathBuf> {
+    let hash_input = format!("{}\n{}\n{}", stamp.path, scope, key_material);
+    let hash = blake3::hash(hash_input.as_bytes()).to_hex();
+    Ok(codex_query_cache_root()?.join(format!("{hash}.msgpack")))
+}
+
+fn read_codex_query_cache(path: &Path, stamp: &CodexStateDbStamp) -> Option<Vec<CodexRecoverRow>> {
+    if codex_query_cache_disabled() {
+        return None;
+    }
+
+    if let Ok(cache) = codex_query_cache_store().lock()
+        && let Some(entry) = cache.get(path)
+        && entry.version == CODEX_QUERY_CACHE_VERSION
+        && entry.stamp == *stamp
+    {
+        return Some(entry.rows.clone());
+    }
+
+    let bytes = fs::read(path).ok()?;
+    let entry = rmp_serde::from_slice::<CodexQueryCacheEntry>(&bytes).ok()?;
+    if entry.version != CODEX_QUERY_CACHE_VERSION || entry.stamp != *stamp {
+        return None;
+    }
+
+    if let Ok(mut cache) = codex_query_cache_store().lock() {
+        cache.insert(path.to_path_buf(), entry.clone());
+    }
+    Some(entry.rows)
+}
+
+fn write_codex_query_cache(path: &Path, entry: &CodexQueryCacheEntry) -> Result<()> {
+    if codex_query_cache_disabled() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create Codex query cache dir {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let bytes = rmp_serde::to_vec(entry).context("failed to encode Codex query cache")?;
+    let tmp_path = path.with_extension(format!(
+        "msgpack.tmp.{}.{}",
+        std::process::id(),
+        unix_now_secs()
+    ));
+    fs::write(&tmp_path, bytes)
+        .with_context(|| format!("failed to write Codex query cache {}", tmp_path.display()))?;
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        if path.exists() {
+            let _ = fs::remove_file(path);
+            fs::rename(&tmp_path, path).with_context(|| {
+                format!("failed to finalize Codex query cache {}", path.display())
+            })?;
+        } else {
+            return Err(err).with_context(|| {
+                format!("failed to finalize Codex query cache {}", path.display())
+            });
+        }
+    }
+
+    if let Ok(mut cache) = codex_query_cache_store().lock() {
+        cache.insert(path.to_path_buf(), entry.clone());
+    }
+
+    Ok(())
+}
+
+fn with_codex_query_cache<F>(
+    db_path: &Path,
+    scope: &str,
+    key_material: &str,
+    query: F,
+) -> Result<Vec<CodexRecoverRow>>
+where
+    F: FnOnce(&Connection) -> Result<Vec<CodexRecoverRow>>,
+{
+    let stamp = codex_state_db_stamp(db_path)?;
+    let cache_path = codex_query_cache_path(&stamp, scope, key_material)?;
+    if let Some(rows) = read_codex_query_cache(&cache_path, &stamp) {
+        return Ok(rows);
+    }
+
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+    let rows = query(&conn)?;
+    let entry = CodexQueryCacheEntry {
+        version: CODEX_QUERY_CACHE_VERSION,
+        stamp,
+        rows: rows.clone(),
+    };
+    if let Err(err) = write_codex_query_cache(&cache_path, &entry) {
+        debug!(path = %cache_path.display(), error = %err, "failed to write codex query cache");
+    }
+    Ok(rows)
+}
+
 fn escape_like(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -3544,13 +4064,27 @@ fn read_recent_codex_threads(
     limit: usize,
     query: Option<&str>,
 ) -> Result<Vec<CodexRecoverRow>> {
+    match codexd::query_recent(target_path, exact_cwd, limit, query) {
+        Ok(rows) => Ok(rows),
+        Err(err) => {
+            debug!(error = %err, "codexd recent query failed; falling back to local query");
+            read_recent_codex_threads_local(target_path, exact_cwd, limit, query)
+        }
+    }
+}
+
+pub(crate) fn read_recent_codex_threads_local(
+    target_path: &Path,
+    exact_cwd: bool,
+    limit: usize,
+    query: Option<&str>,
+) -> Result<Vec<CodexRecoverRow>> {
     let db_path = latest_codex_state_db()?;
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("failed to open {}", db_path.display()))?;
 
     let target = target_path.to_string_lossy().to_string();
     let like_target = format!("{}/%", escape_like(&target));
     let fetch_limit = (limit.max(3) * 12).min(120);
+    let cache_key = format!("target={target}\nexact={exact_cwd}\nfetch_limit={fetch_limit}");
 
     let sql_exact = r#"
 select
@@ -3582,37 +4116,39 @@ order by updated_at desc
 limit ?3
 "#;
 
-    let mut rows = if exact_cwd {
-        let mut stmt = conn
-            .prepare(sql_exact)
-            .context("failed to prepare exact recover query")?;
-        let iter = stmt.query_map(params![target, fetch_limit as i64], |row| {
-            Ok(CodexRecoverRow {
-                id: row.get(0)?,
-                updated_at: row.get(1)?,
-                cwd: row.get(2)?,
-                title: row.get(3)?,
-                first_user_message: row.get(4)?,
-                git_branch: row.get(5)?,
-            })
-        })?;
-        iter.collect::<rusqlite::Result<Vec<_>>>()?
-    } else {
-        let mut stmt = conn
-            .prepare(sql_tree)
-            .context("failed to prepare subtree recover query")?;
-        let iter = stmt.query_map(params![target, like_target, fetch_limit as i64], |row| {
-            Ok(CodexRecoverRow {
-                id: row.get(0)?,
-                updated_at: row.get(1)?,
-                cwd: row.get(2)?,
-                title: row.get(3)?,
-                first_user_message: row.get(4)?,
-                git_branch: row.get(5)?,
-            })
-        })?;
-        iter.collect::<rusqlite::Result<Vec<_>>>()?
-    };
+    let mut rows = with_codex_query_cache(&db_path, "recent", &cache_key, |conn| {
+        if exact_cwd {
+            let mut stmt = conn
+                .prepare(sql_exact)
+                .context("failed to prepare exact recover query")?;
+            let iter = stmt.query_map(params![target, fetch_limit as i64], |row| {
+                Ok(CodexRecoverRow {
+                    id: row.get(0)?,
+                    updated_at: row.get(1)?,
+                    cwd: row.get(2)?,
+                    title: row.get(3)?,
+                    first_user_message: row.get(4)?,
+                    git_branch: row.get(5)?,
+                })
+            })?;
+            Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
+        } else {
+            let mut stmt = conn
+                .prepare(sql_tree)
+                .context("failed to prepare subtree recover query")?;
+            let iter = stmt.query_map(params![target, like_target, fetch_limit as i64], |row| {
+                Ok(CodexRecoverRow {
+                    id: row.get(0)?,
+                    updated_at: row.get(1)?,
+                    cwd: row.get(2)?,
+                    title: row.get(3)?,
+                    first_user_message: row.get(4)?,
+                    git_branch: row.get(5)?,
+                })
+            })?;
+            Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
+        }
+    })?;
 
     rank_recover_rows(&mut rows, query);
     rows.truncate(limit.max(1));
@@ -3623,13 +4159,28 @@ fn read_codex_threads_by_session_hint(
     session_hint: &str,
     limit: usize,
 ) -> Result<Vec<CodexRecoverRow>> {
+    match codexd::query_session_hint(session_hint, limit) {
+        Ok(rows) => Ok(rows),
+        Err(err) => {
+            debug!(
+                error = %err,
+                "codexd session hint query failed; falling back to local query"
+            );
+            read_codex_threads_by_session_hint_local(session_hint, limit)
+        }
+    }
+}
+
+pub(crate) fn read_codex_threads_by_session_hint_local(
+    session_hint: &str,
+    limit: usize,
+) -> Result<Vec<CodexRecoverRow>> {
     let db_path = latest_codex_state_db()?;
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("failed to open {}", db_path.display()))?;
     let normalized_hint = session_hint.trim().to_ascii_lowercase();
     if normalized_hint.is_empty() {
         return Ok(vec![]);
     }
+    let cache_key = format!("hint={normalized_hint}\nlimit={}", limit.max(1));
 
     let sql = r#"
 select
@@ -3648,27 +4199,44 @@ order by
 limit ?3
 "#;
 
-    let mut stmt = conn
-        .prepare(sql)
-        .context("failed to prepare explicit session recover query")?;
     let prefix_like = format!("{}%", escape_like(&normalized_hint));
-    let iter = stmt.query_map(
-        params![normalized_hint, prefix_like, limit.max(1) as i64],
-        |row| {
-            Ok(CodexRecoverRow {
-                id: row.get(0)?,
-                updated_at: row.get(1)?,
-                cwd: row.get(2)?,
-                title: row.get(3)?,
-                first_user_message: row.get(4)?,
-                git_branch: row.get(5)?,
-            })
-        },
-    )?;
-    Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
+    with_codex_query_cache(&db_path, "session-hint", &cache_key, |conn| {
+        let mut stmt = conn
+            .prepare(sql)
+            .context("failed to prepare explicit session recover query")?;
+        let iter = stmt.query_map(
+            params![normalized_hint, prefix_like, limit.max(1) as i64],
+            |row| {
+                Ok(CodexRecoverRow {
+                    id: row.get(0)?,
+                    updated_at: row.get(1)?,
+                    cwd: row.get(2)?,
+                    title: row.get(3)?,
+                    first_user_message: row.get(4)?,
+                    git_branch: row.get(5)?,
+                })
+            },
+        )?;
+        Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
+    })
 }
 
 fn search_codex_threads_for_find(
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<CodexRecoverRow>> {
+    match codexd::query_find(target_path, exact_cwd, query, limit) {
+        Ok(rows) => Ok(rows),
+        Err(err) => {
+            debug!(error = %err, "codexd find query failed; falling back to local query");
+            search_codex_threads_for_find_local(target_path, exact_cwd, query, limit)
+        }
+    }
+}
+
+pub(crate) fn search_codex_threads_for_find_local(
     target_path: Option<&Path>,
     exact_cwd: bool,
     query: &str,
@@ -3680,15 +4248,13 @@ fn search_codex_threads_for_find(
     }
 
     if let Some(session_hint) = extract_codex_session_hint(&normalized_query) {
-        let rows = read_codex_threads_by_session_hint(&session_hint, limit.max(1))?;
+        let rows = read_codex_threads_by_session_hint_local(&session_hint, limit.max(1))?;
         if !rows.is_empty() {
             return Ok(rows);
         }
     }
 
     let db_path = latest_codex_state_db()?;
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("failed to open {}", db_path.display()))?;
 
     let mut sql = String::from(
         r#"
@@ -3735,22 +4301,30 @@ where archived = 0
     sql.push_str("order by updated_at desc\nlimit ?\n");
     let fetch_limit = (limit.max(5) * 20).min(200);
     params_vec.push(Box::new(fetch_limit as i64));
-
-    let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
-    let mut stmt = conn
-        .prepare(&sql)
-        .context("failed to prepare Codex find query")?;
-    let iter = stmt.query_map(params_refs.as_slice(), |row| {
-        Ok(CodexRecoverRow {
-            id: row.get(0)?,
-            updated_at: row.get(1)?,
-            cwd: row.get(2)?,
-            title: row.get(3)?,
-            first_user_message: row.get(4)?,
-            git_branch: row.get(5)?,
-        })
+    let scope_target = target_path
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let cache_key = format!(
+        "query={normalized_query}\nexact={exact_cwd}\ntarget={scope_target}\nfetch_limit={fetch_limit}"
+    );
+    let mut rows = with_codex_query_cache(&db_path, "find", &cache_key, |conn| {
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn
+            .prepare(&sql)
+            .context("failed to prepare Codex find query")?;
+        let iter = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok(CodexRecoverRow {
+                id: row.get(0)?,
+                updated_at: row.get(1)?,
+                cwd: row.get(2)?,
+                title: row.get(3)?,
+                first_user_message: row.get(4)?,
+                git_branch: row.get(5)?,
+            })
+        })?;
+        Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
     })?;
-    let mut rows = iter.collect::<rusqlite::Result<Vec<_>>>()?;
     rank_recover_rows(&mut rows, Some(&normalized_query));
     rows.truncate(limit.max(1));
     Ok(rows)
@@ -4057,7 +4631,79 @@ fn open_codex_session(
     ensure_provider_tty(Provider::Codex, "open")?;
 
     let plan = build_codex_open_plan(path, query, exact_cwd)?;
+    record_codex_open_plan(&plan, "open");
     execute_codex_open_plan(&plan)
+}
+
+fn connect_codex_session(
+    path: Option<String>,
+    query: Vec<String>,
+    exact_cwd: bool,
+    json_output: bool,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("connect is only supported for Codex sessions; use `f codex connect ...`");
+    }
+
+    let target_path = resolve_codex_connect_target_path(path)?;
+    let query_text = query.join(" ").trim().to_string();
+    let normalized_query = query_text.to_ascii_lowercase();
+    let resolved = if query_text.is_empty() {
+        read_recent_codex_threads(&target_path, exact_cwd, 1, None)?
+            .into_iter()
+            .next()
+            .map(|row| (row, "latest recent session".to_string()))
+    } else {
+        resolve_codex_session_lookup(&target_path, exact_cwd, &query_text, &normalized_query)?
+    };
+
+    let Some((row, reason)) = resolved else {
+        if query_text.is_empty() {
+            bail!("No Codex sessions found for {}", target_path.display());
+        }
+        bail!(
+            "{}",
+            build_codex_open_no_match_message(&target_path, exact_cwd, &query_text)?
+        );
+    };
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "id": row.id,
+                "cwd": row.cwd,
+                "updatedAtUnix": row.updated_at,
+                "title": row.title,
+                "firstUserMessage": row.first_user_message,
+                "gitBranch": row.git_branch,
+                "reason": reason,
+                "targetPath": target_path.display().to_string(),
+                "exactCwd": exact_cwd,
+                "query": if query_text.is_empty() { None::<String> } else { Some(query_text) },
+            }))
+            .context("failed to encode codex connect JSON")?
+        );
+        return Ok(());
+    }
+
+    ensure_provider_tty(Provider::Codex, "connect")?;
+    let launch_path = PathBuf::from(&row.cwd);
+    println!(
+        "Resuming session {} from {}...",
+        &row.id[..8.min(row.id.len())],
+        launch_path.display()
+    );
+    if launch_session_for_target(&row.id, Provider::Codex, None, Some(&launch_path), None)? {
+        return Ok(());
+    }
+
+    bail!(
+        "failed to connect to codex session {} for {}",
+        row.id,
+        launch_path.display()
+    )
 }
 
 fn resolve_codex_input(
@@ -4073,6 +4719,7 @@ fn resolve_codex_input(
 
     let (query, json_output) = normalize_codex_resolve_args(query, json_output);
     let plan = build_codex_open_plan(path, query, exact_cwd)?;
+    record_codex_open_plan(&plan, "resolve");
     if json_output {
         println!(
             "{}",
@@ -4082,6 +4729,325 @@ fn resolve_codex_input(
     }
 
     print_codex_open_plan(&plan);
+    Ok(())
+}
+
+fn codex_doctor(path: Option<String>, provider: Provider) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("doctor is only supported for Codex sessions; use `f codex doctor`");
+    }
+
+    let target_path = resolve_session_target_path(path.as_deref())?;
+    let codex_cfg = load_codex_config_for_path(&target_path);
+    let runtime_transport = codex_runtime_transport_enabled(&target_path);
+    let runtime_states = codex_runtime::load_runtime_states()?;
+    let active_runtime_states = runtime_states
+        .iter()
+        .filter(|state| state.target_path == target_path.display().to_string())
+        .count();
+    let codex_bin = configured_codex_bin_for_workdir(&target_path);
+    let codexd_socket = codexd::socket_path()?;
+    let codexd_running = codexd::is_running();
+
+    println!("# codex doctor");
+    println!("target: {}", target_path.display());
+    println!("codex_bin: {}", codex_bin);
+    println!(
+        "codexd: {}",
+        if codexd_running { "running" } else { "stopped" }
+    );
+    println!("codexd_socket: {}", codexd_socket.display());
+    println!(
+        "runtime_transport: {}",
+        if runtime_transport {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "runtime_skills: {}",
+        if codex_cfg.runtime_skills.unwrap_or(false) && runtime_transport {
+            "enabled"
+        } else if codex_cfg.runtime_skills.unwrap_or(false) {
+            "configured-but-inactive"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "auto_resolve_references: {}",
+        codex_cfg.auto_resolve_references.unwrap_or(true)
+    );
+    println!(
+        "home_session_path: {}",
+        codex_cfg
+            .home_session_path
+            .as_deref()
+            .map(config::expand_path)
+            .unwrap_or_else(default_codex_connect_path)
+            .display()
+    );
+    println!(
+        "prompt_context_budget_chars: {}",
+        effective_prompt_context_budget_chars(&codex_cfg, false)
+    );
+    println!(
+        "max_resolved_references: {}",
+        effective_max_resolved_references(&codex_cfg)
+    );
+    println!(
+        "reference_resolvers: {}",
+        codex_cfg.reference_resolvers.len()
+    );
+    println!(
+        "query_cache: {}",
+        if codex_query_cache_disabled() {
+            "disabled"
+        } else {
+            "enabled"
+        }
+    );
+    println!(
+        "query_cache_entries_on_disk: {}",
+        codex_query_cache_entry_count()
+    );
+    println!(
+        "skill_eval_events_on_disk: {}",
+        codex_skill_eval::event_count()
+    );
+    println!(
+        "skill_eval_outcomes_on_disk: {}",
+        codex_skill_eval::outcome_count()
+    );
+    match codex_skill_eval::load_scorecard(&target_path)? {
+        Some(scorecard) => {
+            println!("skill_scorecard_samples: {}", scorecard.samples);
+            println!("skill_scorecard_entries: {}", scorecard.skills.len());
+            if let Some(top) = scorecard.skills.first() {
+                println!("skill_scorecard_top: {} ({:.2})", top.name, top.score);
+            }
+        }
+        None => {
+            println!("skill_scorecard_samples: 0");
+            println!("skill_scorecard_entries: 0");
+        }
+    }
+    let discovered_skills = codex_runtime::discover_external_skills(&target_path, &codex_cfg)?;
+    println!("external_skill_candidates: {}", discovered_skills.len());
+    println!("runtime_state_files: {}", runtime_states.len());
+    println!("runtime_state_files_for_target: {}", active_runtime_states);
+    Ok(())
+}
+
+fn codex_daemon_command(action: Option<CodexDaemonAction>, provider: Provider) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("daemon is only supported for Codex sessions; use `f codex daemon ...`");
+    }
+
+    match action.unwrap_or(CodexDaemonAction::Status) {
+        CodexDaemonAction::Start => codexd::start(),
+        CodexDaemonAction::Stop => codexd::stop(),
+        CodexDaemonAction::Restart => {
+            codexd::stop().ok();
+            std::thread::sleep(Duration::from_millis(300));
+            codexd::start()
+        }
+        CodexDaemonAction::Status => codexd::status(),
+        CodexDaemonAction::Serve { socket } => codexd::serve(socket.as_deref()),
+        CodexDaemonAction::Ping => codexd::ping(),
+    }
+}
+
+fn codex_skill_eval_command(
+    action: Option<CodexSkillEvalAction>,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("skill-eval is only supported for Codex sessions; use `f codex skill-eval ...`");
+    }
+
+    match action.unwrap_or(CodexSkillEvalAction::Show {
+        path: None,
+        json: false,
+    }) {
+        CodexSkillEvalAction::Run { path, limit, json } => {
+            let target_path = resolve_session_target_path(path.as_deref())?;
+            let scorecard = codex_skill_eval::rebuild_scorecard(&target_path, limit)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&scorecard)
+                        .context("failed to encode codex skill-eval JSON")?
+                );
+            } else {
+                println!("{}", codex_skill_eval::format_scorecard(&scorecard));
+            }
+            Ok(())
+        }
+        CodexSkillEvalAction::Show { path, json } => {
+            let target_path = resolve_session_target_path(path.as_deref())?;
+            let scorecard = codex_skill_eval::load_scorecard(&target_path)?
+                .unwrap_or(codex_skill_eval::rebuild_scorecard(&target_path, 200)?);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&scorecard)
+                        .context("failed to encode codex skill-eval JSON")?
+                );
+            } else {
+                println!("{}", codex_skill_eval::format_scorecard(&scorecard));
+            }
+            Ok(())
+        }
+        CodexSkillEvalAction::Events { path, limit, json } => {
+            let target_path = path
+                .as_deref()
+                .map(|value| resolve_session_target_path(Some(value)))
+                .transpose()?;
+            let events = codex_skill_eval::load_events(target_path.as_deref(), limit)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&events)
+                        .context("failed to encode codex skill-eval events JSON")?
+                );
+            } else if events.is_empty() {
+                println!("No codex skill-eval events recorded.");
+            } else {
+                println!("# codex skill-eval events");
+                for event in events {
+                    println!(
+                        "- {} | {} | {} | skills {}",
+                        event.mode,
+                        event.route,
+                        event.target_path,
+                        if event.runtime_skills.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            event.runtime_skills.join(", ")
+                        }
+                    );
+                }
+            }
+            Ok(())
+        }
+        CodexSkillEvalAction::Cron {
+            limit,
+            max_targets,
+            within_hours,
+            json,
+        } => {
+            let targets = codex_skill_eval::recent_targets(limit, max_targets, within_hours)?;
+            let mut scorecards = Vec::new();
+            for target in targets {
+                scorecards.push(codex_skill_eval::rebuild_scorecard(&target, limit)?);
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&scorecards)
+                        .context("failed to encode codex skill-eval cron JSON")?
+                );
+            } else if scorecards.is_empty() {
+                println!("No recent Codex skill-eval targets found.");
+            } else {
+                println!("# codex skill-eval cron");
+                for scorecard in scorecards {
+                    let top = scorecard
+                        .skills
+                        .first()
+                        .map(|skill| format!("{} ({:.2})", skill.name, skill.score))
+                        .unwrap_or_else(|| "none".to_string());
+                    println!(
+                        "- {} | samples {} | top {}",
+                        scorecard.target_path, scorecard.samples, top
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn codex_skill_source_command(
+    action: Option<CodexSkillSourceAction>,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("skill-source is only supported for Codex sessions; use `f codex skill-source ...`");
+    }
+
+    match action.unwrap_or(CodexSkillSourceAction::List {
+        path: None,
+        json: false,
+    }) {
+        CodexSkillSourceAction::List { path, json } => {
+            let target_path = resolve_session_target_path(path.as_deref())?;
+            let codex_cfg = load_codex_config_for_path(&target_path);
+            let skills = codex_runtime::discover_external_skills(&target_path, &codex_cfg)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&skills)
+                        .context("failed to encode codex skill-source JSON")?
+                );
+            } else {
+                println!("{}", codex_runtime::format_external_skills(&skills));
+            }
+            Ok(())
+        }
+        CodexSkillSourceAction::Sync {
+            path,
+            skills,
+            force,
+        } => {
+            let target_path = resolve_session_target_path(path.as_deref())?;
+            let codex_cfg = load_codex_config_for_path(&target_path);
+            let installed =
+                codex_runtime::sync_external_skills(&target_path, &codex_cfg, &skills, force)?;
+            println!(
+                "Synced {} external Codex skill(s) into ~/.codex/skills.",
+                installed
+            );
+            Ok(())
+        }
+    }
+}
+
+fn codex_runtime_command(action: Option<CodexRuntimeAction>, provider: Provider) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("runtime helpers are only supported for Codex sessions; use `f codex runtime ...`");
+    }
+
+    match action.unwrap_or(CodexRuntimeAction::Show) {
+        CodexRuntimeAction::Show => {
+            let states = codex_runtime::load_runtime_states()?;
+            println!("{}", codex_runtime::format_runtime_states(&states));
+        }
+        CodexRuntimeAction::Clear => {
+            let removed = codex_runtime::clear_runtime_states()?;
+            println!(
+                "Cleared {} Flow-managed Codex runtime state file(s).",
+                removed
+            );
+        }
+        CodexRuntimeAction::WritePlan {
+            title,
+            stem,
+            dir,
+            source_session,
+        } => {
+            let path = codex_runtime::write_plan_from_stdin(
+                title.as_deref(),
+                stem.as_deref(),
+                dir.as_deref(),
+                source_session.as_deref(),
+            )?;
+            println!("{}", path.display());
+        }
+    }
+
     Ok(())
 }
 
@@ -4109,31 +5075,103 @@ fn build_codex_open_plan(
     let query_text = normalize_recover_query(&query);
     let codex_cfg = load_codex_config_for_path(&target_path);
     let auto_resolve_references = codex_cfg.auto_resolve_references.unwrap_or(true);
+    let max_resolved_references = effective_max_resolved_references(&codex_cfg);
+    let runtime_skills_enabled =
+        codex_cfg.runtime_skills.unwrap_or(false) && codex_runtime_transport_enabled(&target_path);
+    let default_prompt_budget = effective_prompt_context_budget_chars(&codex_cfg, false);
 
     let Some(query_text) = query_text else {
-        return Ok(CodexOpenPlan {
+        let prompt = None;
+        return Ok(finalize_codex_open_plan(CodexOpenPlan {
             action: "new".to_string(),
+            route: "new-empty".to_string(),
             reason: "no query provided".to_string(),
             target_path: target_path.display().to_string(),
             launch_path: target_path.display().to_string(),
             query: None,
             session_id: None,
-            prompt: None,
+            prompt,
             references: Vec::new(),
-        });
+            runtime_state_path: None,
+            runtime_skills: Vec::new(),
+            prompt_context_budget_chars: default_prompt_budget,
+            max_resolved_references,
+            prompt_chars: 0,
+            injected_context_chars: 0,
+        }));
     };
 
     let normalized_query = query_text.to_ascii_lowercase();
 
+    if let Some(request) = extract_codex_session_reference_request(&query_text, &normalized_query) {
+        let mut references = vec![resolve_builtin_codex_session_reference(&request)?];
+        if auto_resolve_references {
+            let extra_references = resolve_codex_references(
+                &target_path,
+                &request.user_request,
+                &codex_cfg.reference_resolvers,
+            )?;
+            for reference in extra_references {
+                if !references
+                    .iter()
+                    .any(|existing| existing.matched == reference.matched)
+                {
+                    references.push(reference);
+                }
+            }
+        }
+        let runtime = codex_runtime::prepare_runtime_activation(
+            &target_path,
+            &request.user_request,
+            runtime_skills_enabled,
+            &codex_cfg,
+        )?;
+        let prompt_budget = effective_prompt_context_budget_chars(&codex_cfg, true);
+        let prompt = build_codex_prompt_with_runtime(
+            &request.user_request,
+            &references,
+            runtime.as_ref(),
+            max_resolved_references,
+            prompt_budget,
+        );
+        return Ok(finalize_codex_open_plan(CodexOpenPlan {
+            action: "new".to_string(),
+            route: "reference-new".to_string(),
+            reason: "start a new session with resolved Codex session context".to_string(),
+            target_path: target_path.display().to_string(),
+            launch_path: target_path.display().to_string(),
+            query: Some(query_text),
+            session_id: None,
+            prompt,
+            references,
+            runtime_state_path: runtime
+                .as_ref()
+                .map(|value| value.state_path.display().to_string()),
+            runtime_skills: runtime_skill_names(runtime.as_ref()),
+            prompt_context_budget_chars: prompt_budget,
+            max_resolved_references,
+            prompt_chars: 0,
+            injected_context_chars: 0,
+        }));
+    }
+
     if looks_like_recovery_prompt(&normalized_query) {
-        return build_codex_recovery_plan(&target_path, exact_cwd, &query_text);
+        return build_codex_recovery_plan(
+            &target_path,
+            exact_cwd,
+            &query_text,
+            runtime_skills_enabled,
+            default_prompt_budget,
+            max_resolved_references,
+        );
     }
 
     if let Some((session, reason)) =
         resolve_codex_session_lookup(&target_path, exact_cwd, &query_text, &normalized_query)?
     {
-        return Ok(CodexOpenPlan {
+        return Ok(finalize_codex_open_plan(CodexOpenPlan {
             action: "resume".to_string(),
+            route: "resume-existing".to_string(),
             reason,
             target_path: target_path.display().to_string(),
             launch_path: session.cwd.clone(),
@@ -4141,7 +5179,13 @@ fn build_codex_open_plan(
             session_id: Some(session.id),
             prompt: None,
             references: Vec::new(),
-        });
+            runtime_state_path: None,
+            runtime_skills: Vec::new(),
+            prompt_context_budget_chars: default_prompt_budget,
+            max_resolved_references,
+            prompt_chars: 0,
+            injected_context_chars: 0,
+        }));
     }
 
     if looks_like_session_lookup_query(&normalized_query) {
@@ -4156,10 +5200,29 @@ fn build_codex_open_plan(
     } else {
         Vec::new()
     };
-    let prompt = build_codex_prompt(&query_text, &references);
+    let runtime = codex_runtime::prepare_runtime_activation(
+        &target_path,
+        &query_text,
+        runtime_skills_enabled,
+        &codex_cfg,
+    )?;
+    let prompt_budget =
+        effective_prompt_context_budget_chars(&codex_cfg, has_session_reference(&references));
+    let prompt = build_codex_prompt_with_runtime(
+        &query_text,
+        &references,
+        runtime.as_ref(),
+        max_resolved_references,
+        prompt_budget,
+    );
 
-    Ok(CodexOpenPlan {
+    Ok(finalize_codex_open_plan(CodexOpenPlan {
         action: "new".to_string(),
+        route: if references.is_empty() {
+            "new-plain".to_string()
+        } else {
+            "new-with-context".to_string()
+        },
         reason: if references.is_empty() {
             "start a new session from the current query".to_string()
         } else {
@@ -4171,7 +5234,15 @@ fn build_codex_open_plan(
         session_id: None,
         prompt,
         references,
-    })
+        runtime_state_path: runtime
+            .as_ref()
+            .map(|value| value.state_path.display().to_string()),
+        runtime_skills: runtime_skill_names(runtime.as_ref()),
+        prompt_context_budget_chars: prompt_budget,
+        max_resolved_references,
+        prompt_chars: 0,
+        injected_context_chars: 0,
+    }))
 }
 
 fn execute_codex_open_plan(plan: &CodexOpenPlan) -> Result<()> {
@@ -4192,6 +5263,7 @@ fn execute_codex_open_plan(plan: &CodexOpenPlan) -> Result<()> {
                 Provider::Codex,
                 plan.prompt.as_deref(),
                 Some(&launch_path),
+                plan.runtime_state_path.as_deref(),
             )? {
                 Ok(())
             } else {
@@ -4200,7 +5272,12 @@ fn execute_codex_open_plan(plan: &CodexOpenPlan) -> Result<()> {
         }
         "new" | "recover-new" => {
             println!("Starting Codex in {}...", launch_path.display());
-            new_session_for_target(Provider::Codex, plan.prompt.as_deref(), Some(&launch_path))
+            new_session_for_target(
+                Provider::Codex,
+                plan.prompt.as_deref(),
+                Some(&launch_path),
+                plan.runtime_state_path.as_deref(),
+            )
         }
         other => bail!("unsupported codex open action: {}", other),
     }
@@ -4209,9 +5286,14 @@ fn execute_codex_open_plan(plan: &CodexOpenPlan) -> Result<()> {
 fn print_codex_open_plan(plan: &CodexOpenPlan) {
     println!("# codex resolve");
     println!("action: {}", plan.action);
+    println!("route: {}", plan.route);
     println!("reason: {}", plan.reason);
     println!("target: {}", plan.target_path);
     println!("launch: {}", plan.launch_path);
+    println!(
+        "budget: {} chars, {} reference(s)",
+        plan.prompt_context_budget_chars, plan.max_resolved_references
+    );
     if let Some(session_id) = plan.session_id.as_deref() {
         println!("session: {}", truncate_recover_id(session_id));
     }
@@ -4224,10 +5306,59 @@ fn print_codex_open_plan(plan: &CodexOpenPlan) {
             );
         }
     }
+    if !plan.runtime_skills.is_empty() {
+        println!("runtime:");
+        for skill in &plan.runtime_skills {
+            println!("- {}", skill);
+        }
+        if let Some(path) = plan.runtime_state_path.as_deref() {
+            println!("runtime_state: {}", path);
+        }
+    }
     if let Some(prompt) = plan.prompt.as_deref() {
+        println!("prompt_chars: {}", plan.prompt_chars);
+        println!("injected_context_chars: {}", plan.injected_context_chars);
         println!("prompt:");
         println!("{}", compact_codex_context_block(prompt, 12, 900));
     }
+}
+
+fn record_codex_open_plan(plan: &CodexOpenPlan, mode: &str) {
+    let Some(query) = plan
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    let event = codex_skill_eval::CodexSkillEvalEvent {
+        version: 1,
+        recorded_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or(0),
+        mode: mode.to_string(),
+        action: plan.action.clone(),
+        route: plan.route.clone(),
+        target_path: plan.target_path.clone(),
+        launch_path: plan.launch_path.clone(),
+        query: query.to_string(),
+        runtime_token: plan.runtime_state_path.as_deref().and_then(|path| {
+            Path::new(path)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_string())
+        }),
+        runtime_skills: plan.runtime_skills.clone(),
+        prompt_context_budget_chars: plan.prompt_context_budget_chars,
+        prompt_chars: plan.prompt_chars,
+        injected_context_chars: plan.injected_context_chars,
+        reference_count: plan.references.len(),
+    };
+
+    let _ = codex_skill_eval::log_event(&event);
 }
 
 fn load_codex_config_for_path(target_path: &Path) -> config::CodexConfig {
@@ -4252,6 +5383,36 @@ fn load_codex_config_for_path(target_path: &Path) -> config::CodexConfig {
     resolved
 }
 
+fn default_codex_connect_path() -> PathBuf {
+    let seed = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cfg = load_codex_config_for_path(&seed);
+    if let Some(path) = cfg
+        .home_session_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return config::expand_path(path);
+    }
+
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join("repos")
+        .join("openai")
+        .join("codex")
+}
+
+fn resolve_codex_connect_target_path(path: Option<String>) -> Result<PathBuf> {
+    match path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => resolve_session_target_path(Some(value)),
+        None => Ok(default_codex_connect_path()),
+    }
+}
+
 fn looks_like_recovery_prompt(normalized_query: &str) -> bool {
     normalized_query.contains("see this convo")
         || normalized_query.contains("what was i doing")
@@ -4266,12 +5427,17 @@ fn looks_like_recovery_prompt(normalized_query: &str) -> bool {
 
 fn looks_like_session_lookup_query(normalized_query: &str) -> bool {
     extract_codex_session_hint(normalized_query).is_some()
-        || normalized_query.contains("after")
-        || normalized_query.contains("before")
+        || looks_like_directional_session_query(normalized_query)
         || parse_ordinal_index(normalized_query).is_some()
         || looks_like_latest_query(normalized_query)
         || (contains_lookup_subject(normalized_query)
             && starts_with_session_control_phrase(normalized_query))
+}
+
+fn looks_like_directional_session_query(query: &str) -> bool {
+    let has_direction = find_word_boundary(query, "after").is_some()
+        || find_word_boundary(query, "before").is_some();
+    has_direction && (contains_lookup_subject(query) || starts_with_session_control_phrase(query))
 }
 
 fn contains_lookup_subject(query: &str) -> bool {
@@ -4356,6 +5522,9 @@ fn resolve_directional_session_lookup(
     exact_cwd: bool,
     normalized_query: &str,
 ) -> Result<Option<(CodexRecoverRow, String)>> {
+    if !looks_like_directional_session_query(normalized_query) {
+        return Ok(None);
+    }
     let Some((direction, anchor_text)) = split_directional_query(normalized_query) else {
         return Ok(None);
     };
@@ -4508,6 +5677,9 @@ fn build_codex_recovery_plan(
     target_path: &Path,
     exact_cwd: bool,
     query_text: &str,
+    runtime_skills_enabled: bool,
+    prompt_context_budget_chars: usize,
+    max_resolved_references: usize,
 ) -> Result<CodexOpenPlan> {
     let rows = read_recent_codex_threads(target_path, exact_cwd, 3, Some(query_text))?;
     let output = build_recover_output(target_path, exact_cwd, Some(query_text.to_string()), rows);
@@ -4521,20 +5693,44 @@ fn build_codex_recovery_plan(
         bail!("{}", output.summary);
     }
 
-    let prompt = build_recovery_prompt(query_text, &output);
-    Ok(CodexOpenPlan {
+    let recovery_prompt = build_recovery_prompt(query_text, &output, prompt_context_budget_chars);
+    let codex_cfg = load_codex_config_for_path(target_path);
+    let runtime = codex_runtime::prepare_runtime_activation(
+        target_path,
+        query_text,
+        runtime_skills_enabled,
+        &codex_cfg,
+    )?;
+    let prompt = runtime
+        .as_ref()
+        .map(|value| value.inject_into_prompt(&recovery_prompt))
+        .or(Some(recovery_prompt));
+    Ok(finalize_codex_open_plan(CodexOpenPlan {
         action: "recover-new".to_string(),
+        route: "recover-new".to_string(),
         reason: "explicit recovery prompt".to_string(),
         target_path: target_path.display().to_string(),
         launch_path,
         query: Some(query_text.to_string()),
         session_id: None,
-        prompt: Some(prompt),
+        prompt,
         references: Vec::new(),
-    })
+        runtime_state_path: runtime
+            .as_ref()
+            .map(|value| value.state_path.display().to_string()),
+        runtime_skills: runtime_skill_names(runtime.as_ref()),
+        prompt_context_budget_chars,
+        max_resolved_references,
+        prompt_chars: 0,
+        injected_context_chars: 0,
+    }))
 }
 
-fn build_recovery_prompt(query_text: &str, output: &CodexRecoverOutput) -> String {
+fn build_recovery_prompt(
+    query_text: &str,
+    output: &CodexRecoverOutput,
+    max_chars: usize,
+) -> String {
     let mut lines = vec!["Recovered recent Codex context:".to_string()];
     for candidate in output.candidates.iter().take(2) {
         let preview = candidate
@@ -4554,7 +5750,7 @@ fn build_recovery_prompt(query_text: &str, output: &CodexRecoverOutput) -> Strin
     lines.push(String::new());
     lines.push("User request:".to_string());
     lines.push(query_text.trim().to_string());
-    compact_codex_context_block(&lines.join("\n"), 10, 1100)
+    compact_codex_context_block(&lines.join("\n"), 10, max_chars)
 }
 
 fn build_codex_open_no_match_message(
@@ -4884,7 +6080,12 @@ fn render_linear_url_reference(reference: &LinearUrlReference) -> String {
     compact_codex_context_block(&lines.join("\n"), 8, 700)
 }
 
-fn build_codex_prompt(query_text: &str, references: &[CodexResolvedReference]) -> Option<String> {
+fn build_codex_prompt(
+    query_text: &str,
+    references: &[CodexResolvedReference],
+    max_resolved_references: usize,
+    max_chars: usize,
+) -> Option<String> {
     let trimmed_query = query_text.trim();
     if references.is_empty() {
         if trimmed_query.is_empty() {
@@ -4894,16 +6095,110 @@ fn build_codex_prompt(query_text: &str, references: &[CodexResolvedReference]) -
     }
 
     let mut lines = vec!["Resolved context:".to_string()];
-    for reference in references.iter().take(2) {
+    let selected: Vec<_> = references.iter().take(max_resolved_references).collect();
+    for (index, reference) in selected.iter().enumerate() {
+        let current_chars = lines.iter().map(|line| line.chars().count()).sum::<usize>();
+        let query_reserve = if trimmed_query.is_empty() {
+            0
+        } else {
+            trimmed_query.chars().count() + "User request:".chars().count() + 8
+        };
+        let remaining = max_chars.saturating_sub(current_chars + query_reserve);
+        if remaining < 80 {
+            break;
+        }
+        let refs_left = selected.len().saturating_sub(index).max(1);
+        let per_ref_budget = (remaining / refs_left).clamp(120, max_chars.max(120));
         lines.push(format!("[{}]", reference.name));
-        lines.push(reference.output.clone());
+        lines.push(compact_codex_context_block(
+            &reference.output,
+            8,
+            per_ref_budget,
+        ));
     }
     if !trimmed_query.is_empty() {
         lines.push(String::new());
         lines.push("User request:".to_string());
         lines.push(trimmed_query.to_string());
     }
-    Some(compact_codex_context_block(&lines.join("\n"), 16, 1500))
+    let (max_lines, max_chars) = if has_session_reference(references) {
+        (24, max_chars)
+    } else {
+        (14, max_chars)
+    };
+    Some(compact_codex_context_block(
+        &lines.join("\n"),
+        max_lines,
+        max_chars,
+    ))
+}
+
+fn build_codex_prompt_with_runtime(
+    query_text: &str,
+    references: &[CodexResolvedReference],
+    runtime: Option<&codex_runtime::CodexRuntimeActivation>,
+    max_resolved_references: usize,
+    max_chars: usize,
+) -> Option<String> {
+    let prompt = build_codex_prompt(query_text, references, max_resolved_references, max_chars)?;
+    Some(
+        runtime
+            .map(|value| value.inject_into_prompt(&prompt))
+            .unwrap_or(prompt),
+    )
+}
+
+fn has_session_reference(references: &[CodexResolvedReference]) -> bool {
+    references
+        .iter()
+        .any(|reference| reference.source == "session")
+}
+
+fn effective_max_resolved_references(codex_cfg: &config::CodexConfig) -> usize {
+    codex_cfg.max_resolved_references.unwrap_or(2).clamp(1, 6)
+}
+
+fn effective_prompt_context_budget_chars(
+    codex_cfg: &config::CodexConfig,
+    has_session_reference: bool,
+) -> usize {
+    codex_cfg
+        .prompt_context_budget_chars
+        .unwrap_or(if has_session_reference { 2200 } else { 1200 })
+        .clamp(300, 12_000)
+}
+
+fn finalize_codex_open_plan(mut plan: CodexOpenPlan) -> CodexOpenPlan {
+    plan.prompt_chars = plan
+        .prompt
+        .as_deref()
+        .map(|value| value.chars().count())
+        .unwrap_or(0);
+    let query_chars = plan
+        .query
+        .as_deref()
+        .map(str::trim)
+        .map(|value| value.chars().count())
+        .unwrap_or(0);
+    plan.injected_context_chars = plan.prompt_chars.saturating_sub(query_chars);
+    plan
+}
+
+fn runtime_skill_names(runtime: Option<&codex_runtime::CodexRuntimeActivation>) -> Vec<String> {
+    runtime
+        .map(|value| {
+            value
+                .skills
+                .iter()
+                .map(|skill| {
+                    skill
+                        .original_name
+                        .clone()
+                        .unwrap_or_else(|| skill.name.clone())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn compact_codex_context_block(value: &str, max_lines: usize, max_chars: usize) -> String {
@@ -5636,6 +6931,66 @@ fn copy_context(
         count, exchange_word, line_count
     );
 
+    Ok(())
+}
+
+/// Print a cleaned session excerpt to stdout.
+fn show_session(
+    session: Option<String>,
+    provider: Provider,
+    count: usize,
+    path: Option<String>,
+    full: bool,
+) -> Result<()> {
+    auto_import_sessions()?;
+
+    let mut session = session.filter(|value| value != "-");
+    let mut path = path;
+
+    if path.is_none() {
+        if let Some(ref candidate) = session {
+            let candidate_path = PathBuf::from(candidate);
+            if candidate == "." || candidate == ".." || candidate_path.exists() {
+                path = Some(candidate.clone());
+                session = None;
+            }
+        }
+    }
+
+    let project_path = if let Some(ref p) = path {
+        PathBuf::from(p)
+    } else {
+        std::env::current_dir()?
+    };
+
+    let index = load_index()?;
+    let sessions = read_sessions_for_path(provider, &project_path)?;
+
+    let (session_id, session_provider) = if let Some(ref query) = session {
+        resolve_session_selection(query, &sessions, &index, provider)?
+    } else {
+        let latest = sessions.first().ok_or_else(|| {
+            let provider_name = match provider {
+                Provider::Claude => "Claude",
+                Provider::Codex => "Codex",
+                Provider::Cursor => "Cursor",
+                Provider::All => "AI",
+            };
+            anyhow::anyhow!(
+                "No {provider_name} sessions found for {}",
+                project_path.display()
+            )
+        })?;
+        (latest.session_id.clone(), latest.provider)
+    };
+
+    let output = if full {
+        read_session_history(&session_id, session_provider)?
+    } else {
+        read_last_context(&session_id, session_provider, count.max(1), &project_path)?
+    };
+
+    print!("{}", output);
     Ok(())
 }
 
@@ -6374,16 +7729,9 @@ fn get_display_summary(
 /// Return provider:session_id for the most recent session in the project.
 pub fn get_latest_session_ref_for_path(project_path: &PathBuf) -> Result<Option<String>> {
     let sessions = read_sessions_for_path(Provider::All, project_path)?;
-    let Some(session) = sessions.first() else {
-        return Ok(None);
-    };
-    let provider = match session.provider {
-        Provider::Claude => "claude",
-        Provider::Codex => "codex",
-        Provider::Cursor => "cursor",
-        Provider::All => "ai",
-    };
-    Ok(Some(format!("{}:{}", provider, session.session_id)))
+    Ok(sessions
+        .first()
+        .map(|session| format_session_ref(session, true)))
 }
 
 /// Return full message history for the latest session matching a path.
@@ -7999,6 +9347,41 @@ mod tests {
     }
 
     #[test]
+    fn extract_codex_session_reference_request_parses_count_and_followup() {
+        let request = extract_codex_session_reference_request(
+            "see 019ce6ce-c77a-7d52-838e-c01f8820f6b8 last 20 messages, research react hot reload",
+            "see 019ce6ce-c77a-7d52-838e-c01f8820f6b8 last 20 messages, research react hot reload",
+        )
+        .expect("expected session reference request");
+
+        assert_eq!(request.session_hint, "019ce6ce-c77a-7d52-838e-c01f8820f6b8");
+        assert_eq!(request.count, 20);
+        assert_eq!(request.user_request, "research react hot reload");
+    }
+
+    #[test]
+    fn extract_codex_session_reference_request_requires_followup_work() {
+        assert!(
+            extract_codex_session_reference_request(
+                "see 019ce6ce-c77a-7d52-838e-c01f8820f6b8 last 20 messages",
+                "see 019ce6ce-c77a-7d52-838e-c01f8820f6b8 last 20 messages",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn extract_codex_session_reference_request_does_not_steal_resume_queries() {
+        assert!(
+            extract_codex_session_reference_request(
+                "resume 019ce6ce-c77a-7d52-838e-c01f8820f6b8",
+                "resume 019ce6ce-c77a-7d52-838e-c01f8820f6b8",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn infer_recover_route_changes_directory_for_cross_repo_candidate() {
         let output = build_recover_output(
             Path::new("/tmp/current"),
@@ -8027,6 +9410,9 @@ mod tests {
         ));
         assert!(!looks_like_session_lookup_query(
             "conversation summary pipeline cleanup"
+        ));
+        assert!(!looks_like_session_lookup_query(
+            "write plan after reading https://github.com/openai/codex"
         ));
     }
 
@@ -8071,8 +9457,56 @@ mod tests {
     #[test]
     fn build_codex_prompt_keeps_plain_query_plain() {
         assert_eq!(
-            build_codex_prompt("improve codex open perf", &[]).as_deref(),
+            build_codex_prompt("improve codex open perf", &[], 2, 1200).as_deref(),
             Some("improve codex open perf")
+        );
+    }
+
+    #[test]
+    fn build_codex_prompt_respects_shared_context_budget() {
+        let references = vec![
+            CodexResolvedReference {
+                name: "docs".to_string(),
+                source: "resolver".to_string(),
+                matched: "one".to_string(),
+                command: None,
+                output: "A".repeat(500),
+            },
+            CodexResolvedReference {
+                name: "issue".to_string(),
+                source: "resolver".to_string(),
+                matched: "two".to_string(),
+                command: None,
+                output: "B".repeat(500),
+            },
+        ];
+
+        let prompt =
+            build_codex_prompt("summarize", &references, 2, 260).expect("prompt should exist");
+
+        assert!(prompt.chars().count() <= 260);
+        assert!(prompt.contains("User request:"));
+    }
+
+    #[test]
+    fn format_session_ref_respects_provider_prefix_flag() {
+        let session = AiSession {
+            session_id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
+            provider: Provider::Codex,
+            timestamp: None,
+            last_message_at: None,
+            last_message: None,
+            first_message: None,
+            error_summary: None,
+        };
+
+        assert_eq!(
+            format_session_ref(&session, false),
+            "019ce791-7e05-7e51-b2b7-610dc7172e5c"
+        );
+        assert_eq!(
+            format_session_ref(&session, true),
+            "codex:019ce791-7e05-7e51-b2b7-610dc7172e5c"
         );
     }
 }

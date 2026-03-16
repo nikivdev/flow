@@ -83,6 +83,7 @@ f codex open "continue the deploy work"
 f codex open "resume latest"
 f codex open --path ~/work/example-project "what was I doing here"
 f codex resolve "https://linear.app/example-workspace/project/example-project-v1-1234567890ab/overview" --json
+f codex doctor --path ~/work/example-project
 ```
 
 Behavior:
@@ -94,6 +95,7 @@ Behavior:
 - otherwise: start a new session with the raw query and no extra wrapper text
 
 This keeps prompt cost flat unless Flow has a strong reason to recover or unroll context.
+Use `f codex doctor` to confirm whether wrapper transport, runtime skills, and context budgets are actually active for the current repo.
 
 ### Optional `flow.toml` resolver config
 
@@ -102,11 +104,13 @@ You can teach `f codex open` and `f codex resolve` to unroll repo-specific refer
 ```toml
 [codex]
 auto_resolve_references = true
+prompt_context_budget_chars = 900
+max_resolved_references = 1
 
 [[codex.reference_resolver]]
 name = "linear"
 match = ["https://linear.app/*/issue/*", "https://linear.app/*/project/*"]
-command = "forge linear inspect {{ref}} --json"
+command = "my-linear-tool inspect {{ref}} --json"
 inject_as = "linear"
 ```
 
@@ -116,6 +120,100 @@ Notes:
 - `{{ref}}`, `{{query}}`, and `{{cwd}}` are available in resolver commands
 - built-in Linear URL parsing works even without a custom resolver
 - resolver output is compacted before prompt injection
+- `prompt_context_budget_chars` hard-caps injected context before your request is appended
+- `max_resolved_references` prevents broad unrolling from bloating one turn
+
+### Optional runtime skill transport
+
+Flow can also materialize tiny per-launch runtime skills for current upstream Codex without forking Codex.
+
+Enable it with:
+
+```toml
+[codex]
+runtime_skills = true
+
+[options]
+codex_bin = "~/code/flow/scripts/codex-flow-wrapper"
+```
+
+Current first-slice behavior:
+
+- `f codex open "write plan"` can attach a tiny plan-writing runtime skill
+- the runtime skill is exposed only for the launched Codex process
+- Flow keeps the generated runtime state under `~/.config/flow/codex/runtime`
+
+Inspect or clear runtime state:
+
+```bash
+f codex runtime show
+f codex runtime clear
+f codex doctor
+```
+
+Built-in plan writer:
+
+```bash
+cat <<'EOF' | f codex runtime write-plan --title "Example Plan"
+# Example Plan
+
+- item
+EOF
+```
+
+### Skill eval and background refresh
+
+Flow can learn which runtime skills are actually worth injecting from local
+Codex usage history without replaying Codex in the hot path.
+
+Useful commands:
+
+```bash
+f codex skill-eval show --path ~/work/example-project
+f codex skill-eval run --path ~/work/example-project
+f codex skill-eval cron --limit 400 --max-targets 12 --within-hours 168
+f codex skill-source list --path ~/work/example-project
+f codex skill-source sync --path ~/work/example-project --skill find-skills
+```
+
+What `cron` does:
+
+- scans only recent logged Flow Codex events
+- skips missing/moved repo paths
+- rebuilds scorecards for a bounded number of recent repos
+- never launches Codex or replays network work in the background
+
+For your use case, this keeps learning cheap and safe enough to run regularly.
+
+### macOS launchd schedule for skill-eval
+
+If you want scorecards to stay fresh automatically on macOS:
+
+```bash
+f codex-skill-eval-launchd-install
+f codex-skill-eval-launchd-status
+f codex-skill-eval-launchd-logs
+```
+
+Default schedule:
+
+- every 30 minutes
+- scan up to 400 recent events
+- rebuild up to 12 recent repo scorecards
+- ignore repos not seen in the last 168 hours
+
+You can tune install-time bounds:
+
+```bash
+f codex-skill-eval-launchd-install --minutes 20 --limit 600 --max-targets 16 --within-hours 72
+f codex-skill-eval-launchd-install --dry-run
+```
+
+Remove it with:
+
+```bash
+f codex-skill-eval-launchd-uninstall
+```
 
 ### Cursor behavior
 
