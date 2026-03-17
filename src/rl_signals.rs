@@ -10,10 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+use crate::config;
 use crate::secret_redact::redact_json_value;
 
 const DEFAULT_SIGNAL_PATH: &str = "out/logs/flow_rl_signals.jsonl";
-const DEFAULT_SEQ_MEM_PATH: &str = "~/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl";
 const DEFAULT_QUEUE_CAPACITY: usize = 8192;
 
 struct SignalSink {
@@ -188,7 +188,11 @@ fn seq_mirror_path() -> PathBuf {
         .or_else(|| std::env::var("SEQ_CH_MEM_PATH").ok())
         .filter(|v| !v.trim().is_empty())
         .map(|v| expand_tilde_path(&v))
-        .unwrap_or_else(|| expand_tilde_path(DEFAULT_SEQ_MEM_PATH))
+        .unwrap_or_else(default_seq_mirror_path)
+}
+
+fn default_seq_mirror_path() -> PathBuf {
+    config::global_state_dir().join("rl").join("seq_mem.jsonl")
 }
 
 fn expand_tilde_path(value: &str) -> PathBuf {

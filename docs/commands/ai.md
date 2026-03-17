@@ -127,7 +127,14 @@ Notes:
 
 Flow can also materialize tiny per-launch runtime skills for current upstream Codex without forking Codex.
 
-Enable it with:
+Enable it globally with:
+
+```bash
+f codex enable-global --full
+f codex doctor --path ~/docs --assert-runtime --assert-schedule
+```
+
+Or configure it manually with:
 
 ```toml
 [codex]
@@ -148,8 +155,24 @@ Inspect or clear runtime state:
 ```bash
 f codex runtime show
 f codex runtime clear
+f codex memory status
+f codex memory query --path ~/code/flow "codex control plane runtime skills"
+f codex memory recent --path ~/docs
 f codex doctor
 ```
+
+Assertive health checks:
+
+```bash
+f codex doctor --path ~/docs --assert-runtime
+f codex doctor --path ~/docs --assert-schedule
+f codex doctor --path ~/docs --assert-learning
+f codex doctor --path ~/docs --assert-autonomous
+```
+
+`--assert-learning` is intentionally strict: it fails until Flow has real
+logged events, grounded outcome samples, and a non-empty scorecard for that
+target.
 
 Built-in plan writer:
 
@@ -169,6 +192,8 @@ Codex usage history without replaying Codex in the hot path.
 Useful commands:
 
 ```bash
+f codex memory sync --limit 400
+f codex memory recent --path ~/work/example-project --limit 12
 f codex skill-eval show --path ~/work/example-project
 f codex skill-eval run --path ~/work/example-project
 f codex skill-eval cron --limit 400 --max-targets 12 --within-hours 168
@@ -176,9 +201,23 @@ f codex skill-source list --path ~/work/example-project
 f codex skill-source sync --path ~/work/example-project --skill find-skills
 ```
 
+The Codex memory mirror:
+
+- stores durable indexed memory under the Jazz2 root (`~/.jazz2/...` or `~/repos/garden-co/jazz2/.jazz2/...`)
+- mirrors Flow’s route/outcome history into SQLite with WAL enabled
+- extracts compact repo/code facts from repo capsules (summary, commands, important paths, docs hints)
+- adds bounded live code-path retrieval for explicit repo references, so prompts like `see ~/code/flow ...` can inject likely files such as `src/ai.rs` or `docs/...` without dumping raw source
+- indexes durable repo entrypoints and extracted symbols under the same Jazz2-rooted memory store, then supplements them with live symbol extraction from the top-ranked code files during `memory query` / `codex resolve`
+- adds tiny symbol snippets for the top code hits, so coding prompts can carry actual struct/function shape without inlining whole files
+- biases retrieval by intent: implementation/file-edit prompts prefer symbols, snippets, and `src/...` paths; summary/docs prompts prefer doc headings and docs paths
+- stays best-effort so failed memory writes do not block normal Codex coding turns
+- is refreshed again by `f codex skill-eval cron`, so the mirror heals even if a hot-path write is skipped
+- is queried automatically for explicit repo references during `f codex open` / `f codex resolve`
+
 What `cron` does:
 
 - scans only recent logged Flow Codex events
+- syncs recent skill-eval logs into the Jazz2-backed memory mirror
 - skips missing/moved repo paths
 - rebuilds scorecards for a bounded number of recent repos
 - never launches Codex or replays network work in the background
@@ -194,6 +233,8 @@ f codex-skill-eval-launchd-install
 f codex-skill-eval-launchd-status
 f codex-skill-eval-launchd-logs
 ```
+
+`f codex enable-global --full` installs this schedule for you.
 
 Default schedule:
 

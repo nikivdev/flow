@@ -27,7 +27,7 @@ From `~/code/flow`:
 export FLOW_RL_SIGNALS=true
 export FLOW_RL_SIGNALS_PATH=out/logs/flow_rl_signals.jsonl
 export FLOW_RL_SIGNALS_SEQ_MIRROR=true
-export FLOW_RL_SIGNALS_SEQ_PATH=~/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl
+export FLOW_RL_SIGNALS_SEQ_PATH=~/.config/flow/rl/seq_mem.jsonl
 export FLOW_RL_SIGNAL_TEXT=snippet
 export FLOW_RL_SIGNAL_MAX_CHARS=4000
 ```

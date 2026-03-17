@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::json;
 
 use crate::cli::{SkillsAction, SkillsCommand, SkillsFetchAction, SkillsFetchCommand};
+use crate::commit::configured_codex_bin_for_workdir;
 use crate::config;
 use crate::start;
 
@@ -1140,11 +1141,7 @@ fn codex_read_response(
 }
 
 fn reload_codex_skills_for_cwd(cwd: &Path) -> Result<usize> {
-    let codex_bin = std::env::var("CODEX_BIN")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "codex".to_string());
+    let codex_bin = configured_codex_bin_for_workdir(cwd);
 
     let mut child = Command::new(&codex_bin)
         .arg("app-server")

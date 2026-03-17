@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, Read};
@@ -53,6 +54,45 @@ pub struct CodexExternalSkill {
     pub path: String,
     pub description: String,
     pub estimated_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSkillSourceSnapshot {
+    pub name: String,
+    pub path: String,
+    pub enabled: bool,
+    pub skill_count: usize,
+    pub skills: Vec<CodexExternalSkill>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexInstalledSkillSnapshot {
+    pub name: String,
+    pub path: String,
+    pub description: String,
+    pub runtime_managed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRuntimeStateSnapshot {
+    pub token: String,
+    pub created_at_unix: u64,
+    pub target_path: String,
+    pub query: String,
+    pub skills: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSkillsDashboardSnapshot {
+    pub target_path: String,
+    pub sources: Vec<CodexSkillSourceSnapshot>,
+    pub installed_skills: Vec<CodexInstalledSkillSnapshot>,
+    pub recent_runtime_states: Vec<CodexRuntimeStateSnapshot>,
+    pub runtime_states_for_target: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +203,7 @@ fn parse_frontmatter_field(content: &str, field: &str) -> Option<String> {
 
 fn default_skill_sources() -> Vec<config::CodexSkillSourceConfig> {
     let vercel_path = config::expand_path("~/repos/vercel-labs/skills");
-    if vercel_path.join("skills").is_dir() {
+    if looks_like_skill_source_root(&vercel_path) {
         return vec![config::CodexSkillSourceConfig {
             name: "vercel-labs-skills".to_string(),
             path: "~/repos/vercel-labs/skills".to_string(),
@@ -183,6 +223,64 @@ fn configured_skill_sources(
     };
     sources.retain(|source| source.enabled.unwrap_or(true));
     sources
+}
+
+fn looks_like_skill_source_root(root: &Path) -> bool {
+    collect_skill_dirs(root)
+        .map(|dirs| !dirs.is_empty())
+        .unwrap_or(false)
+}
+
+fn collect_skill_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs = BTreeSet::new();
+    let nested_root = root.join("skills");
+    for base in [nested_root.as_path(), root] {
+        if !base.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(base)? {
+            let entry = entry?;
+            let skill_dir = entry.path();
+            if !skill_dir.is_dir() {
+                continue;
+            }
+            if skill_dir.join("SKILL.md").is_file() {
+                dirs.insert(skill_dir);
+            }
+        }
+    }
+    Ok(dirs.into_iter().collect())
+}
+
+fn discover_source_skills(
+    source: &config::CodexSkillSourceConfig,
+) -> Result<Vec<CodexExternalSkill>> {
+    let root = config::expand_path(&source.path);
+    let skill_dirs = collect_skill_dirs(&root)?;
+    let mut skills = Vec::new();
+    for skill_dir in skill_dirs {
+        let skill_file = skill_dir.join("SKILL.md");
+        let raw = fs::read_to_string(&skill_file)
+            .with_context(|| format!("failed to read {}", skill_file.display()))?;
+        let name = parse_frontmatter_field(&raw, "name")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                skill_dir
+                    .file_name()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "skill".to_string())
+            });
+        let description = parse_frontmatter_field(&raw, "description").unwrap_or_default();
+        skills.push(CodexExternalSkill {
+            source_name: source.name.clone(),
+            name,
+            path: skill_dir.display().to_string(),
+            description,
+            estimated_chars: raw.chars().count(),
+        });
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
 }
 
 fn tokenize_keywords(value: &str) -> Vec<String> {
@@ -413,38 +511,93 @@ pub fn discover_external_skills(
 ) -> Result<Vec<CodexExternalSkill>> {
     let mut out = Vec::new();
     for source in configured_skill_sources(codex_cfg) {
-        let root = config::expand_path(&source.path);
-        let skills_root = root.join("skills");
-        if !skills_root.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&skills_root)? {
-            let entry = entry?;
-            let skill_dir = entry.path();
-            if !skill_dir.is_dir() {
-                continue;
-            }
-            let skill_file = skill_dir.join("SKILL.md");
-            if !skill_file.is_file() {
-                continue;
-            }
-            let raw = fs::read_to_string(&skill_file)
-                .with_context(|| format!("failed to read {}", skill_file.display()))?;
-            let name = parse_frontmatter_field(&raw, "name")
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
-            let description = parse_frontmatter_field(&raw, "description").unwrap_or_default();
-            out.push(CodexExternalSkill {
-                source_name: source.name.clone(),
-                name,
-                path: skill_dir.display().to_string(),
-                description,
-                estimated_chars: raw.chars().count(),
-            });
-        }
+        out.extend(discover_source_skills(&source)?);
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+pub fn dashboard_snapshot(
+    target_path: &Path,
+    codex_cfg: &config::CodexConfig,
+    recent_limit: usize,
+) -> Result<CodexSkillsDashboardSnapshot> {
+    let target_display = target_path.display().to_string();
+    let mut sources = Vec::new();
+    for source in configured_skill_sources(codex_cfg) {
+        let skills = discover_source_skills(&source)?;
+        sources.push(CodexSkillSourceSnapshot {
+            name: source.name,
+            path: config::expand_path(&source.path).display().to_string(),
+            enabled: source.enabled.unwrap_or(true),
+            skill_count: skills.len(),
+            skills,
+        });
+    }
+    sources.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let installed_skills = discover_installed_skills()?;
+    let runtime_states = load_runtime_states()?;
+    let runtime_states_for_target = runtime_states
+        .iter()
+        .filter(|state| state.target_path == target_display)
+        .count();
+    let recent_runtime_states = runtime_states
+        .into_iter()
+        .take(recent_limit)
+        .map(|state| CodexRuntimeStateSnapshot {
+            token: state.token,
+            created_at_unix: state.created_at_unix,
+            target_path: state.target_path,
+            query: state.query,
+            skills: state
+                .skills
+                .into_iter()
+                .map(|skill| skill.original_name.unwrap_or(skill.name))
+                .collect(),
+        })
+        .collect();
+
+    Ok(CodexSkillsDashboardSnapshot {
+        target_path: target_display,
+        sources,
+        installed_skills,
+        recent_runtime_states,
+        runtime_states_for_target,
+    })
+}
+
+fn discover_installed_skills() -> Result<Vec<CodexInstalledSkillSnapshot>> {
+    let root = codex_global_skill_root();
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut installed = Vec::new();
+    for entry in fs::read_dir(&root)? {
+        let entry = entry?;
+        let skill_dir = entry.path();
+        if !skill_dir.is_dir() {
+            continue;
+        }
+        let skill_file = skill_dir.join("SKILL.md");
+        if !skill_file.is_file() {
+            continue;
+        }
+        let raw = fs::read_to_string(&skill_file)
+            .with_context(|| format!("failed to read {}", skill_file.display()))?;
+        let name = parse_frontmatter_field(&raw, "name")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+        installed.push(CodexInstalledSkillSnapshot {
+            runtime_managed: name.starts_with(RUNTIME_PREFIX),
+            name,
+            path: skill_dir.display().to_string(),
+            description: parse_frontmatter_field(&raw, "description").unwrap_or_default(),
+        });
+    }
+    installed.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(installed)
 }
 
 pub fn format_external_skills(skills: &[CodexExternalSkill]) -> String {
@@ -826,6 +979,7 @@ pub fn write_plan_from_stdin(
             version: 1,
             recorded_at_unix: unix_now(),
             runtime_token: Some(runtime_state.token),
+            session_id: session.clone(),
             target_path: Some(runtime_state.target_path),
             kind: "plan_written".to_string(),
             skill_names: runtime_state
@@ -848,6 +1002,7 @@ pub fn write_plan_from_stdin(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn plan_request_detection_stays_specific() {
@@ -884,5 +1039,59 @@ mod tests {
         let twice = append_session_footer(&once, Some("019c"));
         assert_eq!(once, twice);
         assert!(once.ends_with("Made from 019c Codex session."));
+    }
+
+    #[test]
+    fn discover_external_skills_supports_nested_repo_layout() {
+        let temp = tempdir().expect("tempdir");
+        let source_root = temp.path().join("vercel-skills");
+        let skill_dir = source_root.join("skills").join("find-skills");
+        fs::create_dir_all(&skill_dir).expect("create nested skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: find-skills\ndescription: Find repo skills.\n---\n",
+        )
+        .expect("write skill");
+
+        let cfg = config::CodexConfig {
+            skill_sources: vec![config::CodexSkillSourceConfig {
+                name: "nested".to_string(),
+                path: source_root.display().to_string(),
+                enabled: Some(true),
+            }],
+            ..Default::default()
+        };
+
+        let skills = discover_external_skills(temp.path(), &cfg).expect("discover nested skills");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "find-skills");
+        assert_eq!(skills[0].source_name, "nested");
+    }
+
+    #[test]
+    fn discover_external_skills_supports_flat_repo_layout() {
+        let temp = tempdir().expect("tempdir");
+        let source_root = temp.path().join("dimillian-skills");
+        let skill_dir = source_root.join("react-component-performance");
+        fs::create_dir_all(&skill_dir).expect("create flat skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: react-component-performance\ndescription: Optimize React renders.\n---\n",
+        )
+        .expect("write skill");
+
+        let cfg = config::CodexConfig {
+            skill_sources: vec![config::CodexSkillSourceConfig {
+                name: "flat".to_string(),
+                path: source_root.display().to_string(),
+                enabled: Some(true),
+            }],
+            ..Default::default()
+        };
+
+        let skills = discover_external_skills(temp.path(), &cfg).expect("discover flat skills");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "react-component-performance");
+        assert_eq!(skills[0].source_name, "flat");
     }
 }

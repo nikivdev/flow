@@ -48,8 +48,8 @@ For optimized mirror (remote ClickHouse + durable local spool), also set:
 
 ```bash
 f env set SEQ_CH_MODE=mirror
-f env set SEQ_CH_MEM_PATH=~/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl
-f env set SEQ_CH_LOG_PATH=~/repos/ClickHouse/ClickHouse/user_files/seq_trace.jsonl
+f env set SEQ_CH_MEM_PATH=~/.config/flow/rl/seq_mem.jsonl
+f env set SEQ_CH_LOG_PATH=~/.config/flow/rl/seq_trace.jsonl
 ```
 
 ## 2) Run with env injected

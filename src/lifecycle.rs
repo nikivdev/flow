@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::{
     cli::{
@@ -18,12 +18,21 @@ static RUNTIME_PREFERRED_URL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 pub fn run_up(opts: LifecycleRunOpts) -> Result<()> {
     let project = resolve_project_config(&opts.config)?;
     let lifecycle = project.config.lifecycle.clone().unwrap_or_default();
-    let preferred_url = lifecycle.domains.as_ref().and_then(lifecycle_preferred_url);
+    let preferred_url = if let Some(domains_cfg) = lifecycle.domains.as_ref() {
+        match ensure_domains_up(domains_cfg) {
+            Ok(()) => lifecycle_preferred_url(domains_cfg),
+            Err(err) => {
+                eprintln!(
+                    "WARN lifecycle domains unavailable; continuing without localhost routing"
+                );
+                eprintln!("WARN {}", err);
+                None
+            }
+        }
+    } else {
+        None
+    };
     let _preferred_url_guard = ScopedPreferredUrl::set(preferred_url);
-
-    if let Some(domains_cfg) = lifecycle.domains.as_ref() {
-        ensure_domains_up(domains_cfg)?;
-    }
 
     let ran_task = match lifecycle.up_task.as_deref() {
         Some(task) => run_required_task(&project.flow_path, task, opts.args)?,
@@ -113,28 +122,26 @@ fn run_task(config_path: &Path, task_name: &str, args: Vec<String>) -> Result<()
 }
 
 fn ensure_domains_up(cfg: &LifecycleDomainsConfig) -> Result<()> {
-    let host = cfg
-        .host
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("lifecycle.domains.host is required"))?;
-    let target = cfg
-        .target
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("lifecycle.domains.target is required"))?;
+    let host = lifecycle_domain_host(cfg)?;
+    let target = lifecycle_domain_target(cfg)?;
     let engine = parse_domains_engine(cfg.engine.as_deref())?;
 
-    domains::run(DomainsCommand {
-        engine,
-        action: Some(DomainsAction::Add(DomainsAddOpts {
-            host: host.to_string(),
-            target: target.to_string(),
-            replace: true,
-        })),
-    })?;
+    add_lifecycle_route(engine, host, target)?;
+    for alias in &cfg.aliases {
+        let alias_host = alias
+            .host
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow!("lifecycle.domains.aliases[].host is required"))?;
+        let alias_target = alias
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow!("lifecycle.domains.aliases[].target is required"))?;
+        add_lifecycle_route(engine, alias_host, alias_target)?;
+    }
 
     domains::run(DomainsCommand {
         engine,
@@ -147,11 +154,7 @@ fn ensure_domains_up(cfg: &LifecycleDomainsConfig) -> Result<()> {
 }
 
 fn lifecycle_preferred_url(cfg: &LifecycleDomainsConfig) -> Option<String> {
-    let host = cfg
-        .host
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())?;
+    let host = lifecycle_domain_host(cfg).ok()?;
     Some(format!("http://{}", host))
 }
 
@@ -160,20 +163,20 @@ fn run_domains_down(cfg: &LifecycleDomainsConfig) -> Result<bool> {
     let engine = parse_domains_engine(cfg.engine.as_deref())?;
 
     if cfg.remove_on_down.unwrap_or(false) {
-        let host = cfg
-            .host
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("lifecycle.domains.host is required when remove_on_down=true")
-            })?;
-        domains::run(DomainsCommand {
-            engine,
-            action: Some(DomainsAction::Rm(DomainsRmOpts {
-                host: host.to_string(),
-            })),
-        })?;
+        let host = lifecycle_domain_host(cfg)
+            .map_err(|_| anyhow!("lifecycle.domains.host is required when remove_on_down=true"))?;
+        remove_lifecycle_route(engine, host)?;
+        for alias in &cfg.aliases {
+            let alias_host = alias
+                .host
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    anyhow!("lifecycle.domains.aliases[].host is required when remove_on_down=true")
+                })?;
+            remove_lifecycle_route(engine, alias_host)?;
+        }
         changed = true;
     }
 
@@ -186,6 +189,42 @@ fn run_domains_down(cfg: &LifecycleDomainsConfig) -> Result<bool> {
     }
 
     Ok(changed)
+}
+
+fn lifecycle_domain_host(cfg: &LifecycleDomainsConfig) -> Result<&str> {
+    cfg.host
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow!("lifecycle.domains.host is required"))
+}
+
+fn lifecycle_domain_target(cfg: &LifecycleDomainsConfig) -> Result<&str> {
+    cfg.target
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow!("lifecycle.domains.target is required"))
+}
+
+fn add_lifecycle_route(engine: Option<DomainsEngineArg>, host: &str, target: &str) -> Result<()> {
+    domains::run(DomainsCommand {
+        engine,
+        action: Some(DomainsAction::Add(DomainsAddOpts {
+            host: host.to_string(),
+            target: target.to_string(),
+            replace: true,
+        })),
+    })
+}
+
+fn remove_lifecycle_route(engine: Option<DomainsEngineArg>, host: &str) -> Result<()> {
+    domains::run(DomainsCommand {
+        engine,
+        action: Some(DomainsAction::Rm(DomainsRmOpts {
+            host: host.to_string(),
+        })),
+    })
 }
 
 fn parse_domains_engine(raw: Option<&str>) -> Result<Option<DomainsEngineArg>> {

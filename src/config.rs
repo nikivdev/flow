@@ -786,6 +786,9 @@ pub struct LifecycleDomainsConfig {
     /// Upstream target in host:port format, for example: "127.0.0.1:3000".
     #[serde(default)]
     pub target: Option<String>,
+    /// Extra host mappings to provision alongside the primary lifecycle domain.
+    #[serde(default)]
+    pub aliases: Vec<LifecycleDomainAliasConfig>,
     /// Domains engine: "docker" or "native" (default uses Flow global default).
     #[serde(default)]
     pub engine: Option<String>,
@@ -805,6 +808,16 @@ pub struct LifecycleDomainsConfig {
         alias = "stopProxyOnDown"
     )]
     pub stop_proxy_on_down: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct LifecycleDomainAliasConfig {
+    /// Hostname to map, for example: "api.myflow.localhost".
+    #[serde(default, alias = "domain")]
+    pub host: Option<String>,
+    /// Upstream target in host:port format, for example: "127.0.0.1:8780".
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 /// Skills enforcement configuration.
@@ -2725,6 +2738,36 @@ mod tests {
 
         assert_eq!(expand_path("~/projects/demo"), expected);
         assert_eq!(expand_path("$HOME/projects/demo"), expected);
+    }
+
+    #[test]
+    fn lifecycle_domains_aliases_parse() {
+        let toml = r#"
+            [lifecycle]
+            up_task = "dev"
+
+            [lifecycle.domains]
+            host = "myflow.localhost"
+            target = "127.0.0.1:3000"
+            engine = "native"
+
+            [[lifecycle.domains.aliases]]
+            host = "api.myflow.localhost"
+            target = "127.0.0.1:8780"
+        "#;
+
+        let cfg: Config =
+            toml::from_str(toml).expect("lifecycle domains alias config should parse");
+        let lifecycle = cfg.lifecycle.expect("lifecycle should parse");
+        let domains = lifecycle.domains.expect("domains should parse");
+        assert_eq!(domains.host.as_deref(), Some("myflow.localhost"));
+        assert_eq!(domains.target.as_deref(), Some("127.0.0.1:3000"));
+        assert_eq!(domains.aliases.len(), 1);
+        assert_eq!(
+            domains.aliases[0].host.as_deref(),
+            Some("api.myflow.localhost")
+        );
+        assert_eq!(domains.aliases[0].target.as_deref(), Some("127.0.0.1:8780"));
     }
 
     #[test]

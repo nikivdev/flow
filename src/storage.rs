@@ -20,6 +20,8 @@ const DEFAULT_JAZZ_SERVER_ENV: &str = "https://cloud.jazz.tools";
 const DEFAULT_JAZZ_API_KEY_APP: &str = "cloud@myflow.sh";
 const DEFAULT_JAZZ_SERVER_APP: &str = "https://cloud.jazz.tools";
 const DEFAULT_POSTGRES_PROJECT: &str = "~/org/la/la/server";
+const DEFAULT_JAZZ_TOOLS_NPX_SPEC: &str = "jazz-tools@0.20.14";
+const JAZZ_TOOLS_NPX_SPEC_ENV: &str = "FLOW_JAZZ_TOOLS_PACKAGE_SPEC";
 
 #[derive(Debug, Clone)]
 pub(crate) struct JazzAppCredentials {
@@ -332,13 +334,16 @@ pub(crate) fn create_jazz_app_credentials(name: &str) -> Result<JazzAppCredentia
         }
         .context("failed to spawn jazz-tools")?
     } else {
+        let package_spec = jazz_tools_package_spec();
         println!(
-            "Running: npx --yes jazz-tools@alpha create app --name {}",
-            name
+            "Running: npx --yes {} create app --name {}",
+            package_spec, name
         );
         {
             let mut cmd = Command::new("npx");
-            cmd.args(["--yes", "jazz-tools@alpha", "create", "app", "--name", name]);
+            cmd.args(["--yes"]);
+            cmd.arg(&package_spec);
+            cmd.args(["create", "app", "--name", name]);
             run_command_with_output(cmd)
         }
         .context("failed to spawn npx")?
@@ -367,6 +372,17 @@ pub(crate) fn create_jazz_app_credentials(name: &str) -> Result<JazzAppCredentia
         backend_secret: generate_secret("backend"),
         admin_secret: generate_secret("admin"),
     })
+}
+
+fn jazz_tools_package_spec() -> String {
+    resolve_jazz_tools_package_spec(std::env::var(JAZZ_TOOLS_NPX_SPEC_ENV).ok().as_deref())
+}
+
+fn resolve_jazz_tools_package_spec(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_JAZZ_TOOLS_NPX_SPEC)
+        .to_string()
 }
 
 fn run_command_with_output(mut cmd: Command) -> Result<Output> {
@@ -522,4 +538,39 @@ pub(crate) fn get_project_name() -> Result<String> {
         .and_then(|n| n.to_str())
         .unwrap_or("flow")
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_JAZZ_TOOLS_NPX_SPEC, resolve_jazz_tools_package_spec, sanitize_name};
+
+    #[test]
+    fn sanitize_name_keeps_alnum_and_normalizes_separators() {
+        assert_eq!(sanitize_name("Flow Mirror App"), "flow-mirror-app");
+        assert_eq!(sanitize_name("___"), "flow-jazz-mirror");
+    }
+
+    #[test]
+    fn resolve_jazz_tools_package_spec_defaults_to_pinned_version() {
+        assert_eq!(
+            resolve_jazz_tools_package_spec(None),
+            DEFAULT_JAZZ_TOOLS_NPX_SPEC
+        );
+        assert_eq!(
+            resolve_jazz_tools_package_spec(Some("   ")),
+            DEFAULT_JAZZ_TOOLS_NPX_SPEC
+        );
+    }
+
+    #[test]
+    fn resolve_jazz_tools_package_spec_allows_explicit_override() {
+        assert_eq!(
+            resolve_jazz_tools_package_spec(Some("jazz-tools@0.20.15")),
+            "jazz-tools@0.20.15"
+        );
+        assert_eq!(
+            resolve_jazz_tools_package_spec(Some("  jazz-tools@local  ")),
+            "jazz-tools@local"
+        );
+    }
 }

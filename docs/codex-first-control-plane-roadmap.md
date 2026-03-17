@@ -63,12 +63,24 @@ The result is "good pieces, weak control plane".
 
 These are enough to start. The missing work is unification.
 
+## Constraint: no Codex fork
+
+Flow should target current upstream Codex directly.
+
+That means:
+
+- prefer wrapper transport + config over patching Codex
+- use stable upstream surfaces like normal user skill roots, `skills/list`, and `thread/*`
+- treat newer upstream features such as `skills/list perCwdExtraUserRoots` and in-process app-server clients as accelerators, not prerequisites
+- keep repo-specific behavior in Flow or repo executors, not in a private Codex fork
+
 ## Proposed Architecture
 
-### 1. `codexd`: long-lived Codex control daemon
+### 1. warm Codex control layer
 
-Add a Flow-managed daemon, either as an extension of `ai-taskd` or as a focused
-`codexd`, with one warm `codex app-server` connection per repo.
+Add a Flow-managed warm control layer, either as an extension of `ai-taskd`, a
+focused `codexd`, or a lighter in-process broker where that is enough for the
+current upstream Codex client surface.
 
 Responsibilities:
 

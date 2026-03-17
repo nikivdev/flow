@@ -146,6 +146,7 @@ fr = "f run"
   - `runtime_skills`: when true, `f codex open` may materialize Flow-managed per-launch runtime skills for wrapper transports.
   - `[[codex.reference_resolver]]`: repo-specific reference unrollers with wildcard `match` patterns and a shell `command` template.
   - command templates support `{{ref}}`, `{{query}}`, and `{{cwd}}`.
+  - `f codex enable-global --full` writes the global wrapper/runtime baseline into `~/.config/flow/flow.toml` for you.
 - `[skills.seq]`: optional defaults for `f skills fetch ...` (local seq scraper integration).
 - `[commit]`: optional commit workflow defaults; plain `f commit` uses fast commit + deferred Codex deep review by default. Set `quick-default = false` to make plain `f commit` run blocking review instead.
 - `[task_resolution]`: optional policy for nested task discovery (`f <scope>:<task>`, preferred scopes, and per-task routes when plain names collide).

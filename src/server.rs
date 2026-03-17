@@ -29,8 +29,10 @@ use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
+    ai,
     cli::DaemonOpts,
     config::{self, Config, ServerConfig},
+    daemon_snapshot,
     log_store::{self, LogEntry, LogQuery},
     running,
     screen::ScreenBroadcaster,
@@ -124,6 +126,11 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
 
     let router = Router::new()
         .route("/health", get(health))
+        .route("/codex/skills", get(codex_skills))
+        .route("/daemons", get(daemons))
+        .route("/daemons/:name/start", post(daemon_start))
+        .route("/daemons/:name/stop", post(daemon_stop))
+        .route("/daemons/:name/restart", post(daemon_restart))
         .route("/screen/latest", get(screen_latest))
         .route("/screen/stream", get(screen_stream))
         .route("/servers", get(servers_list))
@@ -163,6 +170,107 @@ async fn health() -> impl IntoResponse {
         "status": "ok",
         "message": "flow daemon ready"
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexSkillsQuery {
+    path: Option<String>,
+    #[serde(default = "default_codex_skills_limit")]
+    limit: usize,
+}
+
+fn default_codex_skills_limit() -> usize {
+    12
+}
+
+fn resolve_codex_skills_target(path: Option<&str>) -> PathBuf {
+    let candidate = path
+        .map(config::expand_path)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| config::expand_path("~")));
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| config::expand_path("~"))
+            .join(candidate)
+    }
+}
+
+async fn codex_skills(Query(query): Query<CodexSkillsQuery>) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(query.path.as_deref());
+    let limit = query.limit.clamp(1, 50);
+    let result = tokio::task::spawn_blocking(move || {
+        ai::codex_skills_dashboard_snapshot(&target_path, limit)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex skills task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn daemons() -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(|| daemon_snapshot::load_daemon_snapshot(None)).await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("daemon snapshot task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn daemon_start(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
+    daemon_action_response(name, daemon_snapshot::FlowDaemonAction::Start).await
+}
+
+async fn daemon_stop(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
+    daemon_action_response(name, daemon_snapshot::FlowDaemonAction::Stop).await
+}
+
+async fn daemon_restart(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
+    daemon_action_response(name, daemon_snapshot::FlowDaemonAction::Restart).await
+}
+
+async fn daemon_action_response(
+    name: String,
+    action: daemon_snapshot::FlowDaemonAction,
+) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        daemon_snapshot::run_daemon_action(&name, action, None)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("daemon action task failed: {err}") })),
+        )
+            .into_response(),
+    }
 }
 
 async fn screen_latest(State(state): State<AppState>) -> impl IntoResponse {
