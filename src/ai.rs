@@ -10,6 +10,8 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,15 +24,18 @@ use regex::Regex;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use toml::Value as TomlValue;
 use tracing::debug;
 
 use crate::cli::{
-    AiAction, CodexDaemonAction, CodexRuntimeAction, CodexSkillEvalAction, CodexSkillSourceAction,
-    ProviderAiAction,
+    AiAction, CodexDaemonAction, CodexMemoryAction, CodexRuntimeAction, CodexSkillEvalAction,
+    CodexSkillSourceAction, ProviderAiAction,
 };
 use crate::commit::configured_codex_bin_for_workdir;
+use crate::{
+    codex_memory, codex_text, codexd, config, project_snapshot, repo_capsule, url_inspect,
+};
 use crate::{codex_runtime, codex_skill_eval};
-use crate::{codexd, config, project_snapshot, url_inspect};
 
 /// AI provider type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,12 +186,12 @@ struct SessionMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CodexRecoverRow {
-    id: String,
-    updated_at: i64,
-    cwd: String,
-    title: Option<String>,
-    first_user_message: Option<String>,
-    git_branch: Option<String>,
+    pub(crate) id: String,
+    pub(crate) updated_at: i64,
+    pub(crate) cwd: String,
+    pub(crate) title: Option<String>,
+    pub(crate) first_user_message: Option<String>,
+    pub(crate) git_branch: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -311,8 +316,21 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
             Some(ProviderAiAction::Doctor { .. }) => {
                 bail!("doctor is only supported for Codex sessions; use `f codex doctor`");
             }
+            Some(ProviderAiAction::TouchLaunch { .. }) => {
+                bail!(
+                    "touch-launch is only supported for Codex sessions; use `f codex touch-launch`"
+                );
+            }
+            Some(ProviderAiAction::EnableGlobal { .. }) => {
+                bail!(
+                    "global Codex enablement is only supported for Codex sessions; use `f codex enable-global`"
+                );
+            }
             Some(ProviderAiAction::Daemon { .. }) => {
                 bail!("daemon is only supported for Codex sessions; use `f codex daemon ...`");
+            }
+            Some(ProviderAiAction::Memory { .. }) => {
+                bail!("memory is only supported for Codex sessions; use `f codex memory ...`");
             }
             Some(ProviderAiAction::SkillEval { .. }) => {
                 bail!(
@@ -364,11 +382,52 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
             query,
         }) => open_codex_session(path, query, exact_cwd, provider)?,
         Some(ProviderAiAction::Daemon { action }) => codex_daemon_command(action, provider)?,
+        Some(ProviderAiAction::Memory { action }) => codex_memory_command(action, provider)?,
         Some(ProviderAiAction::SkillEval { action }) => codex_skill_eval_command(action, provider)?,
         Some(ProviderAiAction::SkillSource { action }) => {
             codex_skill_source_command(action, provider)?
         }
-        Some(ProviderAiAction::Doctor { path }) => codex_doctor(path, provider)?,
+        Some(ProviderAiAction::Doctor {
+            path,
+            assert_runtime,
+            assert_schedule,
+            assert_learning,
+            assert_autonomous,
+            json,
+        }) => codex_doctor(
+            path,
+            assert_runtime,
+            assert_schedule,
+            assert_learning,
+            assert_autonomous,
+            json,
+            provider,
+        )?,
+        Some(ProviderAiAction::TouchLaunch { mode, cwd }) => {
+            codex_touch_launch(mode, cwd, provider)?
+        }
+        Some(ProviderAiAction::EnableGlobal {
+            dry_run,
+            install_launchd,
+            start_daemon,
+            sync_skills,
+            full,
+            minutes,
+            limit,
+            max_targets,
+            within_hours,
+        }) => codex_enable_global(
+            dry_run,
+            install_launchd,
+            start_daemon,
+            sync_skills,
+            full,
+            minutes,
+            limit,
+            max_targets,
+            within_hours,
+            provider,
+        )?,
         Some(ProviderAiAction::Resolve {
             path,
             exact_cwd,
@@ -445,8 +504,21 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::Doctor { .. }) => {
                 bail!("doctor is only supported for Codex sessions; use `f codex doctor`");
             }
+            Some(ProviderAiAction::TouchLaunch { .. }) => {
+                bail!(
+                    "touch-launch is only supported for Codex sessions; use `f codex touch-launch`"
+                );
+            }
+            Some(ProviderAiAction::EnableGlobal { .. }) => {
+                bail!(
+                    "global Codex enablement is only supported for Codex sessions; use `f codex enable-global`"
+                );
+            }
             Some(ProviderAiAction::Daemon { .. }) => {
                 bail!("daemon is only supported for Codex sessions; use `f codex daemon ...`");
+            }
+            Some(ProviderAiAction::Memory { .. }) => {
+                bail!("memory is only supported for Codex sessions; use `f codex memory ...`");
             }
             Some(ProviderAiAction::SkillEval { .. }) => {
                 bail!(
@@ -525,13 +597,56 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::Daemon { action }) => {
                 codex_daemon_command(action, Provider::Codex)?
             }
+            Some(ProviderAiAction::Memory { action }) => {
+                codex_memory_command(action, Provider::Codex)?
+            }
             Some(ProviderAiAction::SkillEval { action }) => {
                 codex_skill_eval_command(action, Provider::Codex)?
             }
             Some(ProviderAiAction::SkillSource { action }) => {
                 codex_skill_source_command(action, Provider::Codex)?
             }
-            Some(ProviderAiAction::Doctor { path }) => codex_doctor(path, Provider::Codex)?,
+            Some(ProviderAiAction::Doctor {
+                path,
+                assert_runtime,
+                assert_schedule,
+                assert_learning,
+                assert_autonomous,
+                json,
+            }) => codex_doctor(
+                path,
+                assert_runtime,
+                assert_schedule,
+                assert_learning,
+                assert_autonomous,
+                json,
+                Provider::Codex,
+            )?,
+            Some(ProviderAiAction::TouchLaunch { mode, cwd }) => {
+                codex_touch_launch(mode, cwd, Provider::Codex)?
+            }
+            Some(ProviderAiAction::EnableGlobal {
+                dry_run,
+                install_launchd,
+                start_daemon,
+                sync_skills,
+                full,
+                minutes,
+                limit,
+                max_targets,
+                within_hours,
+            }) => codex_enable_global(
+                dry_run,
+                install_launchd,
+                start_daemon,
+                sync_skills,
+                full,
+                minutes,
+                limit,
+                max_targets,
+                within_hours,
+                Provider::Codex,
+            )?,
             Some(ProviderAiAction::Resolve {
                 path,
                 exact_cwd,
@@ -1449,6 +1564,28 @@ fn read_codex_last_context(session_file: &PathBuf, count: usize) -> Result<Strin
     context.push('\n');
 
     Ok(context)
+}
+
+pub(crate) fn read_codex_memory_exchanges(
+    session_id: &str,
+    max_count: usize,
+) -> Result<Vec<(String, String)>> {
+    let session_file = find_codex_session_file(session_id)
+        .ok_or_else(|| anyhow::anyhow!("Codex session file not found: {}", session_id))?;
+    let (exchanges, _last_ts) = read_codex_exchanges(&session_file, None, None)?;
+    if exchanges.is_empty() || max_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let start = exchanges.len().saturating_sub(max_count);
+    Ok(exchanges[start..]
+        .iter()
+        .filter_map(|(user, assistant, _)| {
+            let user = normalize_session_message("user", user)?;
+            let assistant = normalize_session_message("assistant", assistant)?;
+            Some((user, assistant))
+        })
+        .collect())
 }
 
 fn read_cursor_last_context(session_file: &PathBuf, count: usize) -> Result<String> {
@@ -3428,6 +3565,14 @@ fn continue_session(
 
 /// Quick start: continue last session or create new one with dangerous flags.
 pub fn quick_start_session(provider: Provider) -> Result<()> {
+    if provider == Provider::Codex {
+        let launched = launch_codex_continue_last_for_target(None)?;
+        if !launched {
+            new_session(provider)?;
+        }
+        return Ok(());
+    }
+
     // Auto-import any new sessions silently
     let _ = auto_import_sessions();
 
@@ -4732,111 +4877,1021 @@ fn resolve_codex_input(
     Ok(())
 }
 
-fn codex_doctor(path: Option<String>, provider: Provider) -> Result<()> {
-    if provider != Provider::Codex {
-        bail!("doctor is only supported for Codex sessions; use `f codex doctor`");
+const DEFAULT_GLOBAL_CODEX_WRAPPER_BIN: &str = "~/code/flow/scripts/codex-flow-wrapper";
+const DEFAULT_GLOBAL_CODEX_HOME_SESSION_PATH: &str = "~/repos/openai/codex";
+const DEFAULT_GLOBAL_CODEX_SKILL_SOURCE_NAME: &str = "vercel-labs-skills";
+const DEFAULT_GLOBAL_CODEX_SKILL_SOURCE_PATH: &str = "~/repos/vercel-labs/skills";
+const DEFAULT_GLOBAL_CODEX_PROMPT_BUDGET: usize = 1200;
+const DEFAULT_GLOBAL_CODEX_MAX_REFERENCES: usize = 2;
+const CODEX_SKILL_EVAL_LAUNCHD_LABEL: &str = "dev.nikiv.flow-codex-skill-eval";
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexSkillEvalScheduleStatus {
+    Unsupported,
+    NotInstalled,
+    PlistOnly,
+    Loaded,
+}
+
+impl CodexSkillEvalScheduleStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::NotInstalled => "not-installed",
+            Self::PlistOnly => "plist-only",
+            Self::Loaded => "loaded",
+        }
     }
 
-    let target_path = resolve_session_target_path(path.as_deref())?;
-    let codex_cfg = load_codex_config_for_path(&target_path);
-    let runtime_transport = codex_runtime_transport_enabled(&target_path);
+    fn ready(self) -> bool {
+        matches!(self, Self::Loaded)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexDoctorSnapshot {
+    target: String,
+    codex_bin: String,
+    codexd: String,
+    codexd_socket: String,
+    memory_state: String,
+    memory_root: String,
+    memory_db_path: String,
+    memory_events_indexed: usize,
+    memory_facts_indexed: usize,
+    runtime_transport: String,
+    runtime_skills: String,
+    auto_resolve_references: bool,
+    home_session_path: String,
+    prompt_context_budget_chars: usize,
+    max_resolved_references: usize,
+    reference_resolvers: usize,
+    query_cache: String,
+    query_cache_entries_on_disk: usize,
+    skill_eval_events_on_disk: usize,
+    skill_eval_outcomes_on_disk: usize,
+    skill_scorecard_samples: usize,
+    skill_scorecard_entries: usize,
+    skill_scorecard_top: Option<String>,
+    external_skill_candidates: usize,
+    runtime_state_files: usize,
+    runtime_state_files_for_target: usize,
+    skill_eval_schedule: String,
+    learning_state: String,
+    runtime_ready: bool,
+    schedule_ready: bool,
+    learning_ready: bool,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSkillsDashboardResponse {
+    pub doctor: CodexDoctorSnapshot,
+    pub skills: codex_runtime::CodexSkillsDashboardSnapshot,
+}
+
+fn codex_skill_eval_launchd_plist_path() -> PathBuf {
+    config::expand_path(&format!(
+        "~/Library/LaunchAgents/{}.plist",
+        CODEX_SKILL_EVAL_LAUNCHD_LABEL
+    ))
+}
+
+fn codex_skill_eval_launchd_status() -> CodexSkillEvalScheduleStatus {
+    #[cfg(not(target_os = "macos"))]
+    {
+        CodexSkillEvalScheduleStatus::Unsupported
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let plist = codex_skill_eval_launchd_plist_path();
+        if !plist.exists() {
+            return CodexSkillEvalScheduleStatus::NotInstalled;
+        }
+
+        let uid = unsafe { libc::geteuid() };
+        let domain = format!("gui/{uid}/{CODEX_SKILL_EVAL_LAUNCHD_LABEL}");
+        match Command::new("launchctl").arg("print").arg(&domain).output() {
+            Ok(output) if output.status.success() => CodexSkillEvalScheduleStatus::Loaded,
+            _ => CodexSkillEvalScheduleStatus::PlistOnly,
+        }
+    }
+}
+
+fn collect_codex_doctor_snapshot(target_path: &Path) -> Result<CodexDoctorSnapshot> {
+    let codex_cfg = load_codex_config_for_path(target_path);
+    let runtime_transport_enabled = codex_runtime_transport_enabled(target_path);
     let runtime_states = codex_runtime::load_runtime_states()?;
     let active_runtime_states = runtime_states
         .iter()
         .filter(|state| state.target_path == target_path.display().to_string())
         .count();
-    let codex_bin = configured_codex_bin_for_workdir(&target_path);
+    let codex_bin = configured_codex_bin_for_workdir(target_path);
     let codexd_socket = codexd::socket_path()?;
     let codexd_running = codexd::is_running();
+    let memory_stats = codex_memory::stats().ok();
+    let skill_eval_events = codex_skill_eval::event_count();
+    let skill_eval_outcomes = codex_skill_eval::outcome_count();
+    let schedule_status = codex_skill_eval_launchd_status();
+    let scorecard = codex_skill_eval::load_scorecard(target_path)?;
+    let (skill_scorecard_samples, skill_scorecard_entries, skill_scorecard_top) = scorecard
+        .as_ref()
+        .map(|value| {
+            (
+                value.samples,
+                value.skills.len(),
+                value
+                    .skills
+                    .first()
+                    .map(|top| format!("{} ({:.2})", top.name, top.score)),
+            )
+        })
+        .unwrap_or((0, 0, None));
+    let discovered_skills = codex_runtime::discover_external_skills(target_path, &codex_cfg)?;
 
-    println!("# codex doctor");
-    println!("target: {}", target_path.display());
-    println!("codex_bin: {}", codex_bin);
-    println!(
-        "codexd: {}",
-        if codexd_running { "running" } else { "stopped" }
-    );
-    println!("codexd_socket: {}", codexd_socket.display());
-    println!(
-        "runtime_transport: {}",
-        if runtime_transport {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
-    println!(
-        "runtime_skills: {}",
-        if codex_cfg.runtime_skills.unwrap_or(false) && runtime_transport {
+    let runtime_skills_state =
+        if codex_cfg.runtime_skills.unwrap_or(false) && runtime_transport_enabled {
             "enabled"
         } else if codex_cfg.runtime_skills.unwrap_or(false) {
             "configured-but-inactive"
         } else {
             "disabled"
-        }
-    );
-    println!(
-        "auto_resolve_references: {}",
-        codex_cfg.auto_resolve_references.unwrap_or(true)
-    );
-    println!(
-        "home_session_path: {}",
-        codex_cfg
+        };
+    let runtime_ready = runtime_transport_enabled
+        && runtime_skills_state == "enabled"
+        && codex_cfg.auto_resolve_references.unwrap_or(true);
+    let learning_state = if skill_scorecard_entries > 0 && skill_eval_outcomes > 0 {
+        "grounded"
+    } else if skill_scorecard_entries > 0 {
+        "affinity-only"
+    } else if skill_eval_events > 0 || skill_eval_outcomes > 0 {
+        "warming-up"
+    } else {
+        "dormant"
+    };
+    let learning_ready =
+        skill_eval_events > 0 && skill_eval_outcomes > 0 && skill_scorecard_entries > 0;
+
+    let mut warnings = Vec::new();
+    if !runtime_transport_enabled {
+        warnings.push(
+            "wrapper transport is disabled; Flow is launching plain `codex`, so runtime skills never activate"
+                .to_string(),
+        );
+    }
+    if runtime_skills_state == "disabled" {
+        warnings.push("runtime skills are disabled in config".to_string());
+    }
+    if !schedule_status.ready() {
+        warnings.push(
+            "scheduled skill-eval refresh is not loaded; scorecards will only update when you run cron manually"
+                .to_string(),
+        );
+    }
+    if skill_eval_events == 0 {
+        warnings.push("no Codex route events recorded yet".to_string());
+    }
+    if skill_eval_outcomes == 0 {
+        warnings.push(
+            "no grounded outcome events recorded yet; scorecards are still affinity-only"
+                .to_string(),
+        );
+    }
+    if memory_stats.is_none() {
+        warnings.push(
+            "codex memory mirror is unavailable; recent memory and durable sync will stay local-only"
+                .to_string(),
+        );
+    }
+
+    let (memory_state, memory_root, memory_db_path, memory_events_indexed, memory_facts_indexed) =
+        if let Some(stats) = memory_stats {
+            (
+                "ready".to_string(),
+                stats.root_dir,
+                stats.db_path,
+                stats.total_events,
+                stats.total_facts,
+            )
+        } else {
+            (
+                "unavailable".to_string(),
+                codex_memory::root_dir().display().to_string(),
+                codex_memory::db_path().display().to_string(),
+                0,
+                0,
+            )
+        };
+
+    Ok(CodexDoctorSnapshot {
+        target: target_path.display().to_string(),
+        codex_bin,
+        codexd: if codexd_running {
+            "running".to_string()
+        } else {
+            "stopped".to_string()
+        },
+        codexd_socket: codexd_socket.display().to_string(),
+        memory_state,
+        memory_root,
+        memory_db_path,
+        memory_events_indexed,
+        memory_facts_indexed,
+        runtime_transport: if runtime_transport_enabled {
+            "enabled".to_string()
+        } else {
+            "disabled".to_string()
+        },
+        runtime_skills: runtime_skills_state.to_string(),
+        auto_resolve_references: codex_cfg.auto_resolve_references.unwrap_or(true),
+        home_session_path: codex_cfg
             .home_session_path
             .as_deref()
             .map(config::expand_path)
             .unwrap_or_else(default_codex_connect_path)
             .display()
+            .to_string(),
+        prompt_context_budget_chars: effective_prompt_context_budget_chars(&codex_cfg, false),
+        max_resolved_references: effective_max_resolved_references(&codex_cfg),
+        reference_resolvers: codex_cfg.reference_resolvers.len(),
+        query_cache: if codex_query_cache_disabled() {
+            "disabled".to_string()
+        } else {
+            "enabled".to_string()
+        },
+        query_cache_entries_on_disk: codex_query_cache_entry_count(),
+        skill_eval_events_on_disk: skill_eval_events,
+        skill_eval_outcomes_on_disk: skill_eval_outcomes,
+        skill_scorecard_samples,
+        skill_scorecard_entries,
+        skill_scorecard_top,
+        external_skill_candidates: discovered_skills.len(),
+        runtime_state_files: runtime_states.len(),
+        runtime_state_files_for_target: active_runtime_states,
+        skill_eval_schedule: schedule_status.as_str().to_string(),
+        learning_state: learning_state.to_string(),
+        runtime_ready,
+        schedule_ready: schedule_status.ready(),
+        learning_ready,
+        warnings,
+    })
+}
+
+pub fn codex_skills_dashboard_snapshot(
+    target_path: &Path,
+    recent_limit: usize,
+) -> Result<CodexSkillsDashboardResponse> {
+    let codex_cfg = load_codex_config_for_path(target_path);
+    Ok(CodexSkillsDashboardResponse {
+        doctor: collect_codex_doctor_snapshot(target_path)?,
+        skills: codex_runtime::dashboard_snapshot(target_path, &codex_cfg, recent_limit)?,
+    })
+}
+
+fn print_codex_doctor(snapshot: &CodexDoctorSnapshot) {
+    println!("# codex doctor");
+    println!("target: {}", snapshot.target);
+    println!("codex_bin: {}", snapshot.codex_bin);
+    println!("codexd: {}", snapshot.codexd);
+    println!("codexd_socket: {}", snapshot.codexd_socket);
+    println!("memory_state: {}", snapshot.memory_state);
+    println!("memory_root: {}", snapshot.memory_root);
+    println!("memory_db_path: {}", snapshot.memory_db_path);
+    println!("memory_events_indexed: {}", snapshot.memory_events_indexed);
+    println!("memory_facts_indexed: {}", snapshot.memory_facts_indexed);
+    println!("runtime_transport: {}", snapshot.runtime_transport);
+    println!("runtime_skills: {}", snapshot.runtime_skills);
+    println!(
+        "auto_resolve_references: {}",
+        snapshot.auto_resolve_references
     );
+    println!("home_session_path: {}", snapshot.home_session_path);
     println!(
         "prompt_context_budget_chars: {}",
-        effective_prompt_context_budget_chars(&codex_cfg, false)
+        snapshot.prompt_context_budget_chars
     );
     println!(
         "max_resolved_references: {}",
-        effective_max_resolved_references(&codex_cfg)
+        snapshot.max_resolved_references
     );
-    println!(
-        "reference_resolvers: {}",
-        codex_cfg.reference_resolvers.len()
-    );
-    println!(
-        "query_cache: {}",
-        if codex_query_cache_disabled() {
-            "disabled"
-        } else {
-            "enabled"
-        }
-    );
+    println!("reference_resolvers: {}", snapshot.reference_resolvers);
+    println!("query_cache: {}", snapshot.query_cache);
     println!(
         "query_cache_entries_on_disk: {}",
-        codex_query_cache_entry_count()
+        snapshot.query_cache_entries_on_disk
     );
     println!(
         "skill_eval_events_on_disk: {}",
-        codex_skill_eval::event_count()
+        snapshot.skill_eval_events_on_disk
     );
     println!(
         "skill_eval_outcomes_on_disk: {}",
-        codex_skill_eval::outcome_count()
+        snapshot.skill_eval_outcomes_on_disk
     );
-    match codex_skill_eval::load_scorecard(&target_path)? {
-        Some(scorecard) => {
-            println!("skill_scorecard_samples: {}", scorecard.samples);
-            println!("skill_scorecard_entries: {}", scorecard.skills.len());
-            if let Some(top) = scorecard.skills.first() {
-                println!("skill_scorecard_top: {} ({:.2})", top.name, top.score);
-            }
-        }
-        None => {
-            println!("skill_scorecard_samples: 0");
-            println!("skill_scorecard_entries: 0");
+    println!(
+        "skill_scorecard_samples: {}",
+        snapshot.skill_scorecard_samples
+    );
+    println!(
+        "skill_scorecard_entries: {}",
+        snapshot.skill_scorecard_entries
+    );
+    if let Some(top) = &snapshot.skill_scorecard_top {
+        println!("skill_scorecard_top: {}", top);
+    }
+    println!(
+        "external_skill_candidates: {}",
+        snapshot.external_skill_candidates
+    );
+    println!("runtime_state_files: {}", snapshot.runtime_state_files);
+    println!(
+        "runtime_state_files_for_target: {}",
+        snapshot.runtime_state_files_for_target
+    );
+    println!("skill_eval_schedule: {}", snapshot.skill_eval_schedule);
+    println!("learning_state: {}", snapshot.learning_state);
+    println!("runtime_ready: {}", snapshot.runtime_ready);
+    println!("schedule_ready: {}", snapshot.schedule_ready);
+    println!("learning_ready: {}", snapshot.learning_ready);
+    if !snapshot.warnings.is_empty() {
+        println!("warnings: {}", snapshot.warnings.len());
+        for warning in &snapshot.warnings {
+            println!("- {}", warning);
         }
     }
-    let discovered_skills = codex_runtime::discover_external_skills(&target_path, &codex_cfg)?;
-    println!("external_skill_candidates: {}", discovered_skills.len());
-    println!("runtime_state_files: {}", runtime_states.len());
-    println!("runtime_state_files_for_target: {}", active_runtime_states);
+}
+
+fn assert_codex_doctor(
+    snapshot: &CodexDoctorSnapshot,
+    assert_runtime: bool,
+    assert_schedule: bool,
+    assert_learning: bool,
+    assert_autonomous: bool,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    let require_runtime = assert_runtime || assert_autonomous;
+    let require_schedule = assert_schedule || assert_autonomous;
+    let require_learning = assert_learning || assert_autonomous;
+
+    if require_runtime {
+        if snapshot.runtime_transport != "enabled" {
+            failures.push(
+                "runtime transport is disabled; set [options].codex_bin to the Flow wrapper"
+                    .to_string(),
+            );
+        }
+        if snapshot.runtime_skills != "enabled" {
+            failures.push(
+                "runtime skills are not active; enable [codex].runtime_skills and use the Flow wrapper"
+                    .to_string(),
+            );
+        }
+        if !snapshot.auto_resolve_references {
+            failures.push("auto_resolve_references is disabled".to_string());
+        }
+    }
+
+    if require_schedule && !snapshot.schedule_ready {
+        failures.push(format!(
+            "scheduled skill-eval refresh is {}; install/load the launchd agent",
+            snapshot.skill_eval_schedule
+        ));
+    }
+
+    if require_learning {
+        if snapshot.skill_eval_events_on_disk == 0 {
+            failures.push("no Codex route events recorded yet".to_string());
+        }
+        if snapshot.skill_scorecard_entries == 0 {
+            failures.push("no skill scorecard entries built yet".to_string());
+        }
+        if snapshot.skill_eval_outcomes_on_disk == 0 {
+            failures.push(
+                "no grounded skill outcome events recorded yet; the system is still affinity-only"
+                    .to_string(),
+            );
+        }
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "codex doctor assertion failed:\n- {}\nnext: run `f codex enable-global --full`, then exercise `f codex open ...` or `f ai codex new` through Flow until outcomes appear",
+        failures.join("\n- ")
+    )
+}
+
+fn parse_global_flow_toml(path: &Path) -> Result<toml::value::Table> {
+    if !path.exists() {
+        return Ok(toml::value::Table::new());
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(toml::value::Table::new());
+    }
+
+    let value: TomlValue =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+    value
+        .as_table()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("global flow config must be a TOML table"))
+}
+
+fn ensure_toml_table<'a>(
+    root: &'a mut toml::value::Table,
+    key: &str,
+) -> Result<&'a mut toml::value::Table> {
+    let needs_insert = !matches!(root.get(key), Some(TomlValue::Table(_)));
+    if needs_insert {
+        if root.contains_key(key) {
+            bail!("expected [{}] to be a table in global flow config", key);
+        }
+        root.insert(key.to_string(), TomlValue::Table(toml::value::Table::new()));
+    }
+    root.get_mut(key)
+        .and_then(TomlValue::as_table_mut)
+        .ok_or_else(|| anyhow::anyhow!("expected [{}] to be a table in global flow config", key))
+}
+
+fn write_string_atomically(path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing parent for {}", path.display()))?;
+    fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("flow.toml"),
+        std::process::id(),
+        unix_now_secs()
+    ));
+    fs::write(&temp, content).with_context(|| format!("failed to write {}", temp.display()))?;
+    fs::rename(&temp, path).with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
+}
+
+fn upsert_global_codex_config(path: &Path) -> Result<(String, bool, bool, bool)> {
+    let mut root = parse_global_flow_toml(path)?;
+    let created = !path.exists();
+    let wrapper_path = config::expand_path(DEFAULT_GLOBAL_CODEX_WRAPPER_BIN);
+    if !wrapper_path.exists() {
+        bail!(
+            "Flow Codex wrapper is missing at {}; build or sync Flow first",
+            wrapper_path.display()
+        );
+    }
+
+    let codex = ensure_toml_table(&mut root, "codex")?;
+    codex.insert("runtime_skills".to_string(), TomlValue::Boolean(true));
+    codex.insert(
+        "auto_resolve_references".to_string(),
+        TomlValue::Boolean(true),
+    );
+    codex
+        .entry("home_session_path".to_string())
+        .or_insert_with(|| TomlValue::String(DEFAULT_GLOBAL_CODEX_HOME_SESSION_PATH.to_string()));
+    codex
+        .entry("prompt_context_budget_chars".to_string())
+        .or_insert_with(|| TomlValue::Integer(DEFAULT_GLOBAL_CODEX_PROMPT_BUDGET as i64));
+    codex
+        .entry("max_resolved_references".to_string())
+        .or_insert_with(|| TomlValue::Integer(DEFAULT_GLOBAL_CODEX_MAX_REFERENCES as i64));
+
+    let skill_source_root = config::expand_path(DEFAULT_GLOBAL_CODEX_SKILL_SOURCE_PATH);
+    let skill_source_available = skill_source_root.exists();
+    let mut skill_source_added = false;
+    if skill_source_available {
+        let entry = codex
+            .entry("skill_source".to_string())
+            .or_insert_with(|| TomlValue::Array(Vec::new()));
+        let array = entry
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("[codex].skill_source must be an array"))?;
+        let exists = array.iter().any(|value| {
+            let Some(table) = value.as_table() else {
+                return false;
+            };
+            table
+                .get("name")
+                .and_then(TomlValue::as_str)
+                .map(|name| name == DEFAULT_GLOBAL_CODEX_SKILL_SOURCE_NAME)
+                .unwrap_or(false)
+                || table
+                    .get("path")
+                    .and_then(TomlValue::as_str)
+                    .map(|value| config::expand_path(value) == skill_source_root)
+                    .unwrap_or(false)
+        });
+        if !exists {
+            let mut source = toml::value::Table::new();
+            source.insert(
+                "name".to_string(),
+                TomlValue::String(DEFAULT_GLOBAL_CODEX_SKILL_SOURCE_NAME.to_string()),
+            );
+            source.insert(
+                "path".to_string(),
+                TomlValue::String(DEFAULT_GLOBAL_CODEX_SKILL_SOURCE_PATH.to_string()),
+            );
+            source.insert("enabled".to_string(), TomlValue::Boolean(true));
+            array.push(TomlValue::Table(source));
+            skill_source_added = true;
+        }
+    }
+
+    let options = ensure_toml_table(&mut root, "options")?;
+    options.insert(
+        "codex_bin".to_string(),
+        TomlValue::String(DEFAULT_GLOBAL_CODEX_WRAPPER_BIN.to_string()),
+    );
+
+    let rendered = toml::to_string_pretty(&TomlValue::Table(root))
+        .context("failed to render global flow config")?;
+    Ok((
+        rendered,
+        created,
+        skill_source_added,
+        skill_source_available,
+    ))
+}
+
+fn install_codex_skill_eval_launchd(
+    current_exe: &Path,
+    minutes: usize,
+    limit: usize,
+    max_targets: usize,
+    within_hours: u64,
+    dry_run: bool,
+) -> Result<String> {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("codex-skill-eval-launchd.py");
+    let mut command = Command::new("python3");
+    command
+        .arg(script)
+        .arg("install")
+        .arg("--minutes")
+        .arg(minutes.to_string())
+        .arg("--limit")
+        .arg(limit.to_string())
+        .arg("--max-targets")
+        .arg(max_targets.to_string())
+        .arg("--within-hours")
+        .arg(within_hours.to_string());
+    if dry_run {
+        command.arg("--dry-run");
+    }
+    command.env("FLOW_CODEX_SKILL_EVAL_F_BIN", current_exe);
+    let output = command
+        .output()
+        .context("failed to run codex skill-eval launchd installer")?;
+    if !output.status.success() {
+        bail!(
+            "codex skill-eval launchd install failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn codex_enable_global(
+    dry_run: bool,
+    install_launchd: bool,
+    start_daemon: bool,
+    sync_skills: bool,
+    full: bool,
+    minutes: usize,
+    limit: usize,
+    max_targets: usize,
+    within_hours: u64,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("enable-global is only supported for Codex sessions; use `f codex enable-global`");
+    }
+
+    let install_launchd = install_launchd || full;
+    let start_daemon = start_daemon || full;
+    let sync_skills = sync_skills || full;
+    let config_path = config::default_config_path();
+    let (rendered, created, skill_source_added, skill_source_available) =
+        upsert_global_codex_config(&config_path)?;
+
+    if dry_run {
+        println!("# codex enable-global");
+        println!("config_path: {}", config_path.display());
+        println!("config_created: {}", created);
+        println!("skill_source_available: {}", skill_source_available);
+        println!("skill_source_added: {}", skill_source_added);
+        if install_launchd {
+            let preview = install_codex_skill_eval_launchd(
+                &env::current_exe().context("failed to resolve current flow executable")?,
+                minutes,
+                limit,
+                max_targets,
+                within_hours,
+                true,
+            )?;
+            println!();
+            println!("{}", preview);
+        }
+        println!();
+        print!("{}", rendered);
+        return Ok(());
+    }
+
+    let global_dir = config::ensure_global_config_dir()?;
+    write_string_atomically(&config_path, &rendered)?;
+    println!("Updated global Flow config: {}", config_path.display());
+    if created {
+        println!("Created {}", global_dir.display());
+    }
+    println!(
+        "Enabled global Codex wrapper/runtime transport via {}",
+        DEFAULT_GLOBAL_CODEX_WRAPPER_BIN
+    );
+    if skill_source_available {
+        if skill_source_added {
+            println!(
+                "Registered external skill source: {}",
+                DEFAULT_GLOBAL_CODEX_SKILL_SOURCE_PATH
+            );
+        } else {
+            println!(
+                "External skill source already configured: {}",
+                DEFAULT_GLOBAL_CODEX_SKILL_SOURCE_PATH
+            );
+        }
+    }
+
+    if install_launchd {
+        let launchd_output = install_codex_skill_eval_launchd(
+            &env::current_exe().context("failed to resolve current flow executable")?,
+            minutes,
+            limit,
+            max_targets,
+            within_hours,
+            false,
+        )?;
+        if !launchd_output.is_empty() {
+            println!("{}", launchd_output);
+        }
+    }
+
+    if start_daemon {
+        codexd::start()?;
+    }
+
+    if sync_skills {
+        let target_path = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let codex_cfg = load_codex_config_for_path(&target_path);
+        let installed = codex_runtime::sync_external_skills(&target_path, &codex_cfg, &[], false)?;
+        println!(
+            "Synced {} external Codex skill(s) into ~/.codex/skills.",
+            installed
+        );
+    }
+
+    let verify_target = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let snapshot = collect_codex_doctor_snapshot(&verify_target)?;
+    assert_codex_doctor(&snapshot, true, install_launchd, false, false)?;
+    println!();
+    print_codex_doctor(&snapshot);
+    Ok(())
+}
+
+fn codex_doctor(
+    path: Option<String>,
+    assert_runtime: bool,
+    assert_schedule: bool,
+    assert_learning: bool,
+    assert_autonomous: bool,
+    json_output: bool,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("doctor is only supported for Codex sessions; use `f codex doctor`");
+    }
+
+    let target_path = resolve_session_target_path(path.as_deref())?;
+    let snapshot = collect_codex_doctor_snapshot(&target_path)?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&snapshot)
+                .context("failed to encode codex doctor JSON")?
+        );
+    } else {
+        print_codex_doctor(&snapshot);
+    }
+    assert_codex_doctor(
+        &snapshot,
+        assert_runtime,
+        assert_schedule,
+        assert_learning,
+        assert_autonomous,
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexQuickLaunchEvent {
+    version: u8,
+    launch_id: String,
+    recorded_at_unix: u64,
+    mode: String,
+    cwd: String,
+    daemon: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexQuickLaunchHydration {
+    version: u8,
+    launch_id: String,
+    hydrated_at_unix: u64,
+    target_path: String,
+    session_id: String,
+    query: String,
+    prompt_recorded_at_unix: u64,
+}
+
+fn codex_quick_launch_log_path() -> Result<PathBuf> {
+    Ok(config::ensure_global_state_dir()?
+        .join("codex")
+        .join("quick-launches.jsonl"))
+}
+
+fn codex_quick_launch_hydrations_path() -> Result<PathBuf> {
+    Ok(config::ensure_global_state_dir()?
+        .join("codex")
+        .join("quick-launches-hydrated.jsonl"))
+}
+
+fn log_codex_quick_launch_event(event: &CodexQuickLaunchEvent) -> Result<()> {
+    let path = codex_quick_launch_log_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    serde_json::to_writer(&mut file, event).context("failed to encode quick launch event")?;
+    file.write_all(b"\n")
+        .context("failed to terminate quick launch event")?;
+    Ok(())
+}
+
+fn log_codex_quick_launch_hydration(hydration: &CodexQuickLaunchHydration) -> Result<()> {
+    let path = codex_quick_launch_hydrations_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    serde_json::to_writer(&mut file, hydration)
+        .context("failed to encode quick launch hydration")?;
+    file.write_all(b"\n")
+        .context("failed to terminate quick launch hydration")?;
+    Ok(())
+}
+
+fn load_recent_codex_quick_launches(limit: usize) -> Result<Vec<CodexQuickLaunchEvent>> {
+    let path = codex_quick_launch_log_path()?;
+    if !path.exists() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut launches = raw
+        .lines()
+        .rev()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<CodexQuickLaunchEvent>(trimmed).ok()
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+    launches.sort_by_key(|launch| launch.recorded_at_unix);
+    Ok(launches)
+}
+
+fn load_hydrated_codex_quick_launch_ids() -> Result<BTreeSet<String>> {
+    let path = codex_quick_launch_hydrations_path()?;
+    if !path.exists() {
+        return Ok(BTreeSet::new());
+    }
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<CodexQuickLaunchHydration>(line.trim()).ok())
+        .map(|hydration| hydration.launch_id)
+        .collect())
+}
+
+fn parse_rfc3339_to_unix(value: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|dt| u64::try_from(dt.timestamp()).ok())
+}
+
+fn read_codex_first_user_message_since(
+    session_file: &PathBuf,
+    since_unix: u64,
+) -> Result<Option<(String, u64)>> {
+    let mut first: Option<(String, u64)> = None;
+    for_each_nonempty_jsonl_line(session_file, |line| {
+        let entry: CodexEntry = match crate::json_parse::parse_json_line(line) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let Some((role, text)) = extract_codex_message(&entry) else {
+            return;
+        };
+        if role != "user" || text.trim().is_empty() {
+            return;
+        }
+        let Some(cleaned) = codex_text::sanitize_codex_query_text(&text) else {
+            return;
+        };
+        let Some(ts) =
+            extract_codex_timestamp(&entry).and_then(|value| parse_rfc3339_to_unix(&value))
+        else {
+            return;
+        };
+        if ts < since_unix {
+            return;
+        }
+        if first
+            .as_ref()
+            .map(|(_, current)| ts < *current)
+            .unwrap_or(true)
+        {
+            first = Some((cleaned, ts));
+        }
+    })?;
+    Ok(first)
+}
+
+fn hydrate_codex_quick_launch(
+    launch: &CodexQuickLaunchEvent,
+) -> Result<Option<CodexQuickLaunchHydration>> {
+    let target_path = PathBuf::from(&launch.cwd);
+    if !target_path.exists() {
+        return Ok(None);
+    }
+
+    let mut candidates = read_recent_codex_threads_local(&target_path, true, 8, None)?;
+    if candidates.is_empty() {
+        candidates = read_recent_codex_threads_local(&target_path, false, 8, None)?;
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let since_unix = launch.recorded_at_unix.saturating_sub(1);
+    let mut best: Option<(u64, String, String)> = None;
+    for candidate in candidates {
+        let Some(session_file) = find_codex_session_file(&candidate.id) else {
+            continue;
+        };
+        let Some((query, prompt_recorded_at_unix)) =
+            read_codex_first_user_message_since(&session_file, since_unix)?
+        else {
+            continue;
+        };
+        let replace = best
+            .as_ref()
+            .map(|(best_ts, _, _)| prompt_recorded_at_unix < *best_ts)
+            .unwrap_or(true);
+        if replace {
+            best = Some((prompt_recorded_at_unix, candidate.id, query));
+        }
+    }
+
+    let Some((prompt_recorded_at_unix, session_id, query)) = best else {
+        return Ok(None);
+    };
+
+    Ok(Some(CodexQuickLaunchHydration {
+        version: 1,
+        launch_id: launch.launch_id.clone(),
+        hydrated_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or(0),
+        target_path: target_path.display().to_string(),
+        session_id,
+        query,
+        prompt_recorded_at_unix,
+    }))
+}
+
+fn reconcile_pending_codex_quick_launches(limit: usize) -> Result<usize> {
+    let launches = load_recent_codex_quick_launches(limit)?;
+    if launches.is_empty() {
+        return Ok(0);
+    }
+
+    let hydrated_ids = load_hydrated_codex_quick_launch_ids()?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    let mut reconciled = 0usize;
+
+    for launch in launches {
+        if hydrated_ids.contains(&launch.launch_id) {
+            continue;
+        }
+        if now.saturating_sub(launch.recorded_at_unix) < 2 {
+            continue;
+        }
+        let Some(hydration) = hydrate_codex_quick_launch(&launch)? else {
+            continue;
+        };
+
+        let event = codex_skill_eval::CodexSkillEvalEvent {
+            version: 1,
+            recorded_at_unix: hydration.prompt_recorded_at_unix,
+            mode: "quick-launch".to_string(),
+            action: if launch.mode == "new" {
+                "new".to_string()
+            } else {
+                "resume".to_string()
+            },
+            route: "quick-launch-hydrated".to_string(),
+            target_path: hydration.target_path.clone(),
+            launch_path: hydration.target_path.clone(),
+            query: hydration.query.clone(),
+            session_id: Some(hydration.session_id.clone()),
+            runtime_token: None,
+            runtime_skills: Vec::new(),
+            prompt_context_budget_chars: 0,
+            prompt_chars: hydration.query.chars().count(),
+            injected_context_chars: 0,
+            reference_count: 0,
+        };
+        let _ = codex_skill_eval::log_event(&event);
+        let _ = log_codex_quick_launch_hydration(&hydration);
+        reconciled += 1;
+    }
+
+    Ok(reconciled)
+}
+
+fn codex_touch_launch(mode: String, cwd: Option<String>, provider: Provider) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("touch-launch is only supported for Codex sessions; use `f codex touch-launch`");
+    }
+
+    let cwd_path = resolve_session_target_path(cwd.as_deref())?;
+    let daemon = if codexd::ensure_running().is_ok() {
+        "running"
+    } else {
+        "unavailable"
+    };
+    let recorded_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mode.hash(&mut hasher);
+    cwd_path.hash(&mut hasher);
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0)
+        .hash(&mut hasher);
+    let event = CodexQuickLaunchEvent {
+        version: 1,
+        launch_id: format!("{:016x}", hasher.finish()),
+        recorded_at_unix,
+        mode,
+        cwd: cwd_path.display().to_string(),
+        daemon: daemon.to_string(),
+    };
+    let _ = log_codex_quick_launch_event(&event);
+    let _ = reconcile_pending_codex_quick_launches(48);
     Ok(())
 }
 
@@ -4859,6 +5914,112 @@ fn codex_daemon_command(action: Option<CodexDaemonAction>, provider: Provider) -
     }
 }
 
+fn codex_memory_command(action: Option<CodexMemoryAction>, provider: Provider) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("memory is only supported for Codex sessions; use `f codex memory ...`");
+    }
+
+    match action.unwrap_or(CodexMemoryAction::Status { json: false }) {
+        CodexMemoryAction::Status { json } => {
+            let stats = codex_memory::stats()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&stats)
+                        .context("failed to encode codex memory status JSON")?
+                );
+            } else {
+                println!("# codex memory");
+                println!("root: {}", stats.root_dir);
+                println!("db_path: {}", stats.db_path);
+                println!("events_indexed: {}", stats.total_events);
+                println!("facts_indexed: {}", stats.total_facts);
+                println!("skill_eval_events: {}", stats.skill_eval_events);
+                println!("skill_eval_outcomes: {}", stats.skill_eval_outcomes);
+                if let Some(latest) = stats.latest_recorded_at_unix {
+                    println!("latest_recorded_at_unix: {}", latest);
+                }
+            }
+            Ok(())
+        }
+        CodexMemoryAction::Sync { limit, json } => {
+            let _ = reconcile_pending_codex_quick_launches(limit.max(64));
+            let summary = codex_memory::sync_from_skill_eval_logs(limit)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&summary)
+                        .context("failed to encode codex memory sync JSON")?
+                );
+            } else {
+                println!("# codex memory sync");
+                println!("total_considered: {}", summary.total_considered);
+                println!("inserted: {}", summary.inserted);
+                println!("skipped: {}", summary.skipped);
+            }
+            Ok(())
+        }
+        CodexMemoryAction::Query {
+            path,
+            limit,
+            json,
+            query,
+        } => {
+            let query_text = query.join(" ").trim().to_string();
+            if query_text.is_empty() {
+                bail!("codex memory query requires a search string");
+            }
+            let target_path = resolve_session_target_path(path.as_deref())?;
+            let result = codex_memory::query_repo_facts(&target_path, &query_text, limit)?
+                .ok_or_else(|| anyhow::anyhow!("no codex memory facts matched {:?}", query_text))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result)
+                        .context("failed to encode codex memory query JSON")?
+                );
+            } else {
+                println!("{}", result.rendered);
+            }
+            Ok(())
+        }
+        CodexMemoryAction::Recent { path, limit, json } => {
+            let _ = reconcile_pending_codex_quick_launches(limit.max(64));
+            let _ = codex_memory::sync_from_skill_eval_logs(limit.max(200));
+            let target_path = path
+                .as_deref()
+                .map(|value| resolve_session_target_path(Some(value)))
+                .transpose()?;
+            let rows = codex_memory::recent(target_path.as_deref(), limit)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&rows)
+                        .context("failed to encode codex memory recent JSON")?
+                );
+            } else if rows.is_empty() {
+                println!("No codex memory rows recorded.");
+            } else {
+                println!("# codex memory recent");
+                for row in rows {
+                    let subject = row
+                        .query
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| truncate_message(value, 96))
+                        .or_else(|| row.route.clone())
+                        .unwrap_or_else(|| "(no query)".to_string());
+                    println!(
+                        "- {} | {} | {}",
+                        row.event_kind, row.recorded_at_unix, subject
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 fn codex_skill_eval_command(
     action: Option<CodexSkillEvalAction>,
     provider: Provider,
@@ -4872,6 +6033,7 @@ fn codex_skill_eval_command(
         json: false,
     }) {
         CodexSkillEvalAction::Run { path, limit, json } => {
+            let _ = reconcile_pending_codex_quick_launches(limit.max(48));
             let target_path = resolve_session_target_path(path.as_deref())?;
             let scorecard = codex_skill_eval::rebuild_scorecard(&target_path, limit)?;
             if json {
@@ -4886,6 +6048,7 @@ fn codex_skill_eval_command(
             Ok(())
         }
         CodexSkillEvalAction::Show { path, json } => {
+            let _ = reconcile_pending_codex_quick_launches(64);
             let target_path = resolve_session_target_path(path.as_deref())?;
             let scorecard = codex_skill_eval::load_scorecard(&target_path)?
                 .unwrap_or(codex_skill_eval::rebuild_scorecard(&target_path, 200)?);
@@ -4901,6 +6064,7 @@ fn codex_skill_eval_command(
             Ok(())
         }
         CodexSkillEvalAction::Events { path, limit, json } => {
+            let _ = reconcile_pending_codex_quick_launches(limit.max(48));
             let target_path = path
                 .as_deref()
                 .map(|value| resolve_session_target_path(Some(value)))
@@ -4938,21 +6102,38 @@ fn codex_skill_eval_command(
             within_hours,
             json,
         } => {
+            let reconciled = reconcile_pending_codex_quick_launches(limit.max(64))?;
+            let memory_sync = codex_memory::sync_from_skill_eval_logs(limit.max(200))?;
             let targets = codex_skill_eval::recent_targets(limit, max_targets, within_hours)?;
+            let mut capsule_sync_count = 0usize;
             let mut scorecards = Vec::new();
             for target in targets {
+                if codex_memory::sync_repo_capsule_for_path(&target).is_ok() {
+                    capsule_sync_count += 1;
+                }
                 scorecards.push(codex_skill_eval::rebuild_scorecard(&target, limit)?);
             }
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&scorecards)
-                        .context("failed to encode codex skill-eval cron JSON")?
+                    serde_json::to_string_pretty(&json!({
+                        "reconciledQuickLaunches": reconciled,
+                        "memorySync": memory_sync,
+                        "capsulesSynced": capsule_sync_count,
+                        "scorecards": scorecards,
+                    }))
+                    .context("failed to encode codex skill-eval cron JSON")?
                 );
             } else if scorecards.is_empty() {
-                println!("No recent Codex skill-eval targets found.");
+                println!(
+                    "No recent Codex skill-eval targets found. Reconciled {} fast launch(es), indexed {} memory event(s), synced {} repo capsule(s).",
+                    reconciled, memory_sync.inserted, capsule_sync_count
+                );
             } else {
                 println!("# codex skill-eval cron");
+                println!("reconciled fast launches: {}", reconciled);
+                println!("memory inserted: {}", memory_sync.inserted);
+                println!("repo capsules synced: {}", capsule_sync_count);
                 for scorecard in scorecards {
                     let top = scorecard
                         .skills
@@ -5345,6 +6526,7 @@ fn record_codex_open_plan(plan: &CodexOpenPlan, mode: &str) {
         target_path: plan.target_path.clone(),
         launch_path: plan.launch_path.clone(),
         query: query.to_string(),
+        session_id: plan.session_id.clone(),
         runtime_token: plan.runtime_state_path.as_deref().and_then(|path| {
             Path::new(path)
                 .file_stem()
@@ -5789,6 +6971,23 @@ fn resolve_codex_references(
         }
     }
 
+    let remaining = 2usize.saturating_sub(matches.len());
+    if remaining > 0 {
+        for reference in
+            resolve_builtin_repo_references(target_path, query_text, &candidates, remaining)?
+        {
+            if !matches
+                .iter()
+                .any(|value| value.matched == reference.matched)
+            {
+                matches.push(reference);
+            }
+            if matches.len() >= 2 {
+                return Ok(matches);
+            }
+        }
+    }
+
     if let Some(reference) = resolve_builtin_linear_reference(query_text, &candidates)
         && !matches
             .iter()
@@ -5806,6 +7005,38 @@ fn resolve_codex_references(
     }
 
     Ok(matches)
+}
+
+fn resolve_builtin_repo_references(
+    target_path: &Path,
+    query_text: &str,
+    candidates: &[String],
+    limit: usize,
+) -> Result<Vec<CodexResolvedReference>> {
+    let references =
+        repo_capsule::resolve_reference_candidates(target_path, query_text, candidates, limit)?;
+    Ok(references
+        .into_iter()
+        .map(|reference| {
+            let memory_context =
+                codex_memory::query_repo_facts(Path::new(&reference.repo_root), query_text, 4)
+                    .ok()
+                    .flatten()
+                    .map(|result| compact_codex_context_block(&result.rendered, 8, 700));
+            let output = if let Some(memory) = memory_context {
+                format!("{}\n{}", reference.output, memory)
+            } else {
+                reference.output
+            };
+            CodexResolvedReference {
+                name: "repo".to_string(),
+                source: "repo".to_string(),
+                matched: reference.matched,
+                command: None,
+                output,
+            }
+        })
+        .collect())
 }
 
 fn resolve_external_reference(
@@ -9276,6 +10507,51 @@ mod tests {
     }
 
     #[test]
+    fn read_codex_first_user_message_since_prefers_first_post_launch_turn() {
+        let root = tempdir().expect("tempdir");
+        let session_file = root.path().join("codex.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-16T10:00:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"old prompt\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-16T10:00:01Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"old answer\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-16T10:05:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"new prompt after launch\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-16T10:05:02Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"new answer\"}]}}\n"
+            ),
+        )
+        .expect("write session file");
+
+        let since_unix = parse_rfc3339_to_unix("2026-03-16T10:05:00Z").expect("parse timestamp");
+        let first = read_codex_first_user_message_since(&session_file, since_unix)
+            .expect("read")
+            .expect("first post-launch prompt");
+        assert_eq!(first.0, "new prompt after launch");
+        assert_eq!(first.1, since_unix);
+    }
+
+    #[test]
+    fn read_codex_first_user_message_since_skips_contextual_scaffolding() {
+        let root = tempdir().expect("tempdir");
+        let session_file = root.path().join("codex.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-16T10:05:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp\\n\\n<INSTRUCTIONS>\\nbody\\n</INSTRUCTIONS>\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-16T10:05:01Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<environment_context>\\n<cwd>/tmp</cwd>\\n</environment_context>\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-16T10:05:02Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"write plan for rollout\"}]}}\n"
+            ),
+        )
+        .expect("write session file");
+
+        let since_unix = parse_rfc3339_to_unix("2026-03-16T10:05:00Z").expect("parse timestamp");
+        let first = read_codex_first_user_message_since(&session_file, since_unix)
+            .expect("read")
+            .expect("first real prompt");
+        assert_eq!(first.0, "write plan for rollout");
+        assert_eq!(first.1, since_unix + 2);
+    }
+
+    #[test]
     fn append_history_message_skips_consecutive_duplicates() {
         let mut history = String::new();
         let mut last_entry = None;
@@ -9438,6 +10714,62 @@ mod tests {
             "https://linear.app/*/issue/*",
             "https://github.com/openai/codex"
         ));
+    }
+
+    fn sample_codex_doctor_snapshot() -> CodexDoctorSnapshot {
+        CodexDoctorSnapshot {
+            target: "/tmp/repo".to_string(),
+            codex_bin: "codex-flow-wrapper".to_string(),
+            codexd: "running".to_string(),
+            codexd_socket: "/tmp/codexd.sock".to_string(),
+            memory_state: "ready".to_string(),
+            memory_root: "/tmp/jazz2/codex-memory".to_string(),
+            memory_db_path: "/tmp/jazz2/codex-memory/memory.sqlite".to_string(),
+            memory_events_indexed: 9,
+            memory_facts_indexed: 12,
+            runtime_transport: "enabled".to_string(),
+            runtime_skills: "enabled".to_string(),
+            auto_resolve_references: true,
+            home_session_path: "/tmp/home".to_string(),
+            prompt_context_budget_chars: 1200,
+            max_resolved_references: 2,
+            reference_resolvers: 0,
+            query_cache: "enabled".to_string(),
+            query_cache_entries_on_disk: 4,
+            skill_eval_events_on_disk: 6,
+            skill_eval_outcomes_on_disk: 3,
+            skill_scorecard_samples: 6,
+            skill_scorecard_entries: 2,
+            skill_scorecard_top: Some("plan_write (0.91)".to_string()),
+            external_skill_candidates: 1,
+            runtime_state_files: 2,
+            runtime_state_files_for_target: 1,
+            skill_eval_schedule: "loaded".to_string(),
+            learning_state: "grounded".to_string(),
+            runtime_ready: true,
+            schedule_ready: true,
+            learning_ready: true,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn codex_doctor_assert_autonomous_accepts_grounded_snapshot() {
+        let snapshot = sample_codex_doctor_snapshot();
+        assert!(assert_codex_doctor(&snapshot, false, false, false, true).is_ok());
+    }
+
+    #[test]
+    fn codex_doctor_assert_learning_requires_grounded_outcomes() {
+        let mut snapshot = sample_codex_doctor_snapshot();
+        snapshot.skill_eval_outcomes_on_disk = 0;
+        snapshot.learning_ready = false;
+        snapshot.learning_state = "affinity-only".to_string();
+
+        let err = assert_codex_doctor(&snapshot, false, false, true, false)
+            .expect_err("learning assertion should fail without outcomes");
+        let message = format!("{err:#}");
+        assert!(message.contains("no grounded skill outcome events recorded yet"));
     }
 
     #[test]

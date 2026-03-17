@@ -120,7 +120,7 @@ description = "Summarize RL signal counts, errors, and latency percentiles."
 
 [[tasks]]
 name = "rl-dataset-build"
-command = "python3 ./scripts/build_rl_runtime_dataset.py --harbor-dir ${HARBOR_DIR:-$HOME/repos/laude-institute/harbor} --flow-signals ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl} --seq-mem ${SEQ_CH_MEM_PATH:-$HOME/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl} --write-latest $@"
+command = "python3 ./scripts/build_rl_runtime_dataset.py --harbor-dir ${HARBOR_DIR:-$HOME/repos/laude-institute/harbor} --flow-signals ${FLOW_RL_SIGNALS_PATH:-out/logs/flow_rl_signals.jsonl} --seq-mem ${SEQ_CH_MEM_PATH:-$HOME/.config/flow/rl/seq_mem.jsonl} --write-latest $@"
 description = "Build Harbor-ready RL dataset snapshot from flow+seq runtime signals."
 
 [[tasks]]
@@ -491,12 +491,12 @@ variables = [
   { key = "FLOW_RL_SIGNALS", default = "true" },
   { key = "FLOW_RL_SIGNALS_PATH", default = "out/logs/flow_rl_signals.jsonl" },
   { key = "FLOW_RL_SIGNALS_SEQ_MIRROR", default = "true" },
-  { key = "FLOW_RL_SIGNALS_SEQ_PATH", default = "~/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl" },
+  { key = "FLOW_RL_SIGNALS_SEQ_PATH", default = "~/.config/flow/rl/seq_mem.jsonl" },
   { key = "FLOW_ROUTER_SUGGESTED_TASK", default = "" },
   { key = "FLOW_ROUTER_OVERRIDE_REASON", default = "" },
   { key = "FLOW_RL_SIGNAL_TEXT", default = "snippet" },
   { key = "FLOW_RL_SIGNAL_MAX_CHARS", default = "4000" },
-  { key = "SEQ_CH_MEM_PATH", default = "~/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl" },
+  { key = "SEQ_CH_MEM_PATH", default = "~/.config/flow/rl/seq_mem.jsonl" },
   { key = "HARBOR_DIR", default = "~/repos/laude-institute/harbor" },
 ]
 

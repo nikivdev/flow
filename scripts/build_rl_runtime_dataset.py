@@ -456,7 +456,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build RL runtime dataset from flow + seq logs")
     parser.add_argument("--harbor-dir", default=str(Path("~/repos/laude-institute/harbor").expanduser()))
     parser.add_argument("--flow-signals", default="out/logs/flow_rl_signals.jsonl")
-    parser.add_argument("--seq-mem", default=str(Path("~/repos/ClickHouse/ClickHouse/user_files/seq_mem.jsonl").expanduser()))
+    parser.add_argument("--seq-mem", default=str(Path("~/.config/flow/rl/seq_mem.jsonl").expanduser()))
     parser.add_argument("--snapshot", default="", help="snapshot name; default timestamp")
     parser.add_argument("--flow-last", type=int, default=20_000)
     parser.add_argument("--seq-last", type=int, default=50_000)

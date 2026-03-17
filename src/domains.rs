@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{DomainsAction, DomainsAddOpts, DomainsCommand, DomainsEngineArg, DomainsRmOpts};
+use crate::cli::{
+    DomainsAction, DomainsAddOpts, DomainsCommand, DomainsEngineArg, DomainsGetOpts, DomainsRmOpts,
+};
 
 const PROXY_CONTAINER_NAME: &str = "flow-local-domains-proxy";
 const NATIVE_PROXY_HEADER: &str = "x-flow-domainsd: 1";
@@ -77,6 +79,7 @@ pub fn run(cmd: DomainsCommand) -> Result<()> {
         Some(DomainsAction::Up) => run_up(&paths, engine),
         Some(DomainsAction::Down) => run_down(&paths, engine),
         Some(DomainsAction::List) | None => run_list(&paths),
+        Some(DomainsAction::Get(opts)) => run_get(&paths, opts),
         Some(DomainsAction::Add(opts)) => run_add(&paths, opts, engine),
         Some(DomainsAction::Rm(opts)) => run_rm(&paths, opts, engine),
         Some(DomainsAction::Doctor) => run_doctor(&paths, engine),
@@ -147,6 +150,24 @@ fn run_list(paths: &DomainsPaths) -> Result<()> {
     println!("{}", "-".repeat(58));
     for (host, target) in routes {
         println!("{:<32} {}", host, target);
+    }
+    Ok(())
+}
+
+fn run_get(paths: &DomainsPaths, opts: DomainsGetOpts) -> Result<()> {
+    ensure_layout(paths)?;
+    let host = normalize_host(&opts.host)?;
+    let routes = load_routes(paths)?;
+    let target = routes.get(&host).with_context(|| {
+        format!(
+            "Route not found: {}. Add it with `f domains add {} 127.0.0.1:<port>`.",
+            host, host
+        )
+    })?;
+    if opts.target {
+        println!("{target}");
+    } else {
+        println!("http://{host}");
     }
     Ok(())
 }

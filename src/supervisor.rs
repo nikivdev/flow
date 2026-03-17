@@ -753,6 +753,10 @@ fn build_status_views(config_path: Option<&Path>) -> Result<Vec<DaemonStatusView
     Ok(views)
 }
 
+pub fn daemon_status_views(config_path: Option<&Path>) -> Result<Vec<DaemonStatusView>> {
+    build_status_views(config_path)
+}
+
 fn resolve_config_path(config_path: Option<&str>) -> Option<PathBuf> {
     config_path.map(|path| config::expand_path(path))
 }

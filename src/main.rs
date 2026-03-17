@@ -670,7 +670,7 @@ fn env_truthy_override(key: &str) -> Option<bool> {
 }
 
 fn startup_policy_for(command: Option<&Commands>) -> StartupPolicy {
-    use flowd::cli::{AnalyticsAction, GlobalAction, ProxyAction, TasksAction};
+    use flowd::cli::{AnalyticsAction, GlobalAction, ProxyAction, ReposAction, TasksAction};
 
     match command {
         None => StartupPolicy::NONE,
@@ -752,6 +752,12 @@ fn startup_policy_for(command: Option<&Commands>) -> StartupPolicy {
             | ProxyAction::Stop => StartupPolicy::NONE,
             ProxyAction::Start(_) => StartupPolicy::SECRETS_ONLY,
         },
+        Some(Commands::Repos(cmd)) => match cmd.action.as_ref() {
+            None | Some(ReposAction::Capsule(_)) | Some(ReposAction::Alias(_)) => {
+                StartupPolicy::NONE
+            }
+            _ => StartupPolicy::SECRETS_ONLY,
+        },
         Some(Commands::Ai(_)) => StartupPolicy::FULL,
         Some(Commands::Codex { .. }) => StartupPolicy::FULL,
         Some(Commands::Cursor { .. }) => StartupPolicy::FULL,
@@ -807,7 +813,6 @@ fn startup_policy_for(command: Option<&Commands>) -> StartupPolicy {
         | Some(Commands::Prod(_))
         | Some(Commands::Publish(_))
         | Some(Commands::Clone(_))
-        | Some(Commands::Repos(_))
         | Some(Commands::TaskShortcut(_))
         | Some(Commands::Agents(_))
         | Some(Commands::Hive(_)) => StartupPolicy::SECRETS_ONLY,
@@ -1075,9 +1080,10 @@ mod tests {
 
     use super::{StartupPolicy, startup_policy_for};
     use flowd::cli::{
-        AiAction, AiCommand, AnalyticsCommand, Commands, GlobalAction, GlobalCommand, SessionsOpts,
-        StatusOpts, TasksAction, TasksBuildAiOpts, TasksCommand, TasksListOpts, UrlAction,
-        UrlCommand, UrlCrawlOpts, UrlCrawlSource, UrlInspectOpts, UrlInspectProvider,
+        AiAction, AiCommand, AnalyticsCommand, Commands, GlobalAction, GlobalCommand,
+        RepoAliasAction, RepoAliasCommand, RepoCapsuleOpts, ReposAction, ReposCommand,
+        SessionsOpts, StatusOpts, TasksAction, TasksBuildAiOpts, TasksCommand, TasksListOpts,
+        UrlAction, UrlCommand, UrlCrawlOpts, UrlCrawlSource, UrlInspectOpts, UrlInspectProvider,
     };
 
     #[test]
@@ -1182,6 +1188,32 @@ mod tests {
                 handoff: false,
             }))),
             StartupPolicy::SECRETS_ONLY
+        );
+    }
+
+    #[test]
+    fn startup_policy_keeps_repos_capsule_on_fast_path() {
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Repos(ReposCommand {
+                action: Some(ReposAction::Capsule(RepoCapsuleOpts {
+                    path: None,
+                    refresh: false,
+                    json: false,
+                })),
+            }))),
+            StartupPolicy::NONE
+        );
+    }
+
+    #[test]
+    fn startup_policy_keeps_repos_alias_on_fast_path() {
+        assert_eq!(
+            startup_policy_for(Some(&Commands::Repos(ReposCommand {
+                action: Some(ReposAction::Alias(RepoAliasCommand {
+                    action: Some(RepoAliasAction::List { json: false }),
+                })),
+            }))),
+            StartupPolicy::NONE
         );
     }
 }

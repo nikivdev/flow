@@ -12,7 +12,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::cli::{CloneOpts, ReposAction, ReposCloneOpts, ReposCommand};
-use crate::{config, publish, ssh, ssh_keys, upstream, vcs};
+use crate::{config, publish, repo_capsule, ssh, ssh_keys, upstream, vcs};
 
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
 const REPOS_ROOT_OVERRIDE_ENV: &str = "FLOW_REPOS_ALLOW_ROOT_OVERRIDE";
@@ -26,6 +26,8 @@ pub fn run(cmd: ReposCommand) -> Result<()> {
             Ok(())
         }
         Some(ReposAction::Create(opts)) => publish::run_github(opts),
+        Some(ReposAction::Capsule(opts)) => repo_capsule::run_capsule(opts),
+        Some(ReposAction::Alias(cmd)) => repo_capsule::run_alias(cmd),
         None => fuzzy_select_repo(),
     }
 }
@@ -289,7 +291,7 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
         }
     };
 
-    if target_dir.exists() {
+    if preflight_clone_target(&target_dir)? {
         println!("Already cloned: {}", target_dir.display());
         return Ok(target_dir);
     }
@@ -357,6 +359,47 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
 
     init_jj_repo(&target_dir)?;
     Ok(target_dir)
+}
+
+fn preflight_clone_target(target_dir: &Path) -> Result<bool> {
+    match clone_target_state(target_dir)? {
+        CloneTargetState::Missing | CloneTargetState::EmptyDir => Ok(false),
+        CloneTargetState::GitCheckout => Ok(true),
+        CloneTargetState::OccupiedNonRepo => bail!(
+            "target path exists but is not a git checkout: {}",
+            target_dir.display()
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloneTargetState {
+    Missing,
+    EmptyDir,
+    GitCheckout,
+    OccupiedNonRepo,
+}
+
+fn clone_target_state(path: &Path) -> Result<CloneTargetState> {
+    if !path.exists() {
+        return Ok(CloneTargetState::Missing);
+    }
+
+    if path.join(".git").exists() {
+        return Ok(CloneTargetState::GitCheckout);
+    }
+
+    if !path.is_dir() {
+        return Ok(CloneTargetState::OccupiedNonRepo);
+    }
+
+    let mut entries =
+        fs::read_dir(path).with_context(|| format!("failed to inspect {}", path.display()))?;
+    if entries.next().is_none() {
+        return Ok(CloneTargetState::EmptyDir);
+    }
+
+    Ok(CloneTargetState::OccupiedNonRepo)
 }
 
 fn init_jj_repo(repo_dir: &Path) -> Result<()> {
@@ -750,4 +793,42 @@ fn spawn_background_history_fetch(repo_dir: &Path, has_upstream: bool) -> Result
     println!("Fetching full history in background...");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn preflight_clone_target_detects_git_checkout() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join(".git")).expect("git dir");
+
+        let already_cloned = preflight_clone_target(dir.path()).expect("preflight");
+
+        assert!(already_cloned);
+    }
+
+    #[test]
+    fn preflight_clone_target_allows_empty_dir() {
+        let dir = tempdir().expect("tempdir");
+
+        let already_cloned = preflight_clone_target(dir.path()).expect("preflight");
+
+        assert!(!already_cloned);
+    }
+
+    #[test]
+    fn preflight_clone_target_rejects_non_repo_dir() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("user_files")).expect("user_files dir");
+
+        let err = preflight_clone_target(dir.path()).expect_err("expected non-repo error");
+
+        assert!(
+            err.to_string()
+                .contains("target path exists but is not a git checkout")
+        );
+    }
 }

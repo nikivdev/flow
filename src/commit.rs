@@ -5415,7 +5415,7 @@ pub(crate) fn configured_codex_bin_for_workdir(workdir: &Path) -> String {
     if let Ok(value) = env::var("CODEX_BIN") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
-            return trimmed.to_string();
+            return normalize_codex_bin_value(trimmed);
         }
     }
 
@@ -5439,7 +5439,7 @@ pub(crate) fn configured_codex_bin_for_workdir(workdir: &Path) -> String {
             if let Some(bin) = cfg.options.codex_bin {
                 let trimmed = bin.trim();
                 if !trimmed.is_empty() {
-                    return trimmed.to_string();
+                    return normalize_codex_bin_value(trimmed);
                 }
             }
         }
@@ -5451,13 +5451,31 @@ pub(crate) fn configured_codex_bin_for_workdir(workdir: &Path) -> String {
             if let Some(bin) = cfg.options.codex_bin {
                 let trimmed = bin.trim();
                 if !trimmed.is_empty() {
-                    return trimmed.to_string();
+                    return normalize_codex_bin_value(trimmed);
                 }
             }
         }
     }
 
     "codex".to_string()
+}
+
+fn normalize_codex_bin_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if trimmed.starts_with('~')
+        || trimmed.starts_with('$')
+        || trimmed.starts_with('.')
+        || trimmed.starts_with('/')
+        || trimmed.contains(std::path::MAIN_SEPARATOR)
+    {
+        return config::expand_path(trimmed).to_string_lossy().into_owned();
+    }
+
+    trimmed.to_string()
 }
 
 fn normalize_review_url(url: &str) -> String {
@@ -14577,6 +14595,7 @@ pub fn get_review_instructions(repo_root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn ai_scratch_tests_are_excluded_from_related_tests() {
@@ -14673,6 +14692,47 @@ mod tests {
         let input = "## Summary\n- already\n- multiline";
         let out = normalize_markdown_linebreaks(input);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn normalize_codex_bin_value_expands_tilde_paths() {
+        let expected = config::expand_path("~/code/flow/scripts/codex-flow-wrapper")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            normalize_codex_bin_value("~/code/flow/scripts/codex-flow-wrapper"),
+            expected
+        );
+    }
+
+    #[test]
+    fn configured_codex_bin_for_workdir_uses_expanded_global_path() {
+        let global_cfg = config::default_config_path();
+        let backup = fs::read_to_string(&global_cfg).ok();
+        let root = global_cfg
+            .parent()
+            .expect("global config dir")
+            .to_path_buf();
+        fs::create_dir_all(&root).expect("create global config dir");
+        fs::write(
+            &global_cfg,
+            "[options]\ncodex_bin = \"~/code/flow/scripts/codex-flow-wrapper\"\n",
+        )
+        .expect("write global codex config");
+
+        let temp = tempdir().expect("tempdir");
+        let resolved = configured_codex_bin_for_workdir(temp.path());
+        let expected = config::expand_path("~/code/flow/scripts/codex-flow-wrapper")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(resolved, expected);
+
+        match backup {
+            Some(content) => fs::write(&global_cfg, content).expect("restore global config"),
+            None => {
+                let _ = fs::remove_file(&global_cfg);
+            }
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config;
+use crate::{codex_memory, codex_text, config};
 
 const SKILL_EVAL_VERSION: u32 = 1;
 const SKILL_EVAL_REVERSE_SCAN_CHUNK_BYTES: usize = 16 * 1024;
@@ -24,6 +24,8 @@ pub struct CodexSkillEvalEvent {
     pub target_path: String,
     pub launch_path: String,
     pub query: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub runtime_token: Option<String>,
     pub runtime_skills: Vec<String>,
     pub prompt_context_budget_chars: usize,
@@ -52,6 +54,8 @@ pub struct CodexSkillOutcomeEvent {
     pub version: u32,
     pub recorded_at_unix: u64,
     pub runtime_token: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub target_path: Option<String>,
     pub kind: String,
     pub skill_names: Vec<String>,
@@ -115,7 +119,8 @@ fn load_events_from_paths(
             if trimmed.is_empty() {
                 return None::<CodexSkillEvalEvent>;
             }
-            let event = serde_json::from_str::<CodexSkillEvalEvent>(trimmed).ok()?;
+            let mut event = serde_json::from_str::<CodexSkillEvalEvent>(trimmed).ok()?;
+            event.query = codex_text::sanitize_codex_query_text(&event.query)?;
             if let Some(filter) = target_path
                 && !path_matches(&event, filter)
             {
@@ -265,15 +270,22 @@ fn path_matches(event: &CodexSkillEvalEvent, target_path: &Path) -> bool {
 }
 
 pub fn log_event(event: &CodexSkillEvalEvent) -> Result<()> {
+    let mut sanitized = event.clone();
+    let Some(query) = codex_text::sanitize_codex_query_text(&sanitized.query) else {
+        return Ok(());
+    };
+    sanitized.query = query;
     let path = events_path()?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .with_context(|| format!("failed to open {}", path.display()))?;
-    serde_json::to_writer(&mut file, event).context("failed to encode codex skill-eval event")?;
+    serde_json::to_writer(&mut file, &sanitized)
+        .context("failed to encode codex skill-eval event")?;
     file.write_all(b"\n")
         .context("failed to terminate codex skill-eval event")?;
+    let _ = codex_memory::mirror_skill_eval_event(&sanitized);
     Ok(())
 }
 
@@ -288,6 +300,7 @@ pub fn log_outcome(outcome: &CodexSkillOutcomeEvent) -> Result<()> {
         .context("failed to encode codex skill-eval outcome")?;
     file.write_all(b"\n")
         .context("failed to terminate codex skill-eval outcome")?;
+    let _ = codex_memory::mirror_skill_outcome_event(outcome);
     Ok(())
 }
 
@@ -395,6 +408,21 @@ fn build_scorecard(
                 acc
             },
         );
+    let outcomes_by_session = outcomes
+        .iter()
+        .filter_map(|outcome| {
+            outcome
+                .session_id
+                .as_deref()
+                .map(|session_id| (session_id.to_string(), outcome))
+        })
+        .fold(
+            HashMap::<String, Vec<&CodexSkillOutcomeEvent>>::new(),
+            |mut acc, (session_id, outcome)| {
+                acc.entry(session_id).or_default().push(outcome);
+                acc
+            },
+        );
     let known_skills = events
         .iter()
         .flat_map(|event| event.runtime_skills.iter().cloned())
@@ -422,19 +450,27 @@ fn build_scorecard(
                 entry.count += 1;
                 entry.total_affinity_used += affinity;
                 entry.total_context_chars += event.injected_context_chars;
-                if let Some(token) = event.runtime_token.as_deref() {
-                    if let Some(matched) = outcomes_by_token.get(token) {
-                        let best_success = matched
-                            .iter()
-                            .filter(|outcome| {
-                                outcome.skill_names.is_empty()
-                                    || outcome.skill_names.iter().any(|name| name == skill_name)
-                            })
-                            .map(|outcome| outcome.success)
-                            .fold(0.0f64, f64::max);
-                        entry.outcome_count += 1;
-                        entry.success_sum += best_success;
-                    }
+                let matched = event
+                    .runtime_token
+                    .as_deref()
+                    .and_then(|token| outcomes_by_token.get(token))
+                    .or_else(|| {
+                        event
+                            .session_id
+                            .as_deref()
+                            .and_then(|session_id| outcomes_by_session.get(session_id))
+                    });
+                if let Some(matched) = matched {
+                    let best_success = matched
+                        .iter()
+                        .filter(|outcome| {
+                            outcome.skill_names.is_empty()
+                                || outcome.skill_names.iter().any(|name| name == skill_name)
+                        })
+                        .map(|outcome| outcome.success)
+                        .fold(0.0f64, f64::max);
+                    entry.outcome_count += 1;
+                    entry.success_sum += best_success;
                 }
             }
         }
@@ -445,10 +481,17 @@ fn build_scorecard(
         let mut success = 0.0f64;
         let mut samples = 0usize;
         for event in &events {
-            let Some(token) = event.runtime_token.as_deref() else {
-                continue;
-            };
-            let Some(matched) = outcomes_by_token.get(token) else {
+            let matched = event
+                .runtime_token
+                .as_deref()
+                .and_then(|token| outcomes_by_token.get(token))
+                .or_else(|| {
+                    event
+                        .session_id
+                        .as_deref()
+                        .and_then(|session_id| outcomes_by_session.get(session_id))
+                });
+            let Some(matched) = matched else {
                 continue;
             };
             let best = matched
@@ -702,6 +745,7 @@ mod tests {
             target_path: "/tmp/repo".to_string(),
             launch_path: "/tmp/repo".to_string(),
             query: "write plan".to_string(),
+            session_id: None,
             runtime_token: Some("tok".to_string()),
             runtime_skills: vec!["plan_write".to_string()],
             prompt_context_budget_chars: 400,
@@ -739,6 +783,34 @@ mod tests {
     }
 
     #[test]
+    fn load_events_sanitizes_contextual_queries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("events.jsonl");
+        let event = CodexSkillEvalEvent {
+            version: 1,
+            recorded_at_unix: 1,
+            mode: "quick-launch".to_string(),
+            action: "resume".to_string(),
+            route: "quick-launch-hydrated".to_string(),
+            target_path: "/tmp/repo".to_string(),
+            launch_path: "/tmp/repo".to_string(),
+            query: "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>\n<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>\nwrite plan".to_string(),
+            session_id: Some("sess-1".to_string()),
+            runtime_token: None,
+            runtime_skills: Vec::new(),
+            prompt_context_budget_chars: 0,
+            prompt_chars: 10,
+            injected_context_chars: 0,
+            reference_count: 0,
+        };
+        fs::write(&path, serde_json::to_string(&event).expect("encode") + "\n").expect("write");
+
+        let loaded = load_events_from_paths(vec![path], None, 10).expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].query, "write plan");
+    }
+
+    #[test]
     fn resolve_events_contribute_outcome_samples() {
         let target = Path::new("/tmp/repo");
         let scorecard = build_scorecard(
@@ -752,6 +824,7 @@ mod tests {
                 target_path: target.display().to_string(),
                 launch_path: target.display().to_string(),
                 query: "write plan".to_string(),
+                session_id: None,
                 runtime_token: Some("tok".to_string()),
                 runtime_skills: vec!["plan_write".to_string()],
                 prompt_context_budget_chars: 400,
@@ -763,6 +836,7 @@ mod tests {
                 version: 1,
                 recorded_at_unix: 2,
                 runtime_token: Some("tok".to_string()),
+                session_id: None,
                 target_path: Some(target.display().to_string()),
                 kind: "plan_written".to_string(),
                 skill_names: vec!["plan_write".to_string()],
@@ -774,6 +848,46 @@ mod tests {
         assert_eq!(scorecard.samples, 1);
         assert_eq!(scorecard.skills.len(), 1);
         assert_eq!(scorecard.skills[0].name, "plan_write");
+        assert_eq!(scorecard.skills[0].outcome_samples, 1);
+        assert_eq!(scorecard.skills[0].pass_rate, 1.0);
+    }
+
+    #[test]
+    fn session_linked_events_contribute_baseline_outcomes() {
+        let target = Path::new("/tmp/repo");
+        let scorecard = build_scorecard(
+            target,
+            vec![CodexSkillEvalEvent {
+                version: 1,
+                recorded_at_unix: 1,
+                mode: "quick-launch".to_string(),
+                action: "resume".to_string(),
+                route: "quick-launch-hydrated".to_string(),
+                target_path: target.display().to_string(),
+                launch_path: target.display().to_string(),
+                query: "write plan".to_string(),
+                session_id: Some("sess-1".to_string()),
+                runtime_token: None,
+                runtime_skills: vec!["plan_write".to_string()],
+                prompt_context_budget_chars: 0,
+                prompt_chars: 10,
+                injected_context_chars: 0,
+                reference_count: 0,
+            }],
+            vec![CodexSkillOutcomeEvent {
+                version: 1,
+                recorded_at_unix: 2,
+                runtime_token: None,
+                session_id: Some("sess-1".to_string()),
+                target_path: Some(target.display().to_string()),
+                kind: "plan_written".to_string(),
+                skill_names: vec!["plan_write".to_string()],
+                artifact_path: Some("/tmp/repo/plan.md".to_string()),
+                success: 1.0,
+            }],
+        );
+
+        assert_eq!(scorecard.skills.len(), 1);
         assert_eq!(scorecard.skills[0].outcome_samples, 1);
         assert_eq!(scorecard.skills[0].pass_rate, 1.0);
     }
@@ -798,6 +912,7 @@ mod tests {
                     target_path: repo_a.display().to_string(),
                     launch_path: repo_a.display().to_string(),
                     query: "write plan".to_string(),
+                    session_id: None,
                     runtime_token: Some("a".to_string()),
                     runtime_skills: vec!["plan_write".to_string()],
                     prompt_context_budget_chars: 400,
@@ -814,6 +929,7 @@ mod tests {
                     target_path: repo_b.display().to_string(),
                     launch_path: repo_b.display().to_string(),
                     query: "find skills".to_string(),
+                    session_id: None,
                     runtime_token: Some("b".to_string()),
                     runtime_skills: vec!["find-skills".to_string()],
                     prompt_context_budget_chars: 400,
@@ -830,6 +946,7 @@ mod tests {
                     target_path: dir.path().join("missing").display().to_string(),
                     launch_path: dir.path().join("missing").display().to_string(),
                     query: "old".to_string(),
+                    session_id: None,
                     runtime_token: Some("c".to_string()),
                     runtime_skills: vec!["plan_write".to_string()],
                     prompt_context_budget_chars: 400,

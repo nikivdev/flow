@@ -785,6 +785,9 @@ pub enum DomainsAction {
     Down,
     /// List configured host -> target routes.
     List,
+    /// Print the public URL for a configured localhost route.
+    #[command(alias = "url")]
+    Get(DomainsGetOpts),
     /// Add a localhost route (for example: linsa.localhost -> 127.0.0.1:3481).
     Add(DomainsAddOpts),
     /// Remove a localhost route.
@@ -803,6 +806,15 @@ pub struct DomainsAddOpts {
     /// Replace existing route target for this host.
     #[arg(long)]
     pub replace: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DomainsGetOpts {
+    /// Host name ending in .localhost.
+    pub host: String,
+    /// Print the upstream host:port instead of the public URL.
+    #[arg(long)]
+    pub target: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2576,11 +2588,72 @@ pub enum ProviderAiAction {
         /// Project path to inspect instead of the current directory.
         #[arg(long)]
         path: Option<String>,
+        /// Exit non-zero unless wrapper transport and runtime skills are active.
+        #[arg(long)]
+        assert_runtime: bool,
+        /// Exit non-zero unless the scheduled scorecard refresher is installed and loaded.
+        #[arg(long)]
+        assert_schedule: bool,
+        /// Exit non-zero unless Flow has grounded learning data for this target.
+        #[arg(long)]
+        assert_learning: bool,
+        /// Exit non-zero unless runtime, schedule, and grounded learning are all active.
+        #[arg(long)]
+        assert_autonomous: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record a fast-path Codex launch and ensure supporting daemons are warm (internal).
+    #[command(hide = true, name = "touch-launch")]
+    TouchLaunch {
+        /// Quick launch mode.
+        #[arg(long, value_parser = ["resume-last", "new"])]
+        mode: String,
+        /// Working directory used for the launch.
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+    /// Enable the global Codex wrapper/runtime path so Flow features are actually used.
+    #[command(name = "enable-global")]
+    EnableGlobal {
+        /// Show the resulting global config and actions without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also install the macOS launchd scorecard refresher.
+        #[arg(long)]
+        install_launchd: bool,
+        /// Start codexd immediately after enabling the global config.
+        #[arg(long)]
+        start_daemon: bool,
+        /// Sync any discovered external skill sources after enabling the config.
+        #[arg(long)]
+        sync_skills: bool,
+        /// Shortcut for --install-launchd --start-daemon --sync-skills.
+        #[arg(long)]
+        full: bool,
+        /// Launchd cadence in minutes (used with --install-launchd/--full).
+        #[arg(long, default_value = "30")]
+        minutes: usize,
+        /// Max logged events to scan per launchd run.
+        #[arg(long, default_value = "400")]
+        limit: usize,
+        /// Max repos to rebuild per launchd run.
+        #[arg(long, default_value = "12")]
+        max_targets: usize,
+        /// Recent-history window for launchd cron selection.
+        #[arg(long, default_value = "168")]
+        within_hours: u64,
     },
     /// Manage the Flow codexd query daemon.
     Daemon {
         #[command(subcommand)]
         action: Option<CodexDaemonAction>,
+    },
+    /// Inspect or sync the Jazz2-backed Codex memory mirror.
+    Memory {
+        #[command(subcommand)]
+        action: Option<CodexMemoryAction>,
     },
     /// Build and inspect local Codex skill scorecards from Flow history.
     #[command(name = "skill-eval")]
@@ -2698,6 +2771,52 @@ pub enum CodexDaemonAction {
     /// Ping codexd and exit non-zero if unavailable (internal).
     #[command(hide = true)]
     Ping,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexMemoryAction {
+    /// Show memory mirror status and counts.
+    Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sync recent Codex skill-eval logs into the Jazz2-backed memory mirror.
+    Sync {
+        /// Maximum number of recent events and outcomes to ingest.
+        #[arg(long, default_value = "400")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Query compact repo/code memory facts for a path.
+    Query {
+        /// Project path or repo root to query.
+        #[arg(long)]
+        path: Option<String>,
+        /// Maximum number of fact hits to include.
+        #[arg(long, default_value = "6")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Query text to rank facts.
+        #[arg(value_name = "QUERY", trailing_var_arg = true)]
+        query: Vec<String>,
+    },
+    /// Show recent memory rows, optionally scoped to a repo/path.
+    Recent {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Maximum number of rows to print.
+        #[arg(long, default_value = "12")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -3835,6 +3954,10 @@ pub enum ReposAction {
     Clone(ReposCloneOpts),
     /// Create a GitHub repository from the current folder and push it.
     Create(PublishOpts),
+    /// Build or inspect a compact repo capsule for path-based Codex context.
+    Capsule(RepoCapsuleOpts),
+    /// Manage repo aliases used by Codex repo-reference resolution.
+    Alias(RepoAliasCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -3853,6 +3976,61 @@ pub struct ReposCloneOpts {
     /// Upstream URL override (defaults to fork parent via gh).
     #[arg(short = 'u', long)]
     pub upstream_url: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RepoCapsuleOpts {
+    /// Repo or project path to inspect (defaults to the current directory).
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Force a fresh capsule rebuild before printing.
+    #[arg(long)]
+    pub refresh: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RepoAliasCommand {
+    #[command(subcommand)]
+    pub action: Option<RepoAliasAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum RepoAliasAction {
+    /// List registered repo aliases.
+    #[command(alias = "ls")]
+    List {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Register or update an alias for a repo path.
+    Set {
+        /// Alias name to register.
+        alias: String,
+        /// Repo or project path for this alias.
+        path: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a registered alias.
+    Remove {
+        /// Alias name to remove.
+        alias: String,
+    },
+    /// Import aliases from Shelf config.
+    #[command(name = "import-shelf")]
+    ImportShelf {
+        /// Override the Shelf config path (default: ~/.agents/shelf/config.json).
+        #[arg(long)]
+        config: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -4807,6 +4985,181 @@ mod tests {
                     query,
                     vec!["https://linear.app/example-workspace/project/example-project-v1-1234567890ab/overview"]
                 );
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_doctor_assertions() {
+        let cli = Cli::parse_from([
+            "f",
+            "codex",
+            "doctor",
+            "--path",
+            "~/docs",
+            "--assert-runtime",
+            "--assert-learning",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Codex {
+                action:
+                    Some(ProviderAiAction::Doctor {
+                        path,
+                        assert_runtime,
+                        assert_schedule,
+                        assert_learning,
+                        assert_autonomous,
+                        json,
+                    }),
+            }) => {
+                assert_eq!(path.as_deref(), Some("~/docs"));
+                assert!(assert_runtime);
+                assert!(!assert_schedule);
+                assert!(assert_learning);
+                assert!(!assert_autonomous);
+                assert!(json);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_enable_global_full() {
+        let cli = Cli::parse_from(["f", "codex", "enable-global", "--full", "--dry-run"]);
+
+        match cli.command {
+            Some(Commands::Codex {
+                action:
+                    Some(ProviderAiAction::EnableGlobal {
+                        dry_run,
+                        install_launchd,
+                        start_daemon,
+                        sync_skills,
+                        full,
+                        minutes,
+                        limit,
+                        max_targets,
+                        within_hours,
+                    }),
+            }) => {
+                assert!(dry_run);
+                assert!(!install_launchd);
+                assert!(!start_daemon);
+                assert!(!sync_skills);
+                assert!(full);
+                assert_eq!(minutes, 30);
+                assert_eq!(limit, 400);
+                assert_eq!(max_targets, 12);
+                assert_eq!(within_hours, 168);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_repos_capsule_with_refresh_and_json() {
+        let cli = Cli::parse_from([
+            "f",
+            "repos",
+            "capsule",
+            "--path",
+            "~/repos/Effect-TS/effect-smol",
+            "--refresh",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Repos(ReposCommand {
+                action:
+                    Some(ReposAction::Capsule(RepoCapsuleOpts {
+                        path,
+                        refresh,
+                        json,
+                    })),
+            })) => {
+                assert_eq!(path.as_deref(), Some("~/repos/Effect-TS/effect-smol"));
+                assert!(refresh);
+                assert!(json);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_repos_alias_set() {
+        let cli = Cli::parse_from([
+            "f",
+            "repos",
+            "alias",
+            "set",
+            "effect-smol",
+            "~/repos/Effect-TS/effect-smol",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Repos(ReposCommand {
+                action:
+                    Some(ReposAction::Alias(RepoAliasCommand {
+                        action: Some(RepoAliasAction::Set { alias, path, json }),
+                    })),
+            })) => {
+                assert_eq!(alias, "effect-smol");
+                assert_eq!(path, "~/repos/Effect-TS/effect-smol");
+                assert!(json);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_repos_alias_import_shelf() {
+        let cli = Cli::parse_from([
+            "f",
+            "repos",
+            "alias",
+            "import-shelf",
+            "--config",
+            "~/.agents/shelf/config.json",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Repos(ReposCommand {
+                action:
+                    Some(ReposAction::Alias(RepoAliasCommand {
+                        action: Some(RepoAliasAction::ImportShelf { config, json }),
+                    })),
+            })) => {
+                assert_eq!(config.as_deref(), Some("~/.agents/shelf/config.json"));
+                assert!(json);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_domains_get_with_target_flag() {
+        let cli = Cli::parse_from([
+            "f",
+            "domains",
+            "--engine",
+            "native",
+            "get",
+            "myflow.localhost",
+            "--target",
+        ]);
+
+        match cli.command {
+            Some(Commands::Domains(DomainsCommand {
+                engine: Some(DomainsEngineArg::Native),
+                action: Some(DomainsAction::Get(DomainsGetOpts { host, target })),
+            })) => {
+                assert_eq!(host, "myflow.localhost");
+                assert!(target);
             }
             other => panic!("unexpected parsed command: {other:?}"),
         }
