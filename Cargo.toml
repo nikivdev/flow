@@ -48,7 +48,7 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm"]
 crossterm = "0.29"
 reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "query", "rustls"] }
 which = "8"
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 notify = "8"
 notify-debouncer-mini = "0.7"
 shellexpand = "3"
