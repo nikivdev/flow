@@ -1670,7 +1670,7 @@ fn normalize_sync_commit_line(hash: &str, description: &str) -> String {
 }
 
 fn build_synced_commit_list(recorder: &SyncRecorder) -> Vec<String> {
-    let mut seen_hashes: HashSet<String> = HashSet::new();
+    let mut seen_commits: Vec<(String, String)> = Vec::new();
     let mut commits: Vec<String> = Vec::new();
 
     for update in &recorder.remote_updates {
@@ -1679,11 +1679,23 @@ fn build_synced_commit_list(recorder: &SyncRecorder) -> Vec<String> {
             if trimmed.is_empty() {
                 continue;
             }
-            let hash = match trimmed.split_whitespace().next() {
-                Some(value) if !value.is_empty() => value,
-                _ => continue,
-            };
-            if seen_hashes.insert(hash.to_string()) {
+            let (hash, description) =
+                if let Some((hash, rest)) = trimmed.split_once(char::is_whitespace) {
+                    let hash = hash.trim();
+                    if hash.is_empty() {
+                        continue;
+                    }
+                    (hash, rest.trim())
+                } else {
+                    (trimmed, "")
+                };
+            let normalized_description = description.to_string();
+            let is_duplicate = seen_commits.iter().any(|(seen_hash, seen_description)| {
+                seen_description == &normalized_description
+                    && (seen_hash.starts_with(hash) || hash.starts_with(seen_hash))
+            });
+            if !is_duplicate {
+                seen_commits.push((hash.to_string(), normalized_description));
                 commits.push(trimmed.to_string());
             }
         }
@@ -1856,7 +1868,14 @@ fn print_fetched_remote_commits(
                 let range = format!("{}..{}", before_tip, after_tip);
                 let lines = git_capture_in(
                     repo_root,
-                    &["log", "--oneline", "--no-decorate", "--reverse", &range],
+                    &[
+                        "log",
+                        "--oneline",
+                        "--abbrev=8",
+                        "--no-decorate",
+                        "--reverse",
+                        &range,
+                    ],
                 )
                 .unwrap_or_default();
                 let commits: Vec<&str> = lines
@@ -4077,6 +4096,46 @@ mod tests {
         assert_eq!(
             normalize_sync_commit_line("abc12345", ""),
             "abc12345 (no description)"
+        );
+    }
+
+    #[test]
+    fn build_synced_commit_list_dedupes_hash_width_variants() {
+        let cmd = SyncCommand {
+            rebase: false,
+            push: false,
+            no_push: true,
+            stash: false,
+            stash_commits: false,
+            allow_queue: false,
+            create_repo: false,
+            fix: false,
+            no_fix: true,
+            max_fix_attempts: 0,
+            allow_review_issues: false,
+            compact: false,
+        };
+        let mut recorder = SyncRecorder::new(&cmd).expect("sync recorder");
+        recorder.add_remote_update(SyncRemoteUpdate {
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+            before_tip: Some("before".to_string()),
+            after_tip: "after".to_string(),
+            commit_count: 1,
+            commits: vec!["8e258eb3f feat: persist latest model".to_string()],
+        });
+        recorder.add_remote_update(SyncRemoteUpdate {
+            remote: "synced:upstream".to_string(),
+            branch: "main".to_string(),
+            before_tip: Some("before".to_string()),
+            after_tip: "after".to_string(),
+            commit_count: 1,
+            commits: vec!["8e258eb3 feat: persist latest model".to_string()],
+        });
+
+        assert_eq!(
+            build_synced_commit_list(&recorder),
+            vec!["8e258eb3f feat: persist latest model".to_string()]
         );
     }
 

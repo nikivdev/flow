@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result};
 use axum::{
     Router,
-    extract::{Path as AxumPath, Query, State},
+    extract::{Json as AxumJson, Path as AxumPath, Query, State},
     http::{Method, StatusCode},
     response::{
         IntoResponse, Json,
@@ -37,6 +37,7 @@ use crate::{
     running,
     screen::ScreenBroadcaster,
     servers::{LogLine, ManagedServer, ServerSnapshot},
+    skills,
     supervisor,
     terminal,
 };
@@ -127,6 +128,9 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
     let router = Router::new()
         .route("/health", get(health))
         .route("/codex/skills", get(codex_skills))
+        .route("/codex/resolve", post(codex_resolve))
+        .route("/codex/skills/sync", post(codex_skills_sync))
+        .route("/codex/skills/reload", post(codex_skills_reload))
         .route("/daemons", get(daemons))
         .route("/daemons/:name/start", post(daemon_start))
         .route("/daemons/:name/stop", post(daemon_stop))
@@ -179,6 +183,31 @@ struct CodexSkillsQuery {
     limit: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexSkillsSyncRequest {
+    path: Option<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexSkillsReloadRequest {
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexResolveRequest {
+    path: Option<String>,
+    query: String,
+    #[serde(default)]
+    exact_cwd: bool,
+}
+
 fn default_codex_skills_limit() -> usize {
     12
 }
@@ -214,6 +243,81 @@ async fn codex_skills(Query(query): Query<CodexSkillsQuery>) -> impl IntoRespons
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("codex skills task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_resolve(AxumJson(payload): AxumJson<CodexResolveRequest>) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        ai::codex_resolve_inspector(payload.path, payload.query, payload.exact_cwd)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex resolve task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_skills_sync(AxumJson(payload): AxumJson<CodexSkillsSyncRequest>) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(payload.path.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        let installed = ai::codex_skill_source_sync(&target_path, &payload.skills, payload.force)?;
+        Ok::<_, anyhow::Error>(json!({
+            "targetPath": target_path.display().to_string(),
+            "installed": installed,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex skills sync task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_skills_reload(
+    AxumJson(payload): AxumJson<CodexSkillsReloadRequest>,
+) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(payload.path.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        let reloaded = skills::reload_codex_skills_for_cwd(&target_path)?;
+        Ok::<_, anyhow::Error>(json!({
+            "targetPath": target_path.display().to_string(),
+            "reloaded": reloaded,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex skills reload task failed: {err}") })),
         )
             .into_response(),
     }

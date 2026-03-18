@@ -15,6 +15,8 @@ f ai
 # Provider-specific list/read
 f ai claude list
 f ai codex list
+f ai codex sessions
+f ai codex sessions --path ~/repos/mark3labs/kit
 f ai cursor list
 f codex resolve "latest"
 f codex resolve "https://linear.app/.../project/.../overview" --json
@@ -96,6 +98,30 @@ Behavior:
 
 This keeps prompt cost flat unless Flow has a strong reason to recover or unroll context.
 Use `f codex doctor` to confirm whether wrapper transport, runtime skills, and context budgets are actually active for the current repo.
+
+### Codex sessions after a crash or restart
+
+If your Mac restarts and you lose the live Codex terminals, use:
+
+```bash
+f ai codex sessions
+f ai codex sessions --path ~/repos/mark3labs/kit
+```
+
+Behavior:
+
+- lists recent Codex sessions for the current path
+- sorts by the last message timestamp descending
+- shows the stable session id plus a preview of the latest message
+- the numeric index matches `continue`, so you can reopen quickly
+
+Examples:
+
+```bash
+f ai codex continue 1 --path ~/repos/mark3labs/kit
+f ai codex continue 019cd046 --path ~/repos/mark3labs/kit
+f ai codex sessions --path ~/repos/mark3labs/kit --json
+```
 
 ### Optional `flow.toml` resolver config
 

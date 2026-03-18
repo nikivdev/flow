@@ -2221,6 +2221,8 @@ mod tests {
                     .to_string(),
             ),
             git_branch: Some("main".to_string()),
+            model: None,
+            reasoning_effort: None,
         };
 
         let body = session_summary_body(&row);

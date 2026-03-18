@@ -27,6 +27,7 @@ use serde_json::json;
 use toml::Value as TomlValue;
 use tracing::debug;
 
+use crate::activity_log;
 use crate::cli::{
     AiAction, CodexDaemonAction, CodexMemoryAction, CodexRuntimeAction, CodexSkillEvalAction,
     CodexSkillSourceAction, ProviderAiAction,
@@ -192,6 +193,10 @@ pub(crate) struct CodexRecoverRow {
     pub(crate) title: Option<String>,
     pub(crate) first_user_message: Option<String>,
     pub(crate) git_branch: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,6 +206,8 @@ struct CodexRecoverCandidate {
     updated_at_unix: i64,
     cwd: String,
     git_branch: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
     title: Option<String>,
     first_user_message: Option<String>,
 }
@@ -245,9 +252,52 @@ struct CodexOpenPlan {
     injected_context_chars: usize,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResolveReferenceSnapshot {
+    pub name: String,
+    pub source: String,
+    pub matched: String,
+    pub command: Option<String>,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResolveRuntimeSkillSnapshot {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub trigger: String,
+    pub source: Option<String>,
+    pub original_name: Option<String>,
+    pub estimated_chars: Option<usize>,
+    pub match_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResolveInspectorResponse {
+    pub action: String,
+    pub route: String,
+    pub reason: String,
+    pub target_path: String,
+    pub launch_path: String,
+    pub query: Option<String>,
+    pub session_id: Option<String>,
+    pub prompt: Option<String>,
+    pub references: Vec<CodexResolveReferenceSnapshot>,
+    pub runtime_state_path: Option<String>,
+    pub runtime_skills: Vec<CodexResolveRuntimeSkillSnapshot>,
+    pub prompt_context_budget_chars: usize,
+    pub max_resolved_references: usize,
+    pub prompt_chars: usize,
+    pub injected_context_chars: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexSessionReferenceRequest {
-    session_hint: String,
+    session_hints: Vec<String>,
     count: usize,
     user_request: String,
 }
@@ -270,6 +320,8 @@ enum LinearUrlKind {
 
 const CODEX_QUERY_CACHE_VERSION: u32 = 1;
 const CODEX_QUERY_CACHE_ENV_DISABLE: &str = "FLOW_DISABLE_CODEX_QUERY_CACHE";
+const CODEX_SESSION_COMPLETION_DEFAULT_SCAN_LIMIT: usize = 24;
+const CODEX_SESSION_COMPLETION_DEFAULT_IDLE_SECS: u64 = 90;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CodexStateDbStamp {
@@ -283,6 +335,43 @@ struct CodexQueryCacheEntry {
     version: u32,
     stamp: CodexStateDbStamp,
     rows: Vec<CodexRecoverRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexThreadSchema {
+    has_model: bool,
+    has_reasoning_effort: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CodexThreadSchemaCacheEntry {
+    stamp: CodexStateDbStamp,
+    schema: CodexThreadSchema,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexSessionCompletionSnapshot {
+    last_role: Option<String>,
+    last_user_message: Option<String>,
+    last_user_at_unix: Option<u64>,
+    last_assistant_message: Option<String>,
+    last_assistant_at_unix: Option<u64>,
+    file_modified_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexTurnPatchChange {
+    path: String,
+    action: String,
+    patch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrFeedbackCursorHandoff {
+    workspace_path: PathBuf,
+    review_plan_path: PathBuf,
+    review_rules_path: Option<PathBuf>,
+    kit_system_path: PathBuf,
 }
 
 /// Run a provider-specific action (for top-level `f codex` / `f claude` commands).
@@ -342,7 +431,7 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
                     "skill-source is only supported for Codex sessions; use `f codex skill-source ...`"
                 );
             }
-            Some(ProviderAiAction::Sessions)
+            Some(ProviderAiAction::Sessions { .. })
             | Some(ProviderAiAction::Continue { .. })
             | Some(ProviderAiAction::New)
             | Some(ProviderAiAction::Open { .. })
@@ -365,7 +454,9 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
         None => quick_start_session(provider)?,
         Some(ProviderAiAction::List) => list_sessions(provider)?,
         Some(ProviderAiAction::LatestId { path }) => print_latest_session_id(provider, path)?,
-        Some(ProviderAiAction::Sessions) => provider_sessions(provider)?,
+            Some(ProviderAiAction::Sessions { path, json }) => {
+                provider_sessions(provider, path, json)?
+            }
         Some(ProviderAiAction::Continue { session, path }) => {
             continue_session(session, path, provider)?
         }
@@ -485,7 +576,9 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::LatestId { path }) => {
                 print_latest_session_id(Provider::Claude, path)?
             }
-            Some(ProviderAiAction::Sessions) => provider_sessions(Provider::Claude)?,
+            Some(ProviderAiAction::Sessions { path, json }) => {
+                provider_sessions(Provider::Claude, path, json)?
+            }
             Some(ProviderAiAction::Continue { session, path }) => {
                 continue_session(session, path, Provider::Claude)?
             }
@@ -578,7 +671,9 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::LatestId { path }) => {
                 print_latest_session_id(Provider::Codex, path)?
             }
-            Some(ProviderAiAction::Sessions) => provider_sessions(Provider::Codex)?,
+            Some(ProviderAiAction::Sessions { path, json }) => {
+                provider_sessions(Provider::Codex, path, json)?
+            }
             Some(ProviderAiAction::Continue { session, path }) => {
                 continue_session(session, path, Provider::Codex)?
             }
@@ -2862,7 +2957,28 @@ fn parse_cursor_session_file(path: &PathBuf, fallback_id: &str) -> Option<AiSess
     })
 }
 
-fn read_codex_sessions_for_path(path: &PathBuf) -> Result<Vec<AiSession>> {
+fn ai_session_from_codex_recover_row(row: CodexRecoverRow) -> AiSession {
+    let updated_at = DateTime::<Utc>::from_timestamp(row.updated_at, 0)
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| row.updated_at.to_string());
+    let title = row.title.filter(|value| !value.trim().is_empty());
+    let first_user_message = row
+        .first_user_message
+        .filter(|value| !value.trim().is_empty());
+    let last_message = title.clone().or_else(|| first_user_message.clone());
+
+    AiSession {
+        session_id: row.id,
+        provider: Provider::Codex,
+        timestamp: Some(updated_at.clone()),
+        last_message_at: Some(updated_at),
+        last_message,
+        first_message: first_user_message,
+        error_summary: None,
+    }
+}
+
+fn read_codex_sessions_for_path_from_files(path: &PathBuf) -> Result<Vec<AiSession>> {
     let sessions_dir = get_codex_sessions_dir();
     if !sessions_dir.exists() {
         return Ok(vec![]);
@@ -2885,6 +3001,46 @@ fn read_codex_sessions_for_path(path: &PathBuf) -> Result<Vec<AiSession>> {
     }
 
     Ok(sessions)
+}
+
+fn read_codex_sessions_for_path(path: &PathBuf) -> Result<Vec<AiSession>> {
+    let db_result = (|| -> Result<Vec<AiSession>> {
+        let db_path = codex_state_db_path()?;
+        let schema = load_codex_thread_schema(&db_path)?;
+        let target = path.to_string_lossy().to_string();
+        let cache_key = format!("target={target}");
+        let sql = format!(
+            r#"
+{}
+where archived = 0
+  and cwd = ?1
+order by updated_at desc
+"#,
+            codex_recover_select_sql(&schema)
+        );
+
+        let rows = with_codex_query_cache(&db_path, "session-list-exact", &cache_key, |conn| {
+            let mut stmt = conn
+                .prepare(&sql)
+                .context("failed to prepare codex session list query")?;
+            let iter = stmt.query_map(params![target], map_codex_recover_row)?;
+            Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
+        })?;
+
+        Ok(rows.into_iter().map(ai_session_from_codex_recover_row).collect())
+    })();
+
+    match db_result {
+        Ok(sessions) => Ok(sessions),
+        Err(err) => {
+            debug!(
+                error = %err,
+                path = %path.display(),
+                "failed to read codex sessions from state db; falling back to session files"
+            );
+            read_codex_sessions_for_path_from_files(path)
+        }
+    }
 }
 
 fn read_cursor_sessions_for_path(path: &PathBuf) -> Result<Vec<AiSession>> {
@@ -3076,6 +3232,15 @@ struct FzfSessionEntry {
     display: String,
     session_id: String,
     provider: Provider,
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderSessionListRow {
+    index: usize,
+    id: String,
+    updated_at: Option<String>,
+    updated_relative: String,
+    preview: String,
 }
 
 /// List all sessions and let user fuzzy-select one to resume.
@@ -3485,10 +3650,127 @@ fn ensure_provider_tty(provider: Provider, action: &str) -> Result<()> {
     );
 }
 
-fn provider_sessions(provider: Provider) -> Result<()> {
+fn print_provider_session_listing(
+    provider: Provider,
+    target: &Path,
+    sessions: &[AiSession],
+    json: bool,
+) -> Result<()> {
+    if sessions.is_empty() {
+        let provider_name = match provider {
+            Provider::Claude => "Claude",
+            Provider::Codex => "Codex",
+            Provider::Cursor => "Cursor",
+            Provider::All => "AI",
+        };
+        bail!("No {provider_name} sessions found for {}", target.display());
+    }
+
+    let rows: Vec<ProviderSessionListRow> = sessions
+        .iter()
+        .enumerate()
+        .map(|(index, session)| {
+            let updated_at = session
+                .last_message_at
+                .clone()
+                .or_else(|| session.timestamp.clone());
+            let updated_relative = updated_at
+                .as_deref()
+                .map(format_relative_time)
+                .unwrap_or_else(|| "-".to_string());
+            let preview = session
+                .last_message
+                .as_deref()
+                .or(session.first_message.as_deref())
+                .or(session.error_summary.as_deref())
+                .map(clean_summary)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "(no message)".to_string());
+            ProviderSessionListRow {
+                index: index + 1,
+                id: session.session_id.clone(),
+                updated_at,
+                updated_relative,
+                preview,
+            }
+        })
+        .collect();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).context("failed to encode session list JSON")?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} sessions for {}",
+        provider_name(provider),
+        target.display()
+    );
+    println!();
+
+    let index_width = rows
+        .last()
+        .map(|row| row.index.to_string().len())
+        .unwrap_or(1)
+        .max(1);
+    let updated_width = rows
+        .iter()
+        .map(|row| row.updated_relative.chars().count())
+        .max()
+        .unwrap_or(7)
+        .max("updated".len());
+    let id_width = rows
+        .iter()
+        .map(|row| row.id.chars().count())
+        .max()
+        .unwrap_or(10)
+        .min(36)
+        .max(2);
+
+    println!(
+        "{:>index_width$}  {:<updated_width$}  {:<id_width$}  preview",
+        "#",
+        "updated",
+        "id",
+        index_width = index_width,
+        updated_width = updated_width,
+        id_width = id_width,
+    );
+    for row in &rows {
+        println!(
+            "{:>index_width$}  {:<updated_width$}  {:<id_width$}  {}",
+            row.index,
+            row.updated_relative,
+            row.id,
+            truncate_str(&row.preview, 90),
+            index_width = index_width,
+            updated_width = updated_width,
+            id_width = id_width,
+        );
+    }
+
+    println!();
+    println!(
+        "Continue with `f ai {} continue <index|id-prefix> --path {}`",
+        provider_name(provider),
+        shell_words::quote(&target.display().to_string())
+    );
+    Ok(())
+}
+
+fn provider_sessions(provider: Provider, path: Option<String>, json: bool) -> Result<()> {
     if provider == Provider::All {
         bail!("sessions requires a specific provider (claude or codex)");
     }
+    if provider == Provider::Codex {
+        let target = resolve_session_target_path(path.as_deref())?;
+        let sessions = read_sessions_for_target(provider, path.as_deref())?;
+        return print_provider_session_listing(provider, &target, &sessions, json);
+    }
+
     ensure_provider_tty(provider, "sessions")?;
 
     let launched = match provider {
@@ -3866,10 +4148,24 @@ fn looks_like_codex_session_token(token: &str) -> bool {
     true
 }
 
+fn extract_codex_session_hints(query: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+    for token in recover_query_tokens(query) {
+        if looks_like_git_sha(&token) || !looks_like_codex_session_token(&token) {
+            continue;
+        }
+        if !hints.iter().any(|existing| existing == &token) {
+            hints.push(token);
+            if hints.len() >= 2 {
+                break;
+            }
+        }
+    }
+    hints
+}
+
 fn extract_codex_session_hint(query: &str) -> Option<String> {
-    recover_query_tokens(query)
-        .into_iter()
-        .find(|token| !looks_like_git_sha(token) && looks_like_codex_session_token(token))
+    extract_codex_session_hints(query).into_iter().next()
 }
 
 fn extract_codex_session_reference_request(
@@ -3879,11 +4175,14 @@ fn extract_codex_session_reference_request(
     if starts_with_codex_session_lookup_only_phrase(normalized_query) {
         return None;
     }
-    let session_hint = extract_codex_session_hint(normalized_query)?;
-    let user_request = extract_codex_session_reference_user_request(query_text, &session_hint)?;
-    let count = extract_codex_session_reference_count(query_text, &session_hint);
+    let session_hints = extract_codex_session_hints(normalized_query);
+    if session_hints.is_empty() {
+        return None;
+    }
+    let user_request = extract_codex_session_reference_user_request(query_text, &session_hints)?;
+    let count = extract_codex_session_reference_count(query_text, &session_hints);
     Some(CodexSessionReferenceRequest {
-        session_hint,
+        session_hints,
         count,
         user_request,
     })
@@ -3905,15 +4204,17 @@ fn starts_with_codex_session_lookup_only_phrase(query: &str) -> bool {
 
 fn extract_codex_session_reference_user_request(
     query_text: &str,
-    session_hint: &str,
+    session_hints: &[String],
 ) -> Option<String> {
     let query_lower = query_text.to_ascii_lowercase();
-    let hint_lower = session_hint.to_ascii_lowercase();
-    let start = query_lower.find(&hint_lower)?;
-    let after_hint = query_text.get(start + session_hint.len()..)?.trim_start();
+    let last_hint = session_hints.last()?;
+    let hint_lower = last_hint.to_ascii_lowercase();
+    let start = query_lower.rfind(&hint_lower)?;
+    let after_hint = query_text.get(start + last_hint.len()..)?.trim_start();
     let remainder = strip_codex_session_window_prefix(after_hint)
         .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '-'))
         .trim();
+    let remainder = strip_codex_session_followup_prefix(remainder);
     if remainder.is_empty() {
         None
     } else {
@@ -3921,12 +4222,52 @@ fn extract_codex_session_reference_user_request(
     }
 }
 
-fn extract_codex_session_reference_count(query_text: &str, session_hint: &str) -> usize {
+fn strip_codex_session_followup_prefix(value: &str) -> &str {
+    let mut remainder = value.trim_start();
+    loop {
+        let next = if remainder.len() >= 14 && remainder[..14].eq_ignore_ascii_case("codex session ") {
+            Some(&remainder[14..])
+        } else if remainder.len() >= 11 && remainder[..11].eq_ignore_ascii_case("codex sesh ") {
+            Some(&remainder[11..])
+        } else if remainder.len() >= 12 && remainder[..12].eq_ignore_ascii_case("codex chat ") {
+            Some(&remainder[12..])
+        } else if remainder.len() >= 6 && remainder[..6].eq_ignore_ascii_case("codex ") {
+            Some(&remainder[6..])
+        } else if remainder.len() >= 8 && remainder[..8].eq_ignore_ascii_case("session ") {
+            Some(&remainder[8..])
+        } else if remainder.len() >= 5 && remainder[..5].eq_ignore_ascii_case("sesh ") {
+            Some(&remainder[5..])
+        } else if remainder.len() >= 5 && remainder[..5].eq_ignore_ascii_case("chat ") {
+            Some(&remainder[5..])
+        } else if remainder.len() >= 7 && remainder[..7].eq_ignore_ascii_case("thread ") {
+            Some(&remainder[7..])
+        } else if remainder.len() >= 4 && remainder[..4].eq_ignore_ascii_case("and ") {
+            Some(&remainder[4..])
+        } else if remainder.len() >= 5 && remainder[..5].eq_ignore_ascii_case("then ") {
+            Some(&remainder[5..])
+        } else {
+            None
+        };
+
+        match next {
+            Some(rest) => {
+                remainder =
+                    rest.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '-'));
+            }
+            None => return remainder.trim(),
+        }
+    }
+}
+
+fn extract_codex_session_reference_count(query_text: &str, session_hints: &[String]) -> usize {
     let query_lower = query_text.to_ascii_lowercase();
-    let hint_lower = session_hint.to_ascii_lowercase();
+    let Some(last_hint) = session_hints.last() else {
+        return 12;
+    };
+    let hint_lower = last_hint.to_ascii_lowercase();
     let after_hint = query_lower
-        .find(&hint_lower)
-        .and_then(|start| query_text.get(start + session_hint.len()..))
+        .rfind(&hint_lower)
+        .and_then(|start| query_text.get(start + last_hint.len()..))
         .unwrap_or(query_text);
     let captures = codex_session_window_regex().captures(after_hint);
     captures
@@ -3953,16 +4294,17 @@ fn codex_session_window_regex() -> &'static Regex {
 }
 
 fn resolve_builtin_codex_session_reference(
-    request: &CodexSessionReferenceRequest,
+    session_hint: &str,
+    count: usize,
 ) -> Result<CodexResolvedReference> {
-    let row = read_codex_threads_by_session_hint(&request.session_hint, 1)?
+    let row = read_codex_threads_by_session_hint(session_hint, 1)?
         .into_iter()
         .next()
-        .ok_or_else(|| anyhow::anyhow!("No Codex session found for {}", request.session_hint))?;
+        .ok_or_else(|| anyhow::anyhow!("No Codex session found for {}", session_hint))?;
     let excerpt = read_last_context(
         &row.id,
         Provider::Codex,
-        request.count,
+        count,
         &PathBuf::from(&row.cwd),
     )?;
     Ok(CodexResolvedReference {
@@ -3970,7 +4312,7 @@ fn resolve_builtin_codex_session_reference(
         source: "session".to_string(),
         matched: row.id.clone(),
         command: None,
-        output: render_codex_session_reference(&row, request.count, &excerpt),
+        output: render_codex_session_reference(&row, count, &excerpt),
     })
 }
 
@@ -4006,28 +4348,43 @@ fn codex_sqlite_home() -> Result<PathBuf> {
     Ok(home.join(".codex"))
 }
 
-fn latest_codex_state_db() -> Result<PathBuf> {
-    let sqlite_home = codex_sqlite_home()?;
-    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(&sqlite_home)
+fn parse_codex_versioned_db_filename(file_name: &str, prefix: &str) -> Option<u32> {
+    file_name
+        .strip_prefix(prefix)?
+        .strip_suffix(".sqlite")?
+        .parse::<u32>()
+        .ok()
+}
+
+fn select_codex_state_db_path(sqlite_home: &Path) -> Result<PathBuf> {
+    let mut candidates: Vec<(u32, PathBuf)> = fs::read_dir(sqlite_home)
         .with_context(|| format!("failed to read {}", sqlite_home.display()))?
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let path = entry.path();
             let file_name = path.file_name()?.to_str()?;
-            if !file_name.starts_with("state_") || !file_name.ends_with(".sqlite") {
-                return None;
-            }
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, path))
+            let version = parse_codex_versioned_db_filename(file_name, "state_")?;
+            Some((version, path))
         })
         .collect();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    if let Some((_, path)) = candidates.into_iter().next() {
+        return Ok(path);
+    }
 
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    candidates
-        .into_iter()
-        .map(|(_, path)| path)
-        .next()
-        .context("no Codex state_*.sqlite database found")
+    let legacy_path = sqlite_home.join("state.sqlite");
+    if legacy_path.exists() {
+        return Ok(legacy_path);
+    }
+
+    bail!(
+        "no Codex state_<version>.sqlite database found under {}",
+        sqlite_home.display()
+    )
+}
+
+fn codex_state_db_path() -> Result<PathBuf> {
+    select_codex_state_db_path(&codex_sqlite_home()?)
 }
 
 fn codex_query_cache_disabled() -> bool {
@@ -4048,6 +4405,72 @@ fn codex_query_cache_root() -> Result<PathBuf> {
         .join("query-cache"))
 }
 
+fn codex_session_completion_markers_dir() -> Result<PathBuf> {
+    Ok(config::ensure_global_state_dir()?
+        .join("codex")
+        .join("session-completions"))
+}
+
+fn codex_session_completion_scan_limit() -> usize {
+    env::var("FLOW_CODEX_SESSION_COMPLETION_SCAN_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 200))
+        .unwrap_or(CODEX_SESSION_COMPLETION_DEFAULT_SCAN_LIMIT)
+}
+
+fn codex_session_completion_idle_secs() -> u64 {
+    env::var("FLOW_CODEX_SESSION_COMPLETION_IDLE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(15, 3600))
+        .unwrap_or(CODEX_SESSION_COMPLETION_DEFAULT_IDLE_SECS)
+}
+
+fn prune_codex_session_completion_markers(now_unix: u64) -> Result<()> {
+    let root = codex_session_completion_markers_dir()?;
+    if !root.exists() {
+        return Ok(());
+    }
+    let keep_cutoff = now_unix.saturating_sub(60 * 24 * 60 * 60);
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_secs())
+            .unwrap_or(now_unix);
+        if modified < keep_cutoff {
+            let _ = fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
+
+fn claim_codex_session_completion_marker(session_id: &str, assistant_at_unix: u64) -> Result<bool> {
+    let root = codex_session_completion_markers_dir()?;
+    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+    let key = blake3::hash(format!("{session_id}:{assistant_at_unix}").as_bytes()).to_hex();
+    let path = root.join(format!("{key}.done"));
+    let mut file = match OpenOptions::new().create_new(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to create {}", path.display()));
+        }
+    };
+    writeln!(file, "{session_id}:{assistant_at_unix}")
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
+
 fn codex_query_cache_entry_count() -> usize {
     let Ok(root) = codex_query_cache_root() else {
         return 0;
@@ -4064,6 +4487,11 @@ fn codex_query_cache_entry_count() -> usize {
 
 fn codex_query_cache_store() -> &'static Mutex<HashMap<PathBuf, CodexQueryCacheEntry>> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, CodexQueryCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn codex_thread_schema_cache() -> &'static Mutex<HashMap<PathBuf, CodexThreadSchemaCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CodexThreadSchemaCacheEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -4087,6 +4515,88 @@ fn codex_state_db_stamp(path: &Path) -> Result<CodexStateDbStamp> {
         path: path.display().to_string(),
         len: metadata.len(),
         modified_unix_secs: modified,
+    })
+}
+
+fn read_codex_thread_schema(conn: &Connection) -> Result<CodexThreadSchema> {
+    let mut stmt = conn
+        .prepare("pragma table_info(threads)")
+        .context("failed to prepare threads schema query")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("failed to query threads schema")?;
+    let mut names = BTreeSet::new();
+    for column in columns {
+        names.insert(column?);
+    }
+    Ok(CodexThreadSchema {
+        has_model: names.contains("model"),
+        has_reasoning_effort: names.contains("reasoning_effort"),
+    })
+}
+
+fn load_codex_thread_schema(db_path: &Path) -> Result<CodexThreadSchema> {
+    let stamp = codex_state_db_stamp(db_path)?;
+    if let Ok(cache) = codex_thread_schema_cache().lock() {
+        if let Some(entry) = cache.get(db_path) {
+            if entry.stamp == stamp {
+                return Ok(entry.schema.clone());
+            }
+        }
+    }
+
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+    let schema = read_codex_thread_schema(&conn)?;
+    if let Ok(mut cache) = codex_thread_schema_cache().lock() {
+        cache.insert(
+            db_path.to_path_buf(),
+            CodexThreadSchemaCacheEntry {
+                stamp,
+                schema: schema.clone(),
+            },
+        );
+    }
+    Ok(schema)
+}
+
+fn codex_recover_select_sql(schema: &CodexThreadSchema) -> String {
+    let model_expr = if schema.has_model {
+        "model"
+    } else {
+        "NULL as model"
+    };
+    let reasoning_expr = if schema.has_reasoning_effort {
+        "reasoning_effort"
+    } else {
+        "NULL as reasoning_effort"
+    };
+    format!(
+        r#"
+select
+  id,
+  updated_at,
+  cwd,
+  title,
+  first_user_message,
+  git_branch,
+  {model_expr},
+  {reasoning_expr}
+from threads
+"#
+    )
+}
+
+fn map_codex_recover_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodexRecoverRow> {
+    Ok(CodexRecoverRow {
+        id: row.get("id")?,
+        updated_at: row.get("updated_at")?,
+        cwd: row.get("cwd")?,
+        title: row.get("title")?,
+        first_user_message: row.get("first_user_message")?,
+        git_branch: row.get("git_branch")?,
+        model: row.get("model")?,
+        reasoning_effort: row.get("reasoning_effort")?,
     })
 }
 
@@ -4224,73 +4734,52 @@ pub(crate) fn read_recent_codex_threads_local(
     limit: usize,
     query: Option<&str>,
 ) -> Result<Vec<CodexRecoverRow>> {
-    let db_path = latest_codex_state_db()?;
+    let db_path = codex_state_db_path()?;
+    let schema = load_codex_thread_schema(&db_path)?;
 
     let target = target_path.to_string_lossy().to_string();
     let like_target = format!("{}/%", escape_like(&target));
     let fetch_limit = (limit.max(3) * 12).min(120);
     let cache_key = format!("target={target}\nexact={exact_cwd}\nfetch_limit={fetch_limit}");
 
-    let sql_exact = r#"
-select
-  id,
-  updated_at,
-  cwd,
-  title,
-  first_user_message,
-  git_branch
-from threads
+    let sql_exact = format!(
+        r#"
+{}
 where archived = 0
   and cwd = ?1
 order by updated_at desc
 limit ?2
-"#;
+"#,
+        codex_recover_select_sql(&schema)
+    );
 
-    let sql_tree = r#"
-select
-  id,
-  updated_at,
-  cwd,
-  title,
-  first_user_message,
-  git_branch
-from threads
+    let sql_tree = format!(
+        r#"
+{}
 where archived = 0
   and (cwd = ?1 or cwd like ?2 escape '\')
 order by updated_at desc
 limit ?3
-"#;
+"#,
+        codex_recover_select_sql(&schema)
+    );
 
     let mut rows = with_codex_query_cache(&db_path, "recent", &cache_key, |conn| {
         if exact_cwd {
             let mut stmt = conn
-                .prepare(sql_exact)
+                .prepare(&sql_exact)
                 .context("failed to prepare exact recover query")?;
-            let iter = stmt.query_map(params![target, fetch_limit as i64], |row| {
-                Ok(CodexRecoverRow {
-                    id: row.get(0)?,
-                    updated_at: row.get(1)?,
-                    cwd: row.get(2)?,
-                    title: row.get(3)?,
-                    first_user_message: row.get(4)?,
-                    git_branch: row.get(5)?,
-                })
-            })?;
+            let iter =
+                stmt.query_map(params![target, fetch_limit as i64], map_codex_recover_row)?;
             Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
         } else {
             let mut stmt = conn
-                .prepare(sql_tree)
+                .prepare(&sql_tree)
                 .context("failed to prepare subtree recover query")?;
-            let iter = stmt.query_map(params![target, like_target, fetch_limit as i64], |row| {
-                Ok(CodexRecoverRow {
-                    id: row.get(0)?,
-                    updated_at: row.get(1)?,
-                    cwd: row.get(2)?,
-                    title: row.get(3)?,
-                    first_user_message: row.get(4)?,
-                    git_branch: row.get(5)?,
-                })
-            })?;
+            let iter = stmt.query_map(
+                params![target, like_target, fetch_limit as i64],
+                map_codex_recover_row,
+            )?;
             Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
         }
     })?;
@@ -4298,6 +4787,30 @@ limit ?3
     rank_recover_rows(&mut rows, query);
     rows.truncate(limit.max(1));
     Ok(rows)
+}
+
+fn read_recent_codex_threads_global_local(limit: usize) -> Result<Vec<CodexRecoverRow>> {
+    let db_path = codex_state_db_path()?;
+    let schema = load_codex_thread_schema(&db_path)?;
+    let fetch_limit = limit.clamp(1, 200);
+    let cache_key = format!("limit={fetch_limit}");
+    let sql = format!(
+        r#"
+{}
+where archived = 0
+order by updated_at desc
+limit ?1
+"#,
+        codex_recover_select_sql(&schema)
+    );
+
+    with_codex_query_cache(&db_path, "recent-global", &cache_key, |conn| {
+        let mut stmt = conn
+            .prepare(&sql)
+            .context("failed to prepare global recover query")?;
+        let iter = stmt.query_map(params![fetch_limit as i64], map_codex_recover_row)?;
+        Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
+    })
 }
 
 fn read_codex_threads_by_session_hint(
@@ -4320,47 +4833,35 @@ pub(crate) fn read_codex_threads_by_session_hint_local(
     session_hint: &str,
     limit: usize,
 ) -> Result<Vec<CodexRecoverRow>> {
-    let db_path = latest_codex_state_db()?;
+    let db_path = codex_state_db_path()?;
+    let schema = load_codex_thread_schema(&db_path)?;
     let normalized_hint = session_hint.trim().to_ascii_lowercase();
     if normalized_hint.is_empty() {
         return Ok(vec![]);
     }
     let cache_key = format!("hint={normalized_hint}\nlimit={}", limit.max(1));
 
-    let sql = r#"
-select
-  id,
-  updated_at,
-  cwd,
-  title,
-  first_user_message,
-  git_branch
-from threads
+    let sql = format!(
+        r#"
+{}
 where archived = 0
   and (lower(id) = ?1 or lower(id) like ?2 escape '\')
 order by
   case when lower(id) = ?1 then 0 else 1 end,
   updated_at desc
 limit ?3
-"#;
+"#,
+        codex_recover_select_sql(&schema)
+    );
 
     let prefix_like = format!("{}%", escape_like(&normalized_hint));
     with_codex_query_cache(&db_path, "session-hint", &cache_key, |conn| {
         let mut stmt = conn
-            .prepare(sql)
+            .prepare(&sql)
             .context("failed to prepare explicit session recover query")?;
         let iter = stmt.query_map(
             params![normalized_hint, prefix_like, limit.max(1) as i64],
-            |row| {
-                Ok(CodexRecoverRow {
-                    id: row.get(0)?,
-                    updated_at: row.get(1)?,
-                    cwd: row.get(2)?,
-                    title: row.get(3)?,
-                    first_user_message: row.get(4)?,
-                    git_branch: row.get(5)?,
-                })
-            },
+            map_codex_recover_row,
         )?;
         Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
     })
@@ -4399,21 +4900,11 @@ pub(crate) fn search_codex_threads_for_find_local(
         }
     }
 
-    let db_path = latest_codex_state_db()?;
+    let db_path = codex_state_db_path()?;
+    let schema = load_codex_thread_schema(&db_path)?;
 
-    let mut sql = String::from(
-        r#"
-select
-  id,
-  updated_at,
-  cwd,
-  title,
-  first_user_message,
-  git_branch
-from threads
-where archived = 0
-"#,
-    );
+    let mut sql = codex_recover_select_sql(&schema);
+    sql.push_str("where archived = 0\n");
     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
     if let Some(target_path) = target_path {
@@ -4430,9 +4921,16 @@ where archived = 0
 
     let search_terms = codex_find_search_terms(&normalized_query);
     let mut clauses = Vec::new();
+    let mut search_columns = vec!["id", "first_user_message", "title", "git_branch", "cwd"];
+    if schema.has_model {
+        search_columns.push("model");
+    }
+    if schema.has_reasoning_effort {
+        search_columns.push("reasoning_effort");
+    }
     for term in search_terms {
         let pattern = format!("%{}%", escape_like(&term));
-        for column in ["id", "first_user_message", "title", "git_branch", "cwd"] {
+        for column in &search_columns {
             clauses.push(format!("lower(coalesce({column}, '')) like ? escape '\\'"));
             params_vec.push(Box::new(pattern.clone()));
         }
@@ -4458,16 +4956,7 @@ where archived = 0
         let mut stmt = conn
             .prepare(&sql)
             .context("failed to prepare Codex find query")?;
-        let iter = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok(CodexRecoverRow {
-                id: row.get(0)?,
-                updated_at: row.get(1)?,
-                cwd: row.get(2)?,
-                title: row.get(3)?,
-                first_user_message: row.get(4)?,
-                git_branch: row.get(5)?,
-            })
-        })?;
+        let iter = stmt.query_map(params_refs.as_slice(), map_codex_recover_row)?;
         Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
     })?;
     rank_recover_rows(&mut rows, Some(&normalized_query));
@@ -4535,6 +5024,12 @@ fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[St
     let id = row.id.to_lowercase();
     let cwd = row.cwd.to_lowercase();
     let branch = row.git_branch.clone().unwrap_or_default().to_lowercase();
+    let model = row.model.clone().unwrap_or_default().to_lowercase();
+    let reasoning_effort = row
+        .reasoning_effort
+        .clone()
+        .unwrap_or_default()
+        .to_lowercase();
     let title = row.title.clone().unwrap_or_default().to_lowercase();
     let first = row
         .first_user_message
@@ -4561,6 +5056,12 @@ fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[St
         if branch.contains(normalized_query) {
             score += 70;
         }
+        if model.contains(normalized_query) {
+            score += 65;
+        }
+        if reasoning_effort.contains(normalized_query) {
+            score += 30;
+        }
         if cwd.contains(normalized_query) {
             score += 60;
         }
@@ -4580,6 +5081,12 @@ fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[St
         }
         if branch.contains(token) {
             score += 12;
+        }
+        if model.contains(token) {
+            score += 12;
+        }
+        if reasoning_effort.contains(token) {
+            score += 6;
         }
         if cwd.contains(token) {
             score += 8;
@@ -4603,6 +5110,10 @@ fn build_recover_output(
             updated_at_unix: row.updated_at,
             cwd: row.cwd,
             git_branch: row.git_branch.filter(|value| !value.trim().is_empty()),
+            model: row.model.filter(|value| !value.trim().is_empty()),
+            reasoning_effort: row
+                .reasoning_effort
+                .filter(|value| !value.trim().is_empty()),
             title: row.title.filter(|value| !value.trim().is_empty()),
             first_user_message: row
                 .first_user_message
@@ -4723,6 +5234,20 @@ fn format_unix_ts(ts: i64) -> String {
         .unwrap_or_else(|| ts.to_string())
 }
 
+fn codex_model_label(model: Option<&str>, reasoning_effort: Option<&str>) -> Option<String> {
+    match (
+        model.map(str::trim).filter(|value| !value.is_empty()),
+        reasoning_effort
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(model), Some(reasoning_effort)) => Some(format!("{model} [{reasoning_effort}]")),
+        (Some(model), None) => Some(model.to_string()),
+        (None, Some(reasoning_effort)) => Some(format!("reasoning {reasoning_effort}")),
+        (None, None) => None,
+    }
+}
+
 fn print_recover_output(output: &CodexRecoverOutput) {
     println!("Target path: {}", output.target_path);
     println!(
@@ -4752,6 +5277,12 @@ fn print_recover_output(output: &CodexRecoverOutput) {
         );
         if let Some(branch) = candidate.git_branch.as_deref() {
             println!("  branch: {}", branch);
+        }
+        if let Some(model) = codex_model_label(
+            candidate.model.as_deref(),
+            candidate.reasoning_effort.as_deref(),
+        ) {
+            println!("  model: {}", model);
         }
         if let Some(first) = candidate.first_user_message.as_deref() {
             println!("  first: {}", truncate_recover_text(first));
@@ -4823,6 +5354,8 @@ fn connect_codex_session(
                 "title": row.title,
                 "firstUserMessage": row.first_user_message,
                 "gitBranch": row.git_branch,
+                "model": row.model,
+                "reasoningEffort": row.reasoning_effort,
                 "reason": reason,
                 "targetPath": target_path.display().to_string(),
                 "exactCwd": exact_cwd,
@@ -4834,6 +5367,27 @@ fn connect_codex_session(
     }
 
     ensure_provider_tty(Provider::Codex, "connect")?;
+    let connect_summary = if query_text.is_empty() {
+        row.first_user_message
+            .as_deref()
+            .and_then(codex_text::sanitize_codex_query_text)
+            .or_else(|| row.title.as_deref().map(str::trim).map(str::to_string))
+            .unwrap_or_else(|| "resume latest recent session".to_string())
+    } else {
+        query_text.clone()
+    };
+    let mut connect_event = activity_log::ActivityEvent::done("codex.connect", connect_summary);
+    connect_event.route = Some(if query_text.is_empty() {
+        "latest".to_string()
+    } else {
+        "query".to_string()
+    });
+    connect_event.target_path = Some(target_path.display().to_string());
+    connect_event.launch_path = Some(row.cwd.clone());
+    connect_event.session_id = Some(row.id.clone());
+    connect_event.source = Some("codex-connect".to_string());
+    let _ = activity_log::append_daily_event(connect_event);
+
     let launch_path = PathBuf::from(&row.cwd);
     println!(
         "Resuming session {} from {}...",
@@ -4875,6 +5429,68 @@ fn resolve_codex_input(
 
     print_codex_open_plan(&plan);
     Ok(())
+}
+
+pub fn codex_resolve_inspector(
+    path: Option<String>,
+    query: String,
+    exact_cwd: bool,
+) -> Result<CodexResolveInspectorResponse> {
+    let plan = build_codex_open_plan(path, vec![query], exact_cwd)?;
+    let runtime_skills = load_runtime_skills_from_plan(&plan)?;
+    Ok(CodexResolveInspectorResponse {
+        action: plan.action,
+        route: plan.route,
+        reason: plan.reason,
+        target_path: plan.target_path,
+        launch_path: plan.launch_path,
+        query: plan.query,
+        session_id: plan.session_id,
+        prompt: plan.prompt,
+        references: plan
+            .references
+            .into_iter()
+            .map(|reference| CodexResolveReferenceSnapshot {
+                name: reference.name,
+                source: reference.source,
+                matched: reference.matched,
+                command: reference.command,
+                output: reference.output,
+            })
+            .collect(),
+        runtime_state_path: plan.runtime_state_path,
+        runtime_skills,
+        prompt_context_budget_chars: plan.prompt_context_budget_chars,
+        max_resolved_references: plan.max_resolved_references,
+        prompt_chars: plan.prompt_chars,
+        injected_context_chars: plan.injected_context_chars,
+    })
+}
+
+fn load_runtime_skills_from_plan(
+    plan: &CodexOpenPlan,
+) -> Result<Vec<CodexResolveRuntimeSkillSnapshot>> {
+    let Some(path) = plan.runtime_state_path.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let raw =
+        fs::read(path).with_context(|| format!("failed to read runtime state {}", path))?;
+    let state: codex_runtime::CodexRuntimeState = serde_json::from_slice(&raw)
+        .with_context(|| format!("failed to decode runtime state {}", path))?;
+    Ok(state
+        .skills
+        .into_iter()
+        .map(|skill| CodexResolveRuntimeSkillSnapshot {
+            name: skill.name,
+            kind: skill.kind,
+            path: skill.path,
+            trigger: skill.trigger,
+            source: skill.source,
+            original_name: skill.original_name,
+            estimated_chars: skill.estimated_chars,
+            match_reason: skill.match_reason,
+        })
+        .collect())
 }
 
 const DEFAULT_GLOBAL_CODEX_WRAPPER_BIN: &str = "~/code/flow/scripts/codex-flow-wrapper";
@@ -5150,6 +5766,15 @@ pub fn codex_skills_dashboard_snapshot(
         doctor: collect_codex_doctor_snapshot(target_path)?,
         skills: codex_runtime::dashboard_snapshot(target_path, &codex_cfg, recent_limit)?,
     })
+}
+
+pub fn codex_skill_source_sync(
+    target_path: &Path,
+    selected_skills: &[String],
+    force: bool,
+) -> Result<usize> {
+    let codex_cfg = load_codex_config_for_path(target_path);
+    codex_runtime::sync_external_skills(target_path, &codex_cfg, selected_skills, force)
 }
 
 fn print_codex_doctor(snapshot: &CodexDoctorSnapshot) {
@@ -5752,6 +6377,442 @@ fn read_codex_first_user_message_since(
     Ok(first)
 }
 
+fn file_modified_unix(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|value| value.as_secs())
+}
+
+fn read_codex_session_completion_snapshot(
+    session_file: &Path,
+) -> Result<Option<CodexSessionCompletionSnapshot>> {
+    let file_modified_unix = file_modified_unix(session_file).unwrap_or(0);
+    let mut snapshot = CodexSessionCompletionSnapshot {
+        last_role: None,
+        last_user_message: None,
+        last_user_at_unix: None,
+        last_assistant_message: None,
+        last_assistant_at_unix: None,
+        file_modified_unix,
+    };
+
+    for_each_nonempty_jsonl_line(session_file, |line| {
+        let entry: CodexEntry = match crate::json_parse::parse_json_line(line) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let Some((role, text)) = extract_codex_message(&entry) else {
+            return;
+        };
+        let Some(ts) =
+            extract_codex_timestamp(&entry).and_then(|value| parse_rfc3339_to_unix(&value))
+        else {
+            return;
+        };
+
+        snapshot.last_role = Some(role.clone());
+        match role.as_str() {
+            "user" => {
+                snapshot.last_user_message = Some(text);
+                snapshot.last_user_at_unix = Some(ts);
+            }
+            "assistant" => {
+                snapshot.last_assistant_message = Some(text);
+                snapshot.last_assistant_at_unix = Some(ts);
+            }
+            _ => {}
+        }
+    })?;
+
+    if snapshot.last_role.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(snapshot))
+}
+
+fn assistant_completion_summary(text: &str) -> Option<String> {
+    let cleaned = codex_text::sanitize_codex_memory_rollout_text(text)?;
+    let first_line = cleaned
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let summary = first_line
+        .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | ' '))
+        .trim();
+    if summary.is_empty() {
+        return None;
+    }
+
+    let lower = summary.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "done"
+            | "done."
+            | "completed"
+            | "completed."
+            | "implemented"
+            | "implemented."
+            | "fixed"
+            | "fixed."
+            | "it's in."
+            | "it’s in."
+            | "all set."
+    ) {
+        return None;
+    }
+
+    Some(summary.to_string())
+}
+
+fn select_codex_session_completion_summary(
+    row: &CodexRecoverRow,
+    snapshot: &CodexSessionCompletionSnapshot,
+) -> String {
+    snapshot
+        .last_assistant_message
+        .as_deref()
+        .and_then(assistant_completion_summary)
+        .or_else(|| {
+            snapshot
+                .last_user_message
+                .as_deref()
+                .and_then(codex_text::sanitize_codex_query_text)
+        })
+        .or_else(|| {
+            row.first_user_message
+                .as_deref()
+                .and_then(codex_text::sanitize_codex_query_text)
+        })
+        .or_else(|| row.title.as_deref().map(str::trim).map(str::to_string))
+        .unwrap_or_else(|| "completed session turn".to_string())
+}
+
+fn build_codex_session_completion_event(
+    row: &CodexRecoverRow,
+    snapshot: &CodexSessionCompletionSnapshot,
+) -> activity_log::ActivityEvent {
+    let mut event = activity_log::ActivityEvent::done(
+        "codex.done",
+        truncate_recover_text(&select_codex_session_completion_summary(row, snapshot)),
+    );
+    event.target_path = Some(row.cwd.clone());
+    event.launch_path = Some(row.cwd.clone());
+    event.session_id = Some(row.id.clone());
+    event.source = Some("codex-session-completion".to_string());
+    event.dedupe_key = snapshot
+        .last_assistant_at_unix
+        .map(|value| format!("codex:done:{}:{value}", row.id));
+    event
+}
+
+fn read_codex_turn_patch_changes(
+    session_file: &Path,
+    since_unix: u64,
+    until_unix: u64,
+    session_cwd: &str,
+) -> Result<Vec<CodexTurnPatchChange>> {
+    let mut changes: Vec<CodexTurnPatchChange> = Vec::new();
+    for_each_nonempty_jsonl_line(session_file, |line| {
+        let entry: CodexEntry = match crate::json_parse::parse_json_line(line) {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let Some(ts) =
+            extract_codex_timestamp(&entry).and_then(|value| parse_rfc3339_to_unix(&value))
+        else {
+            return;
+        };
+        if ts < since_unix || ts > until_unix {
+            return;
+        }
+
+        let Some(payload) = entry.payload.as_ref() else {
+            return;
+        };
+        if entry.entry_type.as_deref() != Some("response_item") {
+            return;
+        }
+        if payload.get("type").and_then(|value| value.as_str()) != Some("custom_tool_call") {
+            return;
+        }
+        if payload.get("status").and_then(|value| value.as_str()) != Some("completed") {
+            return;
+        }
+        if payload.get("name").and_then(|value| value.as_str()) != Some("apply_patch") {
+            return;
+        }
+        let Some(input) = payload.get("input").and_then(|value| value.as_str()) else {
+            return;
+        };
+
+        for change in parse_apply_patch_changes(input, session_cwd) {
+            if let Some(existing) = changes.iter_mut().find(|item| item.path == change.path) {
+                if !existing.patch.is_empty() && !change.patch.is_empty() {
+                    existing.patch.push('\n');
+                }
+                existing.patch.push_str(&change.patch);
+                if existing.action != change.action {
+                    existing.action = "update".to_string();
+                }
+            } else {
+                changes.push(change);
+            }
+        }
+    })?;
+    Ok(changes)
+}
+
+fn parse_apply_patch_changes(input: &str, session_cwd: &str) -> Vec<CodexTurnPatchChange> {
+    let mut changes = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_action = String::new();
+    let mut current_patch = String::new();
+
+    let flush_current = |changes: &mut Vec<CodexTurnPatchChange>,
+                         current_path: &mut Option<String>,
+                         current_action: &mut String,
+                         current_patch: &mut String| {
+        let Some(path) = current_path.take() else {
+            return;
+        };
+        changes.push(CodexTurnPatchChange {
+            path,
+            action: std::mem::take(current_action),
+            patch: current_patch.trim().to_string(),
+        });
+        current_patch.clear();
+    };
+
+    for line in input.lines() {
+        let header = if let Some(path) = line.strip_prefix("*** Update File: ") {
+            Some(("update", path))
+        } else if let Some(path) = line.strip_prefix("*** Add File: ") {
+            Some(("add", path))
+        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            Some(("delete", path))
+        } else {
+            None
+        };
+
+        if let Some((action, path)) = header {
+            flush_current(
+                &mut changes,
+                &mut current_path,
+                &mut current_action,
+                &mut current_patch,
+            );
+            current_action = action.to_string();
+            current_path = Some(resolve_patch_path(path, session_cwd));
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("*** Move to: ") {
+            current_path = Some(resolve_patch_path(path, session_cwd));
+            continue;
+        }
+
+        if current_path.is_some() {
+            current_patch.push_str(line);
+            current_patch.push('\n');
+        }
+    }
+
+    flush_current(
+        &mut changes,
+        &mut current_path,
+        &mut current_action,
+        &mut current_patch,
+    );
+    changes
+}
+
+fn resolve_patch_path(path: &str, session_cwd: &str) -> String {
+    let raw = Path::new(path);
+    if raw.is_absolute() {
+        return raw.display().to_string();
+    }
+    Path::new(session_cwd).join(raw).display().to_string()
+}
+
+fn fish_fn_path() -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("config")
+        .join("fish")
+        .join("fn.fish")
+        .display()
+        .to_string()
+}
+
+fn is_fish_fn_path(path: &str) -> bool {
+    path.ends_with("/config/fish/fn.fish") || path == fish_fn_path()
+}
+
+fn summarize_fish_fn_change(text: &str) -> Option<String> {
+    let normalized = text.to_ascii_lowercase();
+    let mut remaps = Vec::new();
+    if normalized.contains("j is now the fresh codex entrypoint")
+        || normalized.contains("j runs f codex open")
+        || normalized.contains("__flow_codex open --path")
+    {
+        remaps.push("j->codex.open");
+    }
+    if normalized.contains("k is now the current-folder codex continue entrypoint")
+        || normalized.contains("k uses f codex connect")
+        || normalized.contains("__flow_codex connect --path")
+    {
+        remaps.push("k->codex.connect");
+    }
+    if normalized.contains("l is now kit")
+        || normalized.contains("kit --continue --no-exit")
+        || normalized.contains("exec \"$kit_bin\" --continue")
+    {
+        remaps.push("l->kit");
+    }
+    if normalized.contains("l now delegates to j")
+        || text.contains("function L") && text.contains("j $argv")
+    {
+        remaps.push("L->j");
+    }
+
+    if remaps.is_empty() {
+        if normalized.contains("fn.fish") {
+            return Some("updated fn.fish".to_string());
+        }
+        return None;
+    }
+
+    let keep_fallbacks = normalized.contains("old k moved to cl")
+        || normalized.contains("function cl")
+        || normalized.contains("function cf")
+        || text.contains("function cF");
+    let mut summary = format!("remap {}", remaps.join(", "));
+    if keep_fallbacks {
+        summary.push_str("; keep cl/cf/cF fallbacks");
+    }
+    Some(summary)
+}
+
+fn build_fish_fn_changed_event(
+    row: &CodexRecoverRow,
+    snapshot: &CodexSessionCompletionSnapshot,
+    summary: String,
+) -> activity_log::ActivityEvent {
+    let mut event = activity_log::ActivityEvent::changed("fish.fn", summary);
+    event.target_path = Some(fish_fn_path());
+    event.session_id = Some(row.id.clone());
+    event.source = Some("codex-session-change".to_string());
+    event.dedupe_key = snapshot
+        .last_assistant_at_unix
+        .map(|value| format!("codex:changed:{}:{value}:fish.fn", row.id));
+    event
+}
+
+fn changed_file_label(path: &str) -> String {
+    let path_ref = Path::new(path);
+    if is_fish_fn_path(path) {
+        return "fn.fish".to_string();
+    }
+    path_ref
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn summarize_generic_changed_files(changes: &[CodexTurnPatchChange]) -> String {
+    let labels = changes
+        .iter()
+        .map(|change| changed_file_label(&change.path))
+        .collect::<Vec<_>>();
+    match labels.len() {
+        0 => "updated files".to_string(),
+        1 => format!("updated {}", labels[0]),
+        2 => format!("updated {}, {}", labels[0], labels[1]),
+        _ => format!(
+            "updated {}, {} + {} more",
+            labels[0],
+            labels[1],
+            labels.len() - 2
+        ),
+    }
+}
+
+fn build_codex_session_changed_events(
+    row: &CodexRecoverRow,
+    snapshot: &CodexSessionCompletionSnapshot,
+    session_file: &Path,
+) -> Result<Vec<activity_log::ActivityEvent>> {
+    let mut events = Vec::new();
+    let Some(last_assistant_at_unix) = snapshot.last_assistant_at_unix else {
+        return Ok(events);
+    };
+
+    let patch_changes = snapshot
+        .last_user_at_unix
+        .map(|last_user_at_unix| {
+            read_codex_turn_patch_changes(
+                session_file,
+                last_user_at_unix,
+                last_assistant_at_unix,
+                &row.cwd,
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    let fish_summary = patch_changes
+        .iter()
+        .find(|change| is_fish_fn_path(&change.path))
+        .and_then(|change| summarize_fish_fn_change(&change.patch))
+        .or_else(|| {
+            snapshot
+                .last_assistant_message
+                .as_deref()
+                .and_then(summarize_fish_fn_change)
+        })
+        .or_else(|| {
+            snapshot
+                .last_user_message
+                .as_deref()
+                .and_then(summarize_fish_fn_change)
+        });
+
+    let mut remaining_changes = Vec::new();
+    for change in patch_changes {
+        if is_fish_fn_path(&change.path) {
+            continue;
+        }
+        remaining_changes.push(change);
+    }
+
+    if let Some(summary) = fish_summary {
+        events.push(build_fish_fn_changed_event(row, snapshot, summary));
+    }
+
+    if !remaining_changes.is_empty() {
+        let mut event = activity_log::ActivityEvent::changed(
+            "files.changed",
+            summarize_generic_changed_files(&remaining_changes),
+        );
+        event.target_path = Some(row.cwd.clone());
+        event.launch_path = Some(row.cwd.clone());
+        event.session_id = Some(row.id.clone());
+        event.source = Some("codex-session-change".to_string());
+        event.dedupe_key = Some(format!(
+            "codex:changed:{}:{}:aggregate",
+            row.id, last_assistant_at_unix
+        ));
+        events.push(event);
+    }
+
+    Ok(events)
+}
+
 fn hydrate_codex_quick_launch(
     launch: &CodexQuickLaunchEvent,
 ) -> Result<Option<CodexQuickLaunchHydration>> {
@@ -5853,10 +6914,72 @@ fn reconcile_pending_codex_quick_launches(limit: usize) -> Result<usize> {
         };
         let _ = codex_skill_eval::log_event(&event);
         let _ = log_codex_quick_launch_hydration(&hydration);
+        let mut activity_event =
+            activity_log::ActivityEvent::done("codex.quick-launch", hydration.query.clone());
+        activity_event.route = Some(format!("{}-hydrated", launch.mode));
+        activity_event.target_path = Some(hydration.target_path.clone());
+        activity_event.launch_path = Some(hydration.target_path.clone());
+        activity_event.session_id = Some(hydration.session_id.clone());
+        activity_event.source = Some("codex-quick-launch".to_string());
+        activity_event.dedupe_key = Some(format!("codex:quick-launch:{}", launch.launch_id));
+        let _ = activity_log::append_daily_event(activity_event);
         reconciled += 1;
     }
 
     Ok(reconciled)
+}
+
+pub(crate) fn reconcile_codex_session_completions(limit: usize) -> Result<usize> {
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let rows = read_recent_codex_threads_global_local(limit)?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let now = unix_now_secs();
+    let idle_secs = codex_session_completion_idle_secs();
+    let _ = prune_codex_session_completion_markers(now);
+    let mut reconciled = 0usize;
+
+    for row in rows {
+        let Some(session_file) = find_codex_session_file(&row.id) else {
+            continue;
+        };
+        let Some(snapshot) = read_codex_session_completion_snapshot(&session_file)? else {
+            continue;
+        };
+        if snapshot.last_role.as_deref() != Some("assistant") {
+            continue;
+        }
+        let Some(last_assistant_at_unix) = snapshot.last_assistant_at_unix else {
+            continue;
+        };
+        let idle_anchor = snapshot.file_modified_unix.max(last_assistant_at_unix);
+        if now.saturating_sub(idle_anchor) < idle_secs {
+            continue;
+        }
+        if !claim_codex_session_completion_marker(&row.id, last_assistant_at_unix)? {
+            continue;
+        }
+
+        let _ =
+            activity_log::append_daily_event(build_codex_session_completion_event(&row, &snapshot));
+        for event in build_codex_session_changed_events(&row, &snapshot, &session_file)? {
+            let _ = activity_log::append_daily_event(event);
+        }
+        reconciled += 1;
+    }
+
+    Ok(reconciled)
+}
+
+pub(crate) fn run_codex_background_maintenance() -> Result<(usize, usize)> {
+    let hydrated = reconcile_pending_codex_quick_launches(48)?;
+    let completed = reconcile_codex_session_completions(codex_session_completion_scan_limit())?;
+    Ok((hydrated, completed))
 }
 
 fn codex_touch_launch(mode: String, cwd: Option<String>, provider: Provider) -> Result<()> {
@@ -5891,7 +7014,7 @@ fn codex_touch_launch(mode: String, cwd: Option<String>, provider: Provider) -> 
         daemon: daemon.to_string(),
     };
     let _ = log_codex_quick_launch_event(&event);
-    let _ = reconcile_pending_codex_quick_launches(48);
+    let _ = run_codex_background_maintenance();
     Ok(())
 }
 
@@ -6285,7 +7408,16 @@ fn build_codex_open_plan(
     let normalized_query = query_text.to_ascii_lowercase();
 
     if let Some(request) = extract_codex_session_reference_request(&query_text, &normalized_query) {
-        let mut references = vec![resolve_builtin_codex_session_reference(&request)?];
+        let mut references = Vec::new();
+        for session_hint in &request.session_hints {
+            let reference = resolve_builtin_codex_session_reference(session_hint, request.count)?;
+            if !references
+                .iter()
+                .any(|existing: &CodexResolvedReference| existing.matched == reference.matched)
+            {
+                references.push(reference);
+            }
+        }
         if auto_resolve_references {
             let extra_references = resolve_codex_references(
                 &target_path,
@@ -6315,10 +7447,23 @@ fn build_codex_open_plan(
             max_resolved_references,
             prompt_budget,
         );
+        let route = if request.session_hints.len() > 1 {
+            "multi-session-reference-new"
+        } else {
+            "session-reference-new"
+        };
+        let reason = if request.session_hints.len() > 1 {
+            format!(
+                "start a new session with {} resolved Codex session contexts",
+                request.session_hints.len()
+            )
+        } else {
+            "start a new session with resolved Codex session context".to_string()
+        };
         return Ok(finalize_codex_open_plan(CodexOpenPlan {
             action: "new".to_string(),
-            route: "reference-new".to_string(),
-            reason: "start a new session with resolved Codex session context".to_string(),
+            route: route.to_string(),
+            reason,
             target_path: target_path.display().to_string(),
             launch_path: target_path.display().to_string(),
             query: Some(query_text),
@@ -6334,6 +7479,29 @@ fn build_codex_open_plan(
             prompt_chars: 0,
             injected_context_chars: 0,
         }));
+    }
+
+    if let Some(plan) = build_codex_commit_workflow_plan(
+        &target_path,
+        &query_text,
+        &normalized_query,
+        runtime_skills_enabled,
+        auto_resolve_references,
+        max_resolved_references,
+        default_prompt_budget,
+        &codex_cfg,
+    )? {
+        return Ok(plan);
+    }
+
+    if let Some(plan) = build_codex_sync_workflow_plan(
+        &target_path,
+        &query_text,
+        &normalized_query,
+        max_resolved_references,
+        default_prompt_budget,
+    )? {
+        return Ok(plan);
     }
 
     if looks_like_recovery_prompt(&normalized_query) {
@@ -6426,6 +7594,115 @@ fn build_codex_open_plan(
     }))
 }
 
+fn build_codex_commit_workflow_plan(
+    target_path: &Path,
+    query_text: &str,
+    normalized_query: &str,
+    runtime_skills_enabled: bool,
+    auto_resolve_references: bool,
+    max_resolved_references: usize,
+    default_prompt_budget: usize,
+    codex_cfg: &config::CodexConfig,
+) -> Result<Option<CodexOpenPlan>> {
+    if !looks_like_commit_workflow_query(normalized_query) {
+        return Ok(None);
+    }
+
+    let Some(repo_root) = detect_git_root(target_path) else {
+        return Ok(None);
+    };
+
+    let mut references = vec![resolve_builtin_commit_workflow_reference(&repo_root)?];
+    if auto_resolve_references {
+        for reference in resolve_codex_references(&repo_root, query_text, &codex_cfg.reference_resolvers)? {
+            if !references
+                .iter()
+                .any(|existing| existing.matched == reference.matched)
+            {
+                references.push(reference);
+            }
+        }
+    }
+
+    let runtime = codex_runtime::prepare_runtime_activation(
+        &repo_root,
+        query_text,
+        runtime_skills_enabled,
+        codex_cfg,
+    )?;
+    let prompt_budget =
+        effective_prompt_context_budget_chars(codex_cfg, has_session_reference(&references))
+            .max(2200);
+    let prompt = build_codex_prompt_with_runtime(
+        query_text,
+        &references,
+        runtime.as_ref(),
+        max_resolved_references,
+        prompt_budget,
+    );
+
+    Ok(Some(finalize_codex_open_plan(CodexOpenPlan {
+        action: "new".to_string(),
+        route: "commit-workflow-new".to_string(),
+        reason: "start a new session with enforced deep-review commit workflow".to_string(),
+        target_path: repo_root.display().to_string(),
+        launch_path: repo_root.display().to_string(),
+        query: Some(query_text.to_string()),
+        session_id: None,
+        prompt,
+        references,
+        runtime_state_path: runtime
+            .as_ref()
+            .map(|value| value.state_path.display().to_string()),
+        runtime_skills: runtime_skill_names(runtime.as_ref()),
+        prompt_context_budget_chars: prompt_budget.max(default_prompt_budget),
+        max_resolved_references,
+        prompt_chars: 0,
+        injected_context_chars: 0,
+    })))
+}
+
+fn build_codex_sync_workflow_plan(
+    target_path: &Path,
+    query_text: &str,
+    normalized_query: &str,
+    max_resolved_references: usize,
+    default_prompt_budget: usize,
+) -> Result<Option<CodexOpenPlan>> {
+    if !looks_like_prom_sync_workflow_query(normalized_query) {
+        return Ok(None);
+    }
+
+    let Some(repo_root) = detect_git_root(target_path) else {
+        return Ok(None);
+    };
+    if !is_prom_workspace_path(&repo_root) {
+        return Ok(None);
+    }
+
+    let references = vec![resolve_builtin_sync_workflow_reference(&repo_root)?];
+    let prompt_budget = default_prompt_budget.max(1600);
+    let prompt = build_codex_prompt(query_text, &references, max_resolved_references, prompt_budget);
+
+    Ok(Some(finalize_codex_open_plan(CodexOpenPlan {
+        action: "new".to_string(),
+        route: "sync-workflow-new".to_string(),
+        reason: "start a new session with enforced guarded sync workflow".to_string(),
+        target_path: repo_root.display().to_string(),
+        launch_path: repo_root.display().to_string(),
+        query: Some(query_text.to_string()),
+        session_id: None,
+        prompt,
+        references,
+        runtime_state_path: None,
+        runtime_skills: Vec::new(),
+        prompt_context_budget_chars: prompt_budget,
+        max_resolved_references,
+        prompt_chars: 0,
+        injected_context_chars: 0,
+    })))
+}
+
 fn execute_codex_open_plan(plan: &CodexOpenPlan) -> Result<()> {
     let launch_path = PathBuf::from(&plan.launch_path);
     match plan.action.as_str() {
@@ -6452,7 +7729,7 @@ fn execute_codex_open_plan(plan: &CodexOpenPlan) -> Result<()> {
             }
         }
         "new" | "recover-new" => {
-            println!("Starting Codex in {}...", launch_path.display());
+            maybe_open_cursor_for_pr_feedback_check(plan);
             new_session_for_target(
                 Provider::Codex,
                 plan.prompt.as_deref(),
@@ -6464,6 +7741,92 @@ fn execute_codex_open_plan(plan: &CodexOpenPlan) -> Result<()> {
     }
 }
 
+fn maybe_open_cursor_for_pr_feedback_check(plan: &CodexOpenPlan) {
+    let Some(query) = plan
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    if !looks_like_pr_feedback_query(query) {
+        return;
+    }
+    if env_flag_is_false("FLOW_OPEN_CURSOR_ON_PR_CHECK") {
+        return;
+    }
+    let Some(handoff) = plan
+        .references
+        .iter()
+        .find(|reference| reference.name == "pr-feedback")
+        .and_then(|reference| parse_pr_feedback_cursor_handoff(&reference.output))
+    else {
+        return;
+    };
+    let _ = open_cursor_review_handoff(&handoff);
+}
+
+fn env_flag_is_false(name: &str) -> bool {
+    let Ok(value) = env::var(name) else {
+        return false;
+    };
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+fn parse_pr_feedback_cursor_handoff(value: &str) -> Option<PrFeedbackCursorHandoff> {
+    let mut workspace_path = None;
+    let mut review_plan_path = None;
+    let mut review_rules_path = None;
+    let mut kit_system_path = None;
+    for line in value.lines().map(str::trim) {
+        if let Some(path) = line.strip_prefix("Workspace:") {
+            workspace_path = Some(PathBuf::from(path.trim()));
+        } else if let Some(path) = line.strip_prefix("Review plan:") {
+            review_plan_path = Some(PathBuf::from(path.trim()));
+        } else if let Some(path) = line.strip_prefix("Review rules:") {
+            review_rules_path = Some(PathBuf::from(path.trim()));
+        } else if let Some(path) = line.strip_prefix("Kit system prompt:") {
+            kit_system_path = Some(PathBuf::from(path.trim()));
+        }
+    }
+    Some(PrFeedbackCursorHandoff {
+        workspace_path: workspace_path?,
+        review_plan_path: review_plan_path?,
+        review_rules_path,
+        kit_system_path: kit_system_path?,
+    })
+}
+
+fn command_on_path(command: &str) -> bool {
+    let Some(path_os) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&path_os).any(|dir| dir.join(command).is_file())
+}
+
+fn open_cursor_review_handoff(handoff: &PrFeedbackCursorHandoff) -> Result<()> {
+    let mut command = if cfg!(target_os = "macos") || !command_on_path("cursor") {
+        let mut command = Command::new("open");
+        command.arg("-g").arg("-a").arg("Cursor");
+        command
+    } else {
+        Command::new("cursor")
+    };
+    command
+        .arg(&handoff.workspace_path)
+        .arg(&handoff.review_plan_path)
+        .args(handoff.review_rules_path.iter())
+        .arg(&handoff.kit_system_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _status = command.status()?;
+    Ok(())
+}
+
 fn print_codex_open_plan(plan: &CodexOpenPlan) {
     println!("# codex resolve");
     println!("action: {}", plan.action);
@@ -6472,7 +7835,7 @@ fn print_codex_open_plan(plan: &CodexOpenPlan) {
     println!("target: {}", plan.target_path);
     println!("launch: {}", plan.launch_path);
     println!(
-        "budget: {} chars, {} reference(s)",
+        "budget: {} chars, up to {} reference(s)",
         plan.prompt_context_budget_chars, plan.max_resolved_references
     );
     if let Some(session_id) = plan.session_id.as_deref() {
@@ -6541,6 +7904,20 @@ fn record_codex_open_plan(plan: &CodexOpenPlan, mode: &str) {
     };
 
     let _ = codex_skill_eval::log_event(&event);
+    let mut activity_event =
+        activity_log::ActivityEvent::done(format!("codex.{mode}"), query.to_string());
+    activity_event.route = Some(plan.route.clone());
+    activity_event.target_path = Some(plan.target_path.clone());
+    activity_event.launch_path = Some(plan.launch_path.clone());
+    activity_event.session_id = plan.session_id.clone();
+    activity_event.runtime_token = plan.runtime_state_path.as_deref().and_then(|path| {
+        Path::new(path)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_string())
+    });
+    activity_event.source = Some("codex-open-plan".to_string());
+    let _ = activity_log::append_daily_event(activity_event);
 }
 
 fn load_codex_config_for_path(target_path: &Path) -> config::CodexConfig {
@@ -6605,6 +7982,42 @@ fn looks_like_recovery_prompt(normalized_query: &str) -> bool {
                 || normalized_query.contains(" session")
                 || normalized_query.contains(" convo")
                 || normalized_query.contains(" conversation")))
+}
+
+fn looks_like_commit_workflow_query(normalized_query: &str) -> bool {
+    let collapsed = normalized_query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches!(
+        collapsed.as_str(),
+        "commit"
+            | "commit this"
+            | "commit these"
+            | "commit it"
+            | "commit now"
+            | "commit please"
+            | "commit and push"
+            | "commit & push"
+            | "commit/push"
+            | "review and commit"
+            | "review commit"
+            | "review, commit, and push"
+    )
+}
+
+fn looks_like_prom_sync_workflow_query(normalized_query: &str) -> bool {
+    let collapsed = normalized_query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches!(
+        collapsed.as_str(),
+        "sync branch"
+            | "sync this branch"
+            | "sync with origin/main"
+            | "sync with origin main"
+    )
 }
 
 fn looks_like_session_lookup_query(normalized_query: &str) -> bool {
@@ -6921,13 +8334,29 @@ fn build_recovery_prompt(
             .or(candidate.title.as_deref())
             .map(truncate_recover_text)
             .unwrap_or_else(|| "(no stored prompt text)".to_string());
-        lines.push(format!(
-            "- {} | {} | {} | {}",
-            truncate_recover_id(&candidate.id),
-            candidate.updated_at,
-            candidate.cwd,
-            preview
-        ));
+        let model = codex_model_label(
+            candidate.model.as_deref(),
+            candidate.reasoning_effort.as_deref(),
+        );
+        let line = if let Some(model) = model {
+            format!(
+                "- {} | {} | {} | {} | {}",
+                truncate_recover_id(&candidate.id),
+                candidate.updated_at,
+                model,
+                candidate.cwd,
+                preview
+            )
+        } else {
+            format!(
+                "- {} | {} | {} | {}",
+                truncate_recover_id(&candidate.id),
+                candidate.updated_at,
+                candidate.cwd,
+                preview
+            )
+        };
+        lines.push(line);
     }
     lines.push(String::new());
     lines.push("User request:".to_string());
@@ -6996,7 +8425,8 @@ fn resolve_codex_references(
         matches.push(reference);
     }
 
-    if let Some(reference) = resolve_builtin_url_reference(target_path, &candidates, &matches)
+    if let Some(reference) =
+        resolve_builtin_url_reference(target_path, query_text, &candidates, &matches)
         && !matches
             .iter()
             .any(|value| value.matched == reference.matched)
@@ -7143,6 +8573,7 @@ fn resolve_builtin_linear_reference(
 
 fn resolve_builtin_url_reference(
     target_path: &Path,
+    query_text: &str,
     candidates: &[String],
     existing: &[CodexResolvedReference],
 ) -> Option<CodexResolvedReference> {
@@ -7152,6 +8583,19 @@ fn resolve_builtin_url_reference(
         }
         if existing.iter().any(|value| value.matched == *candidate) {
             continue;
+        }
+        if looks_like_github_pr_url(candidate) && looks_like_pr_feedback_query(query_text) {
+            let Ok(output) = crate::commit::resolve_pr_feedback_reference(target_path, candidate)
+            else {
+                continue;
+            };
+            return Some(CodexResolvedReference {
+                name: "pr-feedback".to_string(),
+                source: "builtin".to_string(),
+                matched: candidate.clone(),
+                command: Some(format!("f pr feedback {}", shell_words::quote(candidate))),
+                output: compact_codex_context_block(&output, 16, 2400),
+            });
         }
         let Ok(output) = url_inspect::inspect_compact(candidate, target_path) else {
             continue;
@@ -7165,6 +8609,213 @@ fn resolve_builtin_url_reference(
         });
     }
     None
+}
+
+fn resolve_builtin_commit_workflow_reference(repo_root: &Path) -> Result<CodexResolvedReference> {
+    let status = capture_git_stdout(repo_root, &["status", "--short"]).unwrap_or_default();
+    let staged_diff = capture_git_stdout(repo_root, &["diff", "--cached", "--stat", "--compact-summary"])
+        .unwrap_or_default();
+    let working_diff = if staged_diff.trim().is_empty() {
+        capture_git_stdout(repo_root, &["diff", "--stat", "--compact-summary"]).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let review_instructions = crate::commit::get_review_instructions(repo_root).unwrap_or_default();
+    let agents_instructions = read_repo_agents_instructions(repo_root).unwrap_or_default();
+    let kit_gate = detect_commit_workflow_kit_gate(repo_root);
+    let output = render_commit_workflow_reference(
+        repo_root,
+        &status,
+        &staged_diff,
+        &working_diff,
+        &review_instructions,
+        &agents_instructions,
+        kit_gate.as_deref(),
+    );
+
+    Ok(CodexResolvedReference {
+        name: "commit-workflow".to_string(),
+        source: "builtin".to_string(),
+        matched: "commit".to_string(),
+        command: Some("f commit --slow --context".to_string()),
+        output: compact_codex_context_block(&output, 20, 2200),
+    })
+}
+
+fn resolve_builtin_sync_workflow_reference(repo_root: &Path) -> Result<CodexResolvedReference> {
+    let agents_instructions = read_repo_agents_instructions(repo_root).unwrap_or_default();
+    let command = detect_sync_workflow_command(repo_root);
+    let output = render_sync_workflow_reference(
+        repo_root,
+        &agents_instructions,
+        command.as_deref().unwrap_or("forge sync"),
+    );
+
+    Ok(CodexResolvedReference {
+        name: "sync-workflow".to_string(),
+        source: "builtin".to_string(),
+        matched: "sync branch".to_string(),
+        command,
+        output: compact_codex_context_block(&output, 18, 1600),
+    })
+}
+
+fn capture_git_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn render_commit_workflow_reference(
+    repo_root: &Path,
+    status: &str,
+    staged_diff: &str,
+    working_diff: &str,
+    review_instructions: &str,
+    agents_instructions: &str,
+    kit_gate: Option<&str>,
+) -> String {
+    let mut lines = vec![
+        "Commit workflow contract:".to_string(),
+        format!("Workspace: {}", repo_root.display()),
+        "Interpret plain `commit` as deep-review-then-commit, not the fast lane.".to_string(),
+        "If you use Flow CLI for the final commit, prefer `f commit --slow --context` over plain `f commit`.".to_string(),
+        "Default focus: correctness, regression risk, performance, robustness, and clear intent.".to_string(),
+        "Preferred execution shape: keep the main thread lean and, if available, use a detached Codex review lane or subagent to inspect the diff in parallel and only surface blocking issues back to the main thread.".to_string(),
+        "Treat repo AGENTS.md and repo review instructions as binding commit constraints.".to_string(),
+    ];
+
+    if let Some(kit_gate) = kit_gate {
+        lines.push(format!("Deterministic gate: {}", kit_gate));
+    }
+
+    lines.extend([
+        "Required operating order:".to_string(),
+        "1. Inspect the actual local diff and adjacent call sites before deciding anything.".to_string(),
+        "2. Run deterministic local gates before the final commit when they are available.".to_string(),
+        "3. Explain the intent behind the change and the main risks.".to_string(),
+        "4. Name the smallest validation that proves the change is safe.".to_string(),
+        "5. Draft a commit title/body that explains why the change was made, not just what changed.".to_string(),
+        "6. Only commit/push once the review is clean and the change is scoped.".to_string(),
+    ]);
+
+    if !status.trim().is_empty() {
+        lines.push(String::new());
+        lines.push("Git status:".to_string());
+        lines.push(render_compact_bullet_block(status, 10));
+    }
+
+    if !staged_diff.trim().is_empty() {
+        lines.push(String::new());
+        lines.push("Staged diff stat:".to_string());
+        lines.push(render_compact_bullet_block(staged_diff, 12));
+    } else if !working_diff.trim().is_empty() {
+        lines.push(String::new());
+        lines.push("Working tree diff stat (nothing staged yet):".to_string());
+        lines.push(render_compact_bullet_block(working_diff, 12));
+    } else {
+        lines.push(String::new());
+        lines.push("Diff state: working tree is clean right now.".to_string());
+    }
+
+    if !review_instructions.trim().is_empty() {
+        lines.push(String::new());
+        lines.push("Repo commit review instructions:".to_string());
+        lines.push(compact_codex_context_block(review_instructions.trim(), 5, 500));
+    }
+
+    lines.push(String::new());
+    lines.push("Final deliverable contract:".to_string());
+    lines.push("- provide one short review summary covering correctness, perf, robustness, and regression risk".to_string());
+    lines.push("- provide exact validation commands or manual checks".to_string());
+    lines.push("- provide the final commit title and body with explicit intent, not only file-level changes".to_string());
+
+    let _ = agents_instructions;
+    lines.join("\n")
+}
+
+fn render_sync_workflow_reference(repo_root: &Path, agents_instructions: &str, command: &str) -> String {
+    let mut lines = vec![
+        "Sync workflow contract:".to_string(),
+        format!("Workspace: {}", repo_root.display()),
+        "Interpret plain `sync branch` as the guarded repo sync workflow, not raw `git pull`, generic rebase steps, or improvised JJ commands.".to_string(),
+        format!("Preferred command: {}", command),
+        "Required operating order:".to_string(),
+        "1. Read ./AGENTS.md if it exists and treat repo workflow instructions as binding.".to_string(),
+        "2. Use the guarded sync path for this repo instead of ad hoc Git/JJ commands.".to_string(),
+        "3. Preserve branch-aware behavior and explain what changed.".to_string(),
+        "4. If sync fails, report the blocker and next safe step instead of improvising.".to_string(),
+        "Final deliverable contract:".to_string(),
+        "- state whether sync succeeded".to_string(),
+        "- summarize the main changes pulled in".to_string(),
+        "- name any remaining blocker or follow-up".to_string(),
+    ];
+
+    if !agents_instructions.trim().is_empty() {
+        lines.push(String::new());
+        lines.push("Repo workflow instructions:".to_string());
+        lines.push(compact_codex_context_block(agents_instructions.trim(), 5, 400));
+    }
+
+    lines.join("\n")
+}
+
+fn render_compact_bullet_block(value: &str, max_lines: usize) -> String {
+    let mut lines = Vec::new();
+    for line in value.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        lines.push(format!("- {}", truncate_message(line, 140)));
+        if lines.len() >= max_lines {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        "- none".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn read_repo_agents_instructions(repo_root: &Path) -> Option<String> {
+    let path = repo_root.join("AGENTS.md");
+    let content = fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn detect_commit_workflow_kit_gate(repo_root: &Path) -> Option<String> {
+    if !command_on_path("kit") {
+        return None;
+    }
+    Some(format!(
+        "cd {} && kit lint --setup never && kit review --dir . --json",
+        shell_words::quote(&repo_root.display().to_string())
+    ))
+}
+
+fn is_prom_workspace_path(path: &Path) -> bool {
+    let display = path.display().to_string();
+    display.contains("/code/prom") || display.contains("/.jj/workspaces/prom/")
+}
+
+fn detect_sync_workflow_command(repo_root: &Path) -> Option<String> {
+    if !is_prom_workspace_path(repo_root) {
+        return None;
+    }
+    Some("forge sync".to_string())
 }
 
 fn extract_reference_candidates(query_text: &str) -> Vec<String> {
@@ -7201,6 +8852,29 @@ fn trim_reference_token(value: &str) -> &str {
 fn looks_like_http_url(value: &str) -> bool {
     let trimmed = trim_reference_token(value);
     trimmed.starts_with("https://") || trimmed.starts_with("http://")
+}
+
+fn looks_like_github_pr_url(value: &str) -> bool {
+    let trimmed = trim_reference_token(value).trim_end_matches('/');
+    let Some(rest) = trimmed.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let owner = parts.next().unwrap_or_default().trim();
+    let repo = parts.next().unwrap_or_default().trim();
+    let kind = parts.next().unwrap_or_default().trim();
+    let number = parts.next().unwrap_or_default().trim();
+    !owner.is_empty() && !repo.is_empty() && kind == "pull" && number.parse::<u64>().is_ok()
+}
+
+fn looks_like_pr_feedback_query(query_text: &str) -> bool {
+    let lowered = query_text.to_ascii_lowercase();
+    lowered.contains("check ")
+        || lowered.starts_with("check")
+        || lowered.contains("feedback")
+        || lowered.contains("comments")
+        || lowered.contains("review")
+        || lowered.contains("lint")
 }
 
 fn wildcard_match(pattern: &str, candidate: &str) -> bool {
@@ -7340,7 +9014,10 @@ fn build_codex_prompt(
         }
         let refs_left = selected.len().saturating_sub(index).max(1);
         let per_ref_budget = (remaining / refs_left).clamp(120, max_chars.max(120));
-        lines.push(format!("[{}]", reference.name));
+        let header = format!("[{}]", reference.name);
+        if !reference.output.trim_start().starts_with(&header) {
+            lines.push(header);
+        }
         lines.push(compact_codex_context_block(
             &reference.output,
             8,
@@ -10405,7 +12082,19 @@ fn get_session_last_timestamp_for_path(
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
     use tempfile::tempdir;
+
+    fn init_temp_git_repo() -> tempfile::TempDir {
+        let root = tempdir().expect("tempdir");
+        let status = Command::new("git")
+            .args(["init"])
+            .current_dir(root.path())
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        root
+    }
 
     #[test]
     fn decode_cursor_project_path_handles_hyphenated_components() {
@@ -10507,6 +12196,61 @@ mod tests {
     }
 
     #[test]
+    fn select_codex_state_db_path_prefers_highest_version() {
+        let root = tempdir().expect("tempdir");
+        fs::write(root.path().join("state_3.sqlite"), "").expect("write state_3");
+        fs::write(root.path().join("state_5.sqlite"), "").expect("write state_5");
+        fs::write(root.path().join("state_4.sqlite"), "").expect("write state_4");
+
+        let selected = select_codex_state_db_path(root.path()).expect("select state db");
+        assert_eq!(selected, root.path().join("state_5.sqlite"));
+    }
+
+    #[test]
+    fn read_codex_thread_schema_detects_optional_columns() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            r#"
+create table threads (
+  id text primary key,
+  updated_at integer not null,
+  cwd text not null,
+  title text,
+  first_user_message text,
+  git_branch text
+);
+"#,
+        )
+        .expect("create threads table");
+
+        let initial = read_codex_thread_schema(&conn).expect("read initial schema");
+        assert_eq!(
+            initial,
+            CodexThreadSchema {
+                has_model: false,
+                has_reasoning_effort: false,
+            }
+        );
+
+        conn.execute_batch(
+            r#"
+alter table threads add column model text;
+alter table threads add column reasoning_effort text;
+"#,
+        )
+        .expect("alter threads table");
+
+        let updated = read_codex_thread_schema(&conn).expect("read updated schema");
+        assert_eq!(
+            updated,
+            CodexThreadSchema {
+                has_model: true,
+                has_reasoning_effort: true,
+            }
+        );
+    }
+
+    #[test]
     fn read_codex_first_user_message_since_prefers_first_post_launch_turn() {
         let root = tempdir().expect("tempdir");
         let session_file = root.path().join("codex.jsonl");
@@ -10588,6 +12332,8 @@ mod tests {
                 title: Some("one remaining unrelated issue".to_string()),
                 first_user_message: Some("npm run lint still fails".to_string()),
                 git_branch: Some("main".to_string()),
+                model: None,
+                reasoning_effort: None,
             },
             CodexRecoverRow {
                 id: "019cdcff-0b3a-7a80-b22b-5ac4ff076eff".to_string(),
@@ -10596,6 +12342,8 @@ mod tests {
                 title: Some("something else".to_string()),
                 first_user_message: Some("different prompt".to_string()),
                 git_branch: Some("feature".to_string()),
+                model: None,
+                reasoning_effort: None,
             },
         ];
 
@@ -10630,9 +12378,33 @@ mod tests {
         )
         .expect("expected session reference request");
 
-        assert_eq!(request.session_hint, "019ce6ce-c77a-7d52-838e-c01f8820f6b8");
+        assert_eq!(
+            request.session_hints,
+            vec!["019ce6ce-c77a-7d52-838e-c01f8820f6b8".to_string()]
+        );
         assert_eq!(request.count, 20);
         assert_eq!(request.user_request, "research react hot reload");
+    }
+
+    #[test]
+    fn extract_codex_session_reference_request_supports_two_session_hints() {
+        let request = extract_codex_session_reference_request(
+            "see 019cf695-d1d8-7e32-a572-f05e1d03d24f and 019cf983-79c3-7ad0-a870-05e308daa032 codex lets make dedicated plan for /tmp/review.md",
+            "see 019cf695-d1d8-7e32-a572-f05e1d03d24f and 019cf983-79c3-7ad0-a870-05e308daa032 codex lets make dedicated plan for /tmp/review.md",
+        )
+        .expect("expected session reference request");
+
+        assert_eq!(
+            request.session_hints,
+            vec![
+                "019cf695-d1d8-7e32-a572-f05e1d03d24f".to_string(),
+                "019cf983-79c3-7ad0-a870-05e308daa032".to_string()
+            ]
+        );
+        assert_eq!(
+            request.user_request,
+            "lets make dedicated plan for /tmp/review.md"
+        );
     }
 
     #[test]
@@ -10670,6 +12442,8 @@ mod tests {
                 title: Some("something else".to_string()),
                 first_user_message: Some("different prompt".to_string()),
                 git_branch: Some("feature".to_string()),
+                model: None,
+                reasoning_effort: None,
             }],
         );
 
@@ -10787,11 +12561,155 @@ mod tests {
     }
 
     #[test]
+    fn github_pr_url_detection_is_specific() {
+        assert!(looks_like_github_pr_url(
+            "https://github.com/fl2024008/prometheus/pull/2922"
+        ));
+        assert!(!looks_like_github_pr_url(
+            "https://github.com/fl2024008/prometheus/issues/2922"
+        ));
+    }
+
+    #[test]
+    fn pr_feedback_query_detection_matches_check_and_comments() {
+        assert!(looks_like_pr_feedback_query(
+            "check https://github.com/fl2024008/prometheus/pull/2922"
+        ));
+        assert!(looks_like_pr_feedback_query(
+            "see https://github.com/fl2024008/prometheus/pull/2922 for comments"
+        ));
+        assert!(!looks_like_pr_feedback_query(
+            "open https://github.com/fl2024008/prometheus/pull/2922 in browser"
+        ));
+    }
+
+    #[test]
+    fn commit_workflow_query_detection_matches_high_confidence_phrases() {
+        assert!(looks_like_commit_workflow_query("commit"));
+        assert!(looks_like_commit_workflow_query("commit and push"));
+        assert!(looks_like_commit_workflow_query("review and commit"));
+    }
+
+    #[test]
+    fn commit_workflow_query_detection_stays_conservative() {
+        assert!(!looks_like_commit_workflow_query(
+            "improve commit queue throughput"
+        ));
+        assert!(!looks_like_commit_workflow_query(
+            "explain commit routing in flow"
+        ));
+    }
+
+    #[test]
+    fn prom_sync_workflow_query_detection_matches_high_confidence_phrases() {
+        assert!(looks_like_prom_sync_workflow_query("sync branch"));
+        assert!(looks_like_prom_sync_workflow_query("sync this branch"));
+        assert!(looks_like_prom_sync_workflow_query("sync with origin/main"));
+    }
+
+    #[test]
+    fn prom_sync_workflow_query_detection_stays_conservative() {
+        assert!(!looks_like_prom_sync_workflow_query(
+            "explain sync branch semantics"
+        ));
+        assert!(!looks_like_prom_sync_workflow_query(
+            "sync branch protection settings"
+        ));
+    }
+
+    #[test]
+    fn build_codex_open_plan_routes_plain_commit_into_commit_workflow() {
+        let root = init_temp_git_repo();
+        fs::write(root.path().join("README.md"), "hello\n").expect("write readme");
+
+        let plan = build_codex_open_plan(
+            Some(root.path().display().to_string()),
+            vec!["commit".to_string()],
+            false,
+        )
+        .expect("commit plan");
+
+        assert_eq!(plan.route, "commit-workflow-new");
+        assert_eq!(plan.action, "new");
+        assert_eq!(plan.references[0].name, "commit-workflow");
+        assert_eq!(
+            plan.references[0].command.as_deref(),
+            Some("f commit --slow --context")
+        );
+        let prompt = plan.prompt.expect("prompt");
+        assert!(prompt.contains("Commit workflow contract:"));
+        assert!(prompt.contains("deep-review-then-commit"));
+    }
+
+    #[test]
+    fn build_codex_open_plan_routes_prom_sync_branch_into_sync_workflow() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("code").join("prom").join("review-workspace");
+        fs::create_dir_all(&root).expect("create root");
+        Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(&root)
+            .status()
+            .expect("git init");
+
+        let plan = build_codex_open_plan(
+            Some(root.display().to_string()),
+            vec!["sync branch".to_string()],
+            false,
+        )
+        .expect("sync plan");
+
+        assert_eq!(plan.route, "sync-workflow-new");
+        assert_eq!(plan.action, "new");
+        assert_eq!(plan.references[0].name, "sync-workflow");
+        assert_eq!(plan.references[0].command.as_deref(), Some("forge sync"));
+        let prompt = plan.prompt.expect("prompt");
+        assert!(prompt.contains("Sync workflow contract:"));
+        assert!(prompt.contains("guarded repo sync workflow"));
+    }
+
+    #[test]
+    fn parse_pr_feedback_cursor_handoff_extracts_paths() {
+        let handoff = parse_pr_feedback_cursor_handoff(
+            "[pr-feedback]\n\
+             Workspace: /tmp/repo\n\
+             PR feedback: owner/repo#1\n\
+             Review plan: /tmp/plan.md\n\
+             Review rules: /tmp/review-rules.md\n\
+             Kit system prompt: /tmp/kit.md\n",
+        )
+        .expect("handoff");
+
+        assert_eq!(handoff.workspace_path, PathBuf::from("/tmp/repo"));
+        assert_eq!(handoff.review_plan_path, PathBuf::from("/tmp/plan.md"));
+        assert_eq!(
+            handoff.review_rules_path,
+            Some(PathBuf::from("/tmp/review-rules.md"))
+        );
+        assert_eq!(handoff.kit_system_path, PathBuf::from("/tmp/kit.md"));
+    }
+
+    #[test]
     fn build_codex_prompt_keeps_plain_query_plain() {
         assert_eq!(
             build_codex_prompt("improve codex open perf", &[], 2, 1200).as_deref(),
             Some("improve codex open perf")
         );
+    }
+
+    #[test]
+    fn build_codex_prompt_avoids_duplicate_reference_header() {
+        let references = vec![CodexResolvedReference {
+            name: "pr-feedback".to_string(),
+            source: "builtin".to_string(),
+            matched: "https://github.com/example/repo/pull/1".to_string(),
+            command: None,
+            output: "[pr-feedback]\nReview plan: /tmp/plan.md".to_string(),
+        }];
+
+        let prompt = build_codex_prompt("check pr", &references, 2, 600).expect("prompt");
+        assert_eq!(prompt.matches("[pr-feedback]").count(), 1);
     }
 
     #[test]
@@ -10821,6 +12739,140 @@ mod tests {
     }
 
     #[test]
+    fn read_codex_session_completion_snapshot_tracks_latest_completed_turn() {
+        let root = tempdir().expect("tempdir");
+        let session_file = root.path().join("codex.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T10:00:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"first prompt\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T10:00:01Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"first answer\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T10:01:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"second prompt\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T10:01:03Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"second answer\"}]}}\n"
+            ),
+        )
+        .expect("write session file");
+
+        let snapshot = read_codex_session_completion_snapshot(&session_file)
+            .expect("snapshot")
+            .expect("completion snapshot");
+        assert_eq!(snapshot.last_role.as_deref(), Some("assistant"));
+        assert_eq!(snapshot.last_user_message.as_deref(), Some("second prompt"));
+        assert_eq!(
+            snapshot.last_assistant_message.as_deref(),
+            Some("second answer")
+        );
+        assert_eq!(
+            snapshot.last_assistant_at_unix,
+            parse_rfc3339_to_unix("2026-03-17T10:01:03Z")
+        );
+    }
+
+    #[test]
+    fn select_codex_session_completion_summary_prefers_last_user_message() {
+        let row = CodexRecoverRow {
+            id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
+            updated_at: 0,
+            cwd: "/tmp/repo".to_string(),
+            title: Some("fallback title".to_string()),
+            first_user_message: Some("older intent".to_string()),
+            git_branch: None,
+            model: None,
+            reasoning_effort: None,
+        };
+        let snapshot = CodexSessionCompletionSnapshot {
+            last_role: Some("assistant".to_string()),
+            last_user_message: Some("implement codex session logging".to_string()),
+            last_user_at_unix: Some(1),
+            last_assistant_message: Some("done".to_string()),
+            last_assistant_at_unix: Some(2),
+            file_modified_unix: 2,
+        };
+
+        let summary = select_codex_session_completion_summary(&row, &snapshot);
+        assert_eq!(summary, "implement codex session logging");
+    }
+
+    #[test]
+    fn parse_apply_patch_changes_extracts_absolute_paths() {
+        let changes = parse_apply_patch_changes(
+            concat!(
+                "*** Begin Patch\n",
+                "*** Update File: /Users/nikitavoloboev/config/fish/fn.fish\n",
+                "@@\n",
+                "+function j\n",
+                "*** Add File: relative/new-file.rs\n",
+                "+fn main() {}\n",
+                "*** End Patch\n",
+            ),
+            "/Users/nikitavoloboev/code/flow",
+        );
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].path, "/Users/nikitavoloboev/config/fish/fn.fish");
+        assert_eq!(changes[0].action, "update");
+        assert!(changes[0].patch.contains("function j"));
+        assert_eq!(
+            changes[1].path,
+            "/Users/nikitavoloboev/code/flow/relative/new-file.rs"
+        );
+        assert_eq!(changes[1].action, "add");
+    }
+
+    #[test]
+    fn summarize_fish_fn_change_detects_shortcut_remap() {
+        let summary = summarize_fish_fn_change(
+            "j runs f codex open --path (pwd -P) --exact-cwd. \
+k uses f codex connect --path (pwd -P) --exact-cwd. \
+l is now Kit for ~/repos/mark3labs/kit. \
+L now delegates to j. old k moved to cl. old l moved to cf. old L moved to cF.",
+        )
+        .expect("summary");
+        assert!(summary.contains("j->codex.open"));
+        assert!(summary.contains("k->codex.connect"));
+        assert!(summary.contains("l->kit"));
+        assert!(summary.contains("L->j"));
+        assert!(summary.contains("cl/cf/cF"));
+    }
+
+    #[test]
+    fn build_codex_session_changed_events_uses_fish_summary_fallback() {
+        let root = tempdir().expect("tempdir");
+        let session_file = root.path().join("codex.jsonl");
+        fs::write(&session_file, "").expect("write empty session file");
+
+        let row = CodexRecoverRow {
+            id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
+            updated_at: 0,
+            cwd: "/Users/nikitavoloboev/code/flow".to_string(),
+            title: None,
+            first_user_message: None,
+            git_branch: None,
+            model: None,
+            reasoning_effort: None,
+        };
+        let snapshot = CodexSessionCompletionSnapshot {
+            last_role: Some("assistant".to_string()),
+            last_user_message: Some(
+                "The remap is in fn.fish. j runs f codex open --path (pwd -P) --exact-cwd. \
+k uses f codex connect --path (pwd -P) --exact-cwd. \
+l is now Kit. L now delegates to j. old k moved to cl. old l moved to cf. old L moved to cF."
+                    .to_string(),
+            ),
+            last_user_at_unix: Some(1),
+            last_assistant_message: Some("logged".to_string()),
+            last_assistant_at_unix: Some(2),
+            file_modified_unix: 2,
+        };
+
+        let events =
+            build_codex_session_changed_events(&row, &snapshot, &session_file).expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "fish.fn");
+        assert!(events[0].summary.contains("j->codex.open"));
+        assert!(events[0].summary.contains("k->codex.connect"));
+    }
+
+    #[test]
     fn format_session_ref_respects_provider_prefix_flag() {
         let session = AiSession {
             session_id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
@@ -10839,6 +12891,51 @@ mod tests {
         assert_eq!(
             format_session_ref(&session, true),
             "codex:019ce791-7e05-7e51-b2b7-610dc7172e5c"
+        );
+    }
+
+    #[test]
+    fn ai_session_from_codex_recover_row_prefers_title_for_preview() {
+        let session = ai_session_from_codex_recover_row(CodexRecoverRow {
+            id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
+            updated_at: 1_773_776_290,
+            cwd: "/tmp/repo".to_string(),
+            title: Some("review github integration".to_string()),
+            first_user_message: Some("older prompt".to_string()),
+            git_branch: None,
+            model: None,
+            reasoning_effort: None,
+        });
+
+        assert_eq!(
+            session.last_message.as_deref(),
+            Some("review github integration")
+        );
+        assert_eq!(session.first_message.as_deref(), Some("older prompt"));
+        assert_eq!(session.provider, Provider::Codex);
+        assert!(session.last_message_at.is_some());
+    }
+
+    #[test]
+    fn ai_session_from_codex_recover_row_falls_back_to_first_user_message() {
+        let session = ai_session_from_codex_recover_row(CodexRecoverRow {
+            id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
+            updated_at: 1_773_776_290,
+            cwd: "/tmp/repo".to_string(),
+            title: None,
+            first_user_message: Some("inspect the current diff".to_string()),
+            git_branch: None,
+            model: None,
+            reasoning_effort: None,
+        });
+
+        assert_eq!(
+            session.last_message.as_deref(),
+            Some("inspect the current diff")
+        );
+        assert_eq!(
+            session.first_message.as_deref(),
+            Some("inspect the current diff")
         );
     }
 }

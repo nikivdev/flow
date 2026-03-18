@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{self, Read};
@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{codex_skill_eval, config};
+use crate::{activity_log, codex_skill_eval, config};
 
 const RUNTIME_VERSION: u32 = 1;
 const RUNTIME_PREFIX: &str = "flow-runtime-";
@@ -27,6 +27,8 @@ pub struct CodexRuntimeSkill {
     pub original_name: Option<String>,
     #[serde(default)]
     pub estimated_chars: Option<usize>,
+    #[serde(default)]
+    pub match_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,6 +56,7 @@ pub struct CodexExternalSkill {
     pub path: String,
     pub description: String,
     pub estimated_chars: usize,
+    pub category: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +76,21 @@ pub struct CodexInstalledSkillSnapshot {
     pub path: String,
     pub description: String,
     pub runtime_managed: bool,
+    pub category: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSkillCatalogEntry {
+    pub name: String,
+    pub description: String,
+    pub category: String,
+    pub path: String,
+    pub sources: Vec<String>,
+    pub installed: bool,
+    pub runtime_managed: bool,
+    #[serde(default)]
+    pub estimated_chars: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +109,7 @@ pub struct CodexSkillsDashboardSnapshot {
     pub target_path: String,
     pub sources: Vec<CodexSkillSourceSnapshot>,
     pub installed_skills: Vec<CodexInstalledSkillSnapshot>,
+    pub catalog: Vec<CodexSkillCatalogEntry>,
     pub recent_runtime_states: Vec<CodexRuntimeStateSnapshot>,
     pub runtime_states_for_target: usize,
 }
@@ -103,18 +122,29 @@ struct RuntimeSkillCandidate {
 }
 
 impl CodexRuntimeActivation {
-    pub fn markers(&self) -> Vec<String> {
+    fn prompt_skill_names(&self) -> Vec<String> {
         self.skills
             .iter()
-            .map(|skill| format!("${}", skill.name))
+            .map(|skill| {
+                skill
+                    .original_name
+                    .as_deref()
+                    .unwrap_or(skill.name.as_str())
+                    .to_string()
+            })
             .collect()
     }
 
     pub fn inject_into_prompt(&self, prompt: &str) -> String {
-        let mut lines = self.markers();
-        lines.push(String::new());
-        lines.push(prompt.trim().to_string());
-        lines.join("\n")
+        let names = self.prompt_skill_names();
+        if names.is_empty() {
+            return prompt.trim().to_string();
+        }
+        format!(
+            "[Active Flow skills: {}]\n\n{}",
+            names.join(", "),
+            prompt.trim()
+        )
     }
 }
 
@@ -271,12 +301,14 @@ fn discover_source_skills(
                     .unwrap_or_else(|| "skill".to_string())
             });
         let description = parse_frontmatter_field(&raw, "description").unwrap_or_default();
+        let category = classify_skill_category(&name, &description).to_string();
         skills.push(CodexExternalSkill {
             source_name: source.name.clone(),
             name,
             path: skill_dir.display().to_string(),
             description,
             estimated_chars: raw.chars().count(),
+            category,
         });
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -312,6 +344,134 @@ fn tokenize_keywords(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn classify_skill_category(name: &str, description: &str) -> &'static str {
+    let normalized = format!("{name} {description}").to_ascii_lowercase();
+    if contains_any(
+        &normalized,
+        &[
+            "review",
+            "lint",
+            "style",
+            "testing-practice",
+            "test-practice",
+            "code quality",
+            "adversarial",
+        ],
+    ) {
+        return "quality";
+    }
+    if contains_any(
+        &normalized,
+        &[
+            "verify",
+            "verification",
+            "playwright",
+            "driver",
+            "assert",
+            "smoke",
+            "e2e",
+            "tmux",
+            "checkout",
+            "signup",
+        ],
+    ) {
+        return "verification";
+    }
+    if contains_any(
+        &normalized,
+        &[
+            "grafana",
+            "dashboard",
+            "query",
+            "cohort",
+            "analysis",
+            "trace",
+            "funnel",
+            "retention",
+            "log",
+            "metric",
+        ],
+    ) {
+        return "analysis";
+    }
+    if contains_any(
+        &normalized,
+        &[
+            "scaffold",
+            "template",
+            "migration",
+            "boilerplate",
+            "create-app",
+            "new-",
+        ],
+    ) {
+        return "scaffold";
+    }
+    if contains_any(
+        &normalized,
+        &[
+            "deploy",
+            "release",
+            "rollback",
+            "ci/cd",
+            "cicd",
+            "prod",
+            "cherry-pick",
+            "merge",
+        ],
+    ) {
+        return "delivery";
+    }
+    if contains_any(
+        &normalized,
+        &[
+            "runbook",
+            "debug",
+            "oncall",
+            "alert",
+            "incident",
+            "correlat",
+            "investigation",
+        ],
+    ) {
+        return "runbook";
+    }
+    if contains_any(
+        &normalized,
+        &[
+            "orphan",
+            "cleanup",
+            "kubectl",
+            "volume",
+            "pod",
+            "infra",
+            "cost",
+            "dependency-management",
+        ],
+    ) {
+        return "ops";
+    }
+    if contains_any(
+        &normalized,
+        &[
+            "workflow",
+            "ticket",
+            "standup",
+            "recap",
+            "automation",
+            "process",
+            "slack",
+        ],
+    ) {
+        return "workflow";
+    }
+    "reference"
+}
+
 fn match_external_skill(query: &str, skill: &CodexExternalSkill) -> f64 {
     let normalized_query = query.to_ascii_lowercase();
     let skill_phrase = tokenize_keywords(&skill.name).join(" ");
@@ -331,6 +491,29 @@ fn match_external_skill(query: &str, skill: &CodexExternalSkill) -> f64 {
         .filter(|term| normalized_query.contains(term.as_str()))
         .count();
     hits as f64 / terms.len().min(6) as f64
+}
+
+fn describe_external_skill_match(query: &str, skill: &CodexExternalSkill) -> Option<String> {
+    let normalized_query = query.to_ascii_lowercase();
+    let skill_phrase = tokenize_keywords(&skill.name).join(" ");
+    if !skill_phrase.is_empty() && normalized_query.contains(&skill_phrase) {
+        return Some(format!("matched skill name phrase `{skill_phrase}`"));
+    }
+
+    let mut terms = tokenize_keywords(&skill.name);
+    terms.extend(tokenize_keywords(&skill.description));
+    terms.sort();
+    terms.dedup();
+    let hits = terms
+        .into_iter()
+        .filter(|term| normalized_query.contains(term.as_str()))
+        .collect::<Vec<_>>();
+    if hits.is_empty() {
+        return None;
+    }
+
+    let preview = hits.into_iter().take(4).collect::<Vec<_>>().join(", ");
+    Some(format!("matched query terms: {preview}"))
 }
 
 fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
@@ -537,6 +720,7 @@ pub fn dashboard_snapshot(
     sources.sort_by(|a, b| a.name.cmp(&b.name));
 
     let installed_skills = discover_installed_skills()?;
+    let catalog = build_skill_catalog(&sources, &installed_skills);
     let runtime_states = load_runtime_states()?;
     let runtime_states_for_target = runtime_states
         .iter()
@@ -562,6 +746,7 @@ pub fn dashboard_snapshot(
         target_path: target_display,
         sources,
         installed_skills,
+        catalog,
         recent_runtime_states,
         runtime_states_for_target,
     })
@@ -589,15 +774,91 @@ fn discover_installed_skills() -> Result<Vec<CodexInstalledSkillSnapshot>> {
         let name = parse_frontmatter_field(&raw, "name")
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+        let description = parse_frontmatter_field(&raw, "description").unwrap_or_default();
+        let category = classify_skill_category(&name, &description).to_string();
         installed.push(CodexInstalledSkillSnapshot {
             runtime_managed: name.starts_with(RUNTIME_PREFIX),
             name,
             path: skill_dir.display().to_string(),
-            description: parse_frontmatter_field(&raw, "description").unwrap_or_default(),
+            description: description.clone(),
+            category,
         });
     }
     installed.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(installed)
+}
+
+fn build_skill_catalog(
+    sources: &[CodexSkillSourceSnapshot],
+    installed_skills: &[CodexInstalledSkillSnapshot],
+) -> Vec<CodexSkillCatalogEntry> {
+    let mut merged = BTreeMap::<String, CodexSkillCatalogEntry>::new();
+
+    for source in sources {
+        for skill in &source.skills {
+            let key = skill.name.to_ascii_lowercase();
+            let entry = merged.entry(key).or_insert_with(|| CodexSkillCatalogEntry {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                category: skill.category.clone(),
+                path: skill.path.clone(),
+                sources: Vec::new(),
+                installed: false,
+                runtime_managed: false,
+                estimated_chars: Some(skill.estimated_chars),
+            });
+            if entry.description.is_empty() && !skill.description.is_empty() {
+                entry.description = skill.description.clone();
+            }
+            if entry.path.is_empty() {
+                entry.path = skill.path.clone();
+            }
+            if entry.category == "reference" && skill.category != "reference" {
+                entry.category = skill.category.clone();
+            }
+            if !entry.sources.iter().any(|value| value == &source.name) {
+                entry.sources.push(source.name.clone());
+            }
+            entry.estimated_chars = entry.estimated_chars.or(Some(skill.estimated_chars));
+        }
+    }
+
+    for skill in installed_skills {
+        let key = skill.name.to_ascii_lowercase();
+        let entry = merged.entry(key).or_insert_with(|| CodexSkillCatalogEntry {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            category: skill.category.clone(),
+            path: skill.path.clone(),
+            sources: vec!["global".to_string()],
+            installed: true,
+            runtime_managed: skill.runtime_managed,
+            estimated_chars: None,
+        });
+        entry.installed = true;
+        entry.runtime_managed |= skill.runtime_managed;
+        if entry.description.is_empty() && !skill.description.is_empty() {
+            entry.description = skill.description.clone();
+        }
+        if entry.path.is_empty() {
+            entry.path = skill.path.clone();
+        }
+        if entry.category == "reference" && skill.category != "reference" {
+            entry.category = skill.category.clone();
+        }
+        if !entry.sources.iter().any(|value| value == "global") {
+            entry.sources.push("global".to_string());
+        }
+    }
+
+    let mut catalog = merged.into_values().collect::<Vec<_>>();
+    for entry in &mut catalog {
+        entry.sources.sort();
+        entry.sources.dedup();
+        entry.category = classify_skill_category(&entry.name, &entry.description).to_string();
+    }
+    catalog.sort_by(|a, b| a.name.cmp(&b.name));
+    catalog
 }
 
 pub fn format_external_skills(skills: &[CodexExternalSkill]) -> String {
@@ -700,6 +961,7 @@ pub fn prepare_runtime_activation(
                 source: Some("flow".to_string()),
                 original_name: Some("plan_write".to_string()),
                 estimated_chars: Some(markdown.chars().count()),
+                match_reason: Some("query explicitly asked to write or save a plan".to_string()),
             },
             source_dir: None,
         });
@@ -745,6 +1007,7 @@ pub fn prepare_runtime_activation(
                 source: Some(external.source_name.clone()),
                 original_name: Some(external.name.clone()),
                 estimated_chars: Some(external.estimated_chars),
+                match_reason: describe_external_skill_match(query, &external),
             },
             source_dir: Some(PathBuf::from(&external.path)),
         });
@@ -978,9 +1241,9 @@ pub fn write_plan_from_stdin(
         let _ = codex_skill_eval::log_outcome(&codex_skill_eval::CodexSkillOutcomeEvent {
             version: 1,
             recorded_at_unix: unix_now(),
-            runtime_token: Some(runtime_state.token),
+            runtime_token: Some(runtime_state.token.clone()),
             session_id: session.clone(),
-            target_path: Some(runtime_state.target_path),
+            target_path: Some(runtime_state.target_path.clone()),
             kind: "plan_written".to_string(),
             skill_names: runtime_state
                 .skills
@@ -995,6 +1258,12 @@ pub fn write_plan_from_stdin(
             artifact_path: Some(path.display().to_string()),
             success: 1.0,
         });
+        let mut activity_event = activity_log::ActivityEvent::done("plan.write", resolved_title);
+        activity_event.runtime_token = Some(runtime_state.token.clone());
+        activity_event.target_path = Some(runtime_state.target_path.clone());
+        activity_event.artifact_path = Some(path.display().to_string());
+        activity_event.source = Some("codex-runtime".to_string());
+        let _ = activity_log::append_daily_event(activity_event);
     }
     Ok(path)
 }
@@ -1013,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_markers_prefix_prompt() {
+    fn runtime_prompt_prelude_is_human_readable() {
         let activation = CodexRuntimeActivation {
             state_path: PathBuf::from("/tmp/runtime.json"),
             skills: vec![CodexRuntimeSkill {
@@ -1024,12 +1293,13 @@ mod tests {
                 source: Some("flow".to_string()),
                 original_name: Some("plan_write".to_string()),
                 estimated_chars: Some(120),
+                match_reason: Some("query explicitly asked to write or save a plan".to_string()),
             }],
         };
 
         assert_eq!(
             activation.inject_into_prompt("write plan"),
-            "$flow-runtime-plan-abc\n\nwrite plan"
+            "[Active Flow skills: plan_write]\n\nwrite plan"
         );
     }
 
@@ -1066,6 +1336,7 @@ mod tests {
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "find-skills");
         assert_eq!(skills[0].source_name, "nested");
+        assert_eq!(skills[0].category, "reference");
     }
 
     #[test]
@@ -1093,5 +1364,71 @@ mod tests {
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "react-component-performance");
         assert_eq!(skills[0].source_name, "flat");
+        assert_eq!(skills[0].category, "reference");
+    }
+
+    #[test]
+    fn classify_skill_category_prefers_verification_for_driver_skills() {
+        assert_eq!(
+            classify_skill_category(
+                "signup-flow-driver",
+                "Runs signup verification in a headless browser"
+            ),
+            "verification"
+        );
+    }
+
+    #[test]
+    fn describe_external_skill_match_reports_name_phrase_hits() {
+        let skill = CodexExternalSkill {
+            source_name: "vercel".to_string(),
+            name: "github".to_string(),
+            path: "/tmp/vercel/github".to_string(),
+            description: "Interact with GitHub from the CLI".to_string(),
+            estimated_chars: 120,
+            category: "workflow".to_string(),
+        };
+        assert_eq!(
+            describe_external_skill_match(
+                "check https://github.com/fl2024008/prometheus/pull/2922",
+                &skill
+            )
+            .as_deref(),
+            Some("matched skill name phrase `github`")
+        );
+    }
+
+    #[test]
+    fn build_skill_catalog_merges_source_and_global_install() {
+        let sources = vec![CodexSkillSourceSnapshot {
+            name: "vercel".to_string(),
+            path: "/tmp/vercel".to_string(),
+            enabled: true,
+            skill_count: 1,
+            skills: vec![CodexExternalSkill {
+                source_name: "vercel".to_string(),
+                name: "github".to_string(),
+                path: "/tmp/vercel/github".to_string(),
+                description: "Interact with GitHub from the CLI".to_string(),
+                estimated_chars: 120,
+                category: "workflow".to_string(),
+            }],
+        }];
+        let installed = vec![CodexInstalledSkillSnapshot {
+            name: "github".to_string(),
+            path: "/tmp/global/github".to_string(),
+            description: "Interact with GitHub from the CLI".to_string(),
+            runtime_managed: false,
+            category: "workflow".to_string(),
+        }];
+
+        let catalog = build_skill_catalog(&sources, &installed);
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name, "github");
+        assert!(catalog[0].installed);
+        assert_eq!(
+            catalog[0].sources,
+            vec!["global".to_string(), "vercel".to_string()]
+        );
     }
 }

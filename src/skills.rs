@@ -1140,7 +1140,7 @@ fn codex_read_response(
     }
 }
 
-fn reload_codex_skills_for_cwd(cwd: &Path) -> Result<usize> {
+pub(crate) fn reload_codex_skills_for_cwd(cwd: &Path) -> Result<usize> {
     let codex_bin = configured_codex_bin_for_workdir(cwd);
 
     let mut child = Command::new(&codex_bin)
