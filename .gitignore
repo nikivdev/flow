@@ -2,6 +2,14 @@
 .cargo/
 .ai/internal/
 .ai/web/
+.ai/reviews/
+.ai/test/
+.ai/tmp/
+.ai/cache/
+.ai/artifacts/
+.ai/traces/
+.ai/generated/
+.ai/scratch/
 .ai/skills/
 # keep generated skills ignored by default, but track curated flow-default skills
 !.ai/skills/
