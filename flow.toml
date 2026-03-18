@@ -403,6 +403,16 @@ command = "python3 ./scripts/codex-skill-eval-launchd.py logs $@"
 description = "Show scheduled Codex skill-eval launch agent logs"
 
 [[tasks]]
+name = "codex-telemetry-status"
+command = "f codex telemetry status $@"
+description = "Show optional redacted Codex telemetry export state"
+
+[[tasks]]
+name = "codex-telemetry-flush"
+command = "f codex telemetry flush $@"
+description = "Flush unseen redacted Codex telemetry to configured Maple endpoints once"
+
+[[tasks]]
 name = "test-args"
 command = "echo \"arg1=$1 arg2=$2 all=$@\""
 description = "Test that task args are passed correctly"
@@ -496,6 +506,24 @@ variables = [
   { key = "FLOW_ROUTER_OVERRIDE_REASON", default = "" },
   { key = "FLOW_RL_SIGNAL_TEXT", default = "snippet" },
   { key = "FLOW_RL_SIGNAL_MAX_CHARS", default = "4000" },
+  { key = "FLOW_CODEX_MAPLE_LOCAL_ENDPOINT", default = "" },
+  { key = "FLOW_CODEX_MAPLE_LOCAL_INGEST_KEY", default = "" },
+  { key = "FLOW_CODEX_MAPLE_HOSTED_ENDPOINT", default = "" },
+  { key = "FLOW_CODEX_MAPLE_HOSTED_INGEST_KEY", default = "" },
+  { key = "FLOW_CODEX_MAPLE_HOSTED_PUBLIC_INGEST_KEY", default = "" },
+  { key = "FLOW_CODEX_MAPLE_TRACES_ENDPOINTS", default = "" },
+  { key = "FLOW_CODEX_MAPLE_INGEST_KEYS", default = "" },
+  { key = "FLOW_CODEX_MAPLE_SERVICE_NAME", default = "flow-codex" },
+  { key = "FLOW_CODEX_MAPLE_SERVICE_VERSION", default = "" },
+  { key = "FLOW_CODEX_MAPLE_SCOPE_NAME", default = "flow.codex" },
+  { key = "FLOW_CODEX_MAPLE_ENV", default = "local" },
+  { key = "FLOW_CODEX_MAPLE_QUEUE_CAPACITY", default = "1024" },
+  { key = "FLOW_CODEX_MAPLE_MAX_BATCH_SIZE", default = "64" },
+  { key = "FLOW_CODEX_MAPLE_FLUSH_INTERVAL_MS", default = "100" },
+  { key = "FLOW_CODEX_MAPLE_CONNECT_TIMEOUT_MS", default = "400" },
+  { key = "FLOW_CODEX_MAPLE_REQUEST_TIMEOUT_MS", default = "800" },
+  { key = "MAPLE_API_TOKEN", default = "" },
+  { key = "MAPLE_MCP_URL", default = "https://api.maple.dev/mcp" },
   { key = "SEQ_CH_MEM_PATH", default = "~/.config/flow/rl/seq_mem.jsonl" },
   { key = "HARBOR_DIR", default = "~/repos/laude-institute/harbor" },
 ]

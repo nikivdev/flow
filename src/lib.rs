@@ -20,6 +20,7 @@ pub mod code;
 pub mod codex_memory;
 pub mod codex_runtime;
 pub mod codex_skill_eval;
+pub mod codex_telemetry;
 pub mod codex_text;
 pub mod codexd;
 pub mod commit;
@@ -121,6 +122,7 @@ pub mod usage;
 pub mod vcs;
 pub mod watchers;
 pub mod web;
+pub mod workflow;
 
 /// Initialize tracing with a default filter if `RUST_LOG` is unset.
 pub fn init_tracing() {

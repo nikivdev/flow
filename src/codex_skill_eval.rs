@@ -32,6 +32,16 @@ pub struct CodexSkillEvalEvent {
     pub prompt_chars: usize,
     pub injected_context_chars: usize,
     pub reference_count: usize,
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    #[serde(default)]
+    pub span_id: Option<String>,
+    #[serde(default)]
+    pub parent_span_id: Option<String>,
+    #[serde(default)]
+    pub workflow_kind: Option<String>,
+    #[serde(default)]
+    pub service_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -61,6 +71,14 @@ pub struct CodexSkillOutcomeEvent {
     pub skill_names: Vec<String>,
     pub artifact_path: Option<String>,
     pub success: f64,
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    #[serde(default)]
+    pub span_id: Option<String>,
+    #[serde(default)]
+    pub parent_span_id: Option<String>,
+    #[serde(default)]
+    pub service_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -182,10 +200,18 @@ fn events_path() -> Result<PathBuf> {
     Ok(root.join("events.jsonl"))
 }
 
+pub fn events_log_path() -> Result<PathBuf> {
+    events_path()
+}
+
 fn outcomes_path() -> Result<PathBuf> {
     let root = skill_eval_root()?;
     fs::create_dir_all(&root)?;
     Ok(root.join("outcomes.jsonl"))
+}
+
+pub fn outcomes_log_path() -> Result<PathBuf> {
+    outcomes_path()
 }
 
 fn scorecards_dir() -> Result<PathBuf> {
@@ -752,6 +778,11 @@ mod tests {
             prompt_chars: 100,
             injected_context_chars: 30,
             reference_count: 0,
+            trace_id: None,
+            span_id: None,
+            parent_span_id: None,
+            workflow_kind: None,
+            service_name: None,
         };
         fs::write(
             legacy_path.join("events.jsonl"),
@@ -802,6 +833,11 @@ mod tests {
             prompt_chars: 10,
             injected_context_chars: 0,
             reference_count: 0,
+            trace_id: None,
+            span_id: None,
+            parent_span_id: None,
+            workflow_kind: None,
+            service_name: None,
         };
         fs::write(&path, serde_json::to_string(&event).expect("encode") + "\n").expect("write");
 
@@ -831,6 +867,11 @@ mod tests {
                 prompt_chars: 100,
                 injected_context_chars: 30,
                 reference_count: 0,
+                trace_id: None,
+                span_id: None,
+                parent_span_id: None,
+                workflow_kind: None,
+                service_name: None,
             }],
             vec![CodexSkillOutcomeEvent {
                 version: 1,
@@ -842,6 +883,10 @@ mod tests {
                 skill_names: vec!["plan_write".to_string()],
                 artifact_path: Some("/tmp/repo/plan.md".to_string()),
                 success: 1.0,
+                trace_id: None,
+                span_id: None,
+                parent_span_id: None,
+                service_name: None,
             }],
         );
 
@@ -873,6 +918,11 @@ mod tests {
                 prompt_chars: 10,
                 injected_context_chars: 0,
                 reference_count: 0,
+                trace_id: None,
+                span_id: None,
+                parent_span_id: None,
+                workflow_kind: None,
+                service_name: None,
             }],
             vec![CodexSkillOutcomeEvent {
                 version: 1,
@@ -884,6 +934,10 @@ mod tests {
                 skill_names: vec!["plan_write".to_string()],
                 artifact_path: Some("/tmp/repo/plan.md".to_string()),
                 success: 1.0,
+                trace_id: None,
+                span_id: None,
+                parent_span_id: None,
+                service_name: None,
             }],
         );
 
@@ -919,6 +973,11 @@ mod tests {
                     prompt_chars: 100,
                     injected_context_chars: 30,
                     reference_count: 0,
+                    trace_id: None,
+                    span_id: None,
+                    parent_span_id: None,
+                    workflow_kind: None,
+                    service_name: None,
                 },
                 CodexSkillEvalEvent {
                     version: 1,
@@ -936,6 +995,11 @@ mod tests {
                     prompt_chars: 100,
                     injected_context_chars: 30,
                     reference_count: 0,
+                    trace_id: None,
+                    span_id: None,
+                    parent_span_id: None,
+                    workflow_kind: None,
+                    service_name: None,
                 },
                 CodexSkillEvalEvent {
                     version: 1,
@@ -953,6 +1017,11 @@ mod tests {
                     prompt_chars: 100,
                     injected_context_chars: 30,
                     reference_count: 0,
+                    trace_id: None,
+                    span_id: None,
+                    parent_span_id: None,
+                    workflow_kind: None,
+                    service_name: None,
                 },
             ],
             1,

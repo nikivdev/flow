@@ -214,6 +214,12 @@ fn start_background_maintenance_loop() {
                 if let Err(err) = ai::run_codex_background_maintenance() {
                     eprintln!("WARN codexd maintenance failed: {err:#}");
                 }
+                if let Err(err) = ai::maybe_run_codex_learning_refresh() {
+                    eprintln!("WARN codexd learning refresh failed: {err:#}");
+                }
+                if let Err(err) = ai::maybe_run_codex_telemetry_export(200) {
+                    eprintln!("WARN codexd telemetry export failed: {err:#}");
+                }
                 thread::sleep(Duration::from_secs(poll_secs));
             }
         });

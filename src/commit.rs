@@ -9735,6 +9735,7 @@ struct PrFeedbackItem {
     author: String,
     body: String,
     url: String,
+    thread_id: Option<String>,
     path: Option<String>,
     line: Option<u64>,
     review_state: Option<String>,
@@ -9747,12 +9748,17 @@ struct PrFeedbackSnapshot {
     pr_number: u64,
     pr_url: String,
     pr_title: String,
+    trace_id: String,
     generated_at: String,
     reviews_count: usize,
     review_comments_count: usize,
     issue_comments_count: usize,
     review_state_counts: HashMap<String, usize>,
     items: Vec<PrFeedbackItem>,
+}
+
+fn new_pr_feedback_trace_id() -> String {
+    Uuid::new_v4().simple().to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -9809,6 +9815,59 @@ struct GhReview {
     #[serde(default)]
     html_url: String,
     user: GhApiUser,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlReviewThreadsResponse {
+    data: GhGraphqlReviewThreadsData,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlReviewThreadsData {
+    repository: GhGraphqlReviewThreadsRepository,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlReviewThreadsRepository {
+    #[serde(rename = "pullRequest")]
+    pull_request: GhGraphqlReviewThreadsPullRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlReviewThreadsPullRequest {
+    #[serde(rename = "reviewThreads")]
+    review_threads: GhGraphqlReviewThreadsConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlReviewThreadsConnection {
+    nodes: Vec<GhGraphqlReviewThreadNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: GhGraphqlPageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlReviewThreadNode {
+    id: String,
+    comments: GhGraphqlReviewThreadComments,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlReviewThreadComments {
+    nodes: Vec<GhGraphqlReviewThreadCommentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlReviewThreadCommentNode {
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGraphqlPageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
 }
 
 #[derive(Debug)]
@@ -9915,6 +9974,88 @@ fn gh_api_json_in<T: DeserializeOwned>(repo_root: &Path, endpoint: &str) -> Resu
     let out = gh_capture_in(repo_root, &["api", endpoint])?;
     serde_json::from_str(out.trim())
         .with_context(|| format!("failed to parse GitHub API response for `{endpoint}`"))
+}
+
+fn gh_review_thread_ids_by_comment_url(
+    repo_root: &Path,
+    repo: &str,
+    pr_number: u64,
+) -> Result<HashMap<String, String>> {
+    let (owner, repo_name) = repo
+        .split_once('/')
+        .with_context(|| format!("invalid GitHub repo `{repo}`"))?;
+    let query = r#"query FlowPrReviewThreads($owner: String!, $repo: String!, $prNumber: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes {
+          id
+          comments(first: 100) {
+            nodes {
+              url
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}"#;
+
+    let mut by_url = HashMap::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let mut args = vec![
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={query}"),
+            "-F".to_string(),
+            format!("owner={owner}"),
+            "-F".to_string(),
+            format!("repo={repo_name}"),
+            "-F".to_string(),
+            format!("prNumber={pr_number}"),
+        ];
+        if let Some(value) = cursor.as_ref() {
+            args.push("-F".to_string());
+            args.push(format!("cursor={value}"));
+        }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = gh_capture_in(repo_root, &arg_refs)?;
+        let parsed: GhGraphqlReviewThreadsResponse = serde_json::from_str(out.trim())
+            .context("failed to parse GitHub GraphQL review thread response")?;
+
+        for thread in parsed
+            .data
+            .repository
+            .pull_request
+            .review_threads
+            .nodes
+        {
+            for comment in thread.comments.nodes {
+                let url = comment.url.trim();
+                if !url.is_empty() {
+                    by_url.insert(url.to_string(), thread.id.clone());
+                }
+            }
+        }
+
+        let page_info = parsed.data.repository.pull_request.review_threads.page_info;
+        if !page_info.has_next_page {
+            break;
+        }
+        cursor = page_info.end_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    Ok(by_url)
 }
 
 fn pr_feedback_external_ref(repo: &str, pr_number: u64, source: &str, source_id: u64) -> String {
@@ -10248,6 +10389,7 @@ fn write_pr_feedback_snapshot(
     repo: &str,
     pr_number: u64,
     pr_url: &str,
+    trace_id: &str,
     items: &[PrFeedbackItem],
 ) -> Result<PathBuf> {
     let dir = repo_root.join(".ai").join("reviews");
@@ -10265,6 +10407,9 @@ fn write_pr_feedback_snapshot(
     out.push_str("- URL: ");
     out.push_str(pr_url);
     out.push('\n');
+    out.push_str("- Trace ID: `");
+    out.push_str(trace_id);
+    out.push_str("`\n");
     out.push_str("- Generated: ");
     out.push_str(&chrono::Utc::now().to_rfc3339());
     out.push('\n');
@@ -10440,10 +10585,11 @@ fn write_pr_feedback_review_rules_at(
     out.push_str("1. read the reviewer comment\n");
     out.push_str("2. inspect the exact diff hunk\n");
     out.push_str("3. inspect adjacent code and dependent call sites\n");
-    out.push_str("4. decide whether the reviewer is right\n");
-    out.push_str("5. choose the smallest acceptable fix\n");
-    out.push_str("6. run the exact validation in the product repo\n");
-    out.push_str("7. capture one durable Kit-side lesson only if it is reusable\n\n");
+    out.push_str("4. decide the concern status in the current code: still applies here, moved nearby, already resolved, or not a real issue\n");
+    out.push_str("5. explain why the original diff ended up in that shape\n");
+    out.push_str("6. choose the smallest acceptable fix or explicit no-fix decision\n");
+    out.push_str("7. run the exact validation in the product repo\n");
+    out.push_str("8. capture one durable Kit-side lesson only if it is reusable\n\n");
     out.push_str("## Prompt Template\n\n```text\n");
     out.push_str("Use this PR review item block as the source of truth.\n\n");
     out.push_str("Canonical review rules: ");
@@ -10456,41 +10602,58 @@ fn write_pr_feedback_review_rules_at(
     out.push_str("- keep the product-repo fix separate from the future Kit improvement\n");
     out.push_str("- if the durable lesson is about the review workflow or prompt contract, update the canonical review rules doc instead of AGENTS.md\n\n");
     out.push_str("Task:\n");
-    out.push_str("1. Decide whether the reviewer is right.\n");
-    out.push_str("2. Propose the smallest acceptable fix in the current branch.\n");
-    out.push_str("3. State the exact validation to run in the product repo.\n");
-    out.push_str("4. If there is a durable lesson about the review operator workflow or prompt contract, propose the exact update for ");
+    out.push_str("1. Decide the Concern Status first: still applies here, moved nearby, already resolved, or not a real issue.\n");
+    out.push_str("2. Decide whether the reviewer is right in the current code shape.\n");
+    out.push_str("3. Explain why the current diff likely ended up in its flawed shape.\n");
+    out.push_str("4. If the concern still applies here or moved nearby, propose the smallest acceptable fix in the current branch. Otherwise explain why no patch is required.\n");
+    out.push_str("5. State the exact validation to run in the product repo.\n");
+    out.push_str("6. If the same diff exposes an adjacent issue, label it fix-now, defer, or ignore.\n");
+    out.push_str("7. If there is a durable lesson about the review operator workflow or prompt contract, propose the exact update for ");
     out.push_str(&canonical_rules_path.display().to_string());
     out.push_str(".\n");
-    out.push_str("5. If there is a durable lesson about Kit review behavior, propose the exact AGENTS.md update for /Users/nikitavoloboev/repos/mark3labs/kit/AGENTS.md.\n");
-    out.push_str("6. If docs or AGENTS.md guidance are not enough, say what specific deterministic review rule or review-extension surface in ~/repos/mark3labs/kit should change.\n");
-    out.push_str("7. Keep scope tight and avoid broad refactors.\n\n");
+    out.push_str("8. If there is a durable lesson about Kit review behavior, propose the exact AGENTS.md update for ~/repos/mark3labs/kit/AGENTS.md.\n");
+    out.push_str("9. If docs or AGENTS.md guidance are not enough, say what specific deterministic review rule or review-extension surface in ~/repos/mark3labs/kit should change.\n");
+    out.push_str("10. Keep scope tight and avoid broad refactors.\n\n");
     out.push_str("Rules:\n");
+    out.push_str("- Decide Concern Status before proposing a patch.\n");
     out.push_str("- Inspect the exact local diff and adjacent call sites before deciding.\n");
+    out.push_str("- Explain the coding habit, wrong assumption, or time pressure that likely produced the flawed diff shape.\n");
     out.push_str("- Prefer the smallest fix that answers the reviewer directly.\n");
+    out.push_str("- If Concern Status is already resolved or not a real issue, do not invent a patch; explain the no-fix decision clearly.\n");
     out.push_str("- Validation must name the actual command, test, or manual behavior to check.\n");
     out.push_str("- Only propose a Kit upgrade if it is reusable across future PRs.\n");
     out.push_str("- If the issue is product-specific and not reusable, say so explicitly.\n");
     out.push_str("- Keep review-rules.md updates separate from AGENTS.md updates and separate from deterministic rule proposals.\n");
-    out.push_str("- Use the existing Local Verdict / Narrow Fix / Validation / Prevention Candidate notes in the block as priors if they are already good. Improve them only when needed.\n\n");
+    out.push_str("- Use the existing Concern Status / Local Verdict / Why This Happened / Narrow Fix / Validation / Prevention Candidate / Kit Upgrade notes in the block as priors if they are already good. Improve them only when needed.\n");
+    out.push_str("- Treat the item as complete only when Concern Status is explicit, validation has passed, the local review notes or ledger text is written, and the Prevention Candidate plus Kit Upgrade decision are explicitly recorded. A code patch is required only for Concern Status `still applies here` or `moved nearby`.\n\n");
     out.push_str("Return sections:\n");
+    out.push_str("- Concern Status\n");
     out.push_str("- Verdict\n");
+    out.push_str("- Why This Happened\n");
     out.push_str("- Smallest Fix\n");
     out.push_str("- Validation\n");
+    out.push_str("- Adjacent Coach Findings\n");
+    out.push_str("- Prevention Candidate\n");
     out.push_str("- Kit Upgrade\n");
+    out.push_str("- Ledger Update\n");
+    out.push_str("- Completion Check\n");
     out.push_str("```\n\n");
     out.push_str("## Required Output Sections\n\n");
+    out.push_str("- `Concern Status`\n");
     out.push_str("- `Verdict`\n");
+    out.push_str("- `Why This Happened`\n");
     out.push_str("- `Smallest Fix`\n");
     out.push_str("- `Validation`\n");
-    out.push_str("- `Kit Upgrade`\n\n");
+    out.push_str("- `Adjacent Coach Findings`\n");
+    out.push_str("- `Prevention Candidate`\n");
+    out.push_str("- `Kit Upgrade`\n");
+    out.push_str("- `Ledger Update`\n");
+    out.push_str("- `Completion Check`\n\n");
     out.push_str("## Kit Upgrade Decision Order\n\n");
     out.push_str("1. `review-rules.md` update in `");
     out.push_str(&canonical_rules_path.display().to_string());
     out.push_str("`\n");
-    out.push_str(
-        "2. `AGENTS.md` update in `/Users/nikitavoloboev/repos/mark3labs/kit/AGENTS.md`\n",
-    );
+    out.push_str("2. `AGENTS.md` update in `~/repos/mark3labs/kit/AGENTS.md`\n");
     out.push_str("3. deterministic Kit review rule\n");
     out.push_str("4. review extension / richer review packet\n");
     out.push_str("5. no Kit change\n\n");
@@ -10552,6 +10715,129 @@ fn write_pr_feedback_kit_system_prompt_at(
     Ok(path)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrFeedbackSeedKind {
+    EnvContract,
+    OverGeneric,
+    OwnershipIntent,
+    Default,
+}
+
+fn normalize_pr_feedback_seed_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_pr_feedback_seed_text(value: &str, max_chars: usize) -> String {
+    let normalized = normalize_pr_feedback_seed_text(value);
+    let mut chars = normalized.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+fn pr_feedback_seed_kind(item: &PrFeedbackItem) -> PrFeedbackSeedKind {
+    let body = item.body.to_ascii_lowercase();
+    if body.contains(".env") || body.contains("env file") || body.contains("environment") {
+        PrFeedbackSeedKind::EnvContract
+    } else if body.contains("generic") {
+        PrFeedbackSeedKind::OverGeneric
+    } else if body.contains("intent")
+        || body.contains("intnet")
+        || body.contains("moving")
+        || body.contains("move this")
+    {
+        PrFeedbackSeedKind::OwnershipIntent
+    } else {
+        PrFeedbackSeedKind::Default
+    }
+}
+
+fn pr_feedback_file_label(item: &PrFeedbackItem) -> String {
+    let file = item
+        .path
+        .as_deref()
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or("current file");
+    match item.line {
+        Some(line) => format!("{file}:{line}"),
+        None => file.to_string(),
+    }
+}
+
+fn pr_feedback_area_label(item: &PrFeedbackItem) -> &'static str {
+    match item.path.as_deref() {
+        Some(path) if path.starts_with("ide/designer") => "Designer",
+        _ => "the product",
+    }
+}
+
+fn seeded_pr_feedback_plan_sections(
+    item: &PrFeedbackItem,
+) -> (String, String, String, String, String, String, String) {
+    let focus = truncate_pr_feedback_seed_text(&item.body, 160);
+    let file_label = pr_feedback_file_label(item);
+    let area = pr_feedback_area_label(item);
+    let concern_status = "decide whether it still applies here, moved nearby, is already resolved, or is not a real issue".to_string();
+    match pr_feedback_seed_kind(item) {
+        PrFeedbackSeedKind::EnvContract => (
+            concern_status,
+            "Reviewer is likely right that this should be fixed in configuration rather than hidden behind a runtime guard.".to_string(),
+            "The diff likely added a defensive env check because local setup felt fragile, but that weakens a required runtime contract instead of enforcing it.".to_string(),
+            format!(
+                "Remove the runtime configuration band-aid in {file_label} and keep the required env contract explicit at the real usage boundary."
+            ),
+            format!(
+                "Run the smallest {area} check with the env configured correctly and confirm the feature still works without the extra guard."
+            ),
+            "Review rule: do not add runtime env fallbacks when the feature contract requires setup-time configuration.".to_string(),
+            "review-rules.md if this survives validation; otherwise none.".to_string(),
+        ),
+        PrFeedbackSeedKind::OverGeneric => (
+            concern_status,
+            "Reviewer is likely right to question whether this abstraction is more generic than the current product need.".to_string(),
+            "The diff likely generalized early to feel reusable, but the reviewer only sees one concrete use case so the abstraction now overpromises intent.".to_string(),
+            format!(
+                "Narrow the abstraction in {file_label} to the concrete use case unless at least two real call sites justify keeping it generic."
+            ),
+            format!(
+                "Exercise the exact {area} flow that needs this code and confirm the narrower API still covers the behavior without breaking adjacent callers."
+            ),
+            "Review rule: do not introduce generic helpers or executors unless the diff shows at least two real consumers or clearly justifies the shared contract.".to_string(),
+            "deterministic Kit review rule if this pattern is detectable; otherwise review-rules.md.".to_string(),
+        ),
+        PrFeedbackSeedKind::OwnershipIntent => (
+            concern_status,
+            "The reviewer is asking for intent and ownership, not just whether the code compiles.".to_string(),
+            "The diff likely moved or extracted code to clean up structure, but it did not make the new ownership boundary legible to a reviewer.".to_string(),
+            format!(
+                "Make the smallest placement or naming change in {file_label} that makes the owner and intent obvious at the touched call site."
+            ),
+            format!(
+                "Open the affected {area} flow and confirm the behavior is unchanged while the new ownership boundary is easier to explain."
+            ),
+            "Review rule: when moving logic across component or module boundaries, make the new owner explicit in names or keep the logic colocated.".to_string(),
+            "review-rules.md unless this turns into a deterministic ownership-boundary rule.".to_string(),
+        ),
+        PrFeedbackSeedKind::Default => (
+            concern_status,
+            format!("Judge whether the reviewer is right about: {focus}"),
+            "The diff likely optimized for implementation speed before making the intent legible to a reviewer.".to_string(),
+            format!(
+                "Make the smallest change in {file_label} and its immediate call site that answers the reviewer directly."
+            ),
+            format!(
+                "Run the smallest relevant {area} check for this flow and confirm adjacent behavior did not regress."
+            ),
+            "Review heuristic: when a diff introduces a new helper, move, or behavior change, the surrounding call sites should make the intent obvious.".to_string(),
+            "review-rules.md if the prevention survives validation; otherwise none.".to_string(),
+        ),
+    }
+}
+
 fn write_pr_feedback_review_plan_at(
     plan_root: &Path,
     workspace_root: &Path,
@@ -10583,6 +10869,9 @@ fn write_pr_feedback_review_plan_at(
     out.push_str("- URL: ");
     out.push_str(&snapshot.pr_url);
     out.push('\n');
+    out.push_str("- Trace ID: `");
+    out.push_str(&snapshot.trace_id);
+    out.push_str("`\n");
     out.push_str("- Workspace: `");
     out.push_str(&workspace_root.display().to_string());
     out.push_str("`\n");
@@ -10716,18 +11005,37 @@ fn write_pr_feedback_review_plan_at(
             out.push_str("\n```\n\n");
         }
 
+        let (concern_status, verdict, why, fix, validation, prevention, kit_upgrade) =
+            seeded_pr_feedback_plan_sections(item);
+
+        out.push_str("### Concern Status\n\n");
+        out.push_str("- ");
+        out.push_str(&concern_status);
+        out.push_str("\n\n");
         out.push_str("### Local Verdict\n\n");
-        out.push_str("- reviewer right / partially right / wrong\n");
-        out.push_str("- explain the real root cause before patching\n\n");
+        out.push_str("- ");
+        out.push_str(&verdict);
+        out.push_str("\n\n");
+        out.push_str("### Why This Happened\n\n");
+        out.push_str("- ");
+        out.push_str(&why);
+        out.push_str("\n\n");
         out.push_str("### Narrow Fix\n\n");
-        out.push_str("- describe the smallest acceptable code change\n");
-        out.push_str("- name the exact files and call sites to touch\n\n");
+        out.push_str("- ");
+        out.push_str(&fix);
+        out.push_str("\n\n");
         out.push_str("### Validation\n\n");
-        out.push_str("- run the smallest relevant test, lint, or manual repro\n");
-        out.push_str("- confirm the old behavior did not regress\n\n");
+        out.push_str("- ");
+        out.push_str(&validation);
+        out.push_str("\n\n");
         out.push_str("### Prevention Candidate\n\n");
-        out.push_str("- deterministic lint / diff rule / review heuristic / product test\n");
-        out.push_str("- if no durable prevention exists, say so explicitly\n\n");
+        out.push_str("- ");
+        out.push_str(&prevention);
+        out.push_str("\n\n");
+        out.push_str("### Kit Upgrade\n\n");
+        out.push_str("- ");
+        out.push_str(&kit_upgrade);
+        out.push_str("\n\n");
         out.push_str("### Status\n\n");
         out.push_str("- [ ] open\n");
         out.push_str("- [ ] patched\n");
@@ -10793,6 +11101,8 @@ fn load_pr_feedback_data(repo_root: &Path, selector: Option<&str>) -> Result<Loa
     let review_comments: Vec<GhPrReviewComment> =
         gh_api_json_in(repo_root, &review_comments_endpoint)?;
     let issue_comments: Vec<GhIssueComment> = gh_api_json_in(repo_root, &issue_comments_endpoint)?;
+    let review_thread_ids =
+        gh_review_thread_ids_by_comment_url(repo_root, &repo, pr_number).unwrap_or_default();
 
     let mut items: Vec<PrFeedbackItem> = Vec::new();
     for comment in &review_comments {
@@ -10809,6 +11119,7 @@ fn load_pr_feedback_data(repo_root: &Path, selector: Option<&str>) -> Result<Loa
             author: comment.user.login.clone(),
             body: body.to_string(),
             url: comment.html_url.trim().to_string(),
+            thread_id: review_thread_ids.get(comment.html_url.trim()).cloned(),
             path: comment.path.clone(),
             line: comment.line,
             review_state: None,
@@ -10826,6 +11137,7 @@ fn load_pr_feedback_data(repo_root: &Path, selector: Option<&str>) -> Result<Loa
             author: comment.user.login.clone(),
             body: body.to_string(),
             url: comment.html_url.trim().to_string(),
+            thread_id: None,
             path: None,
             line: None,
             review_state: None,
@@ -10843,6 +11155,7 @@ fn load_pr_feedback_data(repo_root: &Path, selector: Option<&str>) -> Result<Loa
             author: review.user.login.clone(),
             body: body.to_string(),
             url: review.html_url.trim().to_string(),
+            thread_id: None,
             path: None,
             line: None,
             review_state: Some(review.state.trim().to_string()),
@@ -10868,6 +11181,7 @@ fn build_pr_feedback_snapshot(data: &LoadedPrFeedback) -> PrFeedbackSnapshot {
         pr_number: data.pr_number,
         pr_url: data.pr_url.clone(),
         pr_title: data.pr_title.clone(),
+        trace_id: new_pr_feedback_trace_id(),
         generated_at: chrono::Utc::now().to_rfc3339(),
         reviews_count: data.reviews.len(),
         review_comments_count: data.review_comments.len(),
@@ -10881,14 +11195,15 @@ fn write_pr_feedback_artifacts(
     repo_root: &Path,
     data: &LoadedPrFeedback,
 ) -> Result<(PrFeedbackSnapshot, PrFeedbackArtifacts)> {
+    let snapshot = build_pr_feedback_snapshot(data);
     let snapshot_path = write_pr_feedback_snapshot(
         repo_root,
         &data.repo,
         data.pr_number,
         &data.pr_url,
+        &snapshot.trace_id,
         &data.items,
     )?;
-    let snapshot = build_pr_feedback_snapshot(data);
     let snapshot_json_path = pr_feedback_snapshot_json_path(repo_root, data.pr_number)?;
     write_pr_feedback_snapshot_json(&snapshot, &snapshot_json_path)?;
     let review_plan_path =
@@ -10934,8 +11249,17 @@ fn render_pr_feedback_reference(
     out.push('#');
     out.push_str(&snapshot.pr_number.to_string());
     out.push('\n');
+    out.push_str("Trace ID: ");
+    out.push_str(&snapshot.trace_id);
+    out.push('\n');
     out.push_str("URL: ");
     out.push_str(&snapshot.pr_url);
+    out.push('\n');
+    out.push_str("Snapshot markdown: ");
+    out.push_str(&artifacts.snapshot_path.display().to_string());
+    out.push('\n');
+    out.push_str("Snapshot json: ");
+    out.push_str(&artifacts.snapshot_json_path.display().to_string());
     out.push('\n');
     out.push_str("Review plan: ");
     out.push_str(&artifacts.review_plan_path.display().to_string());
@@ -11039,7 +11363,9 @@ fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
     let issue_comments = &data.issue_comments;
     let items = &data.items;
 
+    let (snapshot, artifacts) = write_pr_feedback_artifacts(repo_root, &data)?;
     println!("PR feedback: {repo}#{pr_number}");
+    println!("Trace ID: {}", snapshot.trace_id);
     println!("URL: {pr_url}");
     println!(
         "Reviews: {} ({})",
@@ -11049,7 +11375,6 @@ fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
     println!("Review comments: {}", review_comments.len());
     println!("Issue comments: {}", issue_comments.len());
 
-    let (_snapshot, artifacts) = write_pr_feedback_artifacts(repo_root, &data)?;
     println!("Snapshot: {}", artifacts.snapshot_path.display());
     println!("Snapshot JSON: {}", artifacts.snapshot_json_path.display());
     println!("Review plan: {}", artifacts.review_plan_path.display());
@@ -15772,6 +16097,7 @@ mod tests {
             pr_number: 2922,
             pr_url: "https://github.com/example-org/example-repo/pull/2922".to_string(),
             pr_title: "feat(designer): add build123d Python live viewer".to_string(),
+            trace_id: "trace-2922".to_string(),
             generated_at: "2026-03-17T15:00:00Z".to_string(),
             reviews_count: 1,
             review_comments_count: 1,
@@ -15783,6 +16109,7 @@ mod tests {
                 author: "reviewer".to_string(),
                 body: "Please move this logic.".to_string(),
                 url: "https://github.com/example".to_string(),
+                thread_id: None,
                 path: Some("src/file.ts".to_string()),
                 line: Some(42),
                 review_state: None,
@@ -15804,12 +16131,20 @@ mod tests {
         assert!(body.contains("# [feat(designer): add build123d Python live viewer](https://github.com/example-org/example-repo/pull/2922)"));
         assert!(body.contains("## Cursor Review"));
         assert!(body.contains("Snapshot (markdown):"));
+        assert!(body.contains("Trace ID: `trace-2922`"));
         assert!(body.contains("## Kit Commands"));
         assert!(body.contains("--feedback-auto --preset designer"));
         assert!(body.contains(
             "f pr feedback https://github.com/example-org/example-repo/pull/2922 --compact --cursor"
         ));
         assert!(body.contains("### Diff Hunk"));
+        assert!(body.contains("### Concern Status"));
+        assert!(body.contains("The reviewer is asking for intent and ownership"));
+        assert!(body.contains("The diff likely moved or extracted code to clean up structure"));
+        assert!(body.contains("Make the smallest placement or naming change in file.ts:42"));
+        assert!(body.contains("Open the affected the product flow"));
+        assert!(body.contains("when moving logic across component or module boundaries"));
+        assert!(body.contains("### Kit Upgrade"));
         assert!(body.contains("### Status"));
         assert!(body.contains("## Kit Input"));
         assert!(plan_path.ends_with("example-org-example-repo-pr-2922-feedback.md"));
@@ -15838,6 +16173,7 @@ mod tests {
             pr_number: 2922,
             pr_url: "https://github.com/example-org/example-repo/pull/2922".to_string(),
             pr_title: "feat(designer): add build123d Python live viewer".to_string(),
+            trace_id: "trace-2922".to_string(),
             generated_at: "2026-03-17T15:00:00Z".to_string(),
             reviews_count: 1,
             review_comments_count: 1,
@@ -15868,6 +16204,9 @@ mod tests {
         assert!(body.contains(&kit_system_path.display().to_string()));
         assert!(body.contains("## One-Item Loop"));
         assert!(body.contains("## Prompt Template"));
+        assert!(body.contains("Decide the Concern Status first"));
+        assert!(body.contains("- Concern Status"));
+        assert!(body.contains("- `Concern Status`"));
         assert!(review_rules_path.ends_with("example-org-example-repo-pr-2922-review-rules.md"));
     }
 
@@ -15890,6 +16229,7 @@ mod tests {
             pr_number: 2922,
             pr_url: "https://github.com/example-org/example-repo/pull/2922".to_string(),
             pr_title: "feat(designer): add build123d Python live viewer".to_string(),
+            trace_id: "trace-2922".to_string(),
             generated_at: "2026-03-17T15:00:00Z".to_string(),
             reviews_count: 1,
             review_comments_count: 1,

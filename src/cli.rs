@@ -2611,6 +2611,18 @@ pub enum ProviderAiAction {
         #[arg(long)]
         json: bool,
     },
+    /// Evaluate how well Flow-guided Codex usage is working for this repo/path.
+    Eval {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Maximum number of recent logged events/outcomes to inspect.
+        #[arg(long, default_value = "200")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Record a fast-path Codex launch and ensure supporting daemons are warm (internal).
     #[command(hide = true, name = "touch-launch")]
     TouchLaunch {
@@ -2661,6 +2673,16 @@ pub enum ProviderAiAction {
     Memory {
         #[command(subcommand)]
         action: Option<CodexMemoryAction>,
+    },
+    /// Export redacted Codex workflow telemetry to configured Maple endpoints.
+    Telemetry {
+        #[command(subcommand)]
+        action: Option<CodexTelemetryAction>,
+    },
+    /// Inspect Flow-managed Codex traces for the current or a specific session.
+    Trace {
+        #[command(subcommand)]
+        action: Option<CodexTraceAction>,
     },
     /// Build and inspect local Codex skill scorecards from Flow history.
     #[command(name = "skill-eval")]
@@ -2820,6 +2842,56 @@ pub enum CodexMemoryAction {
         /// Maximum number of rows to print.
         #[arg(long, default_value = "12")]
         limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexTelemetryAction {
+    /// Show Codex telemetry export config and current forwarder state.
+    Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Flush recently logged Codex telemetry to configured Maple endpoints once.
+    Flush {
+        /// Maximum number of unseen events/outcomes to export in one pass.
+        #[arg(long, default_value = "200")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexTraceAction {
+    /// Show Maple trace read status and configured credentials.
+    Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect the trace associated with the active Flow-managed Codex session.
+    #[command(name = "current-session")]
+    CurrentSession {
+        /// Flush recent Flow Codex telemetry before inspecting the trace.
+        #[arg(long, default_value_t = true)]
+        flush: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a specific trace id.
+    Inspect {
+        /// Trace id to inspect.
+        trace_id: String,
+        /// Flush recent Flow Codex telemetry before inspecting the trace.
+        #[arg(long, default_value_t = true)]
+        flush: bool,
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,

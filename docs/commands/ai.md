@@ -218,11 +218,17 @@ Codex usage history without replaying Codex in the hot path.
 Useful commands:
 
 ```bash
+f codex eval --path ~/work/example-project
 f codex memory sync --limit 400
 f codex memory recent --path ~/work/example-project --limit 12
 f codex skill-eval show --path ~/work/example-project
 f codex skill-eval run --path ~/work/example-project
 f codex skill-eval cron --limit 400 --max-targets 12 --within-hours 168
+f codex telemetry status
+f codex telemetry flush --limit 200
+f codex trace status
+f codex trace current-session --json
+f codex trace inspect <trace-id> --json
 f codex skill-source list --path ~/work/example-project
 f codex skill-source sync --path ~/work/example-project --skill find-skills
 ```
@@ -249,6 +255,76 @@ What `cron` does:
 - never launches Codex or replays network work in the background
 
 For your use case, this keeps learning cheap and safe enough to run regularly.
+
+### Trace inspection for Flow-managed Codex sessions
+
+Flow now assigns a trace envelope to all Flow-managed Codex launches, not just
+special workflows like `check <github-pr-url>`.
+
+That means sessions started or resumed through:
+
+```bash
+j ...
+k <session-id>
+f codex open ...
+f codex resume ...
+f codex continue ...
+```
+
+carry `FLOW_TRACE_*` env vars and emit at least one compact Flow telemetry
+event, so the session becomes remotely inspectable.
+
+Useful commands:
+
+```bash
+f codex trace status
+f codex trace current-session --json
+f codex trace inspect <trace-id> --json
+```
+
+Behavior:
+
+- `trace status` checks whether Maple MCP reads are configured and reachable
+- `trace current-session` reads the active `FLOW_TRACE_ID` from the current
+  Flow-managed Codex session, flushes recent Flow telemetry once, then attempts
+  a remote trace read
+- if Maple reads are partially configured but tenant access is still blocked,
+  Flow returns the current trace metadata plus `readError` instead of failing
+  without context
+
+This keeps the workflow autonomous from inside Codex itself: once the session
+was started through Flow, you can inspect the current trace without manually
+copying ids.
+
+`f codex eval --path ...` is the joined operator report:
+
+- current runtime/doctor state
+- recent route mix and context cost
+- grounded skill scorecard highlights
+- concrete “what to improve next” recommendations
+- commands to deepen or fix the current state
+
+If `codexd` is running, it also keeps recent completion reconciliation warm and
+now does a bounded background scorecard refresh, so the eval report does not go
+stale as quickly between manual runs.
+
+Optional telemetry export follows the same local-first pattern: Flow keeps
+local Codex logs canonical, and if `FLOW_CODEX_MAPLE_*` env vars are set it can
+export redacted route/context/outcome spans to Maple without shipping raw
+prompts or full repo paths. Use:
+
+```bash
+f codex telemetry status
+f codex telemetry flush --limit 200
+```
+
+For local-only secrets, prefer `f env set --personal ...`. On macOS you may
+need `f env unlock` once per day for background reads. Flow-launched Codex
+sessions also inherit the same `FLOW_CODEX_MAPLE_*` values from the personal
+store, while explicit shell env still wins for one-off tests.
+
+When `codexd` is running, the daemon also performs a bounded background export
+pass so the external analytics view stays warm.
 
 ### macOS launchd schedule for skill-eval
 
