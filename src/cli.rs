@@ -2517,9 +2517,16 @@ pub enum ProviderAiAction {
         #[arg(long)]
         path: Option<String>,
     },
-    /// Open provider-native interactive session picker.
+    /// List provider sessions with IDs.
     #[command(alias = "sess")]
-    Sessions,
+    Sessions {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Continue the most recent session for this provider.
     Continue {
         /// Session name or ID to continue (optional).

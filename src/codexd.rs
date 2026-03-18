@@ -1,7 +1,11 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -9,6 +13,19 @@ use serde::{Deserialize, Serialize};
 use crate::{ai, config, daemon, supervisor};
 
 const CODEXD_NAME: &str = "codexd";
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct FileLockGuard {
+    fd: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl Drop for FileLockGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.fd, libc::LOCK_UN) };
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -73,6 +90,30 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(config::ensure_global_state_dir()?.join("codexd.sock"))
 }
 
+fn lock_path() -> Result<PathBuf> {
+    Ok(config::ensure_global_state_dir()?.join("codexd.lock"))
+}
+
+#[cfg(unix)]
+fn acquire_process_lock(file: &std::fs::File) -> Result<FileLockGuard> {
+    let fd = file.as_raw_fd();
+    let status = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if status == 0 {
+        return Ok(FileLockGuard { fd });
+    }
+    let err = std::io::Error::last_os_error();
+    let raw = err.raw_os_error();
+    if raw == Some(libc::EWOULDBLOCK) || raw == Some(libc::EAGAIN) {
+        bail!("codexd already holds {}", lock_path()?.display());
+    }
+    Err(err).context("failed to lock codexd process lock")
+}
+
+#[cfg(not(unix))]
+fn acquire_process_lock(_file: &std::fs::File) -> Result<()> {
+    Ok(())
+}
+
 pub fn ping() -> Result<()> {
     let response = send_request(&CodexdRequest::Ping)?;
     if response.ok {
@@ -116,6 +157,22 @@ pub fn serve(socket_override: Option<&Path>) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    let lock_path = lock_path()?;
+    let mut lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    let _process_lock = acquire_process_lock(&lock_file)?;
+    lock_file
+        .set_len(0)
+        .with_context(|| format!("failed to reset {}", lock_path.display()))?;
+    writeln!(lock_file, "{}", std::process::id())
+        .with_context(|| format!("failed to write {}", lock_path.display()))?;
+    lock_file
+        .flush()
+        .with_context(|| format!("failed to flush {}", lock_path.display()))?;
     if socket.exists() {
         fs::remove_file(&socket)
             .with_context(|| format!("failed to remove stale socket {}", socket.display()))?;
@@ -123,6 +180,8 @@ pub fn serve(socket_override: Option<&Path>) -> Result<()> {
 
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind codexd socket {}", socket.display()))?;
+
+    start_background_maintenance_loop();
 
     loop {
         let (stream, _) = match listener.accept() {
@@ -136,6 +195,28 @@ pub fn serve(socket_override: Option<&Path>) -> Result<()> {
             eprintln!("WARN codexd request failed: {err:#}");
         }
     }
+}
+
+fn background_poll_secs() -> u64 {
+    std::env::var("FLOW_CODEXD_BACKGROUND_POLL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(5, 300))
+        .unwrap_or(20)
+}
+
+fn start_background_maintenance_loop() {
+    let poll_secs = background_poll_secs();
+    let _ = thread::Builder::new()
+        .name("flow-codexd-maint".to_string())
+        .spawn(move || {
+            loop {
+                if let Err(err) = ai::run_codex_background_maintenance() {
+                    eprintln!("WARN codexd maintenance failed: {err:#}");
+                }
+                thread::sleep(Duration::from_secs(poll_secs));
+            }
+        });
 }
 
 pub(crate) fn query_recent(
@@ -339,6 +420,7 @@ fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn builtin_daemon_config_uses_socket_health() {
@@ -361,5 +443,28 @@ mod tests {
                 .windows(2)
                 .any(|window| window == ["daemon", "serve"])
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_lock_rejects_second_holder() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("codexd.lock");
+        let first = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("first lock file");
+        let _guard = acquire_process_lock(&first).expect("first lock");
+
+        let second = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("second lock file");
+        let err = acquire_process_lock(&second).expect_err("second lock should fail");
+        assert!(format!("{err:#}").contains("codexd already holds"));
     }
 }

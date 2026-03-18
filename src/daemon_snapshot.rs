@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::{daemon, supervisor};
+use crate::{activity_log, daemon, supervisor};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlowDaemonEntry {
@@ -91,6 +91,11 @@ pub fn run_daemon_action(
     action: FlowDaemonAction,
     config_path: Option<&Path>,
 ) -> Result<FlowDaemonSnapshot> {
+    let action_name = match action {
+        FlowDaemonAction::Start => "start",
+        FlowDaemonAction::Stop => "stop",
+        FlowDaemonAction::Restart => "restart",
+    };
     match action {
         FlowDaemonAction::Start => daemon::start_daemon_with_path(name, config_path)?,
         FlowDaemonAction::Stop => daemon::stop_daemon_with_path(name, config_path)?,
@@ -99,6 +104,17 @@ pub fn run_daemon_action(
             daemon::start_daemon_with_path(name, config_path)?;
         }
     }
+    let summary = match action_name {
+        "start" => "started",
+        "stop" => "stopped",
+        "restart" => "restarted",
+        _ => action_name,
+    };
+    let mut activity_event =
+        activity_log::ActivityEvent::done(format!("daemon.{action_name}"), summary);
+    activity_event.scope = Some(name.to_string());
+    activity_event.source = Some("daemon-control".to_string());
+    let _ = activity_log::append_daily_event(activity_event);
     load_daemon_snapshot(config_path)
 }
 

@@ -9580,14 +9580,22 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
 }
 
 pub fn run_pr(opts: PrOpts) -> Result<()> {
+    let args = normalize_pr_args(&opts.args);
+    if let Some(feedback) = parse_pr_feedback_args(&args)? {
+        let repo_root = if feedback.selector.is_some() {
+            std::env::current_dir().context("failed to resolve current directory")?
+        } else {
+            ensure_git_repo()?;
+            let repo_root = git_root_or_cwd();
+            ensure_commit_setup(&repo_root)?;
+            repo_root
+        };
+        return run_pr_feedback(&repo_root, feedback);
+    }
+
     ensure_git_repo()?;
     let repo_root = git_root_or_cwd();
     ensure_commit_setup(&repo_root)?;
-
-    let args = normalize_pr_args(&opts.args);
-    if let Some(feedback) = parse_pr_feedback_args(&args)? {
-        return run_pr_feedback(&repo_root, feedback);
-    }
 
     match args.as_slice() {
         // Convenience: `f pr open` opens the PR for the current branch (or queued commit) without
@@ -9716,9 +9724,11 @@ fn normalize_pr_args(args: &[String]) -> Vec<String> {
 struct PrFeedbackCommand {
     selector: Option<String>,
     record_todos: bool,
+    show_full: bool,
+    open_cursor: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct PrFeedbackItem {
     external_ref: String,
     source: &'static str,
@@ -9727,6 +9737,22 @@ struct PrFeedbackItem {
     url: String,
     path: Option<String>,
     line: Option<u64>,
+    review_state: Option<String>,
+    diff_hunk: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PrFeedbackSnapshot {
+    repo: String,
+    pr_number: u64,
+    pr_url: String,
+    pr_title: String,
+    generated_at: String,
+    reviews_count: usize,
+    review_comments_count: usize,
+    issue_comments_count: usize,
+    review_state_counts: HashMap<String, usize>,
+    items: Vec<PrFeedbackItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9741,6 +9767,11 @@ struct GhPrFeedbackSummary {
 }
 
 #[derive(Debug, Deserialize)]
+struct GhPrTitleSummary {
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct GhPrReviewComment {
     id: u64,
     #[serde(default)]
@@ -9751,6 +9782,8 @@ struct GhPrReviewComment {
     path: Option<String>,
     #[serde(default)]
     line: Option<u64>,
+    #[serde(default)]
+    diff_hunk: Option<String>,
     #[serde(default)]
     in_reply_to_id: Option<u64>,
     user: GhApiUser,
@@ -9778,6 +9811,27 @@ struct GhReview {
     user: GhApiUser,
 }
 
+#[derive(Debug)]
+struct LoadedPrFeedback {
+    repo: String,
+    pr_number: u64,
+    pr_url: String,
+    pr_title: String,
+    reviews: Vec<GhReview>,
+    review_comments: Vec<GhPrReviewComment>,
+    issue_comments: Vec<GhIssueComment>,
+    items: Vec<PrFeedbackItem>,
+}
+
+#[derive(Debug)]
+struct PrFeedbackArtifacts {
+    snapshot_path: PathBuf,
+    snapshot_json_path: PathBuf,
+    review_plan_path: PathBuf,
+    review_rules_path: PathBuf,
+    kit_system_path: PathBuf,
+}
+
 fn parse_pr_feedback_args(args: &[String]) -> Result<Option<PrFeedbackCommand>> {
     if args.first().map(|s| s.as_str()) != Some("feedback") {
         return Ok(None);
@@ -9785,13 +9839,20 @@ fn parse_pr_feedback_args(args: &[String]) -> Result<Option<PrFeedbackCommand>> 
 
     let mut selector: Option<String> = None;
     let mut record_todos = false;
+    let mut show_full = true;
+    let mut open_cursor = false;
     for token in args.iter().skip(1) {
         match token.as_str() {
             "--todo" | "todo" => record_todos = true,
+            "--full" | "full" => show_full = true,
+            "--compact" | "compact" => show_full = false,
+            "--cursor" | "cursor" => open_cursor = true,
             "--help" | "-h" => {
                 return Ok(Some(PrFeedbackCommand {
                     selector: Some("--help".to_string()),
                     record_todos: false,
+                    show_full: true,
+                    open_cursor: false,
                 }));
             }
             _ if token.starts_with("--") => {
@@ -9809,6 +9870,8 @@ fn parse_pr_feedback_args(args: &[String]) -> Result<Option<PrFeedbackCommand>> 
     Ok(Some(PrFeedbackCommand {
         selector,
         record_todos,
+        show_full,
+        open_cursor,
     }))
 }
 
@@ -9906,7 +9969,195 @@ fn feedback_location_label(item: &PrFeedbackItem) -> Option<String> {
     }
 }
 
+fn feedback_review_state_label(item: &PrFeedbackItem) -> Option<String> {
+    item.review_state
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_uppercase())
+}
+
+fn compact_diff_hunk(diff_hunk: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut out = Vec::new();
+    let mut char_count = 0usize;
+    for line in diff_hunk.lines().take(max_lines) {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let next_len = trimmed.chars().count();
+        if char_count + next_len > max_chars {
+            break;
+        }
+        out.push(trimmed.to_string());
+        char_count += next_len;
+    }
+    let mut rendered = out.join("\n");
+    if diff_hunk.lines().count() > max_lines || diff_hunk.chars().count() > max_chars {
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        rendered.push_str("...");
+    }
+    rendered
+}
+
+fn compact_pr_feedback_context_block(value: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut rendered = String::new();
+    let mut char_count = 0usize;
+    for line in value.lines().take(max_lines) {
+        let trimmed = line.trim_end();
+        let next_len = trimmed.chars().count();
+        if char_count + next_len > max_chars {
+            break;
+        }
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        rendered.push_str(trimmed);
+        char_count += next_len;
+    }
+    if value.lines().count() > max_lines || value.chars().count() > max_chars {
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        rendered.push_str("...");
+    }
+    rendered
+}
+
+fn command_on_path(command: &str) -> bool {
+    let Some(path_os) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&path_os).any(|dir| dir.join(command).is_file())
+}
+
+fn cursor_review_open_command(selector: &str, compact: bool, open_cursor: bool) -> String {
+    let mut parts = vec![
+        "f".to_string(),
+        "pr".to_string(),
+        "feedback".to_string(),
+        selector.to_string(),
+    ];
+    if compact {
+        parts.push("--compact".to_string());
+    }
+    if open_cursor {
+        parts.push("--cursor".to_string());
+    }
+    parts.join(" ")
+}
+
+fn open_cursor_review_bundle(
+    workspace_root: &Path,
+    review_plan_path: &Path,
+    review_rules_path: &Path,
+    kit_system_path: &Path,
+    background: bool,
+) -> Result<()> {
+    let mut command = if cfg!(target_os = "macos") || !command_on_path("cursor") {
+        let mut command = Command::new("open");
+        if background {
+            command.arg("-g");
+        }
+        command.arg("-a").arg("Cursor");
+        command
+    } else {
+        Command::new("cursor")
+    };
+    command
+        .arg(workspace_root)
+        .arg(review_plan_path)
+        .arg(review_rules_path)
+        .arg(kit_system_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _status = command.status()?;
+    Ok(())
+}
+
+fn pr_feedback_snapshot_json_path(repo_root: &Path, pr_number: u64) -> Result<PathBuf> {
+    let dir = repo_root.join(".ai").join("reviews");
+    fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("pr-feedback-{pr_number}.json")))
+}
+
+fn pr_feedback_plan_root() -> PathBuf {
+    if let Some(root) = env::var_os("FLOW_PR_FEEDBACK_PLAN_ROOT").map(PathBuf::from) {
+        return root;
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("plan")
+        .join("review")
+}
+
+fn pr_feedback_repo_slug(repo: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in repo.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            last_dash = false;
+            ch.to_ascii_lowercase()
+        } else {
+            if last_dash {
+                continue;
+            }
+            last_dash = true;
+            '-'
+        };
+        out.push(mapped);
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn pr_feedback_review_plan_path_at(root: &Path, repo: &str, pr_number: u64) -> PathBuf {
+    root.join(format!(
+        "{}-pr-{}-feedback.md",
+        pr_feedback_repo_slug(repo),
+        pr_number
+    ))
+}
+
+fn pr_feedback_kit_system_path_at(root: &Path, repo: &str, pr_number: u64) -> PathBuf {
+    root.join(format!(
+        "{}-pr-{}-kit-system.md",
+        pr_feedback_repo_slug(repo),
+        pr_number
+    ))
+}
+
+fn pr_feedback_review_rules_path_at(root: &Path, repo: &str, pr_number: u64) -> PathBuf {
+    root.join(format!(
+        "{}-pr-{}-review-rules.md",
+        pr_feedback_repo_slug(repo),
+        pr_number
+    ))
+}
+
+fn canonical_review_rules_doc_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("docs")
+        .join("kit")
+        .join("review-rules.md")
+}
+
 fn format_review_state_counts(reviews: &[GhReview]) -> String {
+    let mut entries: Vec<(String, usize)> = review_state_counts_map(reviews).into_iter().collect();
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .into_iter()
+        .map(|(state, count)| format!("{state}:{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn review_state_counts_map(reviews: &[GhReview]) -> HashMap<String, usize> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for review in reviews {
         let key = if review.state.trim().is_empty() {
@@ -9916,16 +10167,7 @@ fn format_review_state_counts(reviews: &[GhReview]) -> String {
         };
         *counts.entry(key).or_insert(0) += 1;
     }
-    if counts.is_empty() {
-        return "none".to_string();
-    }
-    let mut entries: Vec<(String, usize)> = counts.into_iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries
-        .into_iter()
-        .map(|(state, count)| format!("{state}:{count}"))
-        .collect::<Vec<_>>()
-        .join(", ")
+    counts
 }
 
 fn record_pr_feedback_todos(
@@ -10043,12 +10285,33 @@ fn write_pr_feedback_snapshot(
                 out.push_str(&location);
                 out.push(')');
             }
+            if let Some(state) = feedback_review_state_label(item) {
+                out.push_str(" [");
+                out.push_str(&state);
+                out.push(']');
+            }
             out.push('\n');
             out.push_str("   ");
             out.push_str(item.body.trim());
             out.push('\n');
             out.push_str("   ");
             out.push_str(&item.url);
+            out.push('\n');
+            if let Some(diff_hunk) = item
+                .diff_hunk
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                out.push('\n');
+                out.push_str("   ```diff\n");
+                for line in compact_diff_hunk(diff_hunk, 20, 1000).lines() {
+                    out.push_str("   ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push_str("   ```\n");
+            }
             out.push('\n');
         }
     }
@@ -10057,21 +10320,433 @@ fn write_pr_feedback_snapshot(
     Ok(path)
 }
 
-fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
-    ensure_gh_available()?;
+fn write_pr_feedback_snapshot_json(snapshot: &PrFeedbackSnapshot, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(snapshot).context("failed to encode PR feedback JSON")?;
+    fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
 
-    if let Some(selector) = cmd.selector.as_deref() {
-        if selector == "--help" || selector == "-h" {
-            println!("Usage: f pr feedback [<pr-number|pr-url>] [--todo]");
-            println!("Examples:");
-            println!("  f pr feedback");
-            println!("  f pr feedback 8");
-            println!("  f pr feedback https://github.com/owner/repo/pull/8 --todo");
-            return Ok(());
-        }
+fn write_pr_feedback_review_plan(
+    workspace_root: &Path,
+    snapshot: &PrFeedbackSnapshot,
+    markdown_snapshot_path: &Path,
+    json_snapshot_path: &Path,
+) -> Result<PathBuf> {
+    write_pr_feedback_review_plan_at(
+        &pr_feedback_plan_root(),
+        workspace_root,
+        snapshot,
+        markdown_snapshot_path,
+        json_snapshot_path,
+    )
+}
+
+fn write_pr_feedback_kit_system_prompt(
+    snapshot: &PrFeedbackSnapshot,
+    markdown_snapshot_path: &Path,
+    json_snapshot_path: &Path,
+    review_plan_path: &Path,
+) -> Result<PathBuf> {
+    write_pr_feedback_kit_system_prompt_at(
+        &pr_feedback_plan_root(),
+        snapshot,
+        markdown_snapshot_path,
+        json_snapshot_path,
+        review_plan_path,
+    )
+}
+
+fn write_pr_feedback_review_rules(
+    workspace_root: &Path,
+    snapshot: &PrFeedbackSnapshot,
+    markdown_snapshot_path: &Path,
+    json_snapshot_path: &Path,
+    review_plan_path: &Path,
+    kit_system_path: &Path,
+) -> Result<PathBuf> {
+    write_pr_feedback_review_rules_at(
+        &pr_feedback_plan_root(),
+        workspace_root,
+        snapshot,
+        markdown_snapshot_path,
+        json_snapshot_path,
+        review_plan_path,
+        kit_system_path,
+    )
+}
+
+fn write_pr_feedback_review_rules_at(
+    plan_root: &Path,
+    workspace_root: &Path,
+    snapshot: &PrFeedbackSnapshot,
+    markdown_snapshot_path: &Path,
+    json_snapshot_path: &Path,
+    review_plan_path: &Path,
+    kit_system_path: &Path,
+) -> Result<PathBuf> {
+    let path = pr_feedback_review_rules_path_at(plan_root, &snapshot.repo, snapshot.pr_number);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
 
-    let (repo, pr_number, pr_url) = if let Some(selector) = cmd.selector.as_deref() {
+    let canonical_rules_path = canonical_review_rules_doc_path();
+
+    let mut out = String::new();
+    out.push_str("# [");
+    out.push_str(&snapshot.pr_title);
+    out.push_str("](");
+    out.push_str(&snapshot.pr_url);
+    out.push_str(") Review Rules\n\n");
+    out.push_str("Generated operator artifact for resolving PR feedback item by item in the current workspace.\n\n");
+    out.push_str("- Workspace: `");
+    out.push_str(&workspace_root.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Feedback plan: `");
+    out.push_str(&review_plan_path.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Feedback snapshot (markdown): `");
+    out.push_str(&markdown_snapshot_path.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Feedback snapshot (json): `");
+    out.push_str(&json_snapshot_path.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Kit system prompt: `");
+    out.push_str(&kit_system_path.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Canonical shared rules: `");
+    out.push_str(&canonical_rules_path.display().to_string());
+    out.push_str("`\n\n");
+    out.push_str("## Run Here\n\n");
+    out.push_str("From the product workspace:\n\n```bash\n");
+    out.push_str("cd ");
+    out.push_str(&workspace_root.display().to_string());
+    out.push_str("\nL check ");
+    out.push_str(&snapshot.pr_url);
+    out.push_str(
+        "\nkit review --dir . --base origin/main --feedback-auto --preset designer\n```\n\n",
+    );
+    out.push_str("Keep these visible together in Cursor:\n");
+    out.push_str("- current file under review\n");
+    out.push_str("- local diff for that file\n");
+    out.push_str("- this review-rules artifact\n");
+    out.push_str("- the feedback plan markdown\n");
+    out.push_str("- the feedback JSON snapshot\n");
+    out.push_str("- deterministic `kit review` output when relevant\n\n");
+    out.push_str("## One-Item Loop\n\n");
+    out.push_str("For every review item:\n\n");
+    out.push_str("1. read the reviewer comment\n");
+    out.push_str("2. inspect the exact diff hunk\n");
+    out.push_str("3. inspect adjacent code and dependent call sites\n");
+    out.push_str("4. decide whether the reviewer is right\n");
+    out.push_str("5. choose the smallest acceptable fix\n");
+    out.push_str("6. run the exact validation in the product repo\n");
+    out.push_str("7. capture one durable Kit-side lesson only if it is reusable\n\n");
+    out.push_str("## Prompt Template\n\n```text\n");
+    out.push_str("Use this PR review item block as the source of truth.\n\n");
+    out.push_str("Canonical review rules: ");
+    out.push_str(&canonical_rules_path.display().to_string());
+    out.push_str("\nPR-local workflow artifact: ");
+    out.push_str(&path.display().to_string());
+    out.push_str("\n\nWorkflow:\n");
+    out.push_str("- work in the product repo first\n");
+    out.push_str("- inspect the exact local diff and adjacent call sites before deciding\n");
+    out.push_str("- keep the product-repo fix separate from the future Kit improvement\n");
+    out.push_str("- if the durable lesson is about the review workflow or prompt contract, update the canonical review rules doc instead of AGENTS.md\n\n");
+    out.push_str("Task:\n");
+    out.push_str("1. Decide whether the reviewer is right.\n");
+    out.push_str("2. Propose the smallest acceptable fix in the current branch.\n");
+    out.push_str("3. State the exact validation to run in the product repo.\n");
+    out.push_str("4. If there is a durable lesson about the review operator workflow or prompt contract, propose the exact update for ");
+    out.push_str(&canonical_rules_path.display().to_string());
+    out.push_str(".\n");
+    out.push_str("5. If there is a durable lesson about Kit review behavior, propose the exact AGENTS.md update for /Users/nikitavoloboev/repos/mark3labs/kit/AGENTS.md.\n");
+    out.push_str("6. If docs or AGENTS.md guidance are not enough, say what specific deterministic review rule or review-extension surface in ~/repos/mark3labs/kit should change.\n");
+    out.push_str("7. Keep scope tight and avoid broad refactors.\n\n");
+    out.push_str("Rules:\n");
+    out.push_str("- Inspect the exact local diff and adjacent call sites before deciding.\n");
+    out.push_str("- Prefer the smallest fix that answers the reviewer directly.\n");
+    out.push_str("- Validation must name the actual command, test, or manual behavior to check.\n");
+    out.push_str("- Only propose a Kit upgrade if it is reusable across future PRs.\n");
+    out.push_str("- If the issue is product-specific and not reusable, say so explicitly.\n");
+    out.push_str("- Keep review-rules.md updates separate from AGENTS.md updates and separate from deterministic rule proposals.\n");
+    out.push_str("- Use the existing Local Verdict / Narrow Fix / Validation / Prevention Candidate notes in the block as priors if they are already good. Improve them only when needed.\n\n");
+    out.push_str("Return sections:\n");
+    out.push_str("- Verdict\n");
+    out.push_str("- Smallest Fix\n");
+    out.push_str("- Validation\n");
+    out.push_str("- Kit Upgrade\n");
+    out.push_str("```\n\n");
+    out.push_str("## Required Output Sections\n\n");
+    out.push_str("- `Verdict`\n");
+    out.push_str("- `Smallest Fix`\n");
+    out.push_str("- `Validation`\n");
+    out.push_str("- `Kit Upgrade`\n\n");
+    out.push_str("## Kit Upgrade Decision Order\n\n");
+    out.push_str("1. `review-rules.md` update in `");
+    out.push_str(&canonical_rules_path.display().to_string());
+    out.push_str("`\n");
+    out.push_str(
+        "2. `AGENTS.md` update in `/Users/nikitavoloboev/repos/mark3labs/kit/AGENTS.md`\n",
+    );
+    out.push_str("3. deterministic Kit review rule\n");
+    out.push_str("4. review extension / richer review packet\n");
+    out.push_str("5. no Kit change\n\n");
+    out.push_str("## Suggested Failure Modes\n\n");
+    out.push_str("- `wrong-fix-root-cause`\n");
+    out.push_str("- `unclear-extraction-intent`\n");
+    out.push_str("- `over-generic-abstraction`\n");
+    out.push_str("- `behavior-regression-risk`\n");
+    out.push_str("- `code-shape-needs-refactor`\n");
+
+    fs::write(&path, out).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn write_pr_feedback_kit_system_prompt_at(
+    plan_root: &Path,
+    snapshot: &PrFeedbackSnapshot,
+    markdown_snapshot_path: &Path,
+    json_snapshot_path: &Path,
+    review_plan_path: &Path,
+) -> Result<PathBuf> {
+    let path = pr_feedback_kit_system_path_at(plan_root, &snapshot.repo, snapshot.pr_number);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut out = String::new();
+    out.push_str("# Kit PR Feedback Prevention System Prompt\n\n");
+    out.push_str("You are a strict repository review engineer. Study the attached PR feedback artifacts and design concrete guardrails so the same issues are caught before review next time.\n\n");
+    out.push_str("Priorities:\n");
+    out.push_str("1. Prefer deterministic prevention first: lint rules, diff rules, static checks, tests, review presets, or build-time assertions.\n");
+    out.push_str("2. Only propose agentic or extension-based review hooks when deterministic checks are insufficient.\n");
+    out.push_str("3. Tie every recommendation to exact files, commands, hook points, or review entrypoints.\n");
+    out.push_str("4. Do not restate reviewer comments. Explain root cause, prevention, and rollout cost.\n\n");
+    out.push_str("Attached artifacts:\n");
+    out.push_str("- Feedback snapshot markdown: `");
+    out.push_str(&markdown_snapshot_path.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Feedback snapshot json: `");
+    out.push_str(&json_snapshot_path.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Human review plan: `");
+    out.push_str(&review_plan_path.display().to_string());
+    out.push_str("`\n\n");
+    out.push_str("Expected output:\n");
+    out.push_str("## Root Causes\n");
+    out.push_str("- Group the feedback into a few structural failure modes.\n\n");
+    out.push_str("## Preventative Checks\n");
+    out.push_str("- For each failure mode, propose the smallest deterministic check that would have caught it.\n");
+    out.push_str("- Name the likely implementation target for each check.\n\n");
+    out.push_str("## Kit Review Bot Hooks\n");
+    out.push_str("- Only include hooks that add real signal beyond deterministic checks.\n");
+    out.push_str("- Describe the exact extension or review entrypoint to use.\n\n");
+    out.push_str("## Rollout\n");
+    out.push_str("- Order work from highest-signal/lowest-cost to lower-priority improvements.\n");
+    out.push_str("- Include validation steps for each added guardrail.\n");
+
+    fs::write(&path, out).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn write_pr_feedback_review_plan_at(
+    plan_root: &Path,
+    workspace_root: &Path,
+    snapshot: &PrFeedbackSnapshot,
+    markdown_snapshot_path: &Path,
+    json_snapshot_path: &Path,
+) -> Result<PathBuf> {
+    let path = pr_feedback_review_plan_path_at(plan_root, &snapshot.repo, snapshot.pr_number);
+    let review_rules_path =
+        pr_feedback_review_rules_path_at(plan_root, &snapshot.repo, snapshot.pr_number);
+    let kit_system_path =
+        pr_feedback_kit_system_path_at(plan_root, &snapshot.repo, snapshot.pr_number);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut out = String::new();
+    out.push_str("# [");
+    out.push_str(&snapshot.pr_title);
+    out.push_str("](");
+    out.push_str(&snapshot.pr_url);
+    out.push_str(")\n\n");
+    out.push_str("- Repo: `");
+    out.push_str(&snapshot.repo);
+    out.push_str("`\n");
+    out.push_str("- PR: #");
+    out.push_str(&snapshot.pr_number.to_string());
+    out.push('\n');
+    out.push_str("- URL: ");
+    out.push_str(&snapshot.pr_url);
+    out.push('\n');
+    out.push_str("- Workspace: `");
+    out.push_str(&workspace_root.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Generated: ");
+    out.push_str(&snapshot.generated_at);
+    out.push('\n');
+    out.push_str("- Snapshot (markdown): `");
+    out.push_str(&markdown_snapshot_path.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Snapshot (json): `");
+    out.push_str(&json_snapshot_path.display().to_string());
+    out.push_str("`\n");
+    out.push_str("- Review rules: `");
+    out.push_str(&review_rules_path.display().to_string());
+    out.push_str("`\n\n");
+    out.push_str("## Cursor Review\n\n");
+    out.push_str("Reopen the workspace and review artifacts together:\n\n```bash\n");
+    out.push_str(&cursor_review_open_command(&snapshot.pr_url, true, true));
+    out.push_str("\n```\n\n");
+    out.push_str("Keep these visible while resolving comments:\n");
+    out.push_str("- the repo checkout / JJ workspace\n");
+    out.push_str("- the generated review-rules artifact\n");
+    out.push_str("- this feedback plan\n");
+    out.push_str("- the current file diff\n");
+    out.push_str("- the Kit system prompt for later prevention work\n\n");
+    out.push_str("## Kit Commands\n\n");
+    out.push_str("Deterministic review gate:\n\n```bash\n");
+    out.push_str(
+        "kit review --dir . --base origin/main --feedback-auto --preset designer --json\n",
+    );
+    out.push_str("```\n\n");
+    out.push_str("Preventative rule synthesis from this feedback set:\n\n```bash\n");
+    out.push_str("kit --system-prompt ");
+    out.push_str(&kit_system_path.display().to_string());
+    out.push_str(" @");
+    out.push_str(&json_snapshot_path.display().to_string());
+    out.push_str(" @");
+    out.push_str(&path.display().to_string());
+    out.push_str(" \"Design preventative review and lint rules for this feedback set.\" --json\n");
+    out.push_str("```\n\n");
+
+    let unique_files: Vec<String> = {
+        let mut seen = HashSet::new();
+        snapshot
+            .items
+            .iter()
+            .filter_map(|item| item.path.as_ref())
+            .filter(|path| seen.insert((*path).clone()))
+            .take(8)
+            .cloned()
+            .collect()
+    };
+
+    out.push_str("## Summary\n\n");
+    out.push_str("- Actionable items: ");
+    out.push_str(&snapshot.items.len().to_string());
+    out.push('\n');
+    if !unique_files.is_empty() {
+        out.push_str("- Main files: ");
+        out.push_str(
+            &unique_files
+                .iter()
+                .map(|path| format!("`{path}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push('\n');
+    }
+    out.push_str("- Review states: ");
+    let mut review_states: Vec<(String, usize)> = snapshot
+        .review_state_counts
+        .iter()
+        .map(|(state, count)| (state.clone(), *count))
+        .collect();
+    review_states.sort_by(|a, b| a.0.cmp(&b.0));
+    if review_states.is_empty() {
+        out.push_str("none");
+    } else {
+        out.push_str(
+            &review_states
+                .into_iter()
+                .map(|(state, count)| format!("{state}:{count}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    out.push_str("\n\n");
+
+    for (idx, item) in snapshot.items.iter().enumerate() {
+        out.push_str("## Item ");
+        out.push_str(&(idx + 1).to_string());
+        out.push_str(": ");
+        out.push_str(
+            &feedback_location_label(item)
+                .or_else(|| item.path.clone())
+                .unwrap_or_else(|| format!("{} feedback", item.source)),
+        );
+        out.push_str("\n\n");
+
+        out.push_str("### Reviewer Feedback\n\n");
+        out.push_str("- Source: `");
+        out.push_str(item.source);
+        out.push_str("`\n");
+        out.push_str("- Author: `");
+        out.push_str(&item.author);
+        out.push_str("`\n");
+        if let Some(state) = feedback_review_state_label(item) {
+            out.push_str("- Review state: `");
+            out.push_str(&state);
+            out.push_str("`\n");
+        }
+        if let Some(location) = feedback_location_label(item) {
+            out.push_str("- Location: `");
+            out.push_str(&location);
+            out.push_str("`\n");
+        }
+        out.push_str("- URL: ");
+        out.push_str(&item.url);
+        out.push_str("\n\n");
+        out.push_str(item.body.trim());
+        out.push_str("\n\n");
+
+        if let Some(diff_hunk) = item
+            .diff_hunk
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            out.push_str("### Diff Hunk\n\n```diff\n");
+            out.push_str(&compact_diff_hunk(diff_hunk, 24, 1200));
+            out.push_str("\n```\n\n");
+        }
+
+        out.push_str("### Local Verdict\n\n");
+        out.push_str("- reviewer right / partially right / wrong\n");
+        out.push_str("- explain the real root cause before patching\n\n");
+        out.push_str("### Narrow Fix\n\n");
+        out.push_str("- describe the smallest acceptable code change\n");
+        out.push_str("- name the exact files and call sites to touch\n\n");
+        out.push_str("### Validation\n\n");
+        out.push_str("- run the smallest relevant test, lint, or manual repro\n");
+        out.push_str("- confirm the old behavior did not regress\n\n");
+        out.push_str("### Prevention Candidate\n\n");
+        out.push_str("- deterministic lint / diff rule / review heuristic / product test\n");
+        out.push_str("- if no durable prevention exists, say so explicitly\n\n");
+        out.push_str("### Status\n\n");
+        out.push_str("- [ ] open\n");
+        out.push_str("- [ ] patched\n");
+        out.push_str("- [ ] validated\n");
+        out.push_str("- [ ] prevention-captured\n\n");
+    }
+
+    out.push_str("## Kit Input\n\n```json\n");
+    out.push_str(
+        &serde_json::to_string_pretty(snapshot).context("failed to render kit input JSON")?,
+    );
+    out.push_str("\n```\n");
+
+    fs::write(&path, out).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn load_pr_feedback_data(repo_root: &Path, selector: Option<&str>) -> Result<LoadedPrFeedback> {
+    let (repo, pr_number, pr_url) = if let Some(selector) = selector {
         if let Some((repo, pr_number)) = parse_github_pr_url(selector) {
             let pr_url = format!("https://github.com/{repo}/pull/{pr_number}");
             (repo, pr_number, pr_url)
@@ -10095,6 +10770,24 @@ fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
     let reviews_endpoint = format!("repos/{repo}/pulls/{pr_number}/reviews?per_page=100");
     let review_comments_endpoint = format!("repos/{repo}/pulls/{pr_number}/comments?per_page=100");
     let issue_comments_endpoint = format!("repos/{repo}/issues/{pr_number}/comments?per_page=100");
+    let pr_title = gh_capture_in(
+        repo_root,
+        &[
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--repo",
+            &repo,
+            "--json",
+            "title",
+        ],
+    )
+    .and_then(|out| {
+        serde_json::from_str::<GhPrTitleSummary>(out.trim())
+            .map(|parsed| parsed.title)
+            .context("failed to parse gh pr view title JSON")
+    })
+    .unwrap_or_else(|_| format!("PR #{}", pr_number));
 
     let reviews: Vec<GhReview> = gh_api_json_in(repo_root, &reviews_endpoint)?;
     let review_comments: Vec<GhPrReviewComment> =
@@ -10118,6 +10811,8 @@ fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
             url: comment.html_url.trim().to_string(),
             path: comment.path.clone(),
             line: comment.line,
+            review_state: None,
+            diff_hunk: comment.diff_hunk.clone(),
         });
     }
     for comment in &issue_comments {
@@ -10133,6 +10828,8 @@ fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
             url: comment.html_url.trim().to_string(),
             path: None,
             line: None,
+            review_state: None,
+            diff_hunk: None,
         });
     }
     for review in &reviews {
@@ -10148,8 +10845,199 @@ fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
             url: review.html_url.trim().to_string(),
             path: None,
             line: None,
+            review_state: Some(review.state.trim().to_string()),
+            diff_hunk: None,
         });
     }
+
+    Ok(LoadedPrFeedback {
+        repo,
+        pr_number,
+        pr_url,
+        pr_title,
+        reviews,
+        review_comments,
+        issue_comments,
+        items,
+    })
+}
+
+fn build_pr_feedback_snapshot(data: &LoadedPrFeedback) -> PrFeedbackSnapshot {
+    PrFeedbackSnapshot {
+        repo: data.repo.clone(),
+        pr_number: data.pr_number,
+        pr_url: data.pr_url.clone(),
+        pr_title: data.pr_title.clone(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        reviews_count: data.reviews.len(),
+        review_comments_count: data.review_comments.len(),
+        issue_comments_count: data.issue_comments.len(),
+        review_state_counts: review_state_counts_map(&data.reviews),
+        items: data.items.clone(),
+    }
+}
+
+fn write_pr_feedback_artifacts(
+    repo_root: &Path,
+    data: &LoadedPrFeedback,
+) -> Result<(PrFeedbackSnapshot, PrFeedbackArtifacts)> {
+    let snapshot_path = write_pr_feedback_snapshot(
+        repo_root,
+        &data.repo,
+        data.pr_number,
+        &data.pr_url,
+        &data.items,
+    )?;
+    let snapshot = build_pr_feedback_snapshot(data);
+    let snapshot_json_path = pr_feedback_snapshot_json_path(repo_root, data.pr_number)?;
+    write_pr_feedback_snapshot_json(&snapshot, &snapshot_json_path)?;
+    let review_plan_path =
+        write_pr_feedback_review_plan(repo_root, &snapshot, &snapshot_path, &snapshot_json_path)?;
+    let kit_system_path = write_pr_feedback_kit_system_prompt(
+        &snapshot,
+        &snapshot_path,
+        &snapshot_json_path,
+        &review_plan_path,
+    )?;
+    let review_rules_path = write_pr_feedback_review_rules(
+        repo_root,
+        &snapshot,
+        &snapshot_path,
+        &snapshot_json_path,
+        &review_plan_path,
+        &kit_system_path,
+    )?;
+    Ok((
+        snapshot,
+        PrFeedbackArtifacts {
+            snapshot_path,
+            snapshot_json_path,
+            review_plan_path,
+            review_rules_path,
+            kit_system_path,
+        },
+    ))
+}
+
+fn render_pr_feedback_reference(
+    workspace_root: &Path,
+    snapshot: &PrFeedbackSnapshot,
+    artifacts: &PrFeedbackArtifacts,
+) -> String {
+    let mut out = String::new();
+    out.push_str("[pr-feedback]\n");
+    out.push_str("Workspace: ");
+    out.push_str(&workspace_root.display().to_string());
+    out.push('\n');
+    out.push_str("PR feedback: ");
+    out.push_str(&snapshot.repo);
+    out.push('#');
+    out.push_str(&snapshot.pr_number.to_string());
+    out.push('\n');
+    out.push_str("URL: ");
+    out.push_str(&snapshot.pr_url);
+    out.push('\n');
+    out.push_str("Review plan: ");
+    out.push_str(&artifacts.review_plan_path.display().to_string());
+    out.push('\n');
+    out.push_str("Review rules: ");
+    out.push_str(&artifacts.review_rules_path.display().to_string());
+    out.push('\n');
+    out.push_str("Kit system prompt: ");
+    out.push_str(&artifacts.kit_system_path.display().to_string());
+    out.push('\n');
+    out.push_str("Cursor reopen: ");
+    out.push_str(&cursor_review_open_command(&snapshot.pr_url, true, true));
+    out.push_str("\n\n");
+    out.push_str("Summary:\n");
+    out.push_str("- Actionable items: ");
+    out.push_str(&snapshot.items.len().to_string());
+    out.push('\n');
+    let mut review_states: Vec<(String, usize)> = snapshot
+        .review_state_counts
+        .iter()
+        .map(|(state, count)| (state.clone(), *count))
+        .collect();
+    review_states.sort_by(|a, b| a.0.cmp(&b.0));
+    out.push_str("- Review states: ");
+    if review_states.is_empty() {
+        out.push_str("none");
+    } else {
+        out.push_str(
+            &review_states
+                .into_iter()
+                .map(|(state, count)| format!("{state}:{count}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    out.push_str("\n\nTop feedback items:\n");
+    for (idx, item) in snapshot.items.iter().take(6).enumerate() {
+        out.push_str(&(idx + 1).to_string());
+        out.push_str(". ");
+        if let Some(location) = feedback_location_label(item) {
+            out.push_str(&location);
+            out.push_str(" - ");
+        }
+        out.push_str(&compact_single_line(&item.body, 140));
+        out.push('\n');
+        if let Some(diff_hunk) = item
+            .diff_hunk
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            out.push_str("   diff:\n");
+            for line in compact_diff_hunk(diff_hunk, 8, 500).lines() {
+                out.push_str("     ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str("\nPlan excerpt:\n");
+    if let Ok(body) = fs::read_to_string(&artifacts.review_plan_path) {
+        out.push_str(&compact_pr_feedback_context_block(&body, 40, 2400));
+    } else {
+        out.push_str("- Unable to read generated review plan.");
+    }
+    out
+}
+
+pub fn resolve_pr_feedback_reference(repo_root: &Path, selector: &str) -> Result<String> {
+    ensure_gh_available()?;
+    let data = load_pr_feedback_data(repo_root, Some(selector))?;
+    let (snapshot, artifacts) = write_pr_feedback_artifacts(repo_root, &data)?;
+    Ok(render_pr_feedback_reference(
+        repo_root, &snapshot, &artifacts,
+    ))
+}
+
+fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
+    ensure_gh_available()?;
+
+    if let Some(selector) = cmd.selector.as_deref() {
+        if selector == "--help" || selector == "-h" {
+            println!("Usage: f pr feedback [<pr-number|pr-url>] [--todo] [--compact] [--cursor]");
+            println!("Examples:");
+            println!("  f pr feedback");
+            println!("  f pr feedback 8");
+            println!("  f pr feedback https://github.com/owner/repo/pull/8 --todo");
+            println!("  f pr feedback 8");
+            println!("  f pr feedback 8 --compact");
+            println!("  f pr feedback 8 --compact --cursor");
+            return Ok(());
+        }
+    }
+
+    let data = load_pr_feedback_data(repo_root, cmd.selector.as_deref())?;
+    let repo = data.repo.clone();
+    let pr_number = data.pr_number;
+    let pr_url = data.pr_url.clone();
+    let reviews = &data.reviews;
+    let review_comments = &data.review_comments;
+    let issue_comments = &data.issue_comments;
+    let items = &data.items;
 
     println!("PR feedback: {repo}#{pr_number}");
     println!("URL: {pr_url}");
@@ -10161,8 +11049,26 @@ fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
     println!("Review comments: {}", review_comments.len());
     println!("Issue comments: {}", issue_comments.len());
 
-    let snapshot_path = write_pr_feedback_snapshot(repo_root, &repo, pr_number, &pr_url, &items)?;
-    println!("Snapshot: {}", snapshot_path.display());
+    let (_snapshot, artifacts) = write_pr_feedback_artifacts(repo_root, &data)?;
+    println!("Snapshot: {}", artifacts.snapshot_path.display());
+    println!("Snapshot JSON: {}", artifacts.snapshot_json_path.display());
+    println!("Review plan: {}", artifacts.review_plan_path.display());
+    println!("Review rules: {}", artifacts.review_rules_path.display());
+    println!("Kit system prompt: {}", artifacts.kit_system_path.display());
+    println!(
+        "Cursor reopen: {}",
+        cursor_review_open_command(&pr_url, true, true)
+    );
+    if cmd.open_cursor {
+        open_cursor_review_bundle(
+            repo_root,
+            &artifacts.review_plan_path,
+            &artifacts.review_rules_path,
+            &artifacts.kit_system_path,
+            true,
+        )?;
+        println!("Cursor: opened workspace + review artifacts");
+    }
 
     if items.is_empty() {
         println!("No actionable text feedback found.");
@@ -10179,6 +11085,22 @@ fn run_pr_feedback(repo_root: &Path, cmd: PrFeedbackCommand) -> Result<()> {
             println!("{}. [{}] {}", idx + 1, item.source, preview);
         }
         println!("   by {}  {}", item.author, item.url);
+        if cmd.show_full {
+            if let Some(state) = feedback_review_state_label(item) {
+                println!("   state: {}", state);
+            }
+            if let Some(diff_hunk) = item
+                .diff_hunk
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                println!("   diff:");
+                for line in compact_diff_hunk(diff_hunk, 16, 900).lines() {
+                    println!("     {}", line);
+                }
+            }
+        }
     }
 
     if cmd.record_todos {
@@ -14778,5 +15700,219 @@ mod tests {
         assert!(ctx.contains("Flow: CLI tool"));
         assert!(ctx.contains("web/app.tsx"));
         assert!(ctx.contains("Forbidden pattern"));
+    }
+
+    #[test]
+    fn parse_pr_feedback_args_accepts_full_flag() {
+        let parsed = parse_pr_feedback_args(&[
+            "feedback".to_string(),
+            "2922".to_string(),
+            "--full".to_string(),
+        ])
+        .expect("parse")
+        .expect("command");
+
+        assert_eq!(parsed.selector.as_deref(), Some("2922"));
+        assert!(parsed.show_full);
+        assert!(!parsed.record_todos);
+        assert!(!parsed.open_cursor);
+    }
+
+    #[test]
+    fn parse_pr_feedback_args_defaults_to_full_output() {
+        let parsed = parse_pr_feedback_args(&["feedback".to_string(), "2922".to_string()])
+            .expect("parse")
+            .expect("command");
+
+        assert_eq!(parsed.selector.as_deref(), Some("2922"));
+        assert!(parsed.show_full);
+        assert!(!parsed.open_cursor);
+    }
+
+    #[test]
+    fn parse_pr_feedback_args_accepts_compact_flag() {
+        let parsed = parse_pr_feedback_args(&[
+            "feedback".to_string(),
+            "2922".to_string(),
+            "--compact".to_string(),
+        ])
+        .expect("parse")
+        .expect("command");
+
+        assert_eq!(parsed.selector.as_deref(), Some("2922"));
+        assert!(!parsed.show_full);
+        assert!(!parsed.open_cursor);
+    }
+
+    #[test]
+    fn parse_pr_feedback_args_accepts_cursor_flag() {
+        let parsed = parse_pr_feedback_args(&[
+            "feedback".to_string(),
+            "2922".to_string(),
+            "--cursor".to_string(),
+        ])
+        .expect("parse")
+        .expect("command");
+
+        assert_eq!(parsed.selector.as_deref(), Some("2922"));
+        assert!(parsed.open_cursor);
+    }
+
+    #[test]
+    fn write_pr_feedback_review_plan_includes_snapshot_and_kit_input() {
+        let temp = tempdir().expect("tempdir");
+        let snapshot_path = temp.path().join(".ai/reviews/pr-feedback-2922.md");
+        let json_path = temp.path().join(".ai/reviews/pr-feedback-2922.json");
+        fs::create_dir_all(snapshot_path.parent().expect("snapshot parent")).expect("mkdirs");
+        fs::write(&snapshot_path, "# snapshot\n").expect("write snapshot");
+        fs::write(&json_path, "{}\n").expect("write json snapshot");
+
+        let snapshot = PrFeedbackSnapshot {
+            repo: "example-org/example-repo".to_string(),
+            pr_number: 2922,
+            pr_url: "https://github.com/example-org/example-repo/pull/2922".to_string(),
+            pr_title: "feat(designer): add build123d Python live viewer".to_string(),
+            generated_at: "2026-03-17T15:00:00Z".to_string(),
+            reviews_count: 1,
+            review_comments_count: 1,
+            issue_comments_count: 0,
+            review_state_counts: HashMap::from([("CHANGES_REQUESTED".to_string(), 1usize)]),
+            items: vec![PrFeedbackItem {
+                external_ref: "ref".to_string(),
+                source: "review-comment",
+                author: "reviewer".to_string(),
+                body: "Please move this logic.".to_string(),
+                url: "https://github.com/example".to_string(),
+                path: Some("src/file.ts".to_string()),
+                line: Some(42),
+                review_state: None,
+                diff_hunk: Some("@@ -1,2 +1,2 @@\n-old\n+new".to_string()),
+            }],
+        };
+
+        let plan_root = temp.path().join("review-plans");
+        fs::create_dir_all(&plan_root).expect("plan root");
+        let plan_path = write_pr_feedback_review_plan_at(
+            &plan_root,
+            temp.path(),
+            &snapshot,
+            &snapshot_path,
+            &json_path,
+        )
+        .expect("write plan");
+        let body = fs::read_to_string(&plan_path).expect("read plan");
+        assert!(body.contains("# [feat(designer): add build123d Python live viewer](https://github.com/example-org/example-repo/pull/2922)"));
+        assert!(body.contains("## Cursor Review"));
+        assert!(body.contains("Snapshot (markdown):"));
+        assert!(body.contains("## Kit Commands"));
+        assert!(body.contains("--feedback-auto --preset designer"));
+        assert!(body.contains(
+            "f pr feedback https://github.com/example-org/example-repo/pull/2922 --compact --cursor"
+        ));
+        assert!(body.contains("### Diff Hunk"));
+        assert!(body.contains("### Status"));
+        assert!(body.contains("## Kit Input"));
+        assert!(plan_path.ends_with("example-org-example-repo-pr-2922-feedback.md"));
+    }
+
+    #[test]
+    fn write_pr_feedback_review_rules_mentions_artifacts() {
+        let temp = tempdir().expect("tempdir");
+        let snapshot_path = temp.path().join(".ai/reviews/pr-feedback-2922.md");
+        let json_path = temp.path().join(".ai/reviews/pr-feedback-2922.json");
+        let review_plan_path = temp
+            .path()
+            .join("review/example-org-example-repo-pr-2922-feedback.md");
+        let kit_system_path = temp
+            .path()
+            .join("review/example-org-example-repo-pr-2922-kit-system.md");
+        fs::create_dir_all(snapshot_path.parent().expect("snapshot parent")).expect("mkdirs");
+        fs::create_dir_all(review_plan_path.parent().expect("review plan parent")).expect("mkdirs");
+        fs::write(&snapshot_path, "# snapshot\n").expect("write snapshot");
+        fs::write(&json_path, "{}\n").expect("write json snapshot");
+        fs::write(&review_plan_path, "# plan\n").expect("write review plan");
+        fs::write(&kit_system_path, "# kit\n").expect("write kit prompt");
+
+        let snapshot = PrFeedbackSnapshot {
+            repo: "example-org/example-repo".to_string(),
+            pr_number: 2922,
+            pr_url: "https://github.com/example-org/example-repo/pull/2922".to_string(),
+            pr_title: "feat(designer): add build123d Python live viewer".to_string(),
+            generated_at: "2026-03-17T15:00:00Z".to_string(),
+            reviews_count: 1,
+            review_comments_count: 1,
+            issue_comments_count: 0,
+            review_state_counts: HashMap::from([("CHANGES_REQUESTED".to_string(), 1usize)]),
+            items: vec![],
+        };
+
+        let plan_root = temp.path().join("review-plans");
+        fs::create_dir_all(&plan_root).expect("plan root");
+        let review_rules_path = write_pr_feedback_review_rules_at(
+            &plan_root,
+            temp.path(),
+            &snapshot,
+            &snapshot_path,
+            &json_path,
+            &review_plan_path,
+            &kit_system_path,
+        )
+        .expect("write review rules");
+        let body = fs::read_to_string(&review_rules_path).expect("read review rules");
+        assert!(
+            body.contains("Generated operator artifact for resolving PR feedback item by item")
+        );
+        assert!(body.contains(&snapshot_path.display().to_string()));
+        assert!(body.contains(&json_path.display().to_string()));
+        assert!(body.contains(&review_plan_path.display().to_string()));
+        assert!(body.contains(&kit_system_path.display().to_string()));
+        assert!(body.contains("## One-Item Loop"));
+        assert!(body.contains("## Prompt Template"));
+        assert!(review_rules_path.ends_with("example-org-example-repo-pr-2922-review-rules.md"));
+    }
+
+    #[test]
+    fn write_pr_feedback_kit_system_prompt_mentions_artifacts() {
+        let temp = tempdir().expect("tempdir");
+        let snapshot_path = temp.path().join(".ai/reviews/pr-feedback-2922.md");
+        let json_path = temp.path().join(".ai/reviews/pr-feedback-2922.json");
+        let review_plan_path = temp
+            .path()
+            .join("review/example-org-example-repo-pr-2922-feedback.md");
+        fs::create_dir_all(snapshot_path.parent().expect("snapshot parent")).expect("mkdirs");
+        fs::create_dir_all(review_plan_path.parent().expect("review plan parent")).expect("mkdirs");
+        fs::write(&snapshot_path, "# snapshot\n").expect("write snapshot");
+        fs::write(&json_path, "{}\n").expect("write json snapshot");
+        fs::write(&review_plan_path, "# plan\n").expect("write review plan");
+
+        let snapshot = PrFeedbackSnapshot {
+            repo: "example-org/example-repo".to_string(),
+            pr_number: 2922,
+            pr_url: "https://github.com/example-org/example-repo/pull/2922".to_string(),
+            pr_title: "feat(designer): add build123d Python live viewer".to_string(),
+            generated_at: "2026-03-17T15:00:00Z".to_string(),
+            reviews_count: 1,
+            review_comments_count: 1,
+            issue_comments_count: 0,
+            review_state_counts: HashMap::from([("CHANGES_REQUESTED".to_string(), 1usize)]),
+            items: vec![],
+        };
+
+        let plan_root = temp.path().join("review-plans");
+        fs::create_dir_all(&plan_root).expect("plan root");
+        let kit_system_path = write_pr_feedback_kit_system_prompt_at(
+            &plan_root,
+            &snapshot,
+            &snapshot_path,
+            &json_path,
+            &review_plan_path,
+        )
+        .expect("write kit prompt");
+        let body = fs::read_to_string(&kit_system_path).expect("read kit prompt");
+        assert!(body.contains("Kit PR Feedback Prevention System Prompt"));
+        assert!(body.contains(&snapshot_path.display().to_string()));
+        assert!(body.contains(&json_path.display().to_string()));
+        assert!(body.contains(&review_plan_path.display().to_string()));
+        assert!(kit_system_path.ends_with("example-org-example-repo-pr-2922-kit-system.md"));
     }
 }

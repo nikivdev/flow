@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use axum::{
     Router,
-    extract::{Path as AxumPath, Query, State},
+    extract::{Json as AxumJson, Path as AxumPath, Query, State},
     http::{Method, StatusCode},
     response::{
         IntoResponse, Json,
@@ -26,7 +26,7 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::cli::{ServerAction, ServerOpts};
 use crate::log_store::{self, LogEntry, LogQuery};
 use crate::pr_edit::PrEditService;
-use crate::{ai, config, daemon_snapshot, explain_commits, projects};
+use crate::{ai, config, daemon_snapshot, explain_commits, projects, skills, workflow};
 
 #[derive(Clone)]
 struct AppState {
@@ -139,6 +139,9 @@ fn run_foreground(host: &str, port: u16) -> Result<()> {
         let router = Router::new()
             .route("/health", get(health))
             .route("/codex/skills", get(codex_skills))
+            .route("/codex/resolve", post(codex_resolve))
+            .route("/codex/skills/sync", post(codex_skills_sync))
+            .route("/codex/skills/reload", post(codex_skills_reload))
             .route("/daemons", get(daemons))
             .route("/daemons/{name}/start", post(daemon_start))
             .route("/daemons/{name}/stop", post(daemon_stop))
@@ -152,6 +155,7 @@ fn run_foreground(host: &str, port: u16) -> Result<()> {
             .route("/projects", get(projects_list_all))
             .route("/projects/{name}/sessions", get(project_sessions))
             .route("/sessions/{id}", get(session_detail))
+            .route("/workflow/overview", get(workflow_overview))
             .route(
                 "/projects/{name}/commit-explanations",
                 get(project_commit_explanations),
@@ -262,6 +266,31 @@ struct CodexSkillsQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexSkillsSyncRequest {
+    path: Option<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexSkillsReloadRequest {
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexResolveRequest {
+    path: Option<String>,
+    query: String,
+    #[serde(default)]
+    exact_cwd: bool,
+}
+
 fn resolve_codex_skills_target(path: Option<&str>) -> PathBuf {
     let candidate = path
         .map(config::expand_path)
@@ -293,6 +322,81 @@ async fn codex_skills(Query(query): Query<CodexSkillsQuery>) -> impl IntoRespons
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("codex skills task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_resolve(AxumJson(payload): AxumJson<CodexResolveRequest>) -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        ai::codex_resolve_inspector(payload.path, payload.query, payload.exact_cwd)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex resolve task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_skills_sync(AxumJson(payload): AxumJson<CodexSkillsSyncRequest>) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(payload.path.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        let installed = ai::codex_skill_source_sync(&target_path, &payload.skills, payload.force)?;
+        Ok::<_, anyhow::Error>(json!({
+            "targetPath": target_path.display().to_string(),
+            "installed": installed,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex skills sync task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_skills_reload(
+    AxumJson(payload): AxumJson<CodexSkillsReloadRequest>,
+) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(payload.path.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        let reloaded = skills::reload_codex_skills_for_cwd(&target_path)?;
+        Ok::<_, anyhow::Error>(json!({
+            "targetPath": target_path.display().to_string(),
+            "reloaded": reloaded,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex skills reload task failed: {err}") })),
         )
             .into_response(),
     }
@@ -506,6 +610,24 @@ async fn project_sessions(AxumPath(name): AxumPath<String>) -> impl IntoResponse
             };
             (status, Json(json!({ "error": err.to_string() }))).into_response()
         }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /workflow/overview - List repo/workspace/branch/PR workflow state for registered projects.
+async fn workflow_overview() -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(workflow::load_workflow_overview).await;
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": err.to_string() })),

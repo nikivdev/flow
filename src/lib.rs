@@ -1,3 +1,4 @@
+pub mod activity_log;
 pub mod agent_setup;
 pub mod agents;
 pub mod ai;
