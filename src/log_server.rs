@@ -139,6 +139,7 @@ fn run_foreground(host: &str, port: u16) -> Result<()> {
         let router = Router::new()
             .route("/health", get(health))
             .route("/codex/skills", get(codex_skills))
+            .route("/codex/eval", get(codex_eval))
             .route("/codex/resolve", post(codex_resolve))
             .route("/codex/skills/sync", post(codex_skills_sync))
             .route("/codex/skills/reload", post(codex_skills_reload))
@@ -267,6 +268,12 @@ struct CodexSkillsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct CodexEvalQuery {
+    path: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodexSkillsSyncRequest {
     path: Option<String>,
@@ -322,6 +329,27 @@ async fn codex_skills(Query(query): Query<CodexSkillsQuery>) -> impl IntoRespons
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("codex skills task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_eval(Query(query): Query<CodexEvalQuery>) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(query.path.as_deref());
+    let limit = query.limit.unwrap_or(200).clamp(20, 1000);
+    let result = tokio::task::spawn_blocking(move || ai::codex_eval_snapshot(&target_path, limit))
+        .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex eval task failed: {err}") })),
         )
             .into_response(),
     }

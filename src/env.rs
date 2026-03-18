@@ -1186,11 +1186,24 @@ pub fn fetch_local_personal_env_vars(keys: &[String]) -> Result<HashMap<String, 
         return Ok(vars);
     }
     let mut filtered = HashMap::new();
+    let mut missing = Vec::new();
     for key in keys {
         if let Some(value) = vars.get(key) {
             filtered.insert(key.clone(), value.clone());
+        } else {
+            missing.push(key.clone());
         }
     }
+
+    if !missing.is_empty() && local_personal_keychain_supported(&target) {
+        require_env_read_unlock()?;
+        for key in missing {
+            if let Some(value) = get_local_keychain_env_var(&target, "production", &key)? {
+                filtered.insert(key, value);
+            }
+        }
+    }
+
     Ok(filtered)
 }
 
@@ -2251,19 +2264,26 @@ pub(crate) fn delete_personal_env_vars(keys: &[String]) -> Result<()> {
     }
 
     let auth = load_auth_config()?;
-    let token = auth
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run `f env login` first."))?;
-
     if keys.is_empty() {
         bail!("No keys specified");
     }
 
+    let target = resolve_personal_target()?;
+    let token = match auth.token.as_ref() {
+        Some(token) => token,
+        None => {
+            let path = delete_local_env_vars(&target, "production", keys)?;
+            println!(
+                "✓ Deleted {} key(s) from personal envs (stored at {})",
+                keys.len(),
+                path.display()
+            );
+            return Ok(());
+        }
+    };
+
     let api_url = get_api_url(&auth);
     let client = crate::http_client::blocking_with_timeout(std::time::Duration::from_secs(30))?;
-
-    let target = resolve_personal_target()?;
     let mut url = Url::parse(&format!("{}/api/env/personal", api_url))?;
     if let EnvTarget::Personal { ref space } = target {
         if let Some(space) = space.as_ref() {
@@ -3063,10 +3083,6 @@ fn show_keys() -> Result<()> {
     let flow_path = find_flow_toml(&cwd)
         .ok_or_else(|| anyhow::anyhow!("flow.toml not found. Run `f init` first."))?;
     let cfg = config::load(&flow_path)?;
-    let cf_cfg = cfg
-        .cloudflare
-        .as_ref()
-        .context("No [cloudflare] section in flow.toml")?;
 
     let label = resolve_env_target()
         .map(|target| env_target_label(&target))
@@ -3076,75 +3092,114 @@ fn show_keys() -> Result<()> {
                 .unwrap_or_else(|| "unknown".to_string())
         });
 
-    println!("Env keys for {}", label);
-    println!("─────────────────────────────");
-    if let Some(source) = cf_cfg.env_source.as_deref() {
-        println!("Source: {}", source);
-    }
-    if let Some(environment) = cf_cfg.environment.as_deref() {
-        println!("Environment: {}", environment);
-    }
-    if let Some(apply) = cf_cfg.env_apply.as_deref() {
-        println!("Apply: {}", apply);
-    }
-    println!();
+    if let Some(cf_cfg) = cfg.cloudflare.as_ref() {
+        println!("Env keys for {}", label);
+        println!("─────────────────────────────");
+        if let Some(source) = cf_cfg.env_source.as_deref() {
+            println!("Source: {}", source);
+        }
+        if let Some(environment) = cf_cfg.environment.as_deref() {
+            println!("Environment: {}", environment);
+        }
+        if let Some(apply) = cf_cfg.env_apply.as_deref() {
+            println!("Apply: {}", apply);
+        }
+        println!();
 
-    let mut secrets = cf_cfg.env_keys.clone();
-    secrets.sort();
-    let mut vars = cf_cfg.env_vars.clone();
-    vars.sort();
+        let mut secrets = cf_cfg.env_keys.clone();
+        secrets.sort();
+        let mut vars = cf_cfg.env_vars.clone();
+        vars.sort();
 
-    if secrets.is_empty() && vars.is_empty() {
-        println!("No env keys configured.");
+        if secrets.is_empty() && vars.is_empty() {
+            println!("No env keys configured.");
+            return Ok(());
+        }
+
+        if !secrets.is_empty() {
+            println!("Secrets:");
+            for key in &secrets {
+                if cf_cfg.env_defaults.contains_key(key) {
+                    println!("  {}  (default set)", key);
+                } else {
+                    println!("  {}", key);
+                }
+            }
+            println!();
+        }
+
+        if !vars.is_empty() {
+            println!("Vars:");
+            for key in &vars {
+                let default_value = cf_cfg
+                    .env_defaults
+                    .get(key)
+                    .map(|value| format_default_hint(value));
+                if let Some(default_value) = default_value {
+                    println!("  {} = {}", key, default_value);
+                } else {
+                    println!("  {}", key);
+                }
+            }
+            println!();
+        }
+
+        let mut extra_defaults: Vec<_> = cf_cfg
+            .env_defaults
+            .keys()
+            .filter(|key| !secrets.contains(*key) && !vars.contains(*key))
+            .cloned()
+            .collect();
+        extra_defaults.sort();
+
+        if !extra_defaults.is_empty() {
+            println!("Defaults (not in env_keys/env_vars):");
+            for key in extra_defaults {
+                if let Some(value) = cf_cfg.env_defaults.get(&key) {
+                    println!("  {} = {}", key, format_default_hint(value));
+                }
+            }
+        }
+
         return Ok(());
     }
 
-    if !secrets.is_empty() {
-        println!("Secrets:");
-        for key in &secrets {
-            if cf_cfg.env_defaults.contains_key(key) {
-                println!("  {}  (default set)", key);
-            } else {
-                println!("  {}", key);
-            }
-        }
+    if let Some(storage) = cfg.storage.as_ref() {
+        println!("Storage env keys for {}", label);
+        println!("─────────────────────────────");
+        println!("Provider: {}", storage.provider);
         println!();
-    }
 
-    if !vars.is_empty() {
-        println!("Vars:");
-        for key in &vars {
-            let default_value = cf_cfg
-                .env_defaults
-                .get(key)
-                .map(|value| format_default_hint(value));
-            if let Some(default_value) = default_value {
-                println!("  {} = {}", key, default_value);
+        if storage.envs.is_empty() {
+            println!("No storage envs configured.");
+            return Ok(());
+        }
+
+        for env_cfg in &storage.envs {
+            println!("{}", env_cfg.name);
+            if let Some(description) = env_cfg.description.as_deref() {
+                println!("  {}", description);
+            }
+            if env_cfg.variables.is_empty() {
+                println!("  (no variables)");
             } else {
-                println!("  {}", key);
+                for variable in &env_cfg.variables {
+                    match variable.default.as_deref() {
+                        Some(default) if !default.is_empty() => {
+                            println!("  {} = {}", variable.key, format_default_hint(default));
+                        }
+                        Some(_) => println!("  {}  (default: empty)", variable.key),
+                        None => println!("  {}", variable.key),
+                    }
+                }
             }
+            println!();
         }
-        println!();
+
+        return Ok(());
     }
 
-    let mut extra_defaults: Vec<_> = cf_cfg
-        .env_defaults
-        .keys()
-        .filter(|key| !secrets.contains(*key) && !vars.contains(*key))
-        .cloned()
-        .collect();
-    extra_defaults.sort();
-
-    if !extra_defaults.is_empty() {
-        println!("Defaults (not in env_keys/env_vars):");
-        for key in extra_defaults {
-            if let Some(value) = cf_cfg.env_defaults.get(&key) {
-                println!("  {} = {}", key, format_default_hint(value));
-            }
-        }
-    }
-
-    Ok(())
+    anyhow::bail!("No [cloudflare] or [storage] env keys configured in flow.toml");
 }
 
 /// List env vars for this project.
@@ -3291,18 +3346,13 @@ pub(crate) fn set_personal_env_var(key: &str, value: &str) -> Result<()> {
     let token = match auth.token.as_ref() {
         Some(token) => token,
         None => {
-            if std::io::stdin().is_terminal()
-                && prompt_confirm("Not logged in to cloud. Store locally instead? (y/N): ")?
-            {
-                let path = set_local_env_var(&target, environment, key, value)?;
-                println!(
-                    "✓ Set personal env var locally: {} (stored at {})",
-                    key,
-                    path.display()
-                );
-                return Ok(());
-            }
-            bail!("Not logged in. Run `f env login` first.");
+            let path = set_local_env_var(&target, environment, key, value)?;
+            println!(
+                "✓ Set personal env var locally: {} (stored at {})",
+                key,
+                path.display()
+            );
+            return Ok(());
         }
     };
 
@@ -3642,8 +3692,23 @@ fn fetch_env_vars(
     include_environment: bool,
 ) -> Result<HashMap<String, String>> {
     if local_env_enabled() {
+        if matches!(target, EnvTarget::Personal { .. }) && !keys.is_empty() {
+            return fetch_local_personal_env_vars(keys);
+        }
         let vars = read_local_env_vars(target, environment)?;
         return Ok(select_requested_env_keys(vars, keys));
+    }
+
+    if matches!(target, EnvTarget::Personal { .. }) {
+        match fetch_local_personal_env_vars(keys) {
+            Ok(vars) if !vars.is_empty() => return Ok(vars),
+            Ok(_) => {}
+            Err(err) => {
+                if !has_cloud_auth_token() {
+                    return Err(err);
+                }
+            }
+        }
     }
 
     let auth = load_auth_config()?;

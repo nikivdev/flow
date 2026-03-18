@@ -1257,6 +1257,10 @@ pub fn write_plan_from_stdin(
                 .collect(),
             artifact_path: Some(path.display().to_string()),
             success: 1.0,
+            trace_id: None,
+            span_id: None,
+            parent_span_id: None,
+            service_name: None,
         });
         let mut activity_event = activity_log::ActivityEvent::done("plan.write", resolved_title);
         activity_event.runtime_token = Some(runtime_state.token.clone());
