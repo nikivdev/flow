@@ -5,12 +5,13 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::{ai, config, daemon, supervisor};
+use crate::{ai, ai_project_manifest, codex_session_docs, config, daemon, supervisor, sync_plan};
 
 const CODEXD_NAME: &str = "codexd";
 
@@ -27,7 +28,7 @@ impl Drop for FileLockGuard {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum CodexdRequest {
     Ping,
@@ -47,6 +48,17 @@ enum CodexdRequest {
         query: String,
         limit: usize,
     },
+    ProjectAiManifest {
+        target_path: String,
+        refresh: bool,
+    },
+    ProjectAiRecent {
+        limit: usize,
+    },
+    RecentSyncPlans {
+        repo_root: String,
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,6 +67,8 @@ struct CodexdResponse {
     message: Option<String>,
     #[serde(default)]
     rows: Vec<ai::CodexRecoverRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload: Option<Value>,
 }
 
 pub fn builtin_daemon_config() -> Result<config::DaemonConfig> {
@@ -205,11 +219,33 @@ fn background_poll_secs() -> u64 {
         .unwrap_or(20)
 }
 
+fn background_maintenance_interval_secs(env_key: &str, default_secs: u64) -> u64 {
+    std::env::var(env_key)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(30, 3600))
+        .unwrap_or(default_secs)
+}
+
 fn start_background_maintenance_loop() {
     let poll_secs = background_poll_secs();
+    let docs_review_every = Duration::from_secs(background_maintenance_interval_secs(
+        "FLOW_CODEXD_DOC_REVIEW_EVERY_SECS",
+        300,
+    ));
+    let project_ai_refresh_every = Duration::from_secs(background_maintenance_interval_secs(
+        "FLOW_CODEXD_PROJECT_AI_REFRESH_EVERY_SECS",
+        600,
+    ));
     let _ = thread::Builder::new()
         .name("flow-codexd-maint".to_string())
         .spawn(move || {
+            let mut last_docs_review = Instant::now()
+                .checked_sub(docs_review_every)
+                .unwrap_or_else(Instant::now);
+            let mut last_project_ai_refresh = Instant::now()
+                .checked_sub(project_ai_refresh_every)
+                .unwrap_or_else(Instant::now);
             loop {
                 if let Err(err) = ai::run_codex_background_maintenance() {
                     eprintln!("WARN codexd maintenance failed: {err:#}");
@@ -219,6 +255,21 @@ fn start_background_maintenance_loop() {
                 }
                 if let Err(err) = ai::maybe_run_codex_telemetry_export(200) {
                     eprintln!("WARN codexd telemetry export failed: {err:#}");
+                }
+                if let Err(err) = sync_plan::drain_queued_requests(1) {
+                    eprintln!("WARN codexd sync plan queue drain failed: {err:#}");
+                }
+                if last_docs_review.elapsed() >= docs_review_every {
+                    if let Err(err) = codex_session_docs::review_pending_entries(12) {
+                        eprintln!("WARN codexd docs review pass failed: {err:#}");
+                    }
+                    last_docs_review = Instant::now();
+                }
+                if last_project_ai_refresh.elapsed() >= project_ai_refresh_every {
+                    if let Err(err) = ai_project_manifest::refresh_recent(12) {
+                        eprintln!("WARN codexd project-ai refresh failed: {err:#}");
+                    }
+                    last_project_ai_refresh = Instant::now();
                 }
                 thread::sleep(Duration::from_secs(poll_secs));
             }
@@ -296,6 +347,74 @@ pub(crate) fn query_find(
     }
 }
 
+pub(crate) fn query_project_ai_manifest(
+    target_path: &Path,
+    refresh: bool,
+) -> Result<ai_project_manifest::AiProjectManifest> {
+    ensure_running()?;
+    let response = send_request(&CodexdRequest::ProjectAiManifest {
+        target_path: target_path.display().to_string(),
+        refresh,
+    })?;
+    if response.ok {
+        let payload = response
+            .payload
+            .context("codexd project-ai manifest response was missing payload")?;
+        serde_json::from_value(payload).context("failed to decode codexd project-ai manifest")
+    } else {
+        bail!(
+            "{}",
+            response
+                .message
+                .unwrap_or_else(|| "codexd project-ai manifest query failed".to_string())
+        )
+    }
+}
+
+pub(crate) fn query_recent_project_ai(
+    limit: usize,
+) -> Result<Vec<ai_project_manifest::AiProjectManifest>> {
+    ensure_running()?;
+    let response = send_request(&CodexdRequest::ProjectAiRecent { limit })?;
+    if response.ok {
+        let payload = response
+            .payload
+            .context("codexd project-ai recent response was missing payload")?;
+        serde_json::from_value(payload).context("failed to decode codexd project-ai recent list")
+    } else {
+        bail!(
+            "{}",
+            response
+                .message
+                .unwrap_or_else(|| "codexd project-ai recent query failed".to_string())
+        )
+    }
+}
+
+pub(crate) fn recent_sync_plans(
+    repo_root: &Path,
+    limit: usize,
+) -> Result<Vec<sync_plan::SyncPlanRunRecord>> {
+    ensure_running()?;
+    let response = send_request_with_restart(CodexdRequest::RecentSyncPlans {
+        repo_root: repo_root.display().to_string(),
+        limit,
+    })?;
+    if response.ok {
+        let payload = response
+            .payload
+            .context("codexd recent sync plans response was missing payload")?;
+        serde_json::from_value(payload).context("failed to decode codexd recent sync plans")
+    } else {
+        bail!(
+            "{}",
+            response
+                .message
+                .unwrap_or_else(|| "codexd recent sync plans query failed".to_string())
+        )
+    }
+}
+
 fn send_request(request: &CodexdRequest) -> Result<CodexdResponse> {
     let mut stream =
         UnixStream::connect(socket_path()?).context("failed to connect to codexd socket")?;
@@ -318,6 +437,18 @@ fn send_request(request: &CodexdRequest) -> Result<CodexdResponse> {
         bail!("codexd returned an empty response");
     }
     serde_json::from_slice(trimmed).context("failed to decode codexd response")
+}
+
+fn send_request_with_restart(request: CodexdRequest) -> Result<CodexdResponse> {
+    match send_request(&request) {
+        Ok(response) => Ok(response),
+        Err(initial_err) => {
+            let _ = stop();
+            start().context("failed to restart codexd for upgraded request")?;
+            send_request(&request)
+                .with_context(|| format!("codexd request failed before restart: {initial_err:#}"))
+        }
+    }
 }
 
 fn handle_client(stream: UnixStream) -> Result<()> {
@@ -347,6 +478,7 @@ fn handle_request(request: CodexdRequest) -> CodexdResponse {
             ok: true,
             message: Some("pong".to_string()),
             rows: vec![],
+            payload: None,
         },
         CodexdRequest::Recent {
             target_path,
@@ -363,11 +495,13 @@ fn handle_request(request: CodexdRequest) -> CodexdResponse {
                 ok: true,
                 message: None,
                 rows,
+                payload: None,
             },
             Err(err) => CodexdResponse {
                 ok: false,
                 message: Some(format!("{err:#}")),
                 rows: vec![],
+                payload: None,
             },
         },
         CodexdRequest::SessionHint {
@@ -378,11 +512,13 @@ fn handle_request(request: CodexdRequest) -> CodexdResponse {
                 ok: true,
                 message: None,
                 rows,
+                payload: None,
             },
             Err(err) => CodexdResponse {
                 ok: false,
                 message: Some(format!("{err:#}")),
                 rows: vec![],
+                payload: None,
             },
         },
         CodexdRequest::Find {
@@ -400,13 +536,62 @@ fn handle_request(request: CodexdRequest) -> CodexdResponse {
                 ok: true,
                 message: None,
                 rows,
+                payload: None,
             },
             Err(err) => CodexdResponse {
                 ok: false,
                 message: Some(format!("{err:#}")),
                 rows: vec![],
+                payload: None,
             },
         },
+        CodexdRequest::ProjectAiManifest {
+            target_path,
+            refresh,
+        } => match ai_project_manifest::load_for_target(Path::new(&target_path), refresh) {
+            Ok(manifest) => CodexdResponse {
+                ok: true,
+                message: None,
+                rows: vec![],
+                payload: Some(serde_json::json!(manifest)),
+            },
+            Err(err) => CodexdResponse {
+                ok: false,
+                message: Some(format!("{err:#}")),
+                rows: vec![],
+                payload: None,
+            },
+        },
+        CodexdRequest::ProjectAiRecent { limit } => match ai_project_manifest::recent(limit) {
+            Ok(manifests) => CodexdResponse {
+                ok: true,
+                message: None,
+                rows: vec![],
+                payload: Some(serde_json::json!(manifests)),
+            },
+            Err(err) => CodexdResponse {
+                ok: false,
+                message: Some(format!("{err:#}")),
+                rows: vec![],
+                payload: None,
+            },
+        },
+        CodexdRequest::RecentSyncPlans { repo_root, limit } => {
+            match sync_plan::recent_runs(Path::new(&repo_root), limit) {
+                Ok(runs) => CodexdResponse {
+                    ok: true,
+                    message: None,
+                    rows: vec![],
+                    payload: Some(serde_json::json!(runs)),
+                },
+                Err(err) => CodexdResponse {
+                    ok: false,
+                    message: Some(format!("{err:#}")),
+                    rows: vec![],
+                    payload: None,
+                },
+            }
+        }
     }
 }
 

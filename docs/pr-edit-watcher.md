@@ -26,7 +26,7 @@ Endpoints:
 - `GET /pr-edit/status`
 - `POST /pr-edit/rescan`
 
-Default server URL: `http://127.0.0.1:9060`
+Default server URL: `http://127.0.0.1:9050`
 
 Example:
 
@@ -101,4 +101,3 @@ FLOW_PR_EDIT_DEBUG=1 f server foreground
 ```
 
 If the watcher failed to start, `GET /pr-edit/status` returns HTTP 503 with a `detail` field.
-

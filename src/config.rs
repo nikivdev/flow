@@ -928,6 +928,14 @@ pub struct CodexConfig {
         alias = "maxResolvedReferences"
     )]
     pub max_resolved_references: Option<usize>,
+    /// Optional guarded sync command used when Flow routes plain sync language for this repo.
+    #[serde(
+        default,
+        rename = "sync_workflow_command",
+        alias = "sync-workflow-command",
+        alias = "syncWorkflowCommand"
+    )]
+    pub sync_workflow_command: Option<String>,
     /// External reference resolvers that can unroll URLs or other tokens into compact context.
     #[serde(
         default,
@@ -962,6 +970,9 @@ impl CodexConfig {
         }
         if other.max_resolved_references.is_some() {
             self.max_resolved_references = other.max_resolved_references;
+        }
+        if other.sync_workflow_command.is_some() {
+            self.sync_workflow_command = other.sync_workflow_command;
         }
         for resolver in other.reference_resolvers {
             if let Some(existing) = self

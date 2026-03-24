@@ -97,14 +97,14 @@ Creates or updates a review branch from the current task worktree tip.
 
 Default mapping:
 
-- `codex/workspace-awareness` -> `review/nikiv-workspace-awareness`
+- `codex/workspace-awareness` -> `review/workspace-awareness`
 
 Examples:
 
 ```bash
 f codex-fork-promote
 f codex-fork-promote codex/workspace-awareness --push
-f codex-fork-promote ~/.worktrees/codex/codex-workspace-awareness --review-branch review/nikiv-codex-workspace-awareness
+f codex-fork-promote ~/.worktrees/codex/codex-workspace-awareness --review-branch review/workspace-awareness
 ```
 
 ## State File

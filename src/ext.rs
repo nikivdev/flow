@@ -3,15 +3,135 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
-
-use crate::cli::ExtCommand;
+use crate::cli::{ExtAction, ExtCommand};
 use crate::code;
 use crate::config;
+use crate::flow_config;
 use crate::setup::add_gitignore_entry;
+use anyhow::{Context, Result, bail};
 
 pub fn run(cmd: ExtCommand) -> Result<()> {
-    let source = normalize_path(&cmd.path)?;
+    match (cmd.action, cmd.path) {
+        (Some(ExtAction::List { json }), None) => list_extensions(json),
+        (Some(ExtAction::Doctor { json }), None) => doctor_extensions(json),
+        (Some(ExtAction::Enable { name }), None) => enable_extension(&name),
+        (Some(ExtAction::Disable { name }), None) => disable_extension(&name),
+        (Some(ExtAction::Init { name, force }), None) => init_extension(&name, force),
+        (Some(ExtAction::Import { path }), None) => import_external_path(&path),
+        (None, Some(path)) => import_external_path(&path),
+        (Some(_), Some(_)) => bail!("pass either a subcommand or a bare import path, not both"),
+        (None, None) => list_extensions(false),
+    }
+}
+
+fn list_extensions(as_json: bool) -> Result<()> {
+    let extensions = flow_config::discover_extensions()?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&extensions)?);
+        return Ok(());
+    }
+
+    if extensions.is_empty() {
+        println!(
+            "No Flow extensions discovered. Create one with `f ext init <name>` under {}",
+            flow_config::flow_root_dir().join("extensions").display()
+        );
+        return Ok(());
+    }
+
+    println!("Flow extensions:\n");
+    for extension in extensions {
+        let status = if extension.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let source = extension
+            .source_path
+            .unwrap_or_else(|| "<builtin>".to_string());
+        println!("  {:<20} {:<8} {}", extension.name, status, source);
+    }
+    Ok(())
+}
+
+fn doctor_extensions(as_json: bool) -> Result<()> {
+    let report = flow_config::extension_doctor_report()?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("Flow extension doctor");
+    println!(
+        "  Root config: {}",
+        report
+            .get("rootConfigPath")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+    );
+    println!(
+        "  Extensions root: {}",
+        report
+            .get("extensionsRoot")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+    );
+    println!(
+        "  Runtime helper: {}",
+        report
+            .get("runtimeHelperPath")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+    );
+    let extensions = report
+        .get("extensions")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    println!("  Extensions: {}", extensions.len());
+    for extension in extensions {
+        let name = extension
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let enabled = extension
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let kind = extension
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        println!(
+            "  - {:<20} {:<8} {}",
+            name,
+            if enabled { "enabled" } else { "disabled" },
+            kind
+        );
+    }
+    Ok(())
+}
+
+fn enable_extension(name: &str) -> Result<()> {
+    flow_config::enable_extension(name)?;
+    println!("Enabled extension {}", name);
+    Ok(())
+}
+
+fn disable_extension(name: &str) -> Result<()> {
+    flow_config::disable_extension(name)?;
+    println!("Disabled extension {}", name);
+    Ok(())
+}
+
+fn init_extension(name: &str, force: bool) -> Result<()> {
+    let dir = flow_config::init_extension(name, force)?;
+    println!("Initialized extension {} at {}", name, dir.display());
+    Ok(())
+}
+
+fn import_external_path(path: &str) -> Result<()> {
+    let source = normalize_path(path)?;
     if !source.exists() {
         bail!("Path not found: {}", source.display());
     }

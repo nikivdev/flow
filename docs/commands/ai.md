@@ -21,6 +21,8 @@ f ai cursor list
 f codex resolve "latest"
 f codex resolve "https://linear.app/.../project/.../overview" --json
 f codex open "continue the deploy work"
+f codex agent list
+f codex agent show commit
 f ai claude resume <session-id-or-name>
 f ai codex resume <session-id-or-name>
 f ai codex resume --path ~/work/example-project
@@ -132,6 +134,7 @@ You can teach `f codex open` and `f codex resolve` to unroll repo-specific refer
 auto_resolve_references = true
 prompt_context_budget_chars = 900
 max_resolved_references = 1
+sync_workflow_command = "./scripts/sync-safe"
 
 [[codex.reference_resolver]]
 name = "linear"
@@ -148,6 +151,7 @@ Notes:
 - resolver output is compacted before prompt injection
 - `prompt_context_budget_chars` hard-caps injected context before your request is appended
 - `max_resolved_references` prevents broad unrolling from bloating one turn
+- `sync_workflow_command` lets plain `sync branch` route into a repo-specific safe sync command instead of improvised Git/JJ steps
 
 ### Optional runtime skill transport
 
@@ -169,6 +173,26 @@ runtime_skills = true
 [options]
 codex_bin = "~/code/flow/scripts/codex-flow-wrapper"
 ```
+
+For the `~/code/flow` repo specifically, the intended in-repo shape is:
+
+```toml
+[options]
+codex_bin = "~/code/flow/scripts/codex-flow-wrapper"
+
+[codex]
+runtime_skills = true
+auto_resolve_references = true
+prompt_context_budget_chars = 1200
+max_resolved_references = 2
+
+[[codex.skill_source]]
+name = "run-control-plane"
+path = "~/run"
+enabled = true
+```
+
+That keeps a fresh checkout Codex-first even before machine-local setup is remembered.
 
 Current first-slice behavior:
 
@@ -210,6 +234,41 @@ cat <<'EOF' | f codex runtime write-plan --title "Example Plan"
 EOF
 ```
 
+By default this writes to today's `~/plan/<day-of-month>/` bucket, for example
+`~/plan/23/` on the 23rd day of the month.
+
+### Run-owned agent bridge
+
+Flow can execute run-owned Codex agents directly without copying their specs or
+prompts into `~/code/flow`.
+
+Useful commands:
+
+```bash
+f codex agent list
+f codex agent list --json
+f codex agent show commit
+f codex agent run planner --path ~/code/flow "make a 3 phase rollout plan"
+f codex agent run commit --path ~/repos/openai/codex "review the current diff and draft a safe commit"
+f codex agent run planner --json --path ~/code/flow "reply with exactly: ok"
+```
+
+Behavior:
+
+- Flow bridges into `~/run/scripts/agent-router.sh`
+- the run-owned agent still executes through its own spec/runtime path in `~/run`
+- `--path` controls the repo/worktree cwd used for the agent run
+- `run` returns the agent's final output plus any durable artifact/trace paths
+- `f codex doctor --path <repo>` reports whether the run-agent bridge is ready
+
+Repo-local readiness check:
+
+```bash
+f codex doctor --path ~/code/flow --assert-runtime --assert-schedule
+f codex skill-source list --path ~/code/flow
+f codex agent list
+```
+
 ### Skill eval and background refresh
 
 Flow can learn which runtime skills are actually worth injecting from local
@@ -229,8 +288,12 @@ f codex telemetry flush --limit 200
 f codex trace status
 f codex trace current-session --json
 f codex trace inspect <trace-id> --json
+f codex project-ai show --path ~/work/example-project --json
+f codex project-ai recent --limit 12 --json
 f codex skill-source list --path ~/work/example-project
 f codex skill-source sync --path ~/work/example-project --skill find-skills
+f codex agent list
+f codex agent run planner --path ~/work/example-project "summarize the next rollout slice"
 ```
 
 The Codex memory mirror:
@@ -243,6 +306,13 @@ The Codex memory mirror:
 - adds tiny symbol snippets for the top code hits, so coding prompts can carry actual struct/function shape without inlining whole files
 - biases retrieval by intent: implementation/file-edit prompts prefer symbols, snippets, and `src/...` paths; summary/docs prompts prefer doc headings and docs paths
 - stays best-effort so failed memory writes do not block normal Codex coding turns
+
+The project-ai manifest:
+
+- gives `codexd` a bounded metadata view of repo-local `.ai/` scaffolding
+- records counts and latest paths for skills, docs, reviews, tasks, and todos
+- keeps default context fill minimal by exposing only compact hints, not raw content
+- tracks query counts and recent repo usage so you can see whether the feature is actually being used
 - is refreshed again by `f codex skill-eval cron`, so the mirror heals even if a hot-path write is skipped
 - is queried automatically for explicit repo references during `f codex open` / `f codex resolve`
 

@@ -70,6 +70,42 @@ Lists `.ai/docs` files for the current project.
 
 Shows recent commits and `.ai/docs` file modification times.
 
+It now also shows:
+
+- recent `.ai/docs/session-changes/...` packets generated from completed Flow-managed Codex sessions
+- doc-review queue state counts for the current project
+
+### f docs review-pending
+
+Runs the bounded daemon-style review pass over pending session-doc packets and records
+promotion decisions into queue state plus each packet's `promotion.json`.
+
+Options:
+
+- `-n, --limit <N>`: Maximum number of pending entries to review (default: `25`).
+
+### f docs promote-session
+
+Previews or applies promotion for a daemon-captured session-doc packet.
+
+By default this is a dry run. It prints the chosen target under `.ai/docs/` and the
+promoted markdown note.
+
+Options:
+
+- `<SESSION>`: Session id, session id prefix, or session key like `019d035d-...` or `019d035d-1773776290`
+- `--apply`: Write the promoted note immediately
+
+### f docs commit-pending
+
+Commits promoted session-doc notes when the git diff is isolated to doc-only files.
+
+This command refuses to commit if the worktree contains unrelated changes.
+
+Options:
+
+- `--dry-run`: Show the candidate files and commit message without staging or committing
+
 ### f docs edit
 
 Opens a `.ai/docs` file in `$EDITOR`.

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use chrono::{Datelike, Local};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -603,6 +604,30 @@ fn derive_plan_title(body: &str) -> String {
     "Plan".to_string()
 }
 
+fn home_plan_root() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("plan"))
+}
+
+fn today_plan_bucket_name() -> String {
+    Local::now().day().to_string()
+}
+
+fn resolve_plan_root(dir: Option<&str>) -> PathBuf {
+    let home_root = home_plan_root();
+    let root = dir
+        .map(|value| PathBuf::from(shellexpand::tilde(value).into_owned()))
+        .or_else(|| home_root.clone())
+        .unwrap_or_else(|| PathBuf::from("./plan"));
+
+    match home_root {
+        Some(home_root) if root == home_root => root.join(today_plan_bucket_name()),
+        None if dir.is_none() => root.join(today_plan_bucket_name()),
+        _ => root,
+    }
+}
+
 fn append_session_footer(body: &str, session_id: Option<&str>) -> String {
     let trimmed = body.trim_end();
     let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -643,14 +668,14 @@ fn build_plan_skill_markdown(skill_name: &str) -> String {
     format!(
         r#"---
 name: {skill_name}
-description: Write the finished markdown plan for this task into `~/plan` using `f codex runtime write-plan`. Use only for the current task.
+description: Write the finished markdown plan for this task into today's `~/plan/<day-of-month>` bucket using `f codex runtime write-plan`. Use only for the current task.
 policy:
   allow_implicit_invocation: false
 ---
 
 # Flow Runtime Plan Writer
 
-Use this only when the user asks to write, save, or document a plan.
+Use this only when the user asks to plan, write, save, or document a durable plan.
 
 ## Command
 
@@ -666,7 +691,7 @@ The command prints the absolute path after writing.
 
 ## Hard rules
 
-- write the finished plan to `~/plan`
+- write the finished plan to today's `~/plan/<day-of-month>` bucket, for example `~/plan/23`
 - keep the chat response short
 - end with the absolute path on its own line
 - do not leave the plan only in chat when the user explicitly asked to write it
@@ -675,14 +700,31 @@ The command prints the absolute path after writing.
 }
 
 fn looks_like_plan_request(query: &str) -> bool {
-    let normalized = query.to_ascii_lowercase();
+    let normalized = query
+        .trim()
+        .trim_matches(|ch: char| ch.is_ascii_punctuation() || ch.is_whitespace())
+        .to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if normalized == "plan" || normalized.starts_with("plan ") {
+        return true;
+    }
+
     [
         "write plan",
+        "write a plan",
+        "make a plan",
+        "create a plan",
+        "draft a plan",
         "save this plan",
         "save the plan",
         "document the plan",
+        "document this plan",
         "put the plan in ~/plan",
         "write this up as a plan",
+        "turn this into a plan",
     ]
     .iter()
     .any(|needle| normalized.contains(needle))
@@ -957,11 +999,13 @@ pub fn prepare_runtime_activation(
                 name: skill_name,
                 kind: "plan_write".to_string(),
                 path: skill_dir.display().to_string(),
-                trigger: "write plan".to_string(),
+                trigger: "plan request".to_string(),
                 source: Some("flow".to_string()),
                 original_name: Some("plan_write".to_string()),
                 estimated_chars: Some(markdown.chars().count()),
-                match_reason: Some("query explicitly asked to write or save a plan".to_string()),
+                match_reason: Some(
+                    "query explicitly asked to create, write, or save a durable plan".to_string(),
+                ),
             },
             source_dir: None,
         });
@@ -1199,14 +1243,7 @@ pub fn write_plan_from_stdin(
         bail!("plan body is empty");
     }
 
-    let root = dir
-        .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join("plan"))
-        })
-        .unwrap_or_else(|| PathBuf::from("./plan"));
+    let root = resolve_plan_root(dir);
     fs::create_dir_all(&root)?;
 
     let resolved_title = title
@@ -1279,10 +1316,46 @@ mod tests {
 
     #[test]
     fn plan_request_detection_stays_specific() {
+        assert!(looks_like_plan_request("plan"));
+        assert!(looks_like_plan_request("plan rollout for Codex"));
         assert!(looks_like_plan_request("write plan"));
+        assert!(looks_like_plan_request("make a plan for this"));
         assert!(looks_like_plan_request("Please document the plan"));
         assert!(!looks_like_plan_request("document this feature"));
         assert!(!looks_like_plan_request("planning support cleanup"));
+        assert!(!looks_like_plan_request("review this plan tomorrow"));
+    }
+
+    #[test]
+    fn resolve_plan_root_buckets_home_plan_root() {
+        let temp = tempdir().expect("tempdir");
+        let home_plan = temp.path().join("plan");
+        let other_root = temp.path().join("elsewhere");
+
+        assert_eq!(
+            resolve_plan_root_for_test(Some(&home_plan), Some(home_plan.as_path()), "23"),
+            home_plan.join("23")
+        );
+        assert_eq!(
+            resolve_plan_root_for_test(Some(&other_root), Some(home_plan.as_path()), "23"),
+            other_root
+        );
+    }
+
+    fn resolve_plan_root_for_test(
+        root: Option<&Path>,
+        home_root: Option<&Path>,
+        bucket_name: &str,
+    ) -> PathBuf {
+        let resolved = root
+            .map(Path::to_path_buf)
+            .or_else(|| home_root.map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("./plan"));
+        match home_root {
+            Some(home_root) if resolved == home_root => resolved.join(bucket_name),
+            None if root.is_none() => resolved.join(bucket_name),
+            _ => resolved,
+        }
     }
 
     #[test]
@@ -1293,11 +1366,13 @@ mod tests {
                 name: "flow-runtime-plan-abc".to_string(),
                 kind: "plan_write".to_string(),
                 path: "/tmp/skill".to_string(),
-                trigger: "write plan".to_string(),
+                trigger: "plan request".to_string(),
                 source: Some("flow".to_string()),
                 original_name: Some("plan_write".to_string()),
                 estimated_chars: Some(120),
-                match_reason: Some("query explicitly asked to write or save a plan".to_string()),
+                match_reason: Some(
+                    "query explicitly asked to create, write, or save a durable plan".to_string(),
+                ),
             }],
         };
 

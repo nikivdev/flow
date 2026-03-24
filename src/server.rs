@@ -33,11 +33,13 @@ use crate::{
     cli::DaemonOpts,
     config::{self, Config, ServerConfig},
     daemon_snapshot,
+    jj,
     log_store::{self, LogEntry, LogQuery},
     running,
     screen::ScreenBroadcaster,
     servers::{LogLine, ManagedServer, ServerSnapshot},
     skills,
+    ops_overview,
     supervisor,
     terminal,
 };
@@ -128,14 +130,19 @@ pub async fn run(opts: DaemonOpts) -> Result<()> {
     let router = Router::new()
         .route("/health", get(health))
         .route("/codex/skills", get(codex_skills))
+        .route("/codex/project-ai", get(codex_project_ai))
+        .route("/codex/project-ai/recent", get(codex_project_ai_recent))
         .route("/codex/eval", get(codex_eval))
         .route("/codex/resolve", post(codex_resolve))
         .route("/codex/skills/sync", post(codex_skills_sync))
         .route("/codex/skills/reload", post(codex_skills_reload))
         .route("/daemons", get(daemons))
+        .route("/daemons/stale/cleanup", post(daemon_cleanup_stale))
         .route("/daemons/:name/start", post(daemon_start))
         .route("/daemons/:name/stop", post(daemon_stop))
         .route("/daemons/:name/restart", post(daemon_restart))
+        .route("/jj/overview", get(jj_workflow_overview))
+        .route("/ops/overview", get(ops_visibility_overview))
         .route("/screen/latest", get(screen_latest))
         .route("/screen/stream", get(screen_stream))
         .route("/servers", get(servers_list))
@@ -192,6 +199,19 @@ struct CodexEvalQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct CodexProjectAiQuery {
+    path: Option<String>,
+    #[serde(default)]
+    refresh: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexProjectAiRecentQuery {
+    #[serde(default = "default_codex_skills_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodexSkillsSyncRequest {
     path: Option<String>,
@@ -214,6 +234,21 @@ struct CodexResolveRequest {
     query: String,
     #[serde(default)]
     exact_cwd: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpsOverviewQuery {
+    path: Option<String>,
+    activity_limit: Option<usize>,
+    log_lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JjOverviewQuery {
+    path: Option<String>,
+    op_limit: Option<usize>,
 }
 
 fn default_codex_skills_limit() -> usize {
@@ -255,6 +290,49 @@ async fn codex_skills(Query(query): Query<CodexSkillsQuery>) -> impl IntoRespons
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("codex skills task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_project_ai(Query(query): Query<CodexProjectAiQuery>) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(query.path.as_deref());
+    let refresh = query.refresh;
+    let result =
+        tokio::task::spawn_blocking(move || ai::codex_project_ai_snapshot(&target_path, refresh))
+            .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex project-ai task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_project_ai_recent(
+    Query(query): Query<CodexProjectAiRecentQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.clamp(1, 50);
+    let result = tokio::task::spawn_blocking(move || ai::codex_project_ai_recent(limit)).await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex project-ai recent task failed: {err}") })),
         )
             .into_response(),
     }
@@ -384,6 +462,70 @@ async fn daemon_stop(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
 
 async fn daemon_restart(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
     daemon_action_response(name, daemon_snapshot::FlowDaemonAction::Restart).await
+}
+
+async fn daemon_cleanup_stale() -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(move || daemon_snapshot::cleanup_stale_daemons(None)).await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("daemon cleanup task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn ops_visibility_overview(Query(query): Query<OpsOverviewQuery>) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(query.path.as_deref());
+    let activity_limit = query.activity_limit.unwrap_or(20).clamp(1, 100);
+    let log_lines = query.log_lines.unwrap_or(20).clamp(1, 200);
+    let result = tokio::task::spawn_blocking(move || {
+        ops_overview::load(&target_path, activity_limit, log_lines)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("ops overview task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn jj_workflow_overview(Query(query): Query<JjOverviewQuery>) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(query.path.as_deref());
+    let op_limit = query.op_limit.unwrap_or(8).clamp(1, 32);
+    let result =
+        tokio::task::spawn_blocking(move || jj::load_overview_for_path_uncached(Some(&target_path), op_limit))
+            .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("jj overview task failed: {err}") })),
+        )
+            .into_response(),
+    }
 }
 
 async fn daemon_action_response(

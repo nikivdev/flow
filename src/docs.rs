@@ -13,7 +13,7 @@ use which::which;
 use crate::cli::{
     DeployCommand, DocsAction, DocsCommand, DocsDeployOpts, DocsHubOpts, DocsNewOpts,
 };
-use crate::{config, deploy};
+use crate::{codex_session_docs, config, deploy};
 
 /// Docs directory relative to project root.
 const DOCS_DIR: &str = ".ai/docs";
@@ -34,6 +34,11 @@ pub fn run(cmd: DocsCommand) -> Result<()> {
         Some(DocsAction::Deploy(opts)) => deploy_docs_hub(&project_root, opts),
         Some(DocsAction::List) => list_docs(&docs_dir),
         Some(DocsAction::Status) => show_status(&project_root, &docs_dir),
+        Some(DocsAction::ReviewPending { limit }) => review_pending(limit),
+        Some(DocsAction::PromoteSession { session, apply }) => {
+            promote_session(&project_root, &session, apply)
+        }
+        Some(DocsAction::CommitPending { dry_run }) => commit_pending(&project_root, dry_run),
         Some(DocsAction::Sync { commits, dry }) => {
             sync_docs(&project_root, &docs_dir, commits, dry)
         }
@@ -139,6 +144,47 @@ fn show_status(project_root: &Path, docs_dir: &Path) -> Result<()> {
         println!("  {:<20} modified {}", name, modified);
     }
 
+    let session_packets = codex_session_docs::recent_packets(project_root, 5)?;
+    let pending_queue = codex_session_docs::pending_review_entries(project_root, 200)?;
+    println!("\nSession change packets:");
+    if session_packets.is_empty() {
+        println!("  none");
+    } else {
+        for packet in session_packets {
+            let files = packet.changed_files.len();
+            let rel_summary = display_under_project(project_root, &packet.summary_path);
+            println!(
+                "  {:<18} {:<12} {:>2} files  {}",
+                packet.session_key, packet.confidence, files, rel_summary
+            );
+        }
+    }
+
+    let pending_count = pending_queue
+        .iter()
+        .filter(|entry| entry.doc_review_state == "pending")
+        .count();
+    let reviewed_count = pending_queue
+        .iter()
+        .filter(|entry| entry.doc_review_state == "reviewed")
+        .count();
+    let promoted_count = pending_queue
+        .iter()
+        .filter(|entry| entry.doc_review_state == "promoted")
+        .count();
+    let blocked_count = pending_queue
+        .iter()
+        .filter(|entry| entry.doc_review_state == "blocked")
+        .count();
+    let committed_count = pending_queue
+        .iter()
+        .filter(|entry| entry.doc_review_state == "committed")
+        .count();
+    println!(
+        "\nDoc review queue: {} pending · {} reviewed · {} promoted · {} blocked · {} committed",
+        pending_count, reviewed_count, promoted_count, blocked_count, committed_count
+    );
+
     Ok(())
 }
 
@@ -213,6 +259,56 @@ fn edit_doc(docs_dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+fn review_pending(limit: usize) -> Result<()> {
+    let reviewed = codex_session_docs::review_pending_entries(limit)?;
+    println!(
+        "Reviewed {} pending session-doc entr{}",
+        reviewed,
+        if reviewed == 1 { "y" } else { "ies" }
+    );
+    Ok(())
+}
+
+fn promote_session(project_root: &Path, session: &str, apply: bool) -> Result<()> {
+    let preview = codex_session_docs::promote_session(project_root, session, apply)?;
+    println!("Session: {}", preview.session_id);
+    println!("Session key: {}", preview.session_key);
+    println!("Review state: {}", preview.review_state);
+    println!("Target: {}", preview.target_path);
+    println!("Eligible: {}", if preview.eligible { "yes" } else { "no" });
+    println!("Reason: {}", preview.promotion_reason);
+    if let Some(blocked_reason) = preview.blocked_reason.as_deref() {
+        println!("Blocked: {}", blocked_reason);
+    }
+    println!();
+    if apply {
+        println!("Promoted markdown written.\n");
+    } else {
+        println!("Dry run only. Re-run with --apply to write the promoted note.\n");
+    }
+    println!("{}", preview.markdown);
+    Ok(())
+}
+
+fn commit_pending(project_root: &Path, dry_run: bool) -> Result<()> {
+    let Some(plan) = codex_session_docs::commit_pending(project_root, dry_run)? else {
+        println!("No promoted session-doc entries are ready to commit.");
+        return Ok(());
+    };
+    println!("Session keys: {}", plan.session_keys.join(", "));
+    println!("Files:");
+    for file in &plan.files {
+        println!("  - {}", file);
+    }
+    println!("Commit message: {}", plan.commit_message);
+    if plan.committed {
+        println!("\nCommitted promoted docs.");
+    } else {
+        println!("\nDry run only. Re-run without --dry-run to create the commit.");
+    }
+    Ok(())
+}
+
 /// Format a duration as a human-readable string.
 fn format_duration(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();
@@ -225,6 +321,14 @@ fn format_duration(duration: std::time::Duration) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
+}
+
+fn display_under_project(project_root: &Path, absolute: &str) -> String {
+    let path = Path::new(absolute);
+    path.strip_prefix(project_root)
+        .ok()
+        .map(|value| value.display().to_string())
+        .unwrap_or_else(|| absolute.to_string())
 }
 
 fn create_docs_scaffold(project_root: &Path, opts: DocsNewOpts) -> Result<()> {

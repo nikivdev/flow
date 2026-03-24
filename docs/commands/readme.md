@@ -17,6 +17,8 @@ Complete documentation for all `f` (flow) commands.
 | [`pr`](pr.md) | Create/open PRs and ingest GitHub feedback |
 | [`upstream`](upstream.md) | Manage upstream fork workflow |
 | [`env`](env.md) | Sync project environment and manage env vars |
+| [`config`](config.md) | Build and apply centralized Flow config outputs |
+| [`ext`](ext.md) | Manage Flow config extensions |
 | [`invariants`](invariants.md) | Validate project invariants from `flow.toml` |
 | [`fast`](fast.md) | Low-latency AI task invocation via fast client |
 | [`up`](up.md) | Bring a project up with lifecycle conventions |
@@ -91,6 +93,8 @@ f commit --help
 ### Environment & Configuration
 
 - **[env](env.md)** - Manage environment variables
+- **[config](config.md)** - Build/apply the centralized Flow config snapshot
+- **[ext](ext.md)** - Scaffold, enable, disable, and inspect Flow config extensions
 - **[invariants](invariants.md)** - Validate invariant policies in `flow.toml`
 - **[domains](domains.md)** - Shared local domain proxy ownership and route management
 - **[init](init.md)** - Scaffold a new flow.toml

@@ -543,6 +543,69 @@ pub fn append_daily_bullet(message: &str) -> Result<()> {
     append_daily_event(ActivityEvent::done("note", message))
 }
 
+pub fn recent_events(limit: usize) -> Result<Vec<ActivityEvent>> {
+    recent_events_at(&daily_log_root(), limit)
+}
+
+fn recent_events_at(root: &Path, limit: usize) -> Result<Vec<ActivityEvent>> {
+    if limit == 0 || !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::new();
+    collect_event_files(root, &mut files)?;
+    files.sort_by(|left, right| right.cmp(left));
+
+    let mut events = Vec::new();
+    for path in files {
+        if events.len() >= limit {
+            break;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in contents.lines().rev() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<ActivityEvent>(trimmed) else {
+                continue;
+            };
+            events.push(event);
+            if events.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    events.sort_by(|left, right| {
+        right
+            .recorded_at_unix
+            .cmp(&left.recorded_at_unix)
+            .then_with(|| right.event_id.cmp(&left.event_id))
+    });
+    events.truncate(limit);
+    Ok(events)
+}
+
+fn collect_event_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_event_files(&path, out)?;
+        } else if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.ends_with(".events.jsonl"))
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
