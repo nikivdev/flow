@@ -11,12 +11,12 @@ use flowd::{
         ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
     },
     code, commit, commits, daemon, deploy, deps, docs, doctor, domains, env, explain_commits, ext,
-    fish_install, fish_trace, fix, fixup, git_guard, gitignore_policy, hash, health, help_search,
-    history, hive, home, hub, info, init, init_tracing, install, invariants, jj, latest, lifecycle,
-    log_server, macos, notify, otp, palette, parallel, processes, projects, proxy, publish, push,
-    recipe, registry, release, repos, reviews_todo, seq_rpc, services, setup, skills, ssh_keys,
-    storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo, upgrade, upstream,
-    url_inspect, usage, web,
+    fish_install, fish_trace, fix, fixup, flow_config, git_guard, gitignore_policy, hash, health,
+    help_search, history, hive, home, hub, info, init, init_tracing, install, invariants, jj,
+    latest, lifecycle, log_server, macos, notify, otp, palette, parallel, processes, projects,
+    proxy, publish, push, recipe, registry, release, repos, reviews_todo, seq_rpc, services, setup,
+    skills, ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo,
+    updates, upgrade, upstream, url_inspect, usage, web,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,9 +219,13 @@ fn main() -> Result<()> {
                 branches::run(cmd)?;
             }
             Some(Commands::Status(opts)) => {
-                jj::run_workflow_status(opts.raw)?;
+                jj::run_workflow_status(opts.raw, opts.compact)?;
             }
             Some(Commands::Commit(opts)) => {
+                if let Some(hash) = opts.commit_lookup_hash() {
+                    commit::open_commit_in_cursor(hash)?;
+                    return Ok(());
+                }
                 // Default: fast commit lane with deferred Codex deep review.
                 let mut force = opts.force || opts.approved;
                 let mut message_arg = opts.message_arg.as_deref();
@@ -485,6 +489,9 @@ fn main() -> Result<()> {
             Some(Commands::Env(cmd)) => {
                 env::run(cmd.action)?;
             }
+            Some(Commands::Config(cmd)) => {
+                flow_config::run(cmd)?;
+            }
             Some(Commands::Otp(cmd)) => {
                 otp::run(cmd)?;
             }
@@ -532,6 +539,9 @@ fn main() -> Result<()> {
             }
             Some(Commands::ExplainCommits(cmd)) => {
                 explain_commits::run_cli(cmd)?;
+            }
+            Some(Commands::Updates(cmd)) => {
+                updates::run_cli(cmd)?;
             }
             Some(Commands::Setup(opts)) => {
                 setup::run(opts)?;
@@ -704,11 +714,13 @@ fn startup_policy_for(command: Option<&Commands>) -> StartupPolicy {
         Some(Commands::Ssh(_)) => StartupPolicy::NONE,
         Some(Commands::Todo(_)) => StartupPolicy::NONE,
         Some(Commands::Ext(_)) => StartupPolicy::NONE,
+        Some(Commands::Config(_)) => StartupPolicy::NONE,
         Some(Commands::Tools(_)) => StartupPolicy::NONE,
         Some(Commands::Notify(_)) => StartupPolicy::NONE,
         Some(Commands::Commits(_)) => StartupPolicy::NONE,
         Some(Commands::SeqRpc(_)) => StartupPolicy::NONE,
         Some(Commands::ExplainCommits(_)) => StartupPolicy::NONE,
+        Some(Commands::Updates(_)) => StartupPolicy::NONE,
         Some(Commands::Info) => StartupPolicy::NONE,
         Some(Commands::Upstream(_)) => StartupPolicy::NONE,
         Some(Commands::Latest) => StartupPolicy::NONE,

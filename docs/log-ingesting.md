@@ -8,10 +8,10 @@ Flow includes a log ingestion system for collecting and querying structured logs
 f server
 ```
 
-This starts the HTTP server on `127.0.0.1:9060` (default). Options:
+This starts the HTTP server on `127.0.0.1:9050` (default). Options:
 
 - `--host <IP>` - Bind address (default: 127.0.0.1)
-- `--port <PORT>` - Port number (default: 9060)
+- `--port <PORT>` - Port number (default: 9050)
 
 ## Endpoints
 

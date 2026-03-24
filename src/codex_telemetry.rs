@@ -184,8 +184,8 @@ fn env_non_empty_with_store(
         .as_ref()
         .and_then(|cached| cached.as_ref())
         .and_then(|values| values.get(key))
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn telemetry_state_path() -> Result<PathBuf> {
@@ -202,10 +202,10 @@ fn load_state() -> Result<CodexTelemetryExportState> {
             ..Default::default()
         });
     }
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    let mut state: CodexTelemetryExportState =
-        serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut state: CodexTelemetryExportState = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
     if state.version == 0 {
         state.version = 1;
     }
@@ -244,7 +244,9 @@ fn parse_maple_exporter_config_from_env() -> Result<Option<MapleExporterConfig>>
             ingest_key: key,
         }),
         (None, None) => {}
-        _ => anyhow::bail!("FLOW_CODEX_MAPLE_LOCAL_ENDPOINT and FLOW_CODEX_MAPLE_LOCAL_INGEST_KEY must both be set"),
+        _ => anyhow::bail!(
+            "FLOW_CODEX_MAPLE_LOCAL_ENDPOINT and FLOW_CODEX_MAPLE_LOCAL_INGEST_KEY must both be set"
+        ),
     }
 
     match (
@@ -256,17 +258,20 @@ fn parse_maple_exporter_config_from_env() -> Result<Option<MapleExporterConfig>>
             ingest_key: key,
         }),
         (None, None) => {}
-        _ => anyhow::bail!("FLOW_CODEX_MAPLE_HOSTED_ENDPOINT and FLOW_CODEX_MAPLE_HOSTED_INGEST_KEY must both be set"),
+        _ => anyhow::bail!(
+            "FLOW_CODEX_MAPLE_HOSTED_ENDPOINT and FLOW_CODEX_MAPLE_HOSTED_INGEST_KEY must both be set"
+        ),
     }
 
-    let csv_endpoints = env_non_empty_with_store("FLOW_CODEX_MAPLE_TRACES_ENDPOINTS", &mut personal_env)
-        .map(|raw| {
-            raw.split(',')
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let csv_endpoints =
+        env_non_empty_with_store("FLOW_CODEX_MAPLE_TRACES_ENDPOINTS", &mut personal_env)
+            .map(|raw| {
+                raw.split(',')
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
     let csv_keys = env_non_empty_with_store("FLOW_CODEX_MAPLE_INGEST_KEYS", &mut personal_env)
         .map(|raw| {
             raw.split(',')
@@ -295,9 +300,7 @@ fn parse_maple_exporter_config_from_env() -> Result<Option<MapleExporterConfig>>
         return Ok(None);
     }
 
-    targets.dedup_by(|a, b| {
-        a.traces_endpoint == b.traces_endpoint && a.ingest_key == b.ingest_key
-    });
+    targets.dedup_by(|a, b| a.traces_endpoint == b.traces_endpoint && a.ingest_key == b.ingest_key);
 
     Ok(Some(MapleExporterConfig {
         service_name: env_non_empty("FLOW_CODEX_MAPLE_SERVICE_NAME")
@@ -403,7 +406,8 @@ fn maple_json_rpc_request(
         anyhow::bail!(
             "Maple MCP request failed ({}): {}",
             status,
-            serde_json::to_string(&payload).unwrap_or_else(|_| "unparseable error body".to_string())
+            serde_json::to_string(&payload)
+                .unwrap_or_else(|_| "unparseable error body".to_string())
         );
     }
     let envelope = if let Some(items) = payload.as_array() {
@@ -471,7 +475,10 @@ pub fn status() -> Result<CodexTelemetryStatus> {
 
     Ok(CodexTelemetryStatus {
         enabled: config.is_some(),
-        configured_targets: config.as_ref().map(|value| value.targets.len()).unwrap_or(0),
+        configured_targets: config
+            .as_ref()
+            .map(|value| value.targets.len())
+            .unwrap_or(0),
         service_name: config
             .as_ref()
             .map(|value| value.service_name.clone())
@@ -677,9 +684,18 @@ fn event_span(event: &CodexSkillEvalEvent) -> MapleSpan {
             ("action".to_string(), event.action.clone()),
             ("route".to_string(), event.route.clone()),
             ("target.repo".to_string(), repo_name(&event.target_path)),
-            ("target.path_hash".to_string(), path_hash(&event.target_path)),
-            ("launch.path_hash".to_string(), path_hash(&event.launch_path)),
-            ("session.hash".to_string(), redact_id(event.session_id.as_deref())),
+            (
+                "target.path_hash".to_string(),
+                path_hash(&event.target_path),
+            ),
+            (
+                "launch.path_hash".to_string(),
+                path_hash(&event.launch_path),
+            ),
+            (
+                "session.hash".to_string(),
+                redact_id(event.session_id.as_deref()),
+            ),
             (
                 "runtime.skill_count".to_string(),
                 event.runtime_skills.len().to_string(),
@@ -743,7 +759,10 @@ fn outcome_span(outcome: &CodexSkillOutcomeEvent) -> MapleSpan {
             .map(|value| value.to_string())
             .unwrap_or_else(|| {
                 stable_hex_id(
-                    &[outcome.session_id.as_deref().unwrap_or(target_seed), "outcome"],
+                    &[
+                        outcome.session_id.as_deref().unwrap_or(target_seed),
+                        "outcome",
+                    ],
                     32,
                 )
             }),

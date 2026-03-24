@@ -20,6 +20,18 @@ gitedit_url = "https://gitedit.dev"
 commit_with_check_review_url = "http://100.114.156.47:3000/review"
 # Enable myflow.sh mirroring for commits
 myflow_mirror = true
+codex_bin = "~/code/flow/scripts/codex-flow-wrapper"
+
+[codex]
+runtime_skills = true
+auto_resolve_references = true
+prompt_context_budget_chars = 1200
+max_resolved_references = 2
+
+[[codex.skill_source]]
+name = "run-control-plane"
+path = "~/run"
+enabled = true
 
 [commit]
 queue = true
@@ -66,6 +78,11 @@ activate_on_cd_to_root = true
 name = "test"
 command = "cargo test"
 description = "Run the full test suite for a basic sanity check"
+
+[[tasks]]
+name = "codex-ready"
+command = "f codex doctor --path . --assert-runtime --assert-schedule && f codex skill-source list --path ."
+description = "Verify the repo-local Codex runtime path and run-control-plane skill discovery"
 
 [[tasks]]
 name = "which-cargo"
@@ -578,9 +595,9 @@ command = "bash -c 'cd ~/repos/ghostty-org/ghostty && zig build -Doptimize=Debug
 description = "Build Pond (Ghostty fork) in debug mode"
 
 [[tasks]]
-name = "zed-build-debug-release"
-command = "bash -c 'cd ~/repos/zed-industries/zed && ./script/bundle-mac -d && ./script/bundle-mac'"
-description = "Build Zed macOS bundle in debug mode (fast) and then in release mode"
+name = "Zed"
+command = "bash ./scripts/build-zed-app.sh"
+description = "Build the local Zed fork as optimized stable-channel Zed.app and install it to /Applications/Zed.app"
 
 [[tasks]]
 name = "linsa-assistant-serve"

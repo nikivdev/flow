@@ -261,7 +261,7 @@ pub enum Commands {
     ReviewsTodo(ReviewsTodoCommand),
     #[command(
         about = "Create a GitHub PR from current changes or a queued commit.",
-        long_about = "By default, stages and commits current changes (or only paths passed via --path) into the queue, then creates/updates a GitHub PR for the latest queued commit. Use --no-commit to skip committing and create a PR from an existing queued commit.\n\nSpecial:\n  `f pr open` opens the PR for the current branch (or falls back to the queued commit).\n  `f pr open edit` opens a local markdown editor file and syncs PR title/body on save.\n  `f pr feedback [<number|url>] [--todo]` fetches review comments/reviews and can store them as local todos."
+        long_about = "By default, stages and commits current changes (or only paths passed via --path) into the queue, then creates/updates a GitHub PR for the latest queued commit. Use --no-commit to skip committing and create a PR from an existing queued commit.\n\nSpecial:\n  `f pr preview --json` builds a local pre-PR quality packet and review artifacts under .ai/reviews.\n  `f pr open` opens the PR for the current branch (or falls back to the queued commit).\n  `f pr open edit` opens a local markdown editor file and syncs PR title/body on save.\n  `f pr feedback [<number|url>] [--todo]` fetches review comments/reviews and can store them as local todos."
     )]
     Pr(PrOpts),
     #[command(
@@ -397,10 +397,15 @@ pub enum Commands {
     )]
     Todo(TodoCommand),
     #[command(
-        about = "Copy an external dependency into ext/ and ignore it.",
-        long_about = "Copies a directory into <project>/ext/<name> and adds ext/ to .gitignore."
+        about = "Manage Flow config extensions or import an external dependency into ext/.",
+        long_about = "Use subcommands to inspect, scaffold, enable, or disable Flow config extensions under ~/.flow/extensions. For backwards compatibility, passing a bare path still copies a directory into <project>/ext/<name> and adds ext/ to .gitignore."
     )]
     Ext(ExtCommand),
+    #[command(
+        about = "Compile personal Flow config and generated compatibility outputs.",
+        long_about = "Loads ~/.flow/config.ts plus named extensions, writes a merged snapshot under ~/.config/flow/generated, and can apply generated compatibility files into consumer locations like ~/.config/flow, ~/.config/lin, ~/.hive, and ~/.config/zerg."
+    )]
+    Config(ConfigCommand),
     #[command(
         about = "Manage Codex skills (.ai/skills/).",
         long_about = "Create, list, and manage Codex skills for this project. Skills are stored in .ai/skills/ (gitignored by default) and help Codex understand project-specific workflows."
@@ -451,6 +456,11 @@ pub enum Commands {
     )]
     ExplainCommits(ExplainCommitsCommand),
     #[command(
+        about = "Write a high-signal markdown update for recent repository changes.",
+        long_about = "Summarizes recent changes for a repository, writes a markdown update into ~/docs/updates/<repo>/<timestamp>.md, and tracks the last summarized commit so future runs only cover the delta by default."
+    )]
+    Updates(UpdatesCommand),
+    #[command(
         about = "Bootstrap project and run setup task or aliases.",
         long_about = "Bootstraps the project if needed, creates flow.toml when missing, then runs the 'setup' task or prints shell aliases."
     )]
@@ -489,7 +499,7 @@ pub enum Commands {
     Push(PushCommand),
     #[command(
         about = "Show JJ workflow status optimized for stacked home-branch work.",
-        long_about = "Displays the current JJ workspace, home branch, intake branch, trunk relation, leaf branches, and the working-copy summary. This is intended to replace a raw `jj st` for repos that use a persistent home branch plus review/codex workspaces.",
+        long_about = "Displays the current JJ workspace, home branch, intake branch, trunk relation, leaf branches, and the working-copy summary. This is intended to replace a raw `jj st` for repos that use a persistent home branch plus review/codex workspaces. Use `--compact` when the repo has too many leaves/workspaces for the full listing to be a good first read.",
         alias = "st"
     )]
     Status(StatusOpts),
@@ -1247,7 +1257,7 @@ pub struct ServerOpts {
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
     /// Port for the HTTP server.
-    #[arg(long, default_value_t = 9060)]
+    #[arg(long, default_value_t = 9050)]
     pub port: u16,
     #[command(subcommand)]
     pub action: Option<ServerAction>,
@@ -1705,7 +1715,8 @@ pub struct CommitOpts {
     /// Stage and commit only these paths (repeatable).
     #[arg(long = "path", value_name = "PATH")]
     pub paths: Vec<String>,
-    /// Message to append after the AI-generated subject/body.
+    /// Message to append after the AI-generated subject/body. If this looks like a commit hash
+    /// and no other commit flags are set, `f commit <hash>` opens that commit in Cursor/GitLens.
     #[arg(value_name = "MESSAGE", allow_hyphen_values = true)]
     pub message_arg: Option<String>,
     /// Max tokens for AI session context (default: 1000).
@@ -1722,11 +1733,53 @@ pub struct CommitOpts {
     pub skip_tests: bool,
 }
 
+impl CommitOpts {
+    pub fn commit_lookup_hash(&self) -> Option<&str> {
+        let hash = self.message_arg.as_deref()?.trim();
+        if !looks_like_commit_hash(hash) {
+            return None;
+        }
+
+        if self.no_push
+            || self.queue
+            || self.no_queue
+            || self.force
+            || self.approved
+            || self.review
+            || self.sync
+            || self.context
+            || self.hashed
+            || self.dry
+            || self.quick
+            || self.slow
+            || self.codex
+            || self.review_model.is_some()
+            || self.message.is_some()
+            || self.fast.is_some()
+            || !self.paths.is_empty()
+            || self.tokens != 1000
+            || self.skip_quality
+            || self.skip_docs
+            || self.skip_tests
+        {
+            return None;
+        }
+
+        Some(hash)
+    }
+}
+
+fn looks_like_commit_hash(value: &str) -> bool {
+    let len = value.len();
+    (7..=40).contains(&len) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct PrOpts {
     /// Optional message to append to the AI-generated commit message, or subcommands like:
     ///   f pr open
     ///   f pr open edit
+    ///   f pr preview --json
     ///   f pr feedback [<number|url>] [--todo]
     #[arg(value_name = "ARGS", allow_hyphen_values = true)]
     pub args: Vec<String>,
@@ -1736,6 +1789,12 @@ pub struct PrOpts {
     /// Create as a draft PR.
     #[arg(long)]
     pub draft: bool,
+    /// Print structured JSON output (used by `f pr preview` and tooling integrations).
+    #[arg(long)]
+    pub json: bool,
+    /// Preview mode (draft or feedback) for `f pr preview`.
+    #[arg(long, value_enum)]
+    pub mode: Option<PrPreviewModeArg>,
     /// Do not open the PR in browser after creating/finding it.
     #[arg(long)]
     pub no_open: bool,
@@ -1745,9 +1804,16 @@ pub struct PrOpts {
     /// Specific queued commit hash to use (short or full).
     #[arg(long)]
     pub hash: Option<String>,
-    /// Stage and commit only these paths before creating PR (repeatable).
+    /// Stage and commit only these paths before creating PR (repeatable). With `f pr preview`,
+    /// pass at most one `--path` to preview a different repo root.
     #[arg(long = "path", value_name = "PATH")]
     pub paths: Vec<String>,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum PrPreviewModeArg {
+    Draft,
+    Feedback,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2057,6 +2123,9 @@ pub struct StatusOpts {
     /// Show raw `jj status` output without Flow's workflow summary.
     #[arg(long)]
     pub raw: bool,
+    /// Show a focused status summary using Flow's JJ overview model.
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -2064,6 +2133,22 @@ pub struct JjStatusOpts {
     /// Show raw `jj status` output without Flow's workflow summary.
     #[arg(long)]
     pub raw: bool,
+    /// Show a focused status summary using Flow's JJ overview model.
+    #[arg(long)]
+    pub compact: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct JjOverviewOpts {
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Optional path inside the target JJ repo/workspace.
+    #[arg(long)]
+    pub path: Option<PathBuf>,
+    /// Number of recent JJ operations to include.
+    #[arg(long, default_value_t = 8)]
+    pub op_limit: usize,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -2074,6 +2159,8 @@ pub enum JjAction {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    /// Show a machine-readable JJ workflow overview.
+    Overview(JjOverviewOpts),
     /// Show jj status.
     Status(JjStatusOpts),
     /// Fetch from git remotes.
@@ -2123,12 +2210,17 @@ pub struct JjSyncOpts {
     /// Skip pushing after rebase.
     #[arg(long)]
     pub no_push: bool,
+    /// Print the resolved sync plan without mutating bookmarks or working copies.
+    #[arg(long)]
+    pub plan: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum JjWorkspaceAction {
     /// List workspaces.
     List,
+    /// Diagnose workspace-path drift, unsafe home lanes, and missing review workspaces.
+    Doctor,
     /// Add a workspace.
     Add {
         /// Workspace name.
@@ -2159,7 +2251,7 @@ pub enum JjWorkspaceAction {
     },
     /// Create or reuse a stable JJ workspace for a review branch without touching the current checkout.
     Review {
-        /// Review branch name (for example: review/nikiv-feature).
+        /// Review branch name (for example: review/home-feature).
         branch: String,
         /// Optional path for workspace directory.
         #[arg(long)]
@@ -2684,6 +2776,12 @@ pub enum ProviderAiAction {
         #[command(subcommand)]
         action: Option<CodexTraceAction>,
     },
+    /// Inspect bounded repo intelligence derived from tracked and local `.ai/` surfaces.
+    #[command(name = "project-ai")]
+    ProjectAi {
+        #[command(subcommand)]
+        action: Option<CodexProjectAiAction>,
+    },
     /// Build and inspect local Codex skill scorecards from Flow history.
     #[command(name = "skill-eval")]
     SkillEval {
@@ -2695,6 +2793,11 @@ pub enum ProviderAiAction {
     SkillSource {
         #[command(subcommand)]
         action: Option<CodexSkillSourceAction>,
+    },
+    /// Inspect or run Flow-linked Codex agents owned by the run control plane.
+    Agent {
+        #[command(subcommand)]
+        action: Option<CodexAgentAction>,
     },
     /// Inspect or manage Flow-managed Codex runtime helpers.
     Runtime {
@@ -2899,6 +3002,31 @@ pub enum CodexTraceAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum CodexProjectAiAction {
+    /// Show the bounded `.ai` manifest for a repo/path.
+    Show {
+        /// Project path to inspect instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Force a refresh instead of serving cached metadata.
+        #[arg(long)]
+        refresh: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the most recently queried repo manifests to track actual daemon usage.
+    Recent {
+        /// Maximum number of repo manifests to print.
+        #[arg(long, default_value = "12")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum CodexSkillEvalAction {
     /// Rebuild the local scorecard for this repo/path from recent Flow Codex history.
     Run {
@@ -2976,12 +3104,44 @@ pub enum CodexSkillSourceAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum CodexAgentAction {
+    /// List run-owned agents available through the Flow Codex bridge.
+    List {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show metadata for one run-owned agent.
+    Show {
+        /// Agent id to inspect.
+        agent_id: String,
+    },
+    /// Run a run-owned agent from the target repo/path.
+    Run {
+        /// Project path to execute from instead of the current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Start a fresh agent thread instead of resuming the previous one.
+        #[arg(long)]
+        new_thread: bool,
+        /// Emit the final completed event as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Agent id to execute.
+        agent_id: String,
+        /// Query to pass through to the run-owned agent.
+        #[arg(value_name = "QUERY", trailing_var_arg = true)]
+        query: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum CodexRuntimeAction {
     /// Show recent Flow-managed Codex runtime skill activations.
     Show,
     /// Remove Flow-managed runtime skill state and stale symlinks.
     Clear,
-    /// Write a markdown plan to ~/plan and print the final path.
+    /// Write a markdown plan to today's ~/plan/<day-of-month> bucket and print the final path.
     WritePlan {
         /// Human-readable title used to derive the filename.
         #[arg(long)]
@@ -2989,7 +3149,7 @@ pub enum CodexRuntimeAction {
         /// Explicit filename stem to use instead of deriving from the title.
         #[arg(long)]
         stem: Option<String>,
-        /// Destination directory (defaults to ~/plan).
+        /// Destination directory (default root: ~/plan, which auto-buckets to ~/plan/<day-of-month>).
         #[arg(long)]
         dir: Option<String>,
         /// Codex session id to append as a footer (defaults to $CODEX_THREAD_ID).
@@ -3353,9 +3513,87 @@ pub struct TodoCommand {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(subcommand_precedence_over_arg = true)]
 pub struct ExtCommand {
-    /// Path to the external directory to move.
-    pub path: String,
+    #[command(subcommand)]
+    pub action: Option<ExtAction>,
+    /// Backwards-compatible import path to copy into <project>/ext/.
+    #[arg(value_name = "PATH")]
+    pub path: Option<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ExtAction {
+    /// List discovered Flow config extensions.
+    #[command(alias = "ls")]
+    List {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check extension discovery and root-config wiring.
+    Doctor {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable an extension in ~/.flow/config.ts.
+    Enable {
+        /// Extension name.
+        name: String,
+    },
+    /// Disable an extension in ~/.flow/config.ts.
+    Disable {
+        /// Extension name.
+        name: String,
+    },
+    /// Create a new extension scaffold under ~/.flow/extensions/<name>/.
+    Init {
+        /// Extension name.
+        name: String,
+        /// Overwrite the scaffold if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Explicit import form for the legacy ext copy workflow.
+    Import {
+        /// Path to the external directory to move.
+        path: String,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ConfigCommand {
+    #[command(subcommand)]
+    pub action: ConfigAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigAction {
+    /// Build the merged config snapshot under ~/.config/flow/generated.
+    Build {
+        /// Print the full snapshot as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply generated compatibility outputs into their consumer locations.
+    Apply {
+        /// Print the full snapshot as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check whether the root config, TS runner, and generated snapshot are healthy.
+    Doctor {
+        /// Print the doctor report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Evaluate the currently effective config and extension graph.
+    Eval {
+        /// Print the full snapshot as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -4114,6 +4352,38 @@ pub enum RepoAliasAction {
 
 #[derive(Args, Debug, Clone)]
 pub struct SyncCommand {
+    #[command(subcommand)]
+    pub action: Option<SyncAction>,
+    #[command(flatten)]
+    pub options: SyncRunOptions,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SyncAction {
+    /// Inspect stored improvement plans generated from sync results.
+    Plan(SyncPlanCommand),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SyncPlanCommand {
+    #[command(subcommand)]
+    pub action: Option<SyncPlanAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SyncPlanAction {
+    /// Print the latest stored sync improvement plan for the current repository.
+    Last,
+    /// List recent stored sync improvement plans for the current repository.
+    List {
+        /// Number of plan entries to show.
+        #[arg(long, short = 'n', default_value_t = 10)]
+        limit: usize,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SyncRunOptions {
     /// Use rebase instead of merge when pulling.
     #[arg(long, short)]
     pub rebase: bool,
@@ -4366,6 +4636,40 @@ pub struct ExplainCommitsCommand {
     /// Output directory (relative to repo root unless absolute).
     #[arg(long)]
     pub out_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UpdatesCommand {
+    /// Repository path to summarize (defaults to the current working directory).
+    #[arg(long)]
+    pub repo: Option<PathBuf>,
+    /// Explicit git ref to summarize instead of the default remote branch.
+    #[arg(long = "ref", value_name = "REF")]
+    pub git_ref: Option<String>,
+    /// Remote whose default branch should be summarized (defaults to origin when present).
+    #[arg(long)]
+    pub remote: Option<String>,
+    /// Optional path filters within the repository. Can be passed multiple times.
+    #[arg(long = "path", value_name = "PATH")]
+    pub pathspecs: Vec<String>,
+    /// Start from this revision or date string instead of the stored delta.
+    #[arg(long, value_name = "REV_OR_DATE")]
+    pub since: Option<String>,
+    /// Initial lookback window, in days, when there is no stored delta (default: 14).
+    #[arg(long, default_value_t = 14)]
+    pub days: u32,
+    /// Fetch and prune the selected remote before resolving the target ref.
+    #[arg(long)]
+    pub fetch: bool,
+    /// Print the generated markdown to stdout instead of writing docs/state.
+    #[arg(long)]
+    pub stdout: bool,
+    /// Ignore stored delta state and summarize the lookback window again.
+    #[arg(long)]
+    pub force: bool,
+    /// Override the Codex model for this summary run.
+    #[arg(long)]
+    pub model: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -4826,6 +5130,26 @@ pub enum DocsAction {
     List,
     /// Show documentation status (what needs updating).
     Status,
+    /// Review pending daemon-captured session docs and record promotion decisions.
+    ReviewPending {
+        /// Maximum number of pending entries to review.
+        #[arg(long, short = 'n', default_value_t = 25)]
+        limit: usize,
+    },
+    /// Preview or apply promotion for a daemon-captured session doc packet.
+    PromoteSession {
+        /// Session id, session id prefix, or session key.
+        session: String,
+        /// Apply the promotion and write the durable doc note.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Commit promoted doc packets when the repo diff is doc-only and isolated.
+    CommitPending {
+        /// Preview the commit plan without staging or committing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Open a doc file in editor.
     Edit {
         /// Doc file name (without .md).
@@ -5301,6 +5625,103 @@ mod tests {
                 assert_eq!(max_age_s, None);
                 assert_eq!(wait_timeout_s, 60.0);
                 assert_eq!(poll_interval_s, 2.0);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ext_list_as_subcommand_before_legacy_path() {
+        let cli = Cli::parse_from(["f", "ext", "list"]);
+
+        match cli.command {
+            Some(Commands::Ext(ExtCommand {
+                action: Some(ExtAction::List { json }),
+                path: None,
+            })) => {
+                assert!(!json);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ext_bare_path_for_legacy_import() {
+        let cli = Cli::parse_from(["f", "ext", "/tmp/some-ext"]);
+
+        match cli.command {
+            Some(Commands::Ext(ExtCommand {
+                action: None,
+                path: Some(path),
+            })) => {
+                assert_eq!(path, "/tmp/some-ext");
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commit_opts_detect_hash_lookup_mode() {
+        let cli = Cli::parse_from(["f", "commit", "a00bf8911dfde59bf027039390cf498785ee931d"]);
+
+        match cli.command {
+            Some(Commands::Commit(opts)) => {
+                assert_eq!(
+                    opts.commit_lookup_hash(),
+                    Some("a00bf8911dfde59bf027039390cf498785ee931d")
+                );
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commit_opts_do_not_treat_normal_message_as_hash_lookup() {
+        let cli = Cli::parse_from(["f", "commit", "fix sync output"]);
+
+        match cli.command {
+            Some(Commands::Commit(opts)) => {
+                assert_eq!(opts.commit_lookup_hash(), None);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_agent_run() {
+        let cli = Cli::parse_from([
+            "f",
+            "codex",
+            "agent",
+            "run",
+            "--path",
+            "~/code/flow",
+            "--new-thread",
+            "planner",
+            "make",
+            "a",
+            "plan",
+        ]);
+
+        match cli.command {
+            Some(Commands::Codex {
+                action:
+                    Some(ProviderAiAction::Agent {
+                        action:
+                            Some(CodexAgentAction::Run {
+                                path,
+                                new_thread,
+                                json,
+                                agent_id,
+                                query,
+                            }),
+                    }),
+            }) => {
+                assert_eq!(path.as_deref(), Some("~/code/flow"));
+                assert!(new_thread);
+                assert!(!json);
+                assert_eq!(agent_id, "planner");
+                assert_eq!(query, vec!["make", "a", "plan"]);
             }
             other => panic!("unexpected parsed command: {other:?}"),
         }

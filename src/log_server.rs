@@ -1,4 +1,5 @@
 use std::fs;
+use std::fs::OpenOptions;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Command;
@@ -26,7 +27,9 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::cli::{ServerAction, ServerOpts};
 use crate::log_store::{self, LogEntry, LogQuery};
 use crate::pr_edit::PrEditService;
-use crate::{ai, config, daemon_snapshot, explain_commits, projects, skills, workflow};
+use crate::{
+    ai, config, daemon_snapshot, explain_commits, ops_overview, projects, skills, workflow,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -63,6 +66,16 @@ fn ensure_server(host: &str, port: u16) -> Result<()> {
 
     // Start in background
     let exe = std::env::current_exe().context("failed to get current exe")?;
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(server_stdout_log_path())
+        .context("failed to open server stdout log")?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(server_stderr_log_path())
+        .context("failed to open server stderr log")?;
     let mut cmd = Command::new(exe);
     cmd.arg("server")
         .arg("--host")
@@ -71,8 +84,19 @@ fn ensure_server(host: &str, port: u16) -> Result<()> {
         .arg(port.to_string())
         .arg("foreground")
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(stdout)
+        .stderr(stderr);
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
 
     let child = cmd.spawn().context("failed to start server process")?;
     persist_server_pid(child.id())?;
@@ -139,14 +163,18 @@ fn run_foreground(host: &str, port: u16) -> Result<()> {
         let router = Router::new()
             .route("/health", get(health))
             .route("/codex/skills", get(codex_skills))
+            .route("/codex/project-ai", get(codex_project_ai))
+            .route("/codex/project-ai/recent", get(codex_project_ai_recent))
             .route("/codex/eval", get(codex_eval))
             .route("/codex/resolve", post(codex_resolve))
             .route("/codex/skills/sync", post(codex_skills_sync))
             .route("/codex/skills/reload", post(codex_skills_reload))
             .route("/daemons", get(daemons))
+            .route("/daemons/stale/cleanup", post(daemon_cleanup_stale))
             .route("/daemons/{name}/start", post(daemon_start))
             .route("/daemons/{name}/stop", post(daemon_stop))
             .route("/daemons/{name}/restart", post(daemon_restart))
+            .route("/ops/overview", get(ops_visibility_overview))
             .route("/logs/ingest", post(logs_ingest))
             .route("/logs/query", get(logs_query))
             .route("/logs/errors/stream", get(logs_errors_stream))
@@ -196,6 +224,20 @@ fn server_pid_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config/flow/server.pid")
+}
+
+fn server_stdout_log_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/flow/server.stdout.log")
+}
+
+fn server_stderr_log_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/flow/server.stderr.log")
 }
 
 fn load_server_pid() -> Result<Option<u32>> {
@@ -274,6 +316,25 @@ struct CodexEvalQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct CodexProjectAiQuery {
+    path: Option<String>,
+    refresh: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexProjectAiRecentQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpsOverviewQuery {
+    path: Option<String>,
+    activity_limit: Option<usize>,
+    log_lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodexSkillsSyncRequest {
     path: Option<String>,
@@ -334,11 +395,54 @@ async fn codex_skills(Query(query): Query<CodexSkillsQuery>) -> impl IntoRespons
     }
 }
 
+async fn codex_project_ai(Query(query): Query<CodexProjectAiQuery>) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(query.path.as_deref());
+    let refresh = query.refresh.unwrap_or(false);
+    let result =
+        tokio::task::spawn_blocking(move || ai::codex_project_ai_snapshot(&target_path, refresh))
+            .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex project-ai task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn codex_project_ai_recent(
+    Query(query): Query<CodexProjectAiRecentQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(12).clamp(1, 50);
+    let result = tokio::task::spawn_blocking(move || ai::codex_project_ai_recent(limit)).await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("codex project-ai recent task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
 async fn codex_eval(Query(query): Query<CodexEvalQuery>) -> impl IntoResponse {
     let target_path = resolve_codex_skills_target(query.path.as_deref());
     let limit = query.limit.unwrap_or(200).clamp(20, 1000);
-    let result = tokio::task::spawn_blocking(move || ai::codex_eval_snapshot(&target_path, limit))
-        .await;
+    let result =
+        tokio::task::spawn_blocking(move || ai::codex_eval_snapshot(&target_path, limit)).await;
 
     match result {
         Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
@@ -376,7 +480,9 @@ async fn codex_resolve(AxumJson(payload): AxumJson<CodexResolveRequest>) -> impl
     }
 }
 
-async fn codex_skills_sync(AxumJson(payload): AxumJson<CodexSkillsSyncRequest>) -> impl IntoResponse {
+async fn codex_skills_sync(
+    AxumJson(payload): AxumJson<CodexSkillsSyncRequest>,
+) -> impl IntoResponse {
     let target_path = resolve_codex_skills_target(payload.path.as_deref());
     let result = tokio::task::spawn_blocking(move || {
         let installed = ai::codex_skill_source_sync(&target_path, &payload.skills, payload.force)?;
@@ -458,6 +564,49 @@ async fn daemon_stop(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
 
 async fn daemon_restart(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
     daemon_action_response(name, daemon_snapshot::FlowDaemonAction::Restart).await
+}
+
+async fn daemon_cleanup_stale() -> impl IntoResponse {
+    let result =
+        tokio::task::spawn_blocking(move || daemon_snapshot::cleanup_stale_daemons(None)).await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("daemon cleanup task failed: {err}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn ops_visibility_overview(Query(query): Query<OpsOverviewQuery>) -> impl IntoResponse {
+    let target_path = resolve_codex_skills_target(query.path.as_deref());
+    let activity_limit = query.activity_limit.unwrap_or(20).clamp(1, 100);
+    let log_lines = query.log_lines.unwrap_or(20).clamp(1, 200);
+    let result = tokio::task::spawn_blocking(move || {
+        ops_overview::load(&target_path, activity_limit, log_lines)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => (StatusCode::OK, Json(json!(snapshot))).into_response(),
+        Ok(Err(err)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("ops overview task failed: {err}") })),
+        )
+            .into_response(),
+    }
 }
 
 async fn daemon_action_response(

@@ -23,6 +23,7 @@ use serde_json::json;
 use sha1::{Digest, Sha1};
 use tempfile::{Builder as TempBuilder, NamedTempFile, TempDir};
 use tracing::{debug, info};
+use url::Url;
 use uuid::Uuid;
 
 use crate::ai;
@@ -35,6 +36,7 @@ use crate::git_guard;
 use crate::gitignore_policy;
 use crate::hub;
 use crate::notify;
+use crate::pr_preview;
 use crate::setup;
 use crate::skills;
 use crate::supervisor;
@@ -9581,6 +9583,9 @@ pub fn run_commit_queue(cmd: CommitQueueCommand) -> Result<()> {
 
 pub fn run_pr(opts: PrOpts) -> Result<()> {
     let args = normalize_pr_args(&opts.args);
+    if let Some(preview) = pr_preview::parse_pr_preview_args(&args, &opts)? {
+        return pr_preview::run_pr_preview(preview);
+    }
     if let Some(feedback) = parse_pr_feedback_args(&args)? {
         let repo_root = if feedback.selector.is_some() {
             std::env::current_dir().context("failed to resolve current directory")?
@@ -10030,13 +10035,7 @@ fn gh_review_thread_ids_by_comment_url(
         let parsed: GhGraphqlReviewThreadsResponse = serde_json::from_str(out.trim())
             .context("failed to parse GitHub GraphQL review thread response")?;
 
-        for thread in parsed
-            .data
-            .repository
-            .pull_request
-            .review_threads
-            .nodes
-        {
+        for thread in parsed.data.repository.pull_request.review_threads.nodes {
             for comment in thread.comments.nodes {
                 let url = comment.url.trim();
                 if !url.is_empty() {
@@ -10172,6 +10171,103 @@ fn command_on_path(command: &str) -> bool {
         return false;
     };
     env::split_paths(&path_os).any(|dir| dir.join(command).is_file())
+}
+
+fn cursor_cli_program() -> Option<PathBuf> {
+    if command_on_path("cursor") {
+        return Some(PathBuf::from("cursor"));
+    }
+
+    if cfg!(target_os = "macos") {
+        let bundled = PathBuf::from("/Applications/Cursor.app/Contents/Resources/app/bin/cursor");
+        if bundled.is_file() {
+            return Some(bundled);
+        }
+    }
+
+    None
+}
+
+fn open_repo_in_cursor(repo_root: &Path) -> Result<()> {
+    if let Some(program) = cursor_cli_program() {
+        let status = Command::new(program)
+            .arg("--reuse-window")
+            .arg(repo_root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("failed to launch Cursor")?;
+        if !status.success() {
+            bail!("failed to launch Cursor");
+        }
+        return Ok(());
+    }
+
+    if cfg!(target_os = "macos") {
+        let status = Command::new("open")
+            .arg("-a")
+            .arg("Cursor")
+            .arg(repo_root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("failed to launch Cursor")?;
+        if !status.success() {
+            bail!("failed to launch Cursor");
+        }
+        return Ok(());
+    }
+
+    bail!("Cursor CLI not found")
+}
+
+fn gitlens_commit_deeplink_url(repo_root: &Path, commit_sha: &str) -> Result<Url> {
+    let mut url = Url::parse(&format!("cursor://eamodio.gitlens/link/r/-/c/{commit_sha}"))
+        .context("failed to build GitLens commit deeplink")?;
+    url.query_pairs_mut()
+        .append_pair("path", &repo_root.display().to_string());
+    Ok(url)
+}
+
+fn open_cursor_gitlens_commit(repo_root: &Path, commit_sha: &str) -> Result<()> {
+    open_repo_in_cursor(repo_root)?;
+
+    // Give Cursor a moment to bind the repo window before dispatching the GitLens deeplink.
+    std::thread::sleep(Duration::from_millis(300));
+
+    let deeplink = gitlens_commit_deeplink_url(repo_root, commit_sha)?;
+    let status = if cfg!(target_os = "macos") {
+        Command::new("open")
+            .arg(deeplink.as_str())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("failed to open Cursor GitLens deeplink")?
+    } else {
+        Command::new("xdg-open")
+            .arg(deeplink.as_str())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("failed to open Cursor GitLens deeplink")?
+    };
+
+    if !status.success() {
+        bail!("failed to open Cursor GitLens deeplink");
+    }
+
+    Ok(())
+}
+
+pub fn open_commit_in_cursor(hash: &str) -> Result<()> {
+    ensure_git_repo()?;
+    let repo_root = git_root_or_cwd();
+    let commit_sha = resolve_git_commit_sha(&repo_root, hash)?;
+    let short_sha: String = commit_sha.chars().take(10).collect();
+
+    open_cursor_gitlens_commit(&repo_root, &commit_sha)?;
+    println!("Opened commit {short_sha} in Cursor.");
+    Ok(())
 }
 
 fn cursor_review_open_command(selector: &str, compact: bool, open_cursor: bool) -> String {
@@ -10607,7 +10703,9 @@ fn write_pr_feedback_review_rules_at(
     out.push_str("3. Explain why the current diff likely ended up in its flawed shape.\n");
     out.push_str("4. If the concern still applies here or moved nearby, propose the smallest acceptable fix in the current branch. Otherwise explain why no patch is required.\n");
     out.push_str("5. State the exact validation to run in the product repo.\n");
-    out.push_str("6. If the same diff exposes an adjacent issue, label it fix-now, defer, or ignore.\n");
+    out.push_str(
+        "6. If the same diff exposes an adjacent issue, label it fix-now, defer, or ignore.\n",
+    );
     out.push_str("7. If there is a durable lesson about the review operator workflow or prompt contract, propose the exact update for ");
     out.push_str(&canonical_rules_path.display().to_string());
     out.push_str(".\n");
@@ -15843,6 +15941,28 @@ pub fn get_review_instructions(repo_root: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn gitlens_commit_deeplink_url_targets_cursor_with_repo_path() {
+        let url = gitlens_commit_deeplink_url(
+            Path::new("/Users/nikitavoloboev/repos/gitkraken/vscode-gitlens"),
+            "a00bf8911dfde59bf027039390cf498785ee931d",
+        )
+        .expect("deeplink");
+
+        assert_eq!(url.scheme(), "cursor");
+        assert_eq!(url.host_str(), Some("eamodio.gitlens"));
+        assert_eq!(
+            url.path(),
+            "/link/r/-/c/a00bf8911dfde59bf027039390cf498785ee931d"
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "path")
+                .map(|(_, value)| value.into_owned()),
+            Some("/Users/nikitavoloboev/repos/gitkraken/vscode-gitlens".to_string())
+        );
+    }
 
     #[test]
     fn ai_scratch_tests_are_excluded_from_related_tests() {

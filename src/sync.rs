@@ -22,12 +22,14 @@ use crossterm::{
 use serde::{Deserialize, Serialize};
 
 use crate::ai_context;
-use crate::cli::{CheckoutCommand, SwitchCommand, SyncCommand};
+use crate::cli::{CheckoutCommand, SwitchCommand, SyncAction, SyncCommand, SyncRunOptions};
 use crate::commit;
 use crate::config;
 use crate::git_guard;
 use crate::push;
 use crate::secret_redact;
+use crate::status_line::StatusLine;
+use crate::sync_plan;
 use crate::todo;
 
 #[derive(Serialize, Clone)]
@@ -90,10 +92,103 @@ struct SyncRecorder {
     remote_updates: Vec<SyncRemoteUpdate>,
 }
 
+#[derive(Default)]
+struct SyncRemoteProbeCache {
+    urls: HashMap<String, Option<String>>,
+    reachable: HashMap<String, bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncCommitRef {
+    hash: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncCommitDisplay {
+    hash: String,
+    description: String,
+    author: Option<String>,
+    relative_time: Option<String>,
+}
+
+#[derive(Debug)]
+struct SyncCommitMetadata {
+    full_hash: String,
+    short_hash: String,
+    author_name: String,
+    author_email: String,
+    relative_time: String,
+    subject: String,
+}
+
+#[derive(Copy, Clone)]
+enum SyncRemoteFetchMode {
+    FullRemote,
+    SingleBranch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JjWorkingCopyUpdate {
+    EditBookmark(String),
+    RebaseToDest(String),
+}
+
 // Use the Claude family alias so sync always targets the latest Opus model.
 const SYNC_CLAUDE_MODEL: &str = "opus";
 
-fn sync_should_push(cmd: &SyncCommand) -> bool {
+thread_local! {
+    static ACTIVE_SYNC_STATUS: RefCell<Option<StatusLine>> = const { RefCell::new(None) };
+}
+
+fn set_active_sync_status(status_line: Option<StatusLine>) {
+    ACTIVE_SYNC_STATUS.with(|slot| {
+        *slot.borrow_mut() = status_line;
+    });
+}
+
+fn take_active_sync_status() -> Option<StatusLine> {
+    ACTIVE_SYNC_STATUS.with(|slot| slot.borrow_mut().take())
+}
+
+fn active_sync_status() -> Option<StatusLine> {
+    ACTIVE_SYNC_STATUS.with(|slot| slot.borrow().clone())
+}
+
+fn sync_status_suspend() -> Option<crate::status_line::StatusLineSuspendGuard> {
+    active_sync_status().map(|status_line| status_line.suspend())
+}
+
+fn sync_progress(message: impl Into<String>) {
+    let message = message.into();
+    if let Some(status_line) = active_sync_status() {
+        status_line.update(message);
+    } else if !message.is_empty() {
+        println!("{}", message);
+    }
+}
+
+macro_rules! sync_progressln {
+    ($($arg:tt)*) => {{
+        sync_progress(format!($($arg)*));
+    }};
+}
+
+macro_rules! sync_stdoutln {
+    ($($arg:tt)*) => {{
+        let _sync_status_guard = sync_status_suspend();
+        println!($($arg)*);
+    }};
+}
+
+macro_rules! sync_stderrln {
+    ($($arg:tt)*) => {{
+        let _sync_status_guard = sync_status_suspend();
+        eprintln!($($arg)*);
+    }};
+}
+
+fn sync_should_push(cmd: &SyncRunOptions) -> bool {
     cmd.push && !cmd.no_push
 }
 
@@ -109,8 +204,58 @@ fn sync_claude_command(prompt: &str) -> Command {
     cmd
 }
 
+fn jj_working_copy_update(
+    has_branch_bookmark: bool,
+    current_branch: &str,
+    dest: &str,
+) -> JjWorkingCopyUpdate {
+    if has_branch_bookmark {
+        JjWorkingCopyUpdate::EditBookmark(current_branch.to_string())
+    } else {
+        JjWorkingCopyUpdate::RebaseToDest(dest.to_string())
+    }
+}
+
+fn select_jj_sync_branch(
+    git_head_ref: &str,
+    current_bookmarks: &[String],
+    default_branch: &str,
+) -> String {
+    if let Some(exact) = current_bookmarks
+        .iter()
+        .find(|name| *name == git_head_ref && is_visible_jj_sync_bookmark(name))
+    {
+        return exact.clone();
+    }
+    let mut visible = current_bookmarks
+        .iter()
+        .filter(|name| is_visible_jj_sync_bookmark(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    visible.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
+    if let Some(branch) = visible.first() {
+        return branch.clone();
+    }
+    if git_head_ref.is_empty() || git_head_ref == "HEAD" {
+        default_branch.to_string()
+    } else {
+        git_head_ref.to_string()
+    }
+}
+
+fn is_visible_jj_sync_bookmark(name: &str) -> bool {
+    !name.trim().is_empty() && !name.contains('@') && !is_hidden_jj_sync_bookmark(name)
+}
+
+fn is_hidden_jj_sync_bookmark(name: &str) -> bool {
+    name.starts_with("backup/")
+        || name.starts_with("recovery/")
+        || name.starts_with("jj/keep/")
+        || name.ends_with("-jj-export-backup")
+}
+
 impl SyncRecorder {
-    fn new(cmd: &SyncCommand) -> Result<Self> {
+    fn new(cmd: &SyncRunOptions) -> Result<Self> {
         let should_push = sync_should_push(cmd);
         let repo_root =
             git_capture(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|_| ".".to_string());
@@ -264,6 +409,44 @@ impl SyncRecorder {
     }
 }
 
+impl SyncRemoteProbeCache {
+    fn remote_url(&mut self, repo_root: &Path, remote: &str) -> Option<String> {
+        self.urls
+            .entry(remote.to_string())
+            .or_insert_with(|| {
+                git_capture_in(repo_root, &["remote", "get-url", remote])
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .clone()
+    }
+
+    fn remote_exists(&mut self, repo_root: &Path, remote: &str) -> bool {
+        self.remote_url(repo_root, remote).is_some()
+    }
+
+    fn remote_reachable(&mut self, repo_root: &Path, remote: &str) -> bool {
+        if self.remote_url(repo_root, remote).is_none() {
+            return false;
+        }
+
+        *self.reachable.entry(remote.to_string()).or_insert_with(|| {
+            git_capture_in(repo_root, &["ls-remote", "--exit-code", "-q", remote]).is_ok()
+        })
+    }
+
+    fn remotes_share_target(&mut self, repo_root: &Path, left: &str, right: &str) -> bool {
+        let Some(left_url) = self.remote_url(repo_root, left) else {
+            return false;
+        };
+        let Some(right_url) = self.remote_url(repo_root, right) else {
+            return false;
+        };
+        normalize_git_url(&left_url) == normalize_git_url(&right_url)
+    }
+}
+
 /// Check the review-todo push gate. Returns `true` if push should proceed.
 /// Only P1+P2 items trigger the gate; P3/P4 are non-blocking.
 /// Reads `[commit].review-push-gate` from config: "warn" (default) | "block" | "off".
@@ -303,11 +486,13 @@ fn check_review_todo_push_gate(
     match gate_mode.as_str() {
         "off" => true,
         "block" => {
-            eprintln!(
+            sync_stderrln!(
                 "✗ Push blocked: {} open review todos (P1:{}, P2:{})",
-                blocking, p1, p2
+                blocking,
+                p1,
+                p2
             );
-            eprintln!(
+            sync_stderrln!(
                 "  Resolve with `f reviews-todo list` or use --allow-review-issues to override."
             );
             recorder.record("review-gate", format!("blocked (P1:{}, P2:{})", p1, p2));
@@ -315,11 +500,13 @@ fn check_review_todo_push_gate(
         }
         _ => {
             // "warn" (default)
-            eprintln!(
+            sync_stderrln!(
                 "⚠  {} open review todos (P1:{}, P2:{}) — consider reviewing before push",
-                blocking, p1, p2
+                blocking,
+                p1,
+                p2
             );
-            eprintln!("  Run `f reviews-todo list` to see details.");
+            sync_stderrln!("  Run `f reviews-todo list` to see details.");
             recorder.record("review-gate", format!("warned (P1:{}, P2:{})", p1, p2));
             true
         }
@@ -328,6 +515,14 @@ fn check_review_todo_push_gate(
 
 /// Run the sync command.
 pub fn run(cmd: SyncCommand) -> Result<()> {
+    if let Some(SyncAction::Plan(plan_cmd)) = cmd.action {
+        return sync_plan::run_cli(plan_cmd);
+    }
+
+    run_sync(cmd.options)
+}
+
+fn run_sync(cmd: SyncRunOptions) -> Result<()> {
     let _git_capture_cache_scope = GitCaptureCacheScope::begin();
 
     // Check we're in a git repo
@@ -339,6 +534,7 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
         eprintln!("warn: unable to init sync recorder: {err}");
         SyncRecorder::disabled()
     });
+    set_active_sync_status(Some(StatusLine::new("Syncing...")));
 
     let result = (|| -> Result<()> {
         // Determine if auto-fix is enabled (--fix is default, --no-fix disables)
@@ -349,11 +545,12 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
             .trim()
             .to_string();
         let repo_root_path = Path::new(&repo_root);
+        let mut remote_probe_cache = SyncRemoteProbeCache::default();
         let preferred_remote = config::preferred_git_remote_for_repo(repo_root_path);
         let mut use_jj = should_use_jj(repo_root_path);
         let mut jj_disabled_by_custom_tracking = false;
         if use_jj && preferred_remote != "origin" && preferred_remote != "upstream" {
-            println!(
+            sync_progressln!(
                 "⚠️  Configured git.remote '{}' detected; using git sync flow.",
                 preferred_remote
             );
@@ -373,7 +570,7 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
                         resolve_tracking_remote_branch_in(repo_root_path, Some(branch))
                     {
                         if remote != "origin" && remote != "upstream" {
-                            println!(
+                            sync_progressln!(
                                 "⚠️  Tracking remote '{}' detected; using git sync flow for reliable branch + upstream sync.",
                                 remote
                             );
@@ -389,8 +586,8 @@ pub fn run(cmd: SyncCommand) -> Result<()> {
             }
         }
         if repo_root_path.join(".jj").exists() && !use_jj && !jj_disabled_by_custom_tracking {
-            println!("⚠️  jj workspace appears unhealthy; falling back to git sync flow.");
-            println!(
+            sync_progressln!("⚠️  jj workspace appears unhealthy; falling back to git sync flow.");
+            sync_progressln!(
                 "   Fix: `jj git import` (or if still broken: `rm -rf .jj && jj git init --colocate`)"
             );
             recorder.record("mode", "jj unavailable/unhealthy; fallback to git");
@@ -413,8 +610,10 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
             match run_jj_sync(repo_root_path, &cmd, auto_fix, &mut recorder) {
                 Ok(()) => return Ok(()),
                 Err(err) if is_jj_corruption_error(&err) => {
-                    println!("⚠️  jj sync failed due workspace/store issues; retrying with git.");
-                    println!(
+                    sync_progressln!(
+                        "⚠️  jj sync failed due workspace/store issues; retrying with git."
+                    );
+                    sync_progressln!(
                         "   Fix: `jj git import` (or if still broken: `rm -rf .jj && jj git init --colocate`)"
                     );
                     recorder.record("mode", "jj failed (corruption); fallback to git");
@@ -427,7 +626,7 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
         let unmerged = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
         if !unmerged.trim().is_empty() {
             let unmerged_files: Vec<&str> = unmerged.lines().filter(|l| !l.is_empty()).collect();
-            println!(
+            sync_progressln!(
                 "==> Found {} unmerged files, resolving...",
                 unmerged_files.len()
             );
@@ -444,10 +643,10 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
                     if is_merge_in_progress() {
                         let _ = Command::new("git").args(["commit", "--no-edit"]).output();
                     }
-                    println!("  ✓ Unmerged files resolved");
+                    sync_progressln!("Unmerged files resolved");
                 } else {
                     // Couldn't resolve - reset the conflicted files to HEAD
-                    println!("  Could not auto-resolve. Resetting unmerged files...");
+                    sync_progressln!("Could not auto-resolve. Resetting unmerged files...");
                     for file in &unmerged_files {
                         let _ = Command::new("git")
                             .args(["checkout", "HEAD", "--", file])
@@ -459,7 +658,7 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
                 }
             } else {
                 // User declined - reset the files
-                println!("  Resetting unmerged files...");
+                sync_progressln!("Resetting unmerged files...");
                 for file in &unmerged_files {
                     let _ = Command::new("git")
                         .args(["checkout", "HEAD", "--", file])
@@ -473,36 +672,36 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
 
         // Check for in-progress rebase/merge and handle it
         if is_rebase_in_progress() {
-            println!("==> Rebase in progress, attempting to resolve...");
+            sync_progressln!("Rebase in progress, attempting to resolve...");
             let should_fix = auto_fix || prompt_for_rebase_action()?;
             if should_fix {
                 if try_resolve_rebase_conflicts()? {
-                    println!("  ✓ Rebase completed");
+                    sync_progressln!("Rebase completed");
                 } else {
-                    println!("  Could not auto-resolve. Aborting rebase...");
+                    sync_progressln!("Could not auto-resolve. Aborting rebase...");
                     let _ = Command::new("git").args(["rebase", "--abort"]).output();
                 }
             } else {
-                println!("  Aborting rebase...");
+                sync_progressln!("Aborting rebase...");
                 let _ = Command::new("git").args(["rebase", "--abort"]).output();
             }
         }
 
         // Check for in-progress merge
         if is_merge_in_progress() {
-            println!("==> Merge in progress, attempting to resolve...");
+            sync_progressln!("Merge in progress, attempting to resolve...");
             let should_fix = auto_fix || prompt_for_auto_fix()?;
             if should_fix {
                 if try_resolve_conflicts()? {
                     let _ = git_run(&["add", "-A"]);
                     let _ = Command::new("git").args(["commit", "--no-edit"]).output();
-                    println!("  ✓ Merge completed");
+                    sync_progressln!("Merge completed");
                 } else {
-                    println!("  Could not auto-resolve. Aborting merge...");
+                    sync_progressln!("Could not auto-resolve. Aborting merge...");
                     let _ = Command::new("git").args(["merge", "--abort"]).output();
                 }
             } else {
-                println!("  Aborting merge...");
+                sync_progressln!("Aborting merge...");
                 let _ = Command::new("git").args(["merge", "--abort"]).output();
             }
         }
@@ -515,7 +714,6 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
         let has_changes = !status.trim().is_empty();
 
         if has_changes && !cmd.stash {
-            println!("You have uncommitted changes. Use --stash to auto-stash them.");
             recorder.record("stash", "skipped (uncommitted changes without --stash)");
             bail!("Uncommitted changes");
         }
@@ -523,7 +721,7 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
         // Stash if needed
         let mut stashed = false;
         if has_changes && cmd.stash {
-            println!("==> Stashing local changes...");
+            sync_progressln!("Stashing local changes...");
             let stash_count_before = git_capture(&["stash", "list"])
                 .map(|s| s.lines().count())
                 .unwrap_or(0);
@@ -548,17 +746,20 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
 
         // Resolve remotes for sync.
         let push_remote = preferred_remote.clone();
-        let has_push_remote = git_capture(&["remote", "get-url", &push_remote]).is_ok();
+        let has_push_remote = remote_probe_cache.remote_exists(repo_root_path, &push_remote);
 
         // Keep explicit origin/upstream detection for fork-sync heuristics.
-        let has_origin = git_capture(&["remote", "get-url", "origin"]).is_ok();
-        let has_upstream = git_capture(&["remote", "get-url", "upstream"]).is_ok();
+        let has_origin = remote_probe_cache.remote_exists(repo_root_path, "origin");
+        let has_upstream = remote_probe_cache.remote_exists(repo_root_path, "upstream");
+        let origin_matches_upstream =
+            remote_probe_cache.remotes_share_target(repo_root_path, "origin", "upstream");
+        let use_origin_for_upstream = origin_matches_upstream
+            && remote_probe_cache.remote_reachable(repo_root_path, "origin");
 
         // Check if remotes are reachable (repo exists on remote)
-        let push_remote_reachable = has_push_remote
-            && git_capture(&["ls-remote", "--exit-code", "-q", &push_remote]).is_ok();
-        let origin_reachable =
-            has_origin && git_capture(&["ls-remote", "--exit-code", "-q", "origin"]).is_ok();
+        let push_remote_reachable =
+            remote_probe_cache.remote_reachable(repo_root_path, &push_remote);
+        let origin_reachable = remote_probe_cache.remote_reachable(repo_root_path, "origin");
 
         // Step 1: Pull from tracking branch.
         let mut tracking = resolve_tracking_remote_branch_in(repo_root_path, Some(current));
@@ -583,16 +784,16 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
             }
         }
 
-        if let Some((tracking_remote, tracking_branch)) = tracking {
-            let tracking_reachable = git_capture_in(
-                repo_root_path,
-                &["ls-remote", "--exit-code", "-q", &tracking_remote],
-            )
-            .is_ok();
+        if let Some((tracking_remote, tracking_branch)) = tracking.as_ref() {
+            let tracking_before_tip =
+                remote_branch_tip(repo_root_path, &tracking_remote, &tracking_branch);
+            let tracking_reachable =
+                remote_probe_cache.remote_reachable(repo_root_path, tracking_remote);
             if tracking_reachable {
-                println!(
+                sync_progressln!(
                     "==> Pulling from {}/{}...",
-                    tracking_remote, tracking_branch
+                    tracking_remote,
+                    tracking_branch
                 );
                 recorder.record(
                     "pull",
@@ -636,7 +837,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                             let should_fix = auto_fix || prompt_for_auto_fix()?;
                             if should_fix {
                                 if try_resolve_rebase_conflicts()? {
-                                    println!("  ✓ Rebase conflicts auto-resolved");
+                                    sync_progressln!("Rebase conflicts auto-resolved");
                                     recorder.record("pull", "rebase conflicts auto-resolved");
                                 } else {
                                     restore_stash(repo_root_path, stashed);
@@ -679,7 +880,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                                     let _ = git_run(&["add", "-A"]);
                                     let _ =
                                         Command::new("git").args(["commit", "--no-edit"]).output();
-                                    println!("  ✓ Merge conflicts auto-resolved");
+                                    sync_progressln!("Merge conflicts auto-resolved");
                                     recorder.record("pull", "merge conflicts auto-resolved");
                                 } else {
                                     restore_stash(repo_root_path, stashed);
@@ -702,9 +903,16 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                         }
                     }
                 }
+                record_git_remote_update(
+                    repo_root_path,
+                    &mut recorder,
+                    tracking_remote,
+                    tracking_branch,
+                    tracking_before_tip,
+                );
                 recorder.record("pull", "pull complete");
             } else {
-                println!(
+                sync_progressln!(
                     "==> Tracking remote '{}' unreachable, skipping pull",
                     tracking_remote
                 );
@@ -714,25 +922,68 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                 );
             }
         } else {
-            println!("==> No tracking branch, skipping pull");
+            sync_progressln!("No tracking branch, skipping pull");
             recorder.record("pull", "skipped (no tracking branch)");
         }
 
         // Step 2: Sync upstream if it exists. If no upstream remote is configured and we're on
         // a feature branch, fall back to syncing from origin's default branch.
         if has_upstream {
-            println!("==> Syncing upstream...");
-            recorder.record("upstream", "syncing upstream");
-            if let Err(e) = sync_upstream_internal(repo_root_path, current, auto_fix, &mut recorder)
-            {
-                restore_stash(repo_root_path, stashed);
-                return Err(e);
+            let upstream_branch = resolve_upstream_branch_in(repo_root_path, Some(current));
+            let upstream_sync_remote = if use_origin_for_upstream {
+                "origin"
+            } else {
+                "upstream"
+            };
+            let duplicate_with_pull = tracking
+                .as_ref()
+                .zip(upstream_branch.as_ref())
+                .map(|((tracking_remote, tracking_branch), upstream_branch)| {
+                    tracking_remote == upstream_sync_remote && tracking_branch == upstream_branch
+                })
+                .unwrap_or(false);
+
+            if duplicate_with_pull {
+                recorder.record(
+                    "upstream",
+                    format!(
+                        "skipped (duplicate of pull from {}/{})",
+                        upstream_sync_remote,
+                        upstream_branch.unwrap_or_default()
+                    ),
+                );
+            } else {
+                sync_progressln!("Syncing upstream...");
+                recorder.record("upstream", "syncing upstream");
+                let upstream_result = if use_origin_for_upstream {
+                    if let Some(branch) = upstream_branch.as_deref() {
+                        sync_named_remote_branch_internal(
+                            repo_root_path,
+                            "origin",
+                            branch,
+                            current,
+                            auto_fix,
+                            &mut recorder,
+                            "upstream",
+                            SyncRemoteFetchMode::SingleBranch,
+                        )
+                    } else {
+                        recorder.record("upstream", "skipped (cannot determine upstream branch)");
+                        Ok(())
+                    }
+                } else {
+                    sync_upstream_internal(repo_root_path, current, auto_fix, &mut recorder)
+                };
+                if let Err(e) = upstream_result {
+                    restore_stash(repo_root_path, stashed);
+                    return Err(e);
+                }
             }
         } else if has_origin && origin_reachable {
             if let Some(default_branch) =
                 origin_default_branch_for_feature_sync(repo_root_path, current)
             {
-                println!("==> Syncing origin/{} into {}...", default_branch, current);
+                sync_progressln!("Syncing origin/{} into {}...", default_branch, current);
                 recorder.record(
                     "upstream",
                     format!("syncing origin/{} into {}", default_branch, current),
@@ -770,12 +1021,14 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                     None,
                     true,
                 ) {
-                    eprintln!("Warning: could not set up fork remote: {}", e);
+                    sync_stderrln!("Warning: could not set up fork remote: {}", e);
                 } else {
                     push::ensure_github_repo_exists(&fork_owner, &fork_repo).ok();
-                    println!(
+                    sync_progressln!(
                         "==> Fork push enabled: {}/{}  (remote: {})",
-                        fork_owner, fork_repo, fork_remote
+                        fork_owner,
+                        fork_repo,
+                        fork_remote
                     );
                     push_remote = fork_remote;
                     has_push_remote = true;
@@ -801,34 +1054,34 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                 && normalize_git_url(&push_remote_url) == normalize_git_url(&upstream_url);
 
             if is_read_only {
-                println!(
+                sync_stdoutln!(
                     "==> Skipping push (remote '{}' == upstream, read-only clone)",
                     push_remote
                 );
-                println!("  To push, create a fork first: gh repo fork --remote");
+                sync_stdoutln!("  To push, create a fork first: gh repo fork --remote");
                 recorder.record("push", "skipped (push remote == upstream)");
             } else if !push_remote_reachable {
                 // Remote repo doesn't exist or is unreachable.
                 if cmd.create_repo && push_remote == "origin" {
-                    println!("==> Creating origin repo...");
+                    sync_progressln!("Creating origin repo...");
                     if try_create_origin_repo()? {
-                        println!("==> Pushing to {}...", push_remote);
+                        sync_progressln!("Pushing to {}...", push_remote);
                         git_run(&["push", "-u", &push_remote, current])?;
                         recorder.record(
                             "push",
                             format!("created repo and pushed to {}", push_remote),
                         );
                     } else {
-                        println!("  Could not create repo, skipping push");
+                        sync_stdoutln!("  Could not create repo, skipping push");
                         recorder.record("push", "skipped (create repo failed)");
                     }
                 } else {
-                    println!("==> Remote '{}' unreachable, skipping push", push_remote);
-                    println!("  The remote may be missing, private, or auth/network failed.");
+                    sync_stdoutln!("==> Remote '{}' unreachable, skipping push", push_remote);
+                    sync_stdoutln!("  The remote may be missing, private, or auth/network failed.");
                     if push_remote == "origin" {
-                        println!("  Use --create-repo if origin does not exist yet.");
+                        sync_stdoutln!("  Use --create-repo if origin does not exist yet.");
                     } else {
-                        println!(
+                        sync_stdoutln!(
                             "  Create/fix remote '{}' and re-run sync (or set [git].remote).",
                             push_remote
                         );
@@ -839,7 +1092,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                     );
                 }
             } else {
-                println!("==> Pushing to {}...", push_remote);
+                sync_progressln!("Pushing to {}...", push_remote);
                 let push_result =
                     push_with_autofix(current, &push_remote, auto_fix, cmd.max_fix_attempts);
                 if let Err(e) = push_result {
@@ -872,30 +1125,37 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
             if let Err(e) =
                 crate::explain_commits::maybe_run_after_sync(repo_root_path, &recorder.head_before)
             {
-                eprintln!("warn: commit explanation failed: {e}");
+                sync_stderrln!("warn: commit explanation failed: {e}");
             }
         }
 
-        println!("\n✓ Sync complete!");
         recorder.record("complete", "sync complete");
 
         Ok(())
     })();
 
+    let _ = take_active_sync_status();
+
     if result.is_ok() {
-        let synced_commits = build_synced_commit_list(&recorder);
+        let (synced_commit_summary, synced_commits) = build_synced_commit_outputs(&recorder);
         if !synced_commits.is_empty() {
-            println!("\n==> Synced commits:");
+            println!("==> Synced commits:");
             for line in &synced_commits {
                 println!("  {}", line);
             }
             let payload = synced_commits.join("\n");
             match copy_sync_output_to_clipboard(&payload) {
-                Ok(true) => println!("Copied synced commit list to clipboard."),
+                Ok(true) => {}
                 Ok(false) => {}
                 Err(err) => {
                     eprintln!("warn: failed to copy synced commit list to clipboard: {err}")
                 }
+            }
+            if let Err(err) = sync_plan::queue_after_sync(build_sync_plan_request(
+                &recorder,
+                &synced_commit_summary,
+            )) {
+                eprintln!("warn: failed to queue sync improvement plan: {err}");
             }
         }
     }
@@ -1086,18 +1346,21 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
     if cmd.sync {
         println!("==> Running sync (default no push)...");
         if let Err(sync_err) = run(SyncCommand {
-            rebase: false,
-            push: false,
-            no_push: true,
-            stash: true,
-            stash_commits: false,
-            allow_queue: false,
-            create_repo: false,
-            fix: true,
-            no_fix: false,
-            max_fix_attempts: 3,
-            allow_review_issues: false,
-            compact: false,
+            action: None,
+            options: SyncRunOptions {
+                rebase: false,
+                push: false,
+                no_push: true,
+                stash: true,
+                stash_commits: false,
+                allow_queue: false,
+                create_repo: false,
+                fix: true,
+                no_fix: false,
+                max_fix_attempts: 3,
+                allow_review_issues: false,
+                compact: false,
+            },
         }) {
             let _ = ensure_branch_attached(&repo_root_path, &switched_branch);
             return Err(sync_err);
@@ -1669,9 +1932,133 @@ fn normalize_sync_commit_line(hash: &str, description: &str) -> String {
     }
 }
 
+impl SyncCommitDisplay {
+    fn summary_line(&self) -> String {
+        normalize_sync_commit_line(&self.hash, &self.description)
+    }
+
+    fn display_line(&self) -> String {
+        let summary = self.summary_line();
+        match (
+            self.author
+                .as_deref()
+                .filter(|value| !value.trim().is_empty()),
+            self.relative_time
+                .as_deref()
+                .filter(|value| !value.trim().is_empty()),
+        ) {
+            (Some(author), Some(relative_time)) => {
+                format!("{} ({}) ({})", summary, author, relative_time)
+            }
+            (Some(author), None) => format!("{} ({})", summary, author),
+            (None, Some(relative_time)) => format!("{} ({})", summary, relative_time),
+            (None, None) => summary,
+        }
+    }
+}
+
+fn git_collect_sync_destination_commits(
+    repo_root: &Path,
+    from_rev: &str,
+    to_rev: &str,
+) -> Vec<String> {
+    let range = format!("{}..{}", from_rev, to_rev);
+    let lines = git_capture_in(
+        repo_root,
+        &[
+            "log",
+            "--oneline",
+            "--abbrev=8",
+            "--no-decorate",
+            "--reverse",
+            &range,
+        ],
+    )
+    .unwrap_or_default();
+
+    lines
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let (hash, description) = trimmed
+                .split_once(char::is_whitespace)
+                .unwrap_or((trimmed, ""));
+            Some(normalize_sync_commit_line(hash, description))
+        })
+        .collect()
+}
+
+fn record_git_remote_update(
+    repo_root: &Path,
+    recorder: &mut SyncRecorder,
+    remote: &str,
+    branch: &str,
+    before_tip: Option<String>,
+) {
+    let Some(after_tip) = remote_branch_tip(repo_root, remote, branch) else {
+        return;
+    };
+    if before_tip.as_deref() == Some(after_tip.as_str()) {
+        return;
+    }
+
+    let commits = before_tip
+        .as_deref()
+        .map(|before| git_collect_sync_destination_commits(repo_root, before, &after_tip))
+        .unwrap_or_default();
+
+    recorder.add_remote_update(SyncRemoteUpdate {
+        remote: remote.to_string(),
+        branch: branch.to_string(),
+        before_tip,
+        after_tip,
+        commit_count: commits.len(),
+        commits,
+    });
+}
+
+fn build_synced_commit_outputs(recorder: &SyncRecorder) -> (Vec<String>, Vec<String>) {
+    let raw_commits = collect_unique_sync_commit_refs(recorder);
+    if raw_commits.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let repo_root = Path::new(&recorder.repo_root);
+    let display_items =
+        resolve_sync_commit_display_items(repo_root, &raw_commits).unwrap_or_else(|| {
+            raw_commits
+                .into_iter()
+                .map(|commit| SyncCommitDisplay {
+                    hash: short_commit_id(&commit.hash).to_string(),
+                    description: commit.description,
+                    author: None,
+                    relative_time: None,
+                })
+                .collect()
+        });
+
+    let summary = display_items
+        .iter()
+        .map(SyncCommitDisplay::summary_line)
+        .collect::<Vec<_>>();
+    let display = display_items
+        .iter()
+        .map(SyncCommitDisplay::display_line)
+        .collect::<Vec<_>>();
+    (summary, display)
+}
+
+#[cfg(test)]
 fn build_synced_commit_list(recorder: &SyncRecorder) -> Vec<String> {
+    build_synced_commit_outputs(recorder).1
+}
+
+fn collect_unique_sync_commit_refs(recorder: &SyncRecorder) -> Vec<SyncCommitRef> {
     let mut seen_commits: Vec<(String, String)> = Vec::new();
-    let mut commits: Vec<String> = Vec::new();
+    let mut commits: Vec<SyncCommitRef> = Vec::new();
 
     for update in &recorder.remote_updates {
         for line in &update.commits {
@@ -1695,12 +2082,159 @@ fn build_synced_commit_list(recorder: &SyncRecorder) -> Vec<String> {
                     && (seen_hash.starts_with(hash) || hash.starts_with(seen_hash))
             });
             if !is_duplicate {
-                seen_commits.push((hash.to_string(), normalized_description));
-                commits.push(trimmed.to_string());
+                seen_commits.push((hash.to_string(), normalized_description.clone()));
+                commits.push(SyncCommitRef {
+                    hash: hash.to_string(),
+                    description: normalized_description,
+                });
             }
         }
     }
+
     commits
+}
+
+fn resolve_sync_commit_display_items(
+    repo_root: &Path,
+    raw_commits: &[SyncCommitRef],
+) -> Option<Vec<SyncCommitDisplay>> {
+    if raw_commits.is_empty() || !repo_root.exists() {
+        return None;
+    }
+
+    let raw_hashes = raw_commits
+        .iter()
+        .map(|commit| commit.hash.clone())
+        .collect::<Vec<_>>();
+    let metadata = load_sync_commit_metadata(repo_root, &raw_hashes).ok()?;
+    if metadata.is_empty() {
+        return Some(
+            raw_commits
+                .iter()
+                .map(|commit| SyncCommitDisplay {
+                    hash: short_commit_id(&commit.hash).to_string(),
+                    description: commit.description.clone(),
+                    author: None,
+                    relative_time: None,
+                })
+                .collect(),
+        );
+    }
+
+    let resolved_hashes = metadata
+        .iter()
+        .map(|item| item.full_hash.clone())
+        .collect::<Vec<_>>();
+    let mut rendered = metadata
+        .into_iter()
+        .map(|item| SyncCommitDisplay {
+            hash: item.short_hash,
+            description: item.subject,
+            author: sync_commit_author_label(&item.author_name, &item.author_email),
+            relative_time: Some(item.relative_time),
+        })
+        .collect::<Vec<_>>();
+    for commit in raw_commits {
+        if resolved_hashes
+            .iter()
+            .any(|full_hash| full_hash.starts_with(commit.hash.trim()))
+        {
+            continue;
+        }
+        rendered.push(SyncCommitDisplay {
+            hash: short_commit_id(&commit.hash).to_string(),
+            description: commit.description.clone(),
+            author: None,
+            relative_time: None,
+        });
+    }
+
+    Some(rendered)
+}
+
+fn load_sync_commit_metadata(
+    repo_root: &Path,
+    hashes: &[String],
+) -> Result<Vec<SyncCommitMetadata>> {
+    if hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut args: Vec<&str> = vec![
+        "log",
+        "--no-walk=sorted",
+        "--ignore-missing",
+        "--no-decorate",
+        "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cr%x1f%s%x1e",
+    ];
+    args.extend(hashes.iter().map(String::as_str));
+
+    let output = git_capture_in(repo_root, &args)?;
+    Ok(parse_sync_commit_metadata_output(&output))
+}
+
+fn parse_sync_commit_metadata_output(output: &str) -> Vec<SyncCommitMetadata> {
+    output
+        .split('\x1e')
+        .filter_map(|record| {
+            let trimmed = record.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut parts = trimmed.split('\x1f');
+            let full_hash = parts.next()?.trim().to_string();
+            let short_hash = parts.next()?.trim().to_string();
+            let author_name = parts.next()?.trim().to_string();
+            let author_email = parts.next()?.trim().to_string();
+            let relative_time = parts.next()?.trim().to_string();
+            let subject = parts.next().unwrap_or("").trim().to_string();
+            Some(SyncCommitMetadata {
+                full_hash,
+                short_hash,
+                author_name,
+                author_email,
+                relative_time,
+                subject,
+            })
+        })
+        .collect()
+}
+
+fn sync_commit_author_label(author_name: &str, author_email: &str) -> Option<String> {
+    github_login_from_email(author_email)
+        .or_else(|| {
+            let trimmed = author_name.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .or_else(|| {
+            author_email
+                .trim()
+                .split_once('@')
+                .map(|(local, _)| local.trim().to_string())
+                .filter(|local| !local.is_empty())
+        })
+}
+
+fn github_login_from_email(email: &str) -> Option<String> {
+    let email = email.trim();
+    let (local, domain) = email.split_once('@')?;
+    if domain != "users.noreply.github.com" {
+        return None;
+    }
+    let login = local
+        .split_once('+')
+        .map(|(_, login)| login)
+        .unwrap_or(local)
+        .trim();
+    if login.is_empty() {
+        None
+    } else {
+        Some(login.to_string())
+    }
 }
 
 fn jj_resolve_commit_id(repo_root: &Path, revset: &str) -> Option<String> {
@@ -1922,7 +2456,7 @@ fn print_fetched_remote_commits(
 
 fn run_jj_sync(
     repo_root: &Path,
-    cmd: &SyncCommand,
+    cmd: &SyncRunOptions,
     auto_fix: bool,
     recorder: &mut SyncRecorder,
 ) -> Result<()> {
@@ -1938,21 +2472,35 @@ fn run_jj_sync(
     let head_ref = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "HEAD".to_string());
     let head_ref = head_ref.trim();
-    let current_branch = if head_ref == "HEAD" || head_ref.is_empty() {
-        recorder.record("jj", "detached head (ignored, using default branch)");
-        jj_default_branch(repo_root)
-    } else {
-        head_ref.to_string()
-    };
+    let default_branch = jj_default_branch(repo_root);
+    let current_bookmarks = jj_local_bookmarks_at_rev(repo_root, "@");
+    let current_branch = select_jj_sync_branch(head_ref, &current_bookmarks, &default_branch);
+    if head_ref == "HEAD" || head_ref.is_empty() {
+        recorder.record(
+            "jj",
+            format!("detached head (using jj branch {})", current_branch),
+        );
+    } else if current_branch != head_ref {
+        recorder.record(
+            "jj",
+            format!(
+                "using current jj bookmark {} instead of git HEAD {}",
+                current_branch, head_ref
+            ),
+        );
+    }
 
+    let mut remote_probe_cache = SyncRemoteProbeCache::default();
     let push_remote = config::preferred_git_remote_for_repo(repo_root);
-    let has_push_remote = git_capture_in(repo_root, &["remote", "get-url", &push_remote]).is_ok();
-    let push_remote_reachable = has_push_remote
-        && git_capture_in(repo_root, &["ls-remote", "--exit-code", "-q", &push_remote]).is_ok();
-    let has_origin = git_capture_in(repo_root, &["remote", "get-url", "origin"]).is_ok();
-    let has_upstream = git_capture_in(repo_root, &["remote", "get-url", "upstream"]).is_ok();
-    let origin_reachable = has_origin
-        && git_capture_in(repo_root, &["ls-remote", "--exit-code", "-q", "origin"]).is_ok();
+    let has_push_remote = remote_probe_cache.remote_exists(repo_root, &push_remote);
+    let push_remote_reachable = remote_probe_cache.remote_reachable(repo_root, &push_remote);
+    let has_origin = remote_probe_cache.remote_exists(repo_root, "origin");
+    let has_upstream = remote_probe_cache.remote_exists(repo_root, "upstream");
+    let origin_reachable = remote_probe_cache.remote_reachable(repo_root, "origin");
+    let origin_matches_upstream =
+        remote_probe_cache.remotes_share_target(repo_root, "origin", "upstream");
+    let use_origin_for_upstream =
+        origin_matches_upstream && remote_probe_cache.remote_reachable(repo_root, "origin");
     let should_push = sync_should_push(cmd);
     let origin_default_branch = if !has_upstream && has_origin && origin_reachable {
         origin_default_branch_for_feature_sync(repo_root, &current_branch)
@@ -1969,7 +2517,7 @@ fn run_jj_sync(
 
     let mut tracked_refs: Vec<TrackedRemoteRef> = Vec::new();
     if has_origin || has_upstream {
-        println!("==> Fetching remotes via jj...");
+        sync_progressln!("Fetching remotes via jj...");
         let mut fetched_any = false;
         let mut failures: Vec<String> = Vec::new();
 
@@ -2059,7 +2607,7 @@ fn run_jj_sync(
             recorder.record("jj", format!("skip {} (unreachable)", push_remote));
         }
 
-        if has_upstream {
+        if has_upstream && !use_origin_for_upstream {
             track_remote_ref(
                 &mut tracked_refs,
                 repo_root,
@@ -2106,6 +2654,42 @@ fn run_jj_sync(
             } else {
                 fetched_any = true;
             }
+        } else if has_upstream
+            && use_origin_for_upstream
+            && upstream_branch_for_fetch != current_branch
+        {
+            track_remote_ref(
+                &mut tracked_refs,
+                repo_root,
+                "origin",
+                &upstream_branch_for_fetch,
+            );
+            recorder.record(
+                "jj",
+                format!(
+                    "jj git fetch --remote origin --branch {}",
+                    upstream_branch_for_fetch
+                ),
+            );
+            if let Err(err) = jj_run_in(
+                repo_root,
+                &[
+                    "--quiet",
+                    "git",
+                    "fetch",
+                    "--remote",
+                    "origin",
+                    "--branch",
+                    &upstream_branch_for_fetch,
+                ],
+            ) {
+                failures.push(format!(
+                    "origin alias {}: {}",
+                    upstream_branch_for_fetch, err
+                ));
+            } else {
+                fetched_any = true;
+            }
         }
 
         if fetched_any {
@@ -2129,7 +2713,12 @@ fn run_jj_sync(
     let mut dest_ref: Option<String> = None;
     if has_upstream {
         if let Some(branch) = upstream_branch_opt {
-            dest_ref = Some(format!("{}@upstream", branch));
+            let dest_remote = if use_origin_for_upstream {
+                "origin"
+            } else {
+                "upstream"
+            };
+            dest_ref = Some(format!("{}@{}", branch, dest_remote));
         }
     } else if let Some(default_branch) = origin_default_branch {
         dest_ref = Some(format!("{}@origin", default_branch));
@@ -2151,7 +2740,7 @@ fn run_jj_sync(
         if cmd.stash_commits {
             if jj_has_divergence(repo_root, &branch_sync_source, &dest)? {
                 let stash_name = jj_stash_commits(repo_root, &current_branch, &dest)?;
-                println!("==> Stashed local JJ commits to {}", stash_name);
+                sync_progressln!("Stashed local JJ commits to {}", stash_name);
                 recorder.record("stash", format!("jj stash {}", stash_name));
                 recorder.set_stashed(true);
                 did_rebase = true;
@@ -2161,11 +2750,14 @@ fn run_jj_sync(
         }
 
         if !did_stash_commits {
+            let working_copy_update =
+                jj_working_copy_update(has_branch_bookmark, &current_branch, &dest);
             if has_branch_bookmark {
                 if jj_has_divergence(repo_root, &branch_sync_source, &dest)? {
-                    println!(
+                    sync_progressln!(
                         "==> Rebasing branch {} with jj onto {}...",
-                        current_branch, dest
+                        current_branch,
+                        dest
                     );
                     let preempt_ignore_immutable = branch_tip_matches_remote(
                         repo_root,
@@ -2211,7 +2803,7 @@ fn run_jj_sync(
                     if let Err(err) = jj_run_in(repo_root, &initial_rebase_args) {
                         recorder.record("jj", "jj branch rebase failed");
                         if !preempt_ignore_immutable {
-                            println!(
+                            sync_progressln!(
                                 "==> Rebase blocked by immutable commits; retrying with --ignore-immutable..."
                             );
                             recorder.record("jj", "jj branch rebase retry --ignore-immutable");
@@ -2246,50 +2838,55 @@ fn run_jj_sync(
                         || ff_trimmed.contains("Nothing changed")
                         || ff_trimmed.contains("nothing changed")
                     {
-                        println!("  {} already up to date with {}", current_branch, dest);
+                        sync_progressln!("{} already up to date with {}", current_branch, dest);
                     } else {
-                        println!("==> Fast-forwarded {} to {}", current_branch, dest);
+                        sync_progressln!("Fast-forwarded {} to {}", current_branch, dest);
                     }
                     needs_git_export = true;
                 }
+            }
 
-                // After syncing the branch bookmark, also rebase the working
-                // copy onto the new destination so files reflect latest state.
-                recorder.record("jj", format!("jj rebase -d {} (working copy)", dest));
-                match jj_capture_in(repo_root, &["rebase", "-d", &dest]) {
-                    Ok(_) => {
-                        println!("==> Rebased working copy onto {}", dest);
-                        did_rebase = true;
-                    }
-                    Err(_) => {
-                        // Non-fatal: working copy may already be at destination
-                    }
-                }
-            } else {
-                println!("==> Rebasing with jj onto {}...", dest);
-                recorder.record("jj", format!("jj rebase -d {}", dest));
-                if let Err(err) = jj_run_in(repo_root, &["rebase", "-d", &dest]) {
-                    recorder.record("jj", "jj rebase failed");
-                    println!(
-                        "==> Rebase blocked by immutable commits; retrying with --ignore-immutable..."
+            match working_copy_update {
+                JjWorkingCopyUpdate::EditBookmark(branch) => {
+                    recorder.record(
+                        "jj",
+                        format!("jj edit --ignore-immutable {} (working copy)", branch),
                     );
-                    recorder.record("jj", "jj rebase retry --ignore-immutable");
-                    if let Err(retry_err) =
-                        jj_run_in(repo_root, &["rebase", "--ignore-immutable", "-d", &dest])
-                    {
-                        // If even --ignore-immutable fails, return the original error.
-                        let _ = retry_err;
-                        return Err(err);
+                    match jj_capture_in(repo_root, &["edit", "--ignore-immutable", &branch]) {
+                        Ok(_) => {
+                            sync_progressln!("Re-anchored working copy on {}", branch);
+                        }
+                        Err(_) => {
+                            // Non-fatal: working copy may already be on the branch.
+                        }
                     }
                 }
-                did_rebase = true;
+                JjWorkingCopyUpdate::RebaseToDest(dest) => {
+                    sync_progressln!("Rebasing with jj onto {}...", dest);
+                    recorder.record("jj", format!("jj rebase -d {}", dest));
+                    if let Err(err) = jj_run_in(repo_root, &["rebase", "-d", &dest]) {
+                        recorder.record("jj", "jj rebase failed");
+                        sync_progressln!(
+                            "==> Rebase blocked by immutable commits; retrying with --ignore-immutable..."
+                        );
+                        recorder.record("jj", "jj rebase retry --ignore-immutable");
+                        if let Err(retry_err) =
+                            jj_run_in(repo_root, &["rebase", "--ignore-immutable", "-d", &dest])
+                        {
+                            // If even --ignore-immutable fails, return the original error.
+                            let _ = retry_err;
+                            return Err(err);
+                        }
+                    }
+                    did_rebase = true;
+                }
             }
 
             if commit::commit_queue_has_entries(repo_root) {
                 if let Ok(updated) = commit::refresh_commit_queue(repo_root) {
                     if updated > 0 {
                         recorder.record("queue", format!("refreshed {} queued commits", updated));
-                        println!("==> Updated {} queued commit(s) after rebase", updated);
+                        sync_progressln!("Updated {} queued commit(s) after rebase", updated);
                     }
                 }
             }
@@ -2330,7 +2927,7 @@ fn run_jj_sync(
             }
         }
     } else {
-        println!("==> No remotes configured, skipping rebase");
+        sync_progressln!("No remotes configured, skipping rebase");
         recorder.record("jj", "skipped (no remotes)");
     }
 
@@ -2351,14 +2948,16 @@ fn run_jj_sync(
                 None,
                 true,
             ) {
-                eprintln!("Warning: could not set up fork remote: {}", e);
+                sync_stderrln!("Warning: could not set up fork remote: {}", e);
             } else {
                 push::ensure_github_repo_exists(&fork_owner, &fork_repo).ok();
                 // Let jj know about the new remote.
                 let _ = jj_capture_in(repo_root, &["git", "fetch", "--remote", &fork_remote]);
-                println!(
+                sync_progressln!(
                     "==> Fork push enabled: {}/{}  (remote: {})",
-                    fork_owner, fork_repo, fork_remote
+                    fork_owner,
+                    fork_repo,
+                    fork_remote
                 );
                 push_remote = fork_remote;
                 has_push_remote = true;
@@ -2376,33 +2975,33 @@ fn run_jj_sync(
 
     if has_push_remote && should_push {
         if is_read_only {
-            println!(
+            sync_stdoutln!(
                 "==> Skipping push (remote '{}' == upstream, read-only clone)",
                 push_remote
             );
-            println!("  To push, create a fork first: gh repo fork --remote");
+            sync_stdoutln!("  To push, create a fork first: gh repo fork --remote");
             recorder.record("push", "skipped (push remote == upstream)");
         } else if !push_remote_reachable {
             if cmd.create_repo && push_remote == "origin" {
-                println!("==> Creating origin repo...");
+                sync_progressln!("Creating origin repo...");
                 if try_create_origin_repo()? {
-                    println!("==> Pushing to {}...", push_remote);
+                    sync_progressln!("Pushing to {}...", push_remote);
                     git_run(&["push", "-u", &push_remote, &current_branch])?;
                     recorder.record(
                         "push",
                         format!("created repo and pushed to {}", push_remote),
                     );
                 } else {
-                    println!("  Could not create repo, skipping push");
+                    sync_stdoutln!("  Could not create repo, skipping push");
                     recorder.record("push", "skipped (create repo failed)");
                 }
             } else {
-                println!("==> Remote '{}' unreachable, skipping push", push_remote);
-                println!("  The remote may be missing, private, or auth/network failed.");
+                sync_stdoutln!("==> Remote '{}' unreachable, skipping push", push_remote);
+                sync_stdoutln!("  The remote may be missing, private, or auth/network failed.");
                 if push_remote == "origin" {
-                    println!("  Use --create-repo if origin does not exist yet.");
+                    sync_stdoutln!("  Use --create-repo if origin does not exist yet.");
                 } else {
-                    println!(
+                    sync_stdoutln!(
                         "  Create/fix remote '{}' and re-run sync (or set [git].remote).",
                         push_remote
                     );
@@ -2413,7 +3012,7 @@ fn run_jj_sync(
                 );
             }
         } else {
-            println!("==> Pushing to {}...", push_remote);
+            sync_progressln!("Pushing to {}...", push_remote);
             let push_result = if did_rebase {
                 push_with_autofix_force(
                     &current_branch,
@@ -2455,14 +3054,15 @@ fn run_jj_sync(
         let conflict_details =
             jj_capture_in(repo_root, &["log", "-r", "conflicts()", "--no-graph"])
                 .unwrap_or_default();
-        println!("\n⚠ Sync complete (jj) but conflicts remain:");
+        sync_stdoutln!();
+        sync_stdoutln!("⚠ Sync complete (jj) but conflicts remain:");
         for line in conflict_details.lines().filter(|l| !l.trim().is_empty()) {
-            println!("  {}", line.trim());
+            sync_stdoutln!("  {}", line.trim());
         }
-        println!("\nResolve with: jj resolve");
+        sync_stdoutln!();
+        sync_stdoutln!("Resolve with: jj resolve");
         recorder.record("complete", "sync complete (jj) with conflicts");
     } else {
-        println!("\n✓ Sync complete (jj)!");
         recorder.record("complete", "sync complete (jj)");
     }
     Ok(())
@@ -2475,43 +3075,15 @@ fn sync_upstream_internal(
     auto_fix: bool,
     recorder: &mut SyncRecorder,
 ) -> Result<()> {
-    // Fetch upstream — tolerate case-insensitive ref collisions (macOS)
-    let fetch = Command::new("git")
-        .current_dir(repo_root)
-        .args(["fetch", "upstream", "--prune"])
-        .output()
-        .context("failed to run git fetch upstream")?;
-    if !fetch.status.success() {
-        let stderr = String::from_utf8_lossy(&fetch.stderr);
-        if stderr.contains("case-insensitive filesystem") {
-            eprintln!(
-                "  Warning: upstream has refs that differ only in case; fetch continued anyway"
-            );
-        } else {
-            bail!("git fetch upstream --prune failed: {}", stderr.trim());
-        }
-    }
-    recorder.record("upstream", "fetched upstream");
-
-    // Determine upstream branch
     let upstream_branch = match resolve_upstream_branch_in(repo_root, Some(current_branch)) {
         Some(branch) => branch,
         None => {
-            println!("  Cannot determine upstream branch, skipping upstream sync");
+            sync_progressln!("Cannot determine upstream branch, skipping upstream sync");
             recorder.record("upstream", "skipped (cannot determine upstream branch)");
             return Ok(());
         }
     };
-
-    // Update local upstream branch if it exists
-    let local_upstream_exists =
-        git_capture_in(repo_root, &["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
-    if local_upstream_exists {
-        let upstream_ref = format!("upstream/{}", upstream_branch);
-        git_run_in(repo_root, &["branch", "-f", "upstream", &upstream_ref])?;
-    }
-
-    merge_remote_branch_into_current(
+    sync_named_remote_branch_internal(
         repo_root,
         "upstream",
         &upstream_branch,
@@ -2519,6 +3091,7 @@ fn sync_upstream_internal(
         auto_fix,
         recorder,
         "upstream",
+        SyncRemoteFetchMode::FullRemote,
     )
 }
 
@@ -2529,17 +3102,7 @@ fn sync_origin_default_internal(
     auto_fix: bool,
     recorder: &mut SyncRecorder,
 ) -> Result<()> {
-    let refspec = format!(
-        "+refs/heads/{}:refs/remotes/origin/{}",
-        origin_default_branch, origin_default_branch
-    );
-    git_run_in(repo_root, &["fetch", "origin", "--prune", &refspec])?;
-    recorder.record(
-        "upstream",
-        format!("fetched origin {}", origin_default_branch),
-    );
-
-    merge_remote_branch_into_current(
+    sync_named_remote_branch_internal(
         repo_root,
         "origin",
         origin_default_branch,
@@ -2547,7 +3110,72 @@ fn sync_origin_default_internal(
         auto_fix,
         recorder,
         "origin-default",
+        SyncRemoteFetchMode::SingleBranch,
     )
+}
+
+fn sync_named_remote_branch_internal(
+    repo_root: &Path,
+    remote: &str,
+    remote_branch: &str,
+    current_branch: &str,
+    auto_fix: bool,
+    recorder: &mut SyncRecorder,
+    stage: &str,
+    fetch_mode: SyncRemoteFetchMode,
+) -> Result<()> {
+    let before_tip = remote_branch_tip(repo_root, remote, remote_branch);
+
+    match fetch_mode {
+        SyncRemoteFetchMode::FullRemote => {
+            let fetch = Command::new("git")
+                .current_dir(repo_root)
+                .args(["fetch", remote, "--prune"])
+                .output()
+                .with_context(|| format!("failed to run git fetch {}", remote))?;
+            if !fetch.status.success() {
+                let stderr = String::from_utf8_lossy(&fetch.stderr);
+                if stderr.contains("case-insensitive filesystem") {
+                    sync_stderrln!(
+                        "  Warning: {} has refs that differ only in case; fetch continued anyway",
+                        remote
+                    );
+                } else {
+                    bail!("git fetch {} --prune failed: {}", remote, stderr.trim());
+                }
+            }
+            recorder.record(stage, format!("fetched {}", remote));
+        }
+        SyncRemoteFetchMode::SingleBranch => {
+            let refspec = format!(
+                "+refs/heads/{}:refs/remotes/{}/{}",
+                remote_branch, remote, remote_branch
+            );
+            git_run_in(repo_root, &["fetch", remote, "--prune", &refspec])?;
+            recorder.record(stage, format!("fetched {} {}", remote, remote_branch));
+        }
+    }
+
+    if remote == "upstream" {
+        let local_upstream_exists =
+            git_capture_in(repo_root, &["rev-parse", "--verify", "refs/heads/upstream"]).is_ok();
+        if local_upstream_exists {
+            let upstream_ref = format!("upstream/{}", remote_branch);
+            git_run_in(repo_root, &["branch", "-f", "upstream", &upstream_ref])?;
+        }
+    }
+
+    merge_remote_branch_into_current(
+        repo_root,
+        remote,
+        remote_branch,
+        current_branch,
+        auto_fix,
+        recorder,
+        stage,
+    )?;
+    record_git_remote_update(repo_root, recorder, remote, remote_branch, before_tip);
+    Ok(())
 }
 
 fn merge_remote_branch_into_current(
@@ -2573,12 +3201,12 @@ fn merge_remote_branch_into_current(
     .unwrap_or(0);
 
     if behind == 0 {
-        println!("  Already up to date with {}", remote_ref);
+        sync_progressln!("Already up to date with {}", remote_ref);
         recorder.record(stage, format!("already up to date with {}", remote_ref));
         return Ok(());
     }
 
-    println!("  Merging {} commits from {}...", behind, remote_ref);
+    sync_progressln!("Merging {} commits from {}...", behind, remote_ref);
     recorder.record(
         stage,
         format!("merging {} commits from {}", behind, remote_ref),
@@ -2612,14 +3240,14 @@ fn merge_remote_branch_into_current(
 
     let should_fix = auto_fix || prompt_for_auto_fix()?;
     if should_fix {
-        println!("  Attempting auto-fix...");
+        sync_progressln!("Attempting auto-fix...");
         if try_resolve_conflicts()? {
             let _ = git_run_in(repo_root, &["add", "-A"]);
             let _ = Command::new("git")
                 .current_dir(repo_root)
                 .args(["commit", "--no-edit"])
                 .output();
-            println!("  ✓ Conflicts auto-resolved");
+            sync_progressln!("Conflicts auto-resolved");
             recorder.record(stage, "conflicts auto-resolved");
             return Ok(());
         }
@@ -3063,6 +3691,24 @@ fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn jj_local_bookmarks_at_rev(repo_root: &Path, rev: &str) -> Vec<String> {
+    let output = jj_capture_in(
+        repo_root,
+        &["log", "-r", rev, "--no-graph", "-T", "bookmarks"],
+    )
+    .unwrap_or_default();
+    parse_jj_bookmark_tokens(&output)
+}
+
+fn parse_jj_bookmark_tokens(output: &str) -> Vec<String> {
+    output
+        .split_whitespace()
+        .filter(|token| !token.contains('@'))
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
 fn jj_revset_string_literal(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("\"{}\"", value))
 }
@@ -3158,6 +3804,7 @@ fn read_yes_no() -> Result<bool> {
 
 /// Prompt user for rebase action.
 fn prompt_for_rebase_action() -> Result<bool> {
+    let _sync_status_guard = sync_status_suspend();
     let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
     let conflicted_files: Vec<&str> = conflicts.lines().filter(|l| !l.is_empty()).collect();
 
@@ -3204,14 +3851,14 @@ fn try_resolve_rebase_conflicts() -> Result<bool> {
             continue;
         }
 
-        println!("  Resolving {} conflicted files...", conflicted_files.len());
+        sync_progressln!("Resolving {} conflicted files...", conflicted_files.len());
 
         // Try to resolve each conflict
         let mut all_resolved = true;
         for file in &conflicted_files {
             if !try_resolve_single_conflict(file)? {
                 all_resolved = false;
-                println!("  ✗ Could not resolve {}", file);
+                sync_progressln!("Could not resolve {}", file);
             }
         }
 
@@ -3265,7 +3912,7 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
         .iter()
         .any(|&ag| filename.eq_ignore_ascii_case(ag))
     {
-        println!("  Auto-resolving {} (accepting theirs)", file);
+        sync_progressln!("Auto-resolving {} (accepting theirs)", file);
         let _ = Command::new("git")
             .args(["checkout", "--theirs", file])
             .output();
@@ -3276,7 +3923,7 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
     // Try Claude for code conflicts
     let content = std::fs::read_to_string(file).unwrap_or_default();
     if content.contains("<<<<<<<") {
-        println!("  Trying Claude Opus for {}...", file);
+        sync_progressln!("Trying Claude Opus for {}...", file);
 
         // Load sync context if available
         let context = ai_context::load_command_context("sync").unwrap_or_default();
@@ -3304,7 +3951,7 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
                 if !resolved.contains("<<<<<<<") && !resolved.contains(">>>>>>>") {
                     if std::fs::write(file, resolved.as_ref()).is_ok() {
                         let _ = Command::new("git").args(["add", file]).output();
-                        println!("  ✓ Resolved {}", file);
+                        sync_progressln!("Resolved {}", file);
                         return Ok(true);
                     }
                 }
@@ -3317,6 +3964,7 @@ fn try_resolve_single_conflict(file: &str) -> Result<bool> {
 
 /// Prompt user to try auto-fix for push failures.
 fn prompt_for_push_fix() -> Result<bool> {
+    let _sync_status_guard = sync_status_suspend();
     println!();
     print!("  Try auto-fix with Claude Opus? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
@@ -3325,6 +3973,7 @@ fn prompt_for_push_fix() -> Result<bool> {
 
 /// Prompt user to try auto-fix for conflicts.
 fn prompt_for_auto_fix() -> Result<bool> {
+    let _sync_status_guard = sync_status_suspend();
     // Get list of conflicted files
     let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"])?;
     let conflicted_files: Vec<&str> = conflicts.lines().filter(|l| !l.is_empty()).collect();
@@ -3354,7 +4003,7 @@ fn try_resolve_conflicts() -> Result<bool> {
         return Ok(true);
     }
 
-    println!("  Conflicted files: {}", conflicted_files.join(", "));
+    sync_progressln!("Conflicted files: {}", conflicted_files.join(", "));
 
     // Auto-generated files - accept theirs (upstream)
     let auto_generated = [
@@ -3383,7 +4032,7 @@ fn try_resolve_conflicts() -> Result<bool> {
             .any(|&ag| filename.eq_ignore_ascii_case(ag))
         {
             // Accept theirs for auto-generated files
-            println!("  Auto-resolving {} (accepting upstream)", file);
+            sync_progressln!("Auto-resolving {} (accepting upstream)", file);
             let _ = Command::new("git")
                 .args(["checkout", "--theirs", file])
                 .output();
@@ -3400,7 +4049,7 @@ fn try_resolve_conflicts() -> Result<bool> {
     }
 
     // Try Claude for remaining conflicts
-    println!(
+    sync_progressln!(
         "  Trying Claude Opus for {} remaining conflicts...",
         needs_claude.len()
     );
@@ -3436,13 +4085,13 @@ fn try_resolve_conflicts() -> Result<bool> {
                         if std::fs::write(file, resolved.as_ref()).is_ok() {
                             let _ = Command::new("git").args(["add", file]).output();
                             resolved_count += 1;
-                            println!("  ✓ Resolved {}", file);
+                            sync_progressln!("Resolved {}", file);
                             continue;
                         }
                     }
                 }
             }
-            println!("  ✗ Could not resolve {}", file);
+            sync_progressln!("Could not resolve {}", file);
         }
     }
 
@@ -3451,7 +4100,7 @@ fn try_resolve_conflicts() -> Result<bool> {
 
 fn restore_stash(repo_root: &Path, stashed: bool) {
     if stashed {
-        println!("==> Restoring stashed changes...");
+        sync_progressln!("Restoring stashed changes...");
         let output = Command::new("git")
             .current_dir(repo_root)
             .args(["stash", "pop"])
@@ -3465,23 +4114,23 @@ fn restore_stash(repo_root: &Path, stashed: bool) {
                 if stash_pop_untracked_conflict(&combined) {
                     match drop_stash_if_untracked_restored(repo_root) {
                         Ok(true) => {
-                            println!(
+                            sync_progressln!(
                                 "  ✓ Kept local untracked files and dropped redundant auto-stash"
                             );
                             return;
                         }
                         Ok(false) => {}
                         Err(err) => {
-                            eprintln!("warning: stash cleanup failed: {}", err);
+                            sync_stderrln!("warning: stash cleanup failed: {}", err);
                         }
                     }
                 }
-                eprintln!(
+                sync_stderrln!(
                     "warning: failed to restore stash automatically: git stash pop failed\nRun `git stash list` and restore manually if needed."
                 );
             }
             Err(err) => {
-                eprintln!(
+                sync_stderrln!(
                     "warning: failed to restore stash automatically: {}\nRun `git stash list` and restore manually if needed.",
                     err
                 );
@@ -3782,7 +4431,7 @@ fn push_with_autofix(branch: &str, remote: &str, auto_fix: bool, max_attempts: u
         let should_fix = if auto_fix {
             true
         } else if is_hook_failure && attempts == 1 {
-            println!("{}", combined);
+            sync_stdoutln!("{}", combined);
             prompt_for_push_fix()?
         } else {
             false
@@ -3790,31 +4439,32 @@ fn push_with_autofix(branch: &str, remote: &str, auto_fix: bool, max_attempts: u
 
         if !should_fix || attempts > max_attempts {
             if !should_fix {
-                println!("{}", combined);
+                sync_stdoutln!("{}", combined);
             }
             bail!("git push {} {} failed", remote, branch);
         }
 
-        println!(
-            "\n==> Push failed (attempt {}/{}), attempting auto-fix with Claude Opus...",
-            attempts, max_attempts
+        sync_progressln!(
+            "Push failed (attempt {}/{}), attempting auto-fix with Claude Opus...",
+            attempts,
+            max_attempts
         );
 
         // Run Claude to fix the errors (fallback to opencode glm if Claude fails)
         let mut fixed = try_claude_fix(&combined)?;
         if !fixed {
-            println!("  Claude fix failed; trying opencode glm...");
+            sync_progressln!("Claude fix failed; trying opencode glm...");
             fixed = try_opencode_fix(&combined)?;
         }
         if !fixed {
-            println!("{}", combined);
+            sync_stdoutln!("{}", combined);
             bail!("Auto-fix failed. Run manually:\n  claude 'fix these errors: ...'");
         }
 
         // Stage and commit the fix
         let status = git_capture(&["status", "--porcelain"])?;
         if !status.trim().is_empty() {
-            println!("==> Committing auto-fix...");
+            sync_progressln!("Committing auto-fix...");
             let _ = git_run(&["add", "-A"]);
             let commit_msg = format!("fix: auto-fix sync errors (attempt {})", attempts);
             let _ = Command::new("git")
@@ -3822,7 +4472,7 @@ fn push_with_autofix(branch: &str, remote: &str, auto_fix: bool, max_attempts: u
                 .output();
         }
 
-        println!("==> Retrying push...");
+        sync_progressln!("Retrying push...");
     }
 }
 
@@ -3861,7 +4511,7 @@ fn push_with_autofix_force(
         let should_fix = if auto_fix {
             true
         } else if is_hook_failure && attempts == 1 {
-            println!("{}", combined);
+            sync_stdoutln!("{}", combined);
             prompt_for_push_fix()?
         } else {
             false
@@ -3869,24 +4519,25 @@ fn push_with_autofix_force(
 
         if !should_fix || attempts > max_attempts {
             if !should_fix {
-                println!("{}", combined);
+                sync_stdoutln!("{}", combined);
             }
             bail!("git push --force-with-lease {} {} failed", remote, branch);
         }
 
-        println!(
-            "\n==> Push failed (attempt {}/{}), attempting auto-fix with Claude Opus...",
-            attempts, max_attempts
+        sync_progressln!(
+            "Push failed (attempt {}/{}), attempting auto-fix with Claude Opus...",
+            attempts,
+            max_attempts
         );
 
         let mut fixed = try_claude_fix(&combined)?;
         if !fixed {
-            println!("  Claude fix failed; trying opencode glm...");
+            sync_progressln!("Claude fix failed; trying opencode glm...");
             fixed = try_opencode_fix(&combined)?;
         }
 
         if fixed {
-            println!("  Changes applied. Retrying push...");
+            sync_progressln!("Changes applied. Retrying push...");
         } else {
             bail!("auto-fix failed; push still failing");
         }
@@ -3899,13 +4550,14 @@ fn try_claude_fix(error_output: &str) -> Result<bool> {
     let claude_check = Command::new("which").arg("claude").output();
 
     if claude_check.is_err() || !claude_check.unwrap().status.success() {
-        println!("  Claude CLI not found. Install with: npm i -g @anthropic-ai/claude-code");
+        sync_stdoutln!("  Claude CLI not found. Install with: npm i -g @anthropic-ai/claude-code");
         return Ok(false);
     }
 
     let prompt = build_fix_prompt(error_output);
 
     // Run claude with the fix prompt
+    let _sync_status_guard = sync_status_suspend();
     let status = sync_claude_command(&prompt)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -3919,11 +4571,12 @@ fn try_claude_fix(error_output: &str) -> Result<bool> {
 fn try_opencode_fix(error_output: &str) -> Result<bool> {
     let opencode_check = Command::new("which").arg("opencode").output();
     if opencode_check.is_err() || !opencode_check.unwrap().status.success() {
-        println!("  opencode CLI not found. Install with: npm i -g opencode");
+        sync_stdoutln!("  opencode CLI not found. Install with: npm i -g opencode");
         return Ok(false);
     }
 
     let prompt = build_fix_prompt(error_output);
+    let _sync_status_guard = sync_status_suspend();
     let mut child = Command::new("opencode")
         .args(["run", "-m", "opencode/glm-4.7-free", "-"])
         .stdin(Stdio::piped())
@@ -3976,12 +4629,14 @@ fn try_create_origin_repo() -> Result<bool> {
     };
 
     let Some(repo_path) = repo_path else {
-        println!("Cannot parse origin URL for auto-creation: {}", origin_url);
+        sync_stdoutln!("Cannot parse origin URL for auto-creation: {}", origin_url);
         return Ok(false);
     };
 
-    println!("\nOrigin repo doesn't exist. Creating: {}", repo_path);
+    sync_stdoutln!();
+    sync_stdoutln!("Origin repo doesn't exist. Creating: {}", repo_path);
 
+    let _sync_status_guard = sync_status_suspend();
     let status = Command::new("gh")
         .args(["repo", "create", repo_path, "--private", "--source=."])
         .stdin(Stdio::inherit())
@@ -3991,15 +4646,15 @@ fn try_create_origin_repo() -> Result<bool> {
 
     match status {
         Ok(s) if s.success() => {
-            println!("✓ Created GitHub repo: {}", repo_path);
+            sync_stdoutln!("✓ Created GitHub repo: {}", repo_path);
             Ok(true)
         }
         Ok(_) => {
-            println!("Failed to create repo. Is `gh` installed and authenticated?");
+            sync_stdoutln!("Failed to create repo. Is `gh` installed and authenticated?");
             Ok(false)
         }
         Err(e) => {
-            println!("Failed to run gh CLI: {}", e);
+            sync_stdoutln!("Failed to run gh CLI: {}", e);
             Ok(false)
         }
     }
@@ -4040,6 +4695,50 @@ fn write_sync_snapshot(snapshot: &SyncSnapshot) -> Result<()> {
         writeln!(file, "{}", payload)?;
     }
     Ok(())
+}
+
+fn build_sync_plan_request(
+    recorder: &SyncRecorder,
+    synced_commits: &[String],
+) -> sync_plan::SyncPlanRequest {
+    let branch_after = git_capture(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let head_after = git_capture(&["rev-parse", "HEAD"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let upstream_after = git_capture(&["rev-parse", "--abbrev-ref", "@{upstream}"])
+        .ok()
+        .map(|s| s.trim().to_string());
+
+    sync_plan::SyncPlanRequest {
+        generated_at: Utc::now().to_rfc3339(),
+        repo_root: recorder.repo_root.clone(),
+        repo_name: recorder.repo_name.clone(),
+        branch_before: recorder.branch_before.clone(),
+        branch_after,
+        head_before: recorder.head_before.clone(),
+        head_after,
+        upstream_before: recorder.upstream_before.clone(),
+        upstream_after,
+        origin_url: recorder.origin_url.clone(),
+        upstream_url: recorder.upstream_url.clone(),
+        synced_commits: synced_commits.to_vec(),
+        remote_updates: recorder
+            .remote_updates
+            .iter()
+            .map(|update| sync_plan::SyncPlanRemoteUpdate {
+                remote: update.remote.clone(),
+                branch: update.branch.clone(),
+                before_tip: update.before_tip.clone(),
+                after_tip: update.after_tip.clone(),
+                commit_count: update.commit_count,
+                commits: update.commits.clone(),
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -4088,6 +4787,45 @@ mod tests {
     }
 
     #[test]
+    fn jj_working_copy_update_prefers_edit_for_bookmark_branch() {
+        assert_eq!(
+            jj_working_copy_update(true, "home", "main@origin"),
+            JjWorkingCopyUpdate::EditBookmark("home".to_string())
+        );
+    }
+
+    #[test]
+    fn jj_working_copy_update_rebases_to_dest_without_bookmark() {
+        assert_eq!(
+            jj_working_copy_update(false, "home", "main@origin"),
+            JjWorkingCopyUpdate::RebaseToDest("main@origin".to_string())
+        );
+    }
+
+    #[test]
+    fn select_jj_sync_branch_prefers_visible_bookmark_over_stale_git_head() {
+        let current_bookmarks = vec![
+            "home".to_string(),
+            "recovery/home-pre-sync-20260319".to_string(),
+        ];
+
+        assert_eq!(
+            select_jj_sync_branch("main", &current_bookmarks, "main"),
+            "home".to_string()
+        );
+    }
+
+    #[test]
+    fn select_jj_sync_branch_falls_back_to_git_head_when_visible_bookmark_missing() {
+        let current_bookmarks = vec!["recovery/home-pre-sync-20260319".to_string()];
+
+        assert_eq!(
+            select_jj_sync_branch("main", &current_bookmarks, "main"),
+            "main".to_string()
+        );
+    }
+
+    #[test]
     fn normalize_sync_commit_line_fills_missing_description() {
         assert_eq!(
             normalize_sync_commit_line("abc12345", "Fix sync output"),
@@ -4100,22 +4838,57 @@ mod tests {
     }
 
     #[test]
+    fn sync_commit_display_formats_author_and_relative_time() {
+        let commit = SyncCommitDisplay {
+            hash: "a00bf891".to_string(),
+            description: "Adjust serverless scope ordering in agent guide".to_string(),
+            author: Some("saint".to_string()),
+            relative_time: Some("54 minutes ago".to_string()),
+        };
+
+        assert_eq!(
+            commit.display_line(),
+            "a00bf891 Adjust serverless scope ordering in agent guide (saint) (54 minutes ago)"
+        );
+        assert_eq!(
+            commit.summary_line(),
+            "a00bf891 Adjust serverless scope ordering in agent guide"
+        );
+    }
+
+    #[test]
+    fn github_login_from_noreply_email_extracts_login() {
+        assert_eq!(
+            github_login_from_email("12345+saint0x@users.noreply.github.com"),
+            Some("saint0x".to_string())
+        );
+        assert_eq!(
+            github_login_from_email("saint0x@users.noreply.github.com"),
+            Some("saint0x".to_string())
+        );
+        assert_eq!(github_login_from_email("saint@example.com"), None);
+    }
+
+    #[test]
     fn build_synced_commit_list_dedupes_hash_width_variants() {
         let cmd = SyncCommand {
-            rebase: false,
-            push: false,
-            no_push: true,
-            stash: false,
-            stash_commits: false,
-            allow_queue: false,
-            create_repo: false,
-            fix: false,
-            no_fix: true,
-            max_fix_attempts: 0,
-            allow_review_issues: false,
-            compact: false,
+            action: None,
+            options: SyncRunOptions {
+                rebase: false,
+                push: false,
+                no_push: true,
+                stash: false,
+                stash_commits: false,
+                allow_queue: false,
+                create_repo: false,
+                fix: false,
+                no_fix: true,
+                max_fix_attempts: 0,
+                allow_review_issues: false,
+                compact: false,
+            },
         };
-        let mut recorder = SyncRecorder::new(&cmd).expect("sync recorder");
+        let mut recorder = SyncRecorder::new(&cmd.options).expect("sync recorder");
         recorder.add_remote_update(SyncRemoteUpdate {
             remote: "origin".to_string(),
             branch: "main".to_string(),
@@ -4135,7 +4908,7 @@ mod tests {
 
         assert_eq!(
             build_synced_commit_list(&recorder),
-            vec!["8e258eb3f feat: persist latest model".to_string()]
+            vec!["8e258eb3 feat: persist latest model".to_string()]
         );
     }
 

@@ -273,7 +273,9 @@ pub fn load_workflow_overview() -> Result<WorkflowOverview> {
         errors,
     };
 
-    *workflow_cache().lock().expect("workflow cache mutex poisoned") = Some(CachedWorkflowOverview {
+    *workflow_cache()
+        .lock()
+        .expect("workflow cache mutex poisoned") = Some(CachedWorkflowOverview {
         captured_at: Instant::now(),
         overview: overview.clone(),
     });
@@ -365,15 +367,12 @@ fn detect_project_binding(project: &ProjectEntry) -> Result<Option<ProjectBindin
         )?;
         let common_dir = resolve_path(&project.project_root, common_dir.trim());
         let common_dir = canonical_or_same(common_dir);
-        let current_branch = capture_trimmed_in(
-            &project.project_root,
-            "git",
-            &["branch", "--show-current"],
-        )
-        .ok()
-        .into_iter()
-        .flat_map(|value| split_csv(&value))
-        .collect::<Vec<_>>();
+        let current_branch =
+            capture_trimmed_in(&project.project_root, "git", &["branch", "--show-current"])
+                .ok()
+                .into_iter()
+                .flat_map(|value| split_csv(&value))
+                .collect::<Vec<_>>();
         let status = capture_trimmed_in(&project.project_root, "git", &["status", "--porcelain"])
             .unwrap_or_default();
         let dirty = !status.trim().is_empty();
@@ -437,21 +436,37 @@ fn inspect_jj_repo(seed: &RepoSeed) -> Result<WorkflowRepoSnapshot> {
             .or_else(|| remotes.first());
         let workspace_names = workspaces
             .iter()
-            .filter(|workspace| workspace.current_branches.iter().any(|branch| branch == &name))
+            .filter(|workspace| {
+                workspace
+                    .current_branches
+                    .iter()
+                    .any(|branch| branch == &name)
+            })
             .map(|workspace| workspace.name.clone())
             .collect::<Vec<_>>();
-        let dirty = workspaces
-            .iter()
-            .any(|workspace| workspace.dirty && workspace.current_branches.iter().any(|branch| branch == &name));
-        let workspace_conflict = workspaces
-            .iter()
-            .any(|workspace| workspace.conflict && workspace.current_branches.iter().any(|branch| branch == &name));
-        let meta = commit_meta.get(&name).cloned().unwrap_or_else(|| CommitMeta {
-            head_sha: local.target_sha.clone().unwrap_or_default(),
-            short_sha: truncate_sha(local.target_sha.as_deref().unwrap_or("")),
-            subject: String::new(),
-            updated_at: None,
+        let dirty = workspaces.iter().any(|workspace| {
+            workspace.dirty
+                && workspace
+                    .current_branches
+                    .iter()
+                    .any(|branch| branch == &name)
         });
+        let workspace_conflict = workspaces.iter().any(|workspace| {
+            workspace.conflict
+                && workspace
+                    .current_branches
+                    .iter()
+                    .any(|branch| branch == &name)
+        });
+        let meta = commit_meta
+            .get(&name)
+            .cloned()
+            .unwrap_or_else(|| CommitMeta {
+                head_sha: local.target_sha.clone().unwrap_or_default(),
+                short_sha: truncate_sha(local.target_sha.as_deref().unwrap_or("")),
+                subject: String::new(),
+                updated_at: None,
+            });
         let pull_request = pr_map.get(&name).cloned();
         let compare_base_branch = pull_request
             .as_ref()
@@ -459,11 +474,8 @@ fn inspect_jj_repo(seed: &RepoSeed) -> Result<WorkflowRepoSnapshot> {
             .or_else(|| default_branch.clone());
         let is_current = !workspace_names.is_empty();
         let hidden = is_hidden_branch(&name);
-        let is_active = is_current
-            || dirty
-            || local.conflict
-            || workspace_conflict
-            || pull_request.is_some();
+        let is_active =
+            is_current || dirty || local.conflict || workspace_conflict || pull_request.is_some();
 
         branches.push(WorkflowBranchSnapshot {
             name: name.clone(),
@@ -497,7 +509,10 @@ fn inspect_jj_repo(seed: &RepoSeed) -> Result<WorkflowRepoSnapshot> {
             name: binding.project.name.clone(),
             project_root: binding.project.project_root.display().to_string(),
             repo_relative_path: relative_display_path(
-                binding.workspace_root.as_deref().unwrap_or(&binding.repo_root),
+                binding
+                    .workspace_root
+                    .as_deref()
+                    .unwrap_or(&binding.repo_root),
                 &binding.project.project_root,
             ),
             workspace_name: binding.workspace_name.clone(),
@@ -578,9 +593,9 @@ fn inspect_git_repo(seed: &RepoSeed) -> Result<WorkflowRepoSnapshot> {
                 .filter(|workspace| workspace.branch.as_deref() == Some(row.name.as_str()))
                 .map(|workspace| workspace.name.clone())
                 .collect::<Vec<_>>();
-            let dirty = worktrees
-                .iter()
-                .any(|workspace| workspace.dirty && workspace.branch.as_deref() == Some(row.name.as_str()));
+            let dirty = worktrees.iter().any(|workspace| {
+                workspace.dirty && workspace.branch.as_deref() == Some(row.name.as_str())
+            });
             let pull_request = pr_map.get(&row.name).cloned();
             let compare_base_branch = pull_request
                 .as_ref()
@@ -622,7 +637,10 @@ fn inspect_git_repo(seed: &RepoSeed) -> Result<WorkflowRepoSnapshot> {
         .map(|binding| WorkflowProjectRef {
             name: binding.project.name.clone(),
             project_root: binding.project.project_root.display().to_string(),
-            repo_relative_path: relative_display_path(&binding.repo_root, &binding.project.project_root),
+            repo_relative_path: relative_display_path(
+                &binding.repo_root,
+                &binding.project.project_root,
+            ),
             workspace_name: None,
             workspace_root: None,
             current_branches: binding.current_branches.clone(),
@@ -1010,25 +1028,35 @@ fn git_repo_slug(repo_root: &Path) -> Option<String> {
 }
 
 fn git_default_branch(repo_root: &Path) -> Option<String> {
-    capture_trimmed_in(repo_root, "git", &["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .ok()
-        .and_then(|value| value.trim().rsplit('/').next().map(|branch| branch.to_string()))
-        .or_else(|| {
-            let branches = capture_trimmed_in(
-                repo_root,
-                "git",
-                &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
-            )
-            .ok()?;
-            let names = branches.lines().map(str::trim).collect::<HashSet<_>>();
-            if names.contains("main") {
-                Some("main".to_string())
-            } else if names.contains("master") {
-                Some("master".to_string())
-            } else {
-                None
-            }
-        })
+    capture_trimmed_in(
+        repo_root,
+        "git",
+        &["symbolic-ref", "refs/remotes/origin/HEAD"],
+    )
+    .ok()
+    .and_then(|value| {
+        value
+            .trim()
+            .rsplit('/')
+            .next()
+            .map(|branch| branch.to_string())
+    })
+    .or_else(|| {
+        let branches = capture_trimmed_in(
+            repo_root,
+            "git",
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        )
+        .ok()?;
+        let names = branches.lines().map(str::trim).collect::<HashSet<_>>();
+        if names.contains("main") {
+            Some("main".to_string())
+        } else if names.contains("master") {
+            Some("master".to_string())
+        } else {
+            None
+        }
+    })
 }
 
 fn fetch_open_prs(

@@ -30,16 +30,17 @@ use uuid::Uuid;
 
 use crate::activity_log;
 use crate::cli::{
-    AiAction, CodexDaemonAction, CodexMemoryAction, CodexRuntimeAction, CodexSkillEvalAction,
-    CodexSkillSourceAction, CodexTelemetryAction, CodexTraceAction, ProviderAiAction,
+    AiAction, CodexAgentAction, CodexDaemonAction, CodexMemoryAction, CodexProjectAiAction,
+    CodexRuntimeAction, CodexSkillEvalAction, CodexSkillSourceAction, CodexTelemetryAction,
+    CodexTraceAction, ProviderAiAction,
 };
 use crate::commit::configured_codex_bin_for_workdir;
+use crate::env as flow_env;
 use crate::{
-    codex_memory, codex_telemetry, codex_text, codexd, config, project_snapshot, repo_capsule,
-    url_inspect,
+    ai_project_manifest, codex_memory, codex_session_docs, codex_telemetry, codex_text, codexd,
+    config, project_snapshot, repo_capsule, url_inspect,
 };
 use crate::{codex_runtime, codex_skill_eval};
-use crate::env as flow_env;
 
 /// AI provider type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -398,6 +399,7 @@ const CODEX_QUERY_CACHE_ENV_DISABLE: &str = "FLOW_DISABLE_CODEX_QUERY_CACHE";
 const CODEX_SESSION_COMPLETION_DEFAULT_SCAN_LIMIT: usize = 24;
 const CODEX_SESSION_COMPLETION_DEFAULT_IDLE_SECS: u64 = 90;
 const FLOW_CODEX_TRACE_SERVICE_NAME: &str = "flow_codex";
+const RUN_AGENT_ROUTER_PATH: &str = "~/run/scripts/agent-router.sh";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CodexStateDbStamp {
@@ -501,10 +503,17 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
                 bail!("memory is only supported for Codex sessions; use `f codex memory ...`");
             }
             Some(ProviderAiAction::Telemetry { .. }) => {
-                bail!("telemetry is only supported for Codex sessions; use `f codex telemetry ...`");
+                bail!(
+                    "telemetry is only supported for Codex sessions; use `f codex telemetry ...`"
+                );
             }
             Some(ProviderAiAction::Trace { .. }) => {
                 bail!("trace is only supported for Codex sessions; use `f codex trace ...`");
+            }
+            Some(ProviderAiAction::ProjectAi { .. }) => {
+                bail!(
+                    "project-ai is only supported for Codex sessions; use `f codex project-ai ...`"
+                );
             }
             Some(ProviderAiAction::SkillEval { .. }) => {
                 bail!(
@@ -515,6 +524,9 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
                 bail!(
                     "skill-source is only supported for Codex sessions; use `f codex skill-source ...`"
                 );
+            }
+            Some(ProviderAiAction::Agent { .. }) => {
+                bail!("agent is only supported for Codex sessions; use `f codex agent ...`");
             }
             Some(ProviderAiAction::Sessions { .. })
             | Some(ProviderAiAction::Continue { .. })
@@ -539,9 +551,7 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
         None => quick_start_session(provider)?,
         Some(ProviderAiAction::List) => list_sessions(provider)?,
         Some(ProviderAiAction::LatestId { path }) => print_latest_session_id(provider, path)?,
-            Some(ProviderAiAction::Sessions { path, json }) => {
-                provider_sessions(provider, path, json)?
-            }
+        Some(ProviderAiAction::Sessions { path, json }) => provider_sessions(provider, path, json)?,
         Some(ProviderAiAction::Continue { session, path }) => {
             continue_session(session, path, provider)?
         }
@@ -559,14 +569,14 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
         }) => open_codex_session(path, query, exact_cwd, provider)?,
         Some(ProviderAiAction::Daemon { action }) => codex_daemon_command(action, provider)?,
         Some(ProviderAiAction::Memory { action }) => codex_memory_command(action, provider)?,
-        Some(ProviderAiAction::Telemetry { action }) => {
-            codex_telemetry_command(action, provider)?
-        }
+        Some(ProviderAiAction::Telemetry { action }) => codex_telemetry_command(action, provider)?,
         Some(ProviderAiAction::Trace { action }) => codex_trace_command(action, provider)?,
+        Some(ProviderAiAction::ProjectAi { action }) => codex_project_ai_command(action, provider)?,
         Some(ProviderAiAction::SkillEval { action }) => codex_skill_eval_command(action, provider)?,
         Some(ProviderAiAction::SkillSource { action }) => {
             codex_skill_source_command(action, provider)?
         }
+        Some(ProviderAiAction::Agent { action }) => codex_agent_command(action, provider)?,
         Some(ProviderAiAction::Doctor {
             path,
             assert_runtime,
@@ -709,10 +719,17 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 bail!("memory is only supported for Codex sessions; use `f codex memory ...`");
             }
             Some(ProviderAiAction::Telemetry { .. }) => {
-                bail!("telemetry is only supported for Codex sessions; use `f codex telemetry ...`");
+                bail!(
+                    "telemetry is only supported for Codex sessions; use `f codex telemetry ...`"
+                );
             }
             Some(ProviderAiAction::Trace { .. }) => {
                 bail!("trace is only supported for Codex sessions; use `f codex trace ...`");
+            }
+            Some(ProviderAiAction::ProjectAi { .. }) => {
+                bail!(
+                    "project-ai is only supported for Codex sessions; use `f codex project-ai ...`"
+                );
             }
             Some(ProviderAiAction::SkillEval { .. }) => {
                 bail!(
@@ -723,6 +740,9 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 bail!(
                     "skill-source is only supported for Codex sessions; use `f codex skill-source ...`"
                 );
+            }
+            Some(ProviderAiAction::Agent { .. }) => {
+                bail!("agent is only supported for Codex sessions; use `f codex agent ...`");
             }
             Some(ProviderAiAction::Resume { session, path }) => {
                 resume_session(session, path, Provider::Claude)?
@@ -802,11 +822,17 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::Trace { action }) => {
                 codex_trace_command(action, Provider::Codex)?
             }
+            Some(ProviderAiAction::ProjectAi { action }) => {
+                codex_project_ai_command(action, Provider::Codex)?
+            }
             Some(ProviderAiAction::SkillEval { action }) => {
                 codex_skill_eval_command(action, Provider::Codex)?
             }
             Some(ProviderAiAction::SkillSource { action }) => {
                 codex_skill_source_command(action, Provider::Codex)?
+            }
+            Some(ProviderAiAction::Agent { action }) => {
+                codex_agent_command(action, Provider::Codex)?
             }
             Some(ProviderAiAction::Doctor {
                 path,
@@ -3137,7 +3163,10 @@ order by updated_at desc
             Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
         })?;
 
-        Ok(rows.into_iter().map(ai_session_from_codex_recover_row).collect())
+        Ok(rows
+            .into_iter()
+            .map(ai_session_from_codex_recover_row)
+            .collect())
     })();
 
     match db_result {
@@ -3475,7 +3504,9 @@ fn list_sessions(provider: Provider) -> Result<()> {
             println!("{}", entry.display);
         }
         if !has_tty {
-            println!("\nTip: use `f ai codex sessions --path <repo>` for machine-readable selection.");
+            println!(
+                "\nTip: use `f ai codex sessions --path <repo>` for machine-readable selection."
+            );
         }
         return Ok(());
     }
@@ -3556,11 +3587,17 @@ fn direct_codex_trace_query(action: &str, route: &str, session_id: Option<&str>)
         "continue-last-direct" => "continue last codex session".to_string(),
         "new-direct" => "start new codex session".to_string(),
         "resume-direct" if session_id.is_some() => {
-            format!("resume codex session {}", truncate_recover_id(session_id.unwrap_or_default()))
+            format!(
+                "resume codex session {}",
+                truncate_recover_id(session_id.unwrap_or_default())
+            )
         }
         "resume-direct" => "resume codex session".to_string(),
         "connect-direct" if session_id.is_some() => {
-            format!("connect codex session {}", truncate_recover_id(session_id.unwrap_or_default()))
+            format!(
+                "connect codex session {}",
+                truncate_recover_id(session_id.unwrap_or_default())
+            )
         }
         "connect-direct" => "connect codex session".to_string(),
         _ => format!("{action} codex session"),
@@ -3712,6 +3749,323 @@ fn detect_git_root(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(trimmed))
 }
 
+fn run_agent_router_path() -> PathBuf {
+    config::expand_path(RUN_AGENT_ROUTER_PATH)
+}
+
+fn parse_run_agent_list_output(stdout: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn command_output_error_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    format!("exit status {}", output.status)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexRunAgentBridgeStatus {
+    router_path: String,
+    status: String,
+    agent_count: usize,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+struct CodexRunAgentHandoff {
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    next_action: String,
+    #[serde(default)]
+    artifacts: Vec<String>,
+    #[serde(default)]
+    relevant_paths: Vec<String>,
+    #[serde(default)]
+    validation: Vec<String>,
+    #[serde(default)]
+    open_questions: Vec<String>,
+    #[serde(default)]
+    source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct CodexRunAgentCompletedEvent {
+    #[serde(rename = "type", default)]
+    event_type: String,
+    #[serde(default)]
+    agent_id: String,
+    #[serde(default)]
+    invocation_id: String,
+    #[serde(default)]
+    artifact_path: Option<String>,
+    #[serde(default)]
+    handoff: Option<CodexRunAgentHandoff>,
+    #[serde(default)]
+    output: String,
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    trace_path: Option<String>,
+}
+
+fn collect_run_agent_bridge_status() -> CodexRunAgentBridgeStatus {
+    let router_path = run_agent_router_path();
+    let router_path_display = router_path.display().to_string();
+    if !router_path.is_file() {
+        return CodexRunAgentBridgeStatus {
+            router_path: router_path_display,
+            status: "missing".to_string(),
+            agent_count: 0,
+            error: Some("router script not found".to_string()),
+        };
+    }
+
+    match Command::new("bash").arg(&router_path).arg("list").output() {
+        Ok(output) if output.status.success() => {
+            let agent_ids = parse_run_agent_list_output(&output.stdout);
+            CodexRunAgentBridgeStatus {
+                router_path: router_path_display,
+                status: "ready".to_string(),
+                agent_count: agent_ids.len(),
+                error: None,
+            }
+        }
+        Ok(output) => CodexRunAgentBridgeStatus {
+            router_path: router_path_display,
+            status: "error".to_string(),
+            agent_count: 0,
+            error: Some(command_output_error_detail(&output)),
+        },
+        Err(err) => CodexRunAgentBridgeStatus {
+            router_path: router_path_display,
+            status: "error".to_string(),
+            agent_count: 0,
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+fn require_run_agent_router_path() -> Result<PathBuf> {
+    let router_path = run_agent_router_path();
+    if !router_path.is_file() {
+        bail!(
+            "run-agent bridge is unavailable; expected router at {}",
+            router_path.display()
+        );
+    }
+    Ok(router_path)
+}
+
+fn run_agent_router_list() -> Result<Vec<String>> {
+    let router_path = require_run_agent_router_path()?;
+    let output = Command::new("bash")
+        .arg(&router_path)
+        .arg("list")
+        .output()
+        .with_context(|| format!("failed to execute {}", router_path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "run-agent bridge list failed: {}",
+            command_output_error_detail(&output)
+        );
+    }
+    Ok(parse_run_agent_list_output(&output.stdout))
+}
+
+fn run_agent_router_show(agent_id: &str) -> Result<String> {
+    let router_path = require_run_agent_router_path()?;
+    let output = Command::new("bash")
+        .arg(&router_path)
+        .arg("show")
+        .arg(agent_id)
+        .output()
+        .with_context(|| format!("failed to execute {}", router_path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "run-agent bridge show failed: {}",
+            command_output_error_detail(&output)
+        );
+    }
+    String::from_utf8(output.stdout).context("failed to decode run-agent show output")
+}
+
+fn parse_run_agent_completed_event(stdout: &[u8]) -> Result<CodexRunAgentCompletedEvent> {
+    let rendered = String::from_utf8(stdout.to_vec())
+        .context("failed to decode run-agent event stream as UTF-8")?;
+    let mut completed: Option<CodexRunAgentCompletedEvent> = None;
+
+    for line in rendered.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(trimmed).context("failed to parse run-agent event JSON")?;
+        if value.get("type").and_then(|item| item.as_str()) == Some("completed") {
+            completed = Some(
+                serde_json::from_value(value)
+                    .context("failed to decode run-agent completed event")?,
+            );
+        }
+    }
+
+    completed.context("run-agent bridge returned no completed event")
+}
+
+fn run_agent_bridge_completed_event_summary(event: &CodexRunAgentCompletedEvent) -> String {
+    let output = event.output.trim();
+    if !output.is_empty() {
+        return truncate_message(output, 180);
+    }
+    if let Some(handoff) = &event.handoff {
+        let summary = handoff.summary.trim();
+        if !summary.is_empty() {
+            return truncate_message(summary, 180);
+        }
+    }
+    if !event.agent_id.is_empty() {
+        return format!("completed {}", event.agent_id);
+    }
+    "completed run-agent bridge".to_string()
+}
+
+fn run_codex_agent_bridge(
+    agent_id: &str,
+    target_path: &Path,
+    new_thread: bool,
+    query_text: &str,
+) -> Result<CodexRunAgentCompletedEvent> {
+    let router_path = require_run_agent_router_path()?;
+    let repo_root = detect_git_root(target_path).unwrap_or_else(|| target_path.to_path_buf());
+    let project_name = repo_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("project")
+        .to_string();
+    let request = json!({
+        "query": query_text,
+        "context": {
+            "workspace_path": target_path.display().to_string(),
+            "workspace_repo_root": repo_root.display().to_string(),
+            "project_path": repo_root.display().to_string(),
+            "project_name": project_name,
+            "entry_harness_id": "flow.codex.agent",
+            "input_surface": "flow",
+        }
+    });
+    let request_bytes =
+        serde_json::to_vec(&request).context("failed to encode run-agent request payload")?;
+
+    let mut command = Command::new("bash");
+    command.arg(&router_path).arg("run-json");
+    if new_thread {
+        command.arg("--new-thread");
+    }
+    command
+        .arg(agent_id)
+        .current_dir(target_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to launch run-agent bridge for `{agent_id}`"))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("run-agent bridge stdin was not available")?;
+        stdin
+            .write_all(&request_bytes)
+            .context("failed to write run-agent request payload")?;
+        stdin
+            .write_all(b"\n")
+            .context("failed to terminate run-agent request payload")?;
+    }
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for run-agent bridge process")?;
+    if !output.status.success() {
+        bail!(
+            "run-agent bridge run failed: {}",
+            command_output_error_detail(&output)
+        );
+    }
+    parse_run_agent_completed_event(&output.stdout)
+}
+
+fn record_run_agent_bridge_activity(
+    agent_id: &str,
+    target_path: &Path,
+    repo_root: &Path,
+    event: &CodexRunAgentCompletedEvent,
+) {
+    let mut activity_event = activity_log::ActivityEvent::done(
+        "codex.agent.run",
+        run_agent_bridge_completed_event_summary(event),
+    );
+    activity_event.route = Some(format!("agent.{agent_id}"));
+    activity_event.scope = Some(agent_id.to_string());
+    activity_event.source = Some("run-agent-bridge".to_string());
+    activity_event.session_id = event.thread_id.clone();
+    activity_event.target_path = Some(repo_root.display().to_string());
+    activity_event.launch_path = Some(target_path.display().to_string());
+    activity_event.artifact_path = event.artifact_path.clone();
+    activity_event.payload_ref = event.trace_path.clone();
+    let _ = activity_log::append_daily_event(activity_event);
+}
+
+fn print_run_agent_completed_event(event: &CodexRunAgentCompletedEvent) {
+    let output = event.output.trim_end();
+    let fallback_summary = event
+        .handoff
+        .as_ref()
+        .map(|handoff| handoff.summary.trim())
+        .filter(|summary| !summary.is_empty());
+    let mut printed_body = false;
+    if !output.is_empty() {
+        println!("{output}");
+        printed_body = true;
+    } else if let Some(summary) = fallback_summary {
+        println!("{summary}");
+        printed_body = true;
+    }
+
+    let mut metadata = vec![format!("agent_id: {}", event.agent_id)];
+    if let Some(thread_id) = &event.thread_id {
+        metadata.push(format!("thread_id: {thread_id}"));
+    }
+    if let Some(artifact_path) = &event.artifact_path {
+        metadata.push(format!("artifact_path: {artifact_path}"));
+    }
+    if let Some(trace_path) = &event.trace_path {
+        metadata.push(format!("trace_path: {trace_path}"));
+    }
+
+    if !metadata.is_empty() {
+        if printed_body {
+            println!();
+        }
+        for line in metadata {
+            println!("{line}");
+        }
+    }
+}
+
 fn codex_trusted_paths() -> Vec<PathBuf> {
     env::current_dir()
         .ok()
@@ -3838,7 +4192,12 @@ fn apply_codex_personal_env_to_command(command: &mut Command) {
     }
     let missing_keys: Vec<String> = codex_personal_env_keys()
         .into_iter()
-        .filter(|key| env::var(key).ok().map(|v| v.trim().is_empty()).unwrap_or(true))
+        .filter(|key| {
+            env::var(key)
+                .ok()
+                .map(|v| v.trim().is_empty())
+                .unwrap_or(true)
+        })
         .collect();
     if missing_keys.is_empty() {
         return;
@@ -4517,6 +4876,14 @@ fn extract_codex_session_reference_user_request(
     query_text: &str,
     session_hints: &[String],
 ) -> Option<String> {
+    extract_codex_session_reference_suffix_user_request(query_text, session_hints)
+        .or_else(|| extract_codex_session_reference_prefix_user_request(query_text, session_hints))
+}
+
+fn extract_codex_session_reference_suffix_user_request(
+    query_text: &str,
+    session_hints: &[String],
+) -> Option<String> {
     let query_lower = query_text.to_ascii_lowercase();
     let last_hint = session_hints.last()?;
     let hint_lower = last_hint.to_ascii_lowercase();
@@ -4533,37 +4900,97 @@ fn extract_codex_session_reference_user_request(
     }
 }
 
+fn extract_codex_session_reference_prefix_user_request(
+    query_text: &str,
+    session_hints: &[String],
+) -> Option<String> {
+    let query_lower = query_text.to_ascii_lowercase();
+    let first_hint = session_hints.first()?;
+    let hint_lower = first_hint.to_ascii_lowercase();
+    let start = query_lower.find(&hint_lower)?;
+    let before_hint = query_text.get(..start)?.trim_end();
+    let remainder = strip_codex_session_reference_bridge_suffix(before_hint)?
+        .trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '-'))
+        .trim();
+    if remainder.is_empty() {
+        None
+    } else {
+        Some(remainder.to_string())
+    }
+}
+
+fn strip_codex_session_reference_bridge_suffix(value: &str) -> Option<&str> {
+    let trimmed =
+        value.trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':'));
+    for suffix in [
+        " with context from codex session",
+        " with context from codex sesh",
+        " with context from codex chat",
+        " with context from session",
+        " with context from sesh",
+        " with context from chat",
+        " with context from thread",
+        " using codex session",
+        " using codex sesh",
+        " using codex chat",
+        " using session",
+        " using sesh",
+        " using chat",
+        " using thread",
+        " from codex session",
+        " from codex sesh",
+        " from codex chat",
+        " from session",
+        " from sesh",
+        " from chat",
+        " from thread",
+        " based on",
+        " using",
+        " from",
+        " via",
+    ] {
+        if trimmed.len() >= suffix.len()
+            && trimmed[trimmed.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        {
+            return Some(trimmed[..trimmed.len() - suffix.len()].trim_end());
+        }
+    }
+    None
+}
+
 fn strip_codex_session_followup_prefix(value: &str) -> &str {
     let mut remainder = value.trim_start();
     loop {
-        let next = if remainder.len() >= 14 && remainder[..14].eq_ignore_ascii_case("codex session ") {
-            Some(&remainder[14..])
-        } else if remainder.len() >= 11 && remainder[..11].eq_ignore_ascii_case("codex sesh ") {
-            Some(&remainder[11..])
-        } else if remainder.len() >= 12 && remainder[..12].eq_ignore_ascii_case("codex chat ") {
-            Some(&remainder[12..])
-        } else if remainder.len() >= 6 && remainder[..6].eq_ignore_ascii_case("codex ") {
-            Some(&remainder[6..])
-        } else if remainder.len() >= 8 && remainder[..8].eq_ignore_ascii_case("session ") {
-            Some(&remainder[8..])
-        } else if remainder.len() >= 5 && remainder[..5].eq_ignore_ascii_case("sesh ") {
-            Some(&remainder[5..])
-        } else if remainder.len() >= 5 && remainder[..5].eq_ignore_ascii_case("chat ") {
-            Some(&remainder[5..])
-        } else if remainder.len() >= 7 && remainder[..7].eq_ignore_ascii_case("thread ") {
-            Some(&remainder[7..])
-        } else if remainder.len() >= 4 && remainder[..4].eq_ignore_ascii_case("and ") {
-            Some(&remainder[4..])
-        } else if remainder.len() >= 5 && remainder[..5].eq_ignore_ascii_case("then ") {
-            Some(&remainder[5..])
-        } else {
-            None
-        };
+        let next =
+            if remainder.len() >= 14 && remainder[..14].eq_ignore_ascii_case("codex session ") {
+                Some(&remainder[14..])
+            } else if remainder.len() >= 11 && remainder[..11].eq_ignore_ascii_case("codex sesh ") {
+                Some(&remainder[11..])
+            } else if remainder.len() >= 12 && remainder[..12].eq_ignore_ascii_case("codex chat ") {
+                Some(&remainder[12..])
+            } else if remainder.len() >= 6 && remainder[..6].eq_ignore_ascii_case("codex ") {
+                Some(&remainder[6..])
+            } else if remainder.len() >= 8 && remainder[..8].eq_ignore_ascii_case("session ") {
+                Some(&remainder[8..])
+            } else if remainder.len() >= 5 && remainder[..5].eq_ignore_ascii_case("sesh ") {
+                Some(&remainder[5..])
+            } else if remainder.len() >= 5 && remainder[..5].eq_ignore_ascii_case("chat ") {
+                Some(&remainder[5..])
+            } else if remainder.len() >= 7 && remainder[..7].eq_ignore_ascii_case("thread ") {
+                Some(&remainder[7..])
+            } else if remainder.len() >= 4 && remainder[..4].eq_ignore_ascii_case("and ") {
+                Some(&remainder[4..])
+            } else if remainder.len() >= 5 && remainder[..5].eq_ignore_ascii_case("then ") {
+                Some(&remainder[5..])
+            } else {
+                None
+            };
 
         match next {
             Some(rest) => {
-                remainder =
-                    rest.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '-'));
+                remainder = rest.trim_start_matches(|ch: char| {
+                    ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '-')
+                });
             }
             None => return remainder.trim(),
         }
@@ -4612,12 +5039,7 @@ fn resolve_builtin_codex_session_reference(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("No Codex session found for {}", session_hint))?;
-    let excerpt = read_last_context(
-        &row.id,
-        Provider::Codex,
-        count,
-        &PathBuf::from(&row.cwd),
-    )?;
+    let excerpt = read_last_context(&row.id, Provider::Codex, count, &PathBuf::from(&row.cwd))?;
     Ok(CodexResolvedReference {
         name: "codex-session".to_string(),
         source: "session".to_string(),
@@ -5792,7 +6214,10 @@ fn build_codex_resolve_workflow_explanation(
     plan: &CodexOpenPlan,
     runtime_skills: &[CodexResolveRuntimeSkillSnapshot],
 ) -> Option<CodexResolveWorkflowExplanation> {
-    if let Some(reference) = plan.references.iter().find(|reference| reference.name == "pr-feedback")
+    if let Some(reference) = plan
+        .references
+        .iter()
+        .find(|reference| reference.name == "pr-feedback")
     {
         return Some(build_pr_feedback_workflow_explanation(
             plan,
@@ -5991,7 +6416,12 @@ fn build_pr_feedback_workflow_explanation(
         fields.get("snapshot json"),
         "path",
     );
-    push_workflow_artifact(&mut artifacts, "Review plan", fields.get("review plan"), "path");
+    push_workflow_artifact(
+        &mut artifacts,
+        "Review plan",
+        fields.get("review plan"),
+        "path",
+    );
     push_workflow_artifact(
         &mut artifacts,
         "Review rules",
@@ -6023,7 +6453,8 @@ fn build_pr_feedback_workflow_explanation(
         .map(|skill| {
             let mut note = format!(
                 "Runtime skill: {}",
-                skill.original_name
+                skill
+                    .original_name
                     .as_deref()
                     .unwrap_or(skill.name.as_str())
             );
@@ -6160,8 +6591,7 @@ fn load_runtime_skills_from_plan(
     let Some(path) = plan.runtime_state_path.as_deref() else {
         return Ok(Vec::new());
     };
-    let raw =
-        fs::read(path).with_context(|| format!("failed to read runtime state {}", path))?;
+    let raw = fs::read(path).with_context(|| format!("failed to read runtime state {}", path))?;
     let state: codex_runtime::CodexRuntimeState = serde_json::from_slice(&raw)
         .with_context(|| format!("failed to decode runtime state {}", path))?;
     Ok(state
@@ -6219,6 +6649,10 @@ pub struct CodexDoctorSnapshot {
     codex_bin: String,
     codexd: String,
     codexd_socket: String,
+    run_agent_bridge: String,
+    run_agent_router: String,
+    run_agent_count: usize,
+    run_agent_bridge_error: Option<String>,
     memory_state: String,
     memory_root: String,
     memory_db_path: String,
@@ -6253,6 +6687,7 @@ pub struct CodexDoctorSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct CodexSkillsDashboardResponse {
     pub doctor: CodexDoctorSnapshot,
+    pub project_ai: ai_project_manifest::AiProjectManifest,
     pub skills: codex_runtime::CodexSkillsDashboardSnapshot,
 }
 
@@ -6367,6 +6802,7 @@ fn collect_codex_doctor_snapshot(target_path: &Path) -> Result<CodexDoctorSnapsh
     let skill_eval_outcomes = codex_skill_eval::outcome_count();
     let schedule_status = codex_skill_eval_launchd_status();
     let scorecard = codex_skill_eval::load_scorecard(target_path)?;
+    let run_agent_bridge = collect_run_agent_bridge_status();
     let (skill_scorecard_samples, skill_scorecard_entries, skill_scorecard_top) = scorecard
         .as_ref()
         .map(|value| {
@@ -6436,6 +6872,16 @@ fn collect_codex_doctor_snapshot(target_path: &Path) -> Result<CodexDoctorSnapsh
                 .to_string(),
         );
     }
+    if run_agent_bridge.status != "ready" {
+        let detail = run_agent_bridge
+            .error
+            .clone()
+            .unwrap_or_else(|| "unknown error".to_string());
+        warnings.push(format!(
+            "run-agent bridge is {}; Flow cannot launch ~/run agents directly ({detail})",
+            run_agent_bridge.status
+        ));
+    }
 
     let (memory_state, memory_root, memory_db_path, memory_events_indexed, memory_facts_indexed) =
         if let Some(stats) = memory_stats {
@@ -6465,6 +6911,10 @@ fn collect_codex_doctor_snapshot(target_path: &Path) -> Result<CodexDoctorSnapsh
             "stopped".to_string()
         },
         codexd_socket: codexd_socket.display().to_string(),
+        run_agent_bridge: run_agent_bridge.status,
+        run_agent_router: run_agent_bridge.router_path,
+        run_agent_count: run_agent_bridge.agent_count,
+        run_agent_bridge_error: run_agent_bridge.error,
         memory_state,
         memory_root,
         memory_db_path,
@@ -6517,8 +6967,22 @@ pub fn codex_skills_dashboard_snapshot(
     let codex_cfg = load_codex_config_for_path(target_path);
     Ok(CodexSkillsDashboardResponse {
         doctor: collect_codex_doctor_snapshot(target_path)?,
+        project_ai: ai_project_manifest::load_for_target(target_path, false)?,
         skills: codex_runtime::dashboard_snapshot(target_path, &codex_cfg, recent_limit)?,
     })
+}
+
+pub fn codex_project_ai_snapshot(
+    target_path: &Path,
+    refresh: bool,
+) -> Result<ai_project_manifest::AiProjectManifest> {
+    ai_project_manifest::load_for_target(target_path, refresh)
+}
+
+pub fn codex_project_ai_recent(
+    limit: usize,
+) -> Result<Vec<ai_project_manifest::AiProjectManifest>> {
+    ai_project_manifest::recent(limit)
 }
 
 pub fn codex_skill_source_sync(
@@ -6536,6 +7000,12 @@ fn print_codex_doctor(snapshot: &CodexDoctorSnapshot) {
     println!("codex_bin: {}", snapshot.codex_bin);
     println!("codexd: {}", snapshot.codexd);
     println!("codexd_socket: {}", snapshot.codexd_socket);
+    println!("run_agent_bridge: {}", snapshot.run_agent_bridge);
+    println!("run_agent_router: {}", snapshot.run_agent_router);
+    println!("run_agent_count: {}", snapshot.run_agent_count);
+    if let Some(error) = &snapshot.run_agent_bridge_error {
+        println!("run_agent_bridge_error: {}", error);
+    }
     println!("memory_state: {}", snapshot.memory_state);
     println!("memory_root: {}", snapshot.memory_root);
     println!("memory_db_path: {}", snapshot.memory_db_path);
@@ -6803,9 +7273,7 @@ fn build_codex_eval_summary(
     let route = top_route
         .map(|value| value.route.as_str())
         .unwrap_or("unknown");
-    let skill = top_skill
-        .map(|value| value.name.as_str())
-        .unwrap_or("none");
+    let skill = top_skill.map(|value| value.name.as_str()).unwrap_or("none");
     format!(
         "Runtime is ready and grounded learning is active. Recent launches: {}, grounded outcomes: {}, top route: {}, top skill: {}.",
         events, outcomes, route, skill
@@ -6866,10 +7334,9 @@ fn build_codex_eval_opportunities(
         });
     }
 
-    if let Some(skill) = skills
-        .iter()
-        .find(|skill| skill.sample_size >= 3 && skill.outcome_samples >= 2 && skill.pass_rate < 0.55)
-    {
+    if let Some(skill) = skills.iter().find(|skill| {
+        skill.sample_size >= 3 && skill.outcome_samples >= 2 && skill.pass_rate < 0.55
+    }) {
         opportunities.push(CodexEvalOpportunity {
             severity: "medium".to_string(),
             title: format!("Skill `{}` is underperforming", skill.name),
@@ -6935,7 +7402,10 @@ pub fn codex_eval_snapshot(target_path: &Path, limit: usize) -> Result<CodexEval
     let doctor = collect_codex_doctor_snapshot(target_path)?;
     let events = codex_skill_eval::load_events(Some(target_path), limit)?;
     let outcomes = codex_skill_eval::load_outcomes(Some(target_path), limit)?;
-    let latest_event_at = events.first().map(|event| event.recorded_at_unix).unwrap_or(0);
+    let latest_event_at = events
+        .first()
+        .map(|event| event.recorded_at_unix)
+        .unwrap_or(0);
     let scorecard = match codex_skill_eval::load_scorecard(target_path)? {
         Some(scorecard) if scorecard.generated_at_unix >= latest_event_at => scorecard,
         _ => codex_skill_eval::rebuild_scorecard(target_path, limit.max(200))?,
@@ -7091,12 +7561,7 @@ fn print_codex_eval(snapshot: &CodexEvalSnapshot) {
     }
 }
 
-fn codex_eval(
-    path: Option<String>,
-    limit: usize,
-    json: bool,
-    provider: Provider,
-) -> Result<()> {
+fn codex_eval(path: Option<String>, limit: usize, json: bool, provider: Provider) -> Result<()> {
     if provider != Provider::Codex {
         bail!("eval is only supported for Codex sessions; use `f codex eval`");
     }
@@ -7106,8 +7571,7 @@ fn codex_eval(
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&snapshot)
-                .context("failed to encode codex eval JSON")?
+            serde_json::to_string_pretty(&snapshot).context("failed to encode codex eval JSON")?
         );
     } else {
         print_codex_eval(&snapshot);
@@ -8016,6 +8480,47 @@ fn build_codex_session_changed_events(
     Ok(events)
 }
 
+fn build_codex_session_doc_input(
+    row: &CodexRecoverRow,
+    snapshot: &CodexSessionCompletionSnapshot,
+    session_file: &Path,
+) -> Result<Option<codex_session_docs::CompletedSessionDocInput>> {
+    let Some(completed_at_unix) = snapshot.last_assistant_at_unix else {
+        return Ok(None);
+    };
+
+    let patch_changes = snapshot
+        .last_user_at_unix
+        .map(|last_user_at_unix| {
+            read_codex_turn_patch_changes(
+                session_file,
+                last_user_at_unix,
+                completed_at_unix,
+                &row.cwd,
+            )
+        })
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|change| codex_session_docs::SessionDocPatchChange {
+            path: change.path,
+            action: change.action,
+            patch: change.patch,
+        })
+        .collect();
+
+    Ok(Some(codex_session_docs::CompletedSessionDocInput {
+        session_id: row.id.clone(),
+        session_file: session_file.to_path_buf(),
+        target_path: row.cwd.clone(),
+        launch_path: Some(row.cwd.clone()),
+        first_user_prompt: row.first_user_message.clone(),
+        completion_summary: select_codex_session_completion_summary(row, snapshot),
+        completed_at_unix,
+        patch_changes,
+    }))
+}
+
 fn hydrate_codex_quick_launch(
     launch: &CodexQuickLaunchEvent,
 ) -> Result<Option<CodexQuickLaunchHydration>> {
@@ -8177,6 +8682,11 @@ pub(crate) fn reconcile_codex_session_completions(limit: usize) -> Result<usize>
             activity_log::append_daily_event(build_codex_session_completion_event(&row, &snapshot));
         for event in build_codex_session_changed_events(&row, &snapshot, &session_file)? {
             let _ = activity_log::append_daily_event(event);
+        }
+        if let Some(doc_input) = build_codex_session_doc_input(&row, &snapshot, &session_file)? {
+            if let Err(err) = codex_session_docs::document_completed_session(&doc_input) {
+                eprintln!("WARN codex session docs failed for {}: {err:#}", row.id);
+            }
         }
         reconciled += 1;
     }
@@ -8355,10 +8865,7 @@ fn codex_memory_command(action: Option<CodexMemoryAction>, provider: Provider) -
     }
 }
 
-fn codex_telemetry_command(
-    action: Option<CodexTelemetryAction>,
-    provider: Provider,
-) -> Result<()> {
+fn codex_telemetry_command(action: Option<CodexTelemetryAction>, provider: Provider) -> Result<()> {
     if provider != Provider::Codex {
         bail!("telemetry is only supported for Codex sessions; use `f codex telemetry ...`");
     }
@@ -8513,6 +9020,122 @@ fn codex_trace_command(action: Option<CodexTraceAction>, provider: Provider) -> 
                         "{}",
                         serde_json::to_string_pretty(result)
                             .context("failed to encode codex trace inspect result")?
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn codex_project_ai_command(
+    action: Option<CodexProjectAiAction>,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("project-ai is only supported for Codex sessions; use `f codex project-ai ...`");
+    }
+
+    match action.unwrap_or(CodexProjectAiAction::Show {
+        path: None,
+        refresh: false,
+        json: false,
+    }) {
+        CodexProjectAiAction::Show {
+            path,
+            refresh,
+            json,
+        } => {
+            let target_path = resolve_session_target_path(path.as_deref())?;
+            let manifest = if codexd::is_running() {
+                codexd::query_project_ai_manifest(&target_path, refresh)
+                    .or_else(|_| ai_project_manifest::load_for_target(&target_path, refresh))?
+            } else {
+                ai_project_manifest::load_for_target(&target_path, refresh)?
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&manifest)
+                        .context("failed to encode codex project-ai JSON")?
+                );
+            } else {
+                println!("# codex project-ai");
+                println!("repo_root: {}", manifest.repo_root);
+                println!("generated_at: {}", manifest.generated_at);
+                println!("has_ai_dir: {}", manifest.has_ai_dir);
+                println!("skills_count: {}", manifest.skills_count);
+                println!("docs_count: {}", manifest.docs_count);
+                println!("reviews_count: {}", manifest.reviews_count);
+                println!("tasks_count: {}", manifest.tasks_count);
+                println!("todos_count: {}", manifest.todos_count);
+                println!("open_todos_count: {}", manifest.open_todos_count);
+                println!("query_count: {}", manifest.query_count);
+                if let Some(last) = manifest.last_requested_at_unix {
+                    println!("last_requested_at_unix: {}", last);
+                }
+                if let Some(packet) = manifest.latest_review_packet.as_ref() {
+                    println!("latest_review_markdown: {}", packet.markdown_path);
+                    if let Some(json_path) = packet.json_path.as_deref() {
+                        println!("latest_review_json: {}", json_path);
+                    }
+                    if let Some(repo_slug) = packet.repo_slug.as_deref() {
+                        println!("latest_review_repo: {}", repo_slug);
+                    }
+                    if let Some(pr_number) = packet.pr_number {
+                        println!("latest_review_pr: {}", pr_number);
+                    }
+                }
+                if let Some(context_doc) = manifest.latest_context_doc.as_deref() {
+                    println!("latest_context_doc: {}", context_doc);
+                }
+                if !manifest.latest_skill_names.is_empty() {
+                    println!("skills:");
+                    for skill in &manifest.latest_skill_names {
+                        println!("- {}", skill);
+                    }
+                }
+                if !manifest.latest_task_paths.is_empty() {
+                    println!("recent_tasks:");
+                    for task in &manifest.latest_task_paths {
+                        println!("- {}", task);
+                    }
+                }
+                if !manifest.ignored_local_buckets_present.is_empty() {
+                    println!("ignored_local_buckets_present:");
+                    for bucket in &manifest.ignored_local_buckets_present {
+                        println!("- {}", bucket);
+                    }
+                }
+            }
+            Ok(())
+        }
+        CodexProjectAiAction::Recent { limit, json } => {
+            let manifests = if codexd::is_running() {
+                codexd::query_recent_project_ai(limit)
+                    .or_else(|_| ai_project_manifest::recent(limit))?
+            } else {
+                ai_project_manifest::recent(limit)?
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&manifests)
+                        .context("failed to encode codex project-ai recent JSON")?
+                );
+            } else if manifests.is_empty() {
+                println!("No project-ai manifests have been queried yet.");
+            } else {
+                println!("# codex project-ai recent");
+                for manifest in manifests {
+                    println!(
+                        "- {} | queries {} | last {} | skills {} | reviews {} | tasks {}",
+                        manifest.repo_root,
+                        manifest.query_count,
+                        manifest.last_requested_at_unix.unwrap_or(0),
+                        manifest.skills_count,
+                        manifest.reviews_count,
+                        manifest.tasks_count
                     );
                 }
             }
@@ -8692,6 +9315,65 @@ fn codex_skill_source_command(
                 "Synced {} external Codex skill(s) into ~/.codex/skills.",
                 installed
             );
+            Ok(())
+        }
+    }
+}
+
+fn codex_agent_command(action: Option<CodexAgentAction>, provider: Provider) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("agent is only supported for Codex sessions; use `f codex agent ...`");
+    }
+
+    match action.unwrap_or(CodexAgentAction::List { json: false }) {
+        CodexAgentAction::List { json } => {
+            let agents = run_agent_router_list()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&agents)
+                        .context("failed to encode codex agent list JSON")?
+                );
+            } else {
+                for agent in agents {
+                    println!("{agent}");
+                }
+            }
+            Ok(())
+        }
+        CodexAgentAction::Show { agent_id } => {
+            let output = run_agent_router_show(&agent_id)?;
+            print!("{output}");
+            if !output.ends_with('\n') {
+                println!();
+            }
+            Ok(())
+        }
+        CodexAgentAction::Run {
+            path,
+            new_thread,
+            json,
+            agent_id,
+            query,
+        } => {
+            let target_path = resolve_session_target_path(path.as_deref())?;
+            let query_text = query.join(" ").trim().to_string();
+            if query_text.is_empty() {
+                bail!("agent run requires a non-empty query");
+            }
+            let repo_root = detect_git_root(&target_path).unwrap_or_else(|| target_path.clone());
+            let completed =
+                run_codex_agent_bridge(&agent_id, &target_path, new_thread, &query_text)?;
+            record_run_agent_bridge_activity(&agent_id, &target_path, &repo_root, &completed);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&completed)
+                        .context("failed to encode codex agent run JSON")?
+                );
+            } else {
+                print_run_agent_completed_event(&completed);
+            }
             Ok(())
         }
     }
@@ -8996,7 +9678,9 @@ fn build_codex_commit_workflow_plan(
 
     let mut references = vec![resolve_builtin_commit_workflow_reference(&repo_root)?];
     if auto_resolve_references {
-        for reference in resolve_codex_references(&repo_root, query_text, &codex_cfg.reference_resolvers)? {
+        for reference in
+            resolve_codex_references(&repo_root, query_text, &codex_cfg.reference_resolvers)?
+        {
             if !references
                 .iter()
                 .any(|existing| existing.matched == reference.matched)
@@ -9052,20 +9736,27 @@ fn build_codex_sync_workflow_plan(
     max_resolved_references: usize,
     default_prompt_budget: usize,
 ) -> Result<Option<CodexOpenPlan>> {
-    if !looks_like_prom_sync_workflow_query(normalized_query) {
+    if !looks_like_sync_workflow_query(normalized_query) {
         return Ok(None);
     }
 
     let Some(repo_root) = detect_git_root(target_path) else {
         return Ok(None);
     };
-    if !is_prom_workspace_path(&repo_root) {
+    let Some(command) = detect_sync_workflow_command(&repo_root) else {
         return Ok(None);
-    }
+    };
 
-    let references = vec![resolve_builtin_sync_workflow_reference(&repo_root)?];
+    let references = vec![resolve_builtin_sync_workflow_reference(
+        &repo_root, &command,
+    )?];
     let prompt_budget = default_prompt_budget.max(1600);
-    let prompt = build_codex_prompt(query_text, &references, max_resolved_references, prompt_budget);
+    let prompt = build_codex_prompt(
+        query_text,
+        &references,
+        max_resolved_references,
+        prompt_budget,
+    );
 
     Ok(Some(finalize_codex_open_plan(CodexOpenPlan {
         action: "new".to_string(),
@@ -9383,7 +10074,7 @@ fn looks_like_commit_workflow_query(normalized_query: &str) -> bool {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    matches!(
+    if matches!(
         collapsed.as_str(),
         "commit"
             | "commit this"
@@ -9397,20 +10088,66 @@ fn looks_like_commit_workflow_query(normalized_query: &str) -> bool {
             | "review and commit"
             | "review commit"
             | "review, commit, and push"
-    )
+    ) {
+        return true;
+    }
+
+    let Some(rest) = collapsed.strip_prefix("commit ") else {
+        return false;
+    };
+    let blocked_prefixes = [
+        "queue",
+        "routing",
+        "hash",
+        "sha",
+        "history",
+        "log",
+        "logs",
+        "semantics",
+        "title",
+        "titles",
+        "message",
+        "messages",
+    ];
+    if blocked_prefixes
+        .iter()
+        .any(|prefix| rest.starts_with(prefix))
+    {
+        return false;
+    }
+
+    if rest.split_whitespace().count() == 1 && rest.len() >= 3 {
+        return true;
+    }
+
+    let review_cues = [
+        "diff",
+        "review",
+        "inspect",
+        "analy",
+        "check",
+        "push",
+        "repo",
+        "branch",
+        "status",
+        "robust",
+        "perf",
+        "performance",
+        "regression",
+        "~/",
+        "/",
+    ];
+    review_cues.iter().any(|cue| rest.contains(cue))
 }
 
-fn looks_like_prom_sync_workflow_query(normalized_query: &str) -> bool {
+fn looks_like_sync_workflow_query(normalized_query: &str) -> bool {
     let collapsed = normalized_query
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
     matches!(
         collapsed.as_str(),
-        "sync branch"
-            | "sync this branch"
-            | "sync with origin/main"
-            | "sync with origin main"
+        "sync branch" | "sync this branch" | "sync with origin/main" | "sync with origin main"
     )
 }
 
@@ -10008,8 +10745,11 @@ fn resolve_builtin_url_reference(
 
 fn resolve_builtin_commit_workflow_reference(repo_root: &Path) -> Result<CodexResolvedReference> {
     let status = capture_git_stdout(repo_root, &["status", "--short"]).unwrap_or_default();
-    let staged_diff = capture_git_stdout(repo_root, &["diff", "--cached", "--stat", "--compact-summary"])
-        .unwrap_or_default();
+    let staged_diff = capture_git_stdout(
+        repo_root,
+        &["diff", "--cached", "--stat", "--compact-summary"],
+    )
+    .unwrap_or_default();
     let working_diff = if staged_diff.trim().is_empty() {
         capture_git_stdout(repo_root, &["diff", "--stat", "--compact-summary"]).unwrap_or_default()
     } else {
@@ -10037,20 +10777,18 @@ fn resolve_builtin_commit_workflow_reference(repo_root: &Path) -> Result<CodexRe
     })
 }
 
-fn resolve_builtin_sync_workflow_reference(repo_root: &Path) -> Result<CodexResolvedReference> {
+fn resolve_builtin_sync_workflow_reference(
+    repo_root: &Path,
+    command: &str,
+) -> Result<CodexResolvedReference> {
     let agents_instructions = read_repo_agents_instructions(repo_root).unwrap_or_default();
-    let command = detect_sync_workflow_command(repo_root);
-    let output = render_sync_workflow_reference(
-        repo_root,
-        &agents_instructions,
-        command.as_deref().unwrap_or("forge sync"),
-    );
+    let output = render_sync_workflow_reference(repo_root, &agents_instructions, command);
 
     Ok(CodexResolvedReference {
         name: "sync-workflow".to_string(),
         source: "builtin".to_string(),
         matched: "sync branch".to_string(),
-        command,
+        command: Some(command.to_string()),
         output: compact_codex_context_block(&output, 18, 1600),
     })
 }
@@ -10085,6 +10823,8 @@ fn render_commit_workflow_reference(
         "Commit workflow contract:".to_string(),
         format!("Workspace: {}", repo_root.display()),
         "Interpret plain `commit` as deep-review-then-commit, not the fast lane.".to_string(),
+        "Primary workflow skill: `commit` from the run control plane when it is active. Treat this built-in block as the bootstrap contract, not the only source of truth.".to_string(),
+        "If the user names another repo in the query, let the `commit` skill resolve that repo and run the review there instead of assuming this workspace is final.".to_string(),
         "If you use Flow CLI for the final commit, prefer `f commit --slow --context` over plain `f commit`.".to_string(),
         "Default focus: correctness, regression risk, performance, robustness, and clear intent.".to_string(),
         "Preferred execution shape: keep the main thread lean and, if available, use a detached Codex review lane or subagent to inspect the diff in parallel and only surface blocking issues back to the main thread.".to_string(),
@@ -10127,7 +10867,11 @@ fn render_commit_workflow_reference(
     if !review_instructions.trim().is_empty() {
         lines.push(String::new());
         lines.push("Repo commit review instructions:".to_string());
-        lines.push(compact_codex_context_block(review_instructions.trim(), 5, 500));
+        lines.push(compact_codex_context_block(
+            review_instructions.trim(),
+            5,
+            500,
+        ));
     }
 
     lines.push(String::new());
@@ -10140,7 +10884,11 @@ fn render_commit_workflow_reference(
     lines.join("\n")
 }
 
-fn render_sync_workflow_reference(repo_root: &Path, agents_instructions: &str, command: &str) -> String {
+fn render_sync_workflow_reference(
+    repo_root: &Path,
+    agents_instructions: &str,
+    command: &str,
+) -> String {
     let mut lines = vec![
         "Sync workflow contract:".to_string(),
         format!("Workspace: {}", repo_root.display()),
@@ -10160,7 +10908,11 @@ fn render_sync_workflow_reference(repo_root: &Path, agents_instructions: &str, c
     if !agents_instructions.trim().is_empty() {
         lines.push(String::new());
         lines.push("Repo workflow instructions:".to_string());
-        lines.push(compact_codex_context_block(agents_instructions.trim(), 5, 400));
+        lines.push(compact_codex_context_block(
+            agents_instructions.trim(),
+            5,
+            400,
+        ));
     }
 
     lines.join("\n")
@@ -10201,16 +10953,13 @@ fn detect_commit_workflow_kit_gate(repo_root: &Path) -> Option<String> {
     ))
 }
 
-fn is_prom_workspace_path(path: &Path) -> bool {
-    let display = path.display().to_string();
-    display.contains("/code/prom") || display.contains("/.jj/workspaces/prom/")
-}
-
 fn detect_sync_workflow_command(repo_root: &Path) -> Option<String> {
-    if !is_prom_workspace_path(repo_root) {
-        return None;
-    }
-    Some("forge sync".to_string())
+    let cfg = load_codex_config_for_path(repo_root);
+    cfg.sync_workflow_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
 }
 
 fn extract_reference_candidates(query_text: &str) -> Vec<String> {
@@ -13858,6 +14607,41 @@ alter table threads add column reasoning_effort text;
     }
 
     #[test]
+    fn extract_codex_session_reference_request_supports_suffix_reference_form() {
+        let request = extract_codex_session_reference_request(
+            "study /tmp/review-sync-plan.md from 019d035d-99b3-7461-9f15-73306348aa28",
+            "study /tmp/review-sync-plan.md from 019d035d-99b3-7461-9f15-73306348aa28",
+        )
+        .expect("expected session reference request");
+
+        assert_eq!(
+            request.session_hints,
+            vec!["019d035d-99b3-7461-9f15-73306348aa28".to_string()]
+        );
+        assert_eq!(
+            request.user_request,
+            "study /tmp/review-sync-plan.md"
+        );
+        assert_eq!(request.count, 12);
+    }
+
+    #[test]
+    fn extract_codex_session_reference_request_supports_suffix_reference_with_count() {
+        let request = extract_codex_session_reference_request(
+            "study /tmp/review.md from 019ce6ce-c77a-7d52-838e-c01f8820f6b8 last 7 messages",
+            "study /tmp/review.md from 019ce6ce-c77a-7d52-838e-c01f8820f6b8 last 7 messages",
+        )
+        .expect("expected session reference request");
+
+        assert_eq!(
+            request.session_hints,
+            vec!["019ce6ce-c77a-7d52-838e-c01f8820f6b8".to_string()]
+        );
+        assert_eq!(request.user_request, "study /tmp/review.md");
+        assert_eq!(request.count, 7);
+    }
+
+    #[test]
     fn extract_codex_session_reference_request_requires_followup_work() {
         assert!(
             extract_codex_session_reference_request(
@@ -13940,12 +14724,42 @@ alter table threads add column reasoning_effort text;
         ));
     }
 
+    #[test]
+    fn parse_run_agent_list_output_filters_empty_lines() {
+        let parsed = parse_run_agent_list_output(b"commit\n\nplanner\nrun\n");
+        assert_eq!(parsed, vec!["commit", "planner", "run"]);
+    }
+
+    #[test]
+    fn parse_run_agent_completed_event_extracts_final_completed_line() {
+        let stdout = br#"{"type":"started","agent_id":"planner"}
+{"type":"completed","agent_id":"planner","invocation_id":"20260324T131353Z","artifact_path":"/tmp/plan.md","handoff":{"summary":"ok","nextAction":"wait","artifacts":["/tmp/plan.md"],"relevantPaths":[],"validation":[],"openQuestions":[],"source":"agent"},"output":"flow bridge ok","thread_id":"019d1c41-3797-7e20-b4ad-4e72e68579e6","trace_path":"/tmp/trace.json"}
+"#;
+        let event = parse_run_agent_completed_event(stdout).expect("completed event");
+        assert_eq!(event.event_type, "completed");
+        assert_eq!(event.agent_id, "planner");
+        assert_eq!(event.output, "flow bridge ok");
+        assert_eq!(event.artifact_path.as_deref(), Some("/tmp/plan.md"));
+        assert_eq!(
+            event
+                .handoff
+                .as_ref()
+                .map(|handoff| handoff.summary.as_str()),
+            Some("ok")
+        );
+        assert_eq!(event.trace_path.as_deref(), Some("/tmp/trace.json"));
+    }
+
     fn sample_codex_doctor_snapshot() -> CodexDoctorSnapshot {
         CodexDoctorSnapshot {
             target: "/tmp/repo".to_string(),
             codex_bin: "codex-flow-wrapper".to_string(),
             codexd: "running".to_string(),
             codexd_socket: "/tmp/codexd.sock".to_string(),
+            run_agent_bridge: "ready".to_string(),
+            run_agent_router: "/tmp/run/scripts/agent-router.sh".to_string(),
+            run_agent_count: 14,
+            run_agent_bridge_error: None,
             memory_state: "ready".to_string(),
             memory_root: "/tmp/jazz2/codex-memory".to_string(),
             memory_db_path: "/tmp/jazz2/codex-memory/memory.sqlite".to_string(),
@@ -14007,15 +14821,20 @@ alter table threads add column reasoning_effort text;
         snapshot.learning_ready = false;
 
         let opportunities = build_codex_eval_opportunities(&snapshot, 4, 0, &[], &[]);
-        assert!(opportunities
-            .iter()
-            .any(|item| item.title.contains("Wrapper/runtime path")));
-        assert!(opportunities
-            .iter()
-            .any(|item| item.title.contains("codexd is not running")));
-        assert!(opportunities
-            .iter()
-            .any(|item| item.title.contains("No grounded outcome samples for this target yet")));
+        assert!(
+            opportunities
+                .iter()
+                .any(|item| item.title.contains("Wrapper/runtime path"))
+        );
+        assert!(
+            opportunities
+                .iter()
+                .any(|item| item.title.contains("codexd is not running"))
+        );
+        assert!(opportunities.iter().any(|item| {
+            item.title
+                .contains("No grounded outcome samples for this target yet")
+        }));
     }
 
     #[test]
@@ -14040,8 +14859,7 @@ alter table threads add column reasoning_effort text;
             avg_context_chars: 300.0,
         };
 
-        let summary =
-            build_codex_eval_summary(&snapshot, 8, 3, Some(&route), Some(&skill));
+        let summary = build_codex_eval_summary(&snapshot, 8, 3, Some(&route), Some(&skill));
         assert!(summary.contains("grounded learning is active"));
         assert!(summary.contains("top route: new-with-context"));
         assert!(summary.contains("top skill: github"));
@@ -14058,18 +14876,24 @@ alter table threads add column reasoning_effort text;
         let quality = build_codex_eval_quality(&snapshot, 5, 0);
         assert_eq!(quality.status, "erroneous");
         assert!(!quality.grounded);
-        assert!(quality
-            .failure_modes
-            .iter()
-            .any(|mode| mode.contains("wrapper transport disabled")));
-        assert!(quality
-            .failure_modes
-            .iter()
-            .any(|mode| mode.contains("runtime skills")));
-        assert!(quality
-            .failure_modes
-            .iter()
-            .any(|mode| mode.contains("codex memory unavailable")));
+        assert!(
+            quality
+                .failure_modes
+                .iter()
+                .any(|mode| mode.contains("wrapper transport disabled"))
+        );
+        assert!(
+            quality
+                .failure_modes
+                .iter()
+                .any(|mode| mode.contains("runtime skills"))
+        );
+        assert!(
+            quality
+                .failure_modes
+                .iter()
+                .any(|mode| mode.contains("codex memory unavailable"))
+        );
     }
 
     #[test]
@@ -14124,6 +14948,10 @@ alter table threads add column reasoning_effort text;
         assert!(looks_like_commit_workflow_query("commit"));
         assert!(looks_like_commit_workflow_query("commit and push"));
         assert!(looks_like_commit_workflow_query("review and commit"));
+        assert!(looks_like_commit_workflow_query("commit flow"));
+        assert!(looks_like_commit_workflow_query(
+            "commit analyze diff of flow deeply"
+        ));
     }
 
     #[test]
@@ -14134,21 +14962,22 @@ alter table threads add column reasoning_effort text;
         assert!(!looks_like_commit_workflow_query(
             "explain commit routing in flow"
         ));
+        assert!(!looks_like_commit_workflow_query("commit hash for release"));
     }
 
     #[test]
-    fn prom_sync_workflow_query_detection_matches_high_confidence_phrases() {
-        assert!(looks_like_prom_sync_workflow_query("sync branch"));
-        assert!(looks_like_prom_sync_workflow_query("sync this branch"));
-        assert!(looks_like_prom_sync_workflow_query("sync with origin/main"));
+    fn sync_workflow_query_detection_matches_high_confidence_phrases() {
+        assert!(looks_like_sync_workflow_query("sync branch"));
+        assert!(looks_like_sync_workflow_query("sync this branch"));
+        assert!(looks_like_sync_workflow_query("sync with origin/main"));
     }
 
     #[test]
-    fn prom_sync_workflow_query_detection_stays_conservative() {
-        assert!(!looks_like_prom_sync_workflow_query(
+    fn sync_workflow_query_detection_stays_conservative() {
+        assert!(!looks_like_sync_workflow_query(
             "explain sync branch semantics"
         ));
-        assert!(!looks_like_prom_sync_workflow_query(
+        assert!(!looks_like_sync_workflow_query(
             "sync branch protection settings"
         ));
     }
@@ -14175,12 +15004,13 @@ alter table threads add column reasoning_effort text;
         let prompt = plan.prompt.expect("prompt");
         assert!(prompt.contains("Commit workflow contract:"));
         assert!(prompt.contains("deep-review-then-commit"));
+        assert!(prompt.contains("Primary workflow skill: `commit`"));
     }
 
     #[test]
-    fn build_codex_open_plan_routes_prom_sync_branch_into_sync_workflow() {
+    fn build_codex_open_plan_routes_configured_sync_branch_into_sync_workflow() {
         let temp = tempdir().expect("tempdir");
-        let root = temp.path().join("code").join("prom").join("review-workspace");
+        let root = temp.path().join("repo-sync-workspace");
         fs::create_dir_all(&root).expect("create root");
         Command::new("git")
             .arg("init")
@@ -14188,6 +15018,11 @@ alter table threads add column reasoning_effort text;
             .current_dir(&root)
             .status()
             .expect("git init");
+        fs::write(
+            root.join("flow.toml"),
+            "version = 1\n\n[codex]\nsync_workflow_command = \"repo sync --safe\"\n",
+        )
+        .expect("write flow.toml");
 
         let plan = build_codex_open_plan(
             Some(root.display().to_string()),
@@ -14199,10 +15034,27 @@ alter table threads add column reasoning_effort text;
         assert_eq!(plan.route, "sync-workflow-new");
         assert_eq!(plan.action, "new");
         assert_eq!(plan.references[0].name, "sync-workflow");
-        assert_eq!(plan.references[0].command.as_deref(), Some("forge sync"));
+        assert_eq!(
+            plan.references[0].command.as_deref(),
+            Some("repo sync --safe")
+        );
         let prompt = plan.prompt.expect("prompt");
         assert!(prompt.contains("Sync workflow contract:"));
         assert!(prompt.contains("guarded repo sync workflow"));
+    }
+
+    #[test]
+    fn build_codex_open_plan_keeps_plain_sync_branch_without_config() {
+        let root = init_temp_git_repo();
+
+        let plan = build_codex_open_plan(
+            Some(root.path().display().to_string()),
+            vec!["sync branch".to_string()],
+            false,
+        )
+        .expect("plan");
+
+        assert_eq!(plan.route, "new-plain");
     }
 
     #[test]
@@ -14266,7 +15118,10 @@ alter table threads add column reasoning_effort text;
              - Actionable items: 6\n",
         );
 
-        assert_eq!(fields.get("workspace").map(String::as_str), Some("/tmp/repo"));
+        assert_eq!(
+            fields.get("workspace").map(String::as_str),
+            Some("/tmp/repo")
+        );
         assert_eq!(
             fields.get("snapshot markdown").map(String::as_str),
             Some("/tmp/repo/.ai/reviews/pr-feedback-1.md")
@@ -14368,25 +15223,34 @@ alter table threads add column reasoning_effort text;
             .expect("workflow explanation");
         assert_eq!(workflow.id, "pr-feedback");
         assert_eq!(workflow.packet.kind, "pr_feedback");
-        assert!(workflow
-            .packet
-            .expansion_rules
-            .iter()
-            .any(|rule| rule.contains("Read the compact packet first")));
-        assert!(workflow
-            .packet
-            .validation_plan
-            .iter()
-            .any(|item| item.label == "Per-item product validation"));
-        assert_eq!(workflow.commands.first().map(|c| c.command.as_str()), Some("f pr feedback https://github.com/owner/repo/pull/1"));
+        assert!(
+            workflow
+                .packet
+                .expansion_rules
+                .iter()
+                .any(|rule| rule.contains("Read the compact packet first"))
+        );
+        assert!(
+            workflow
+                .packet
+                .validation_plan
+                .iter()
+                .any(|item| item.label == "Per-item product validation")
+        );
+        assert_eq!(
+            workflow.commands.first().map(|c| c.command.as_str()),
+            Some("f pr feedback https://github.com/owner/repo/pull/1")
+        );
         assert!(workflow
             .artifacts
             .iter()
             .any(|artifact| artifact.label == "Review plan" && artifact.value == "/tmp/plan.md"));
-        assert!(workflow
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.label == "Trace ID" && artifact.value == "trace-1"));
+        assert!(
+            workflow
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.label == "Trace ID" && artifact.value == "trace-1")
+        );
         assert_eq!(
             workflow
                 .packet
@@ -14395,10 +15259,12 @@ alter table threads add column reasoning_effort text;
                 .map(|trace| trace.trace_id.as_str()),
             Some("trace-1")
         );
-        assert!(workflow
-            .notes
-            .iter()
-            .any(|note| note.contains("Runtime skill: github")));
+        assert!(
+            workflow
+                .notes
+                .iter()
+                .any(|note| note.contains("Runtime skill: github"))
+        );
     }
 
     #[test]
