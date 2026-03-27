@@ -2213,6 +2213,7 @@ mod tests {
     fn session_summary_body_strips_contextual_first_prompt_noise() {
         let row = crate::ai::CodexRecoverRow {
             id: "019ce6ce-c77a-7d52-838e-c01f8820f6b8".to_string(),
+            rollout_path: None,
             updated_at: 42,
             cwd: "/tmp/repo".to_string(),
             title: Some("Session title".to_string()),

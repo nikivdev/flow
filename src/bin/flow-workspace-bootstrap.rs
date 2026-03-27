@@ -1,0 +1,1605 @@
+use std::collections::{BTreeSet, VecDeque};
+use std::fs;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result, bail};
+use chrono::Utc;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use flowd::init_tracing;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+const STAMP_FILE: &str = ".flow-workspace-bootstrap.json";
+const DEFAULT_WARM_BYTES_PER_FILE: usize = 4096;
+const MAX_RECORDED_ERRORS: usize = 16;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "flow-workspace-bootstrap",
+    about = "Create JJ workspaces and hydrate ignored caches efficiently on macOS"
+)]
+struct Cli {
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Create or reuse a JJ workspace, then optionally hydrate caches and warm files.
+    Bootstrap(BootstrapArgs),
+    /// Hydrate ignored caches from an existing source tree into an existing target tree.
+    Hydrate(HydrateArgs),
+    /// Warm the filesystem cache for selected paths.
+    Warm(WarmArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct WorkspaceArgs {
+    /// Repository root that owns the JJ repo.
+    #[arg(long)]
+    repo: PathBuf,
+
+    /// Repo-relative subtree this workspace is grouped under.
+    ///
+    /// Defaults to the current cwd relative to `--repo` when invoked from
+    /// inside the repo, else the repo root itself.
+    #[arg(long)]
+    focus_path: Option<PathBuf>,
+
+    /// Explicit workspace name. If omitted, `--branch` is sanitized into a name.
+    #[arg(long)]
+    workspace: Option<String>,
+
+    /// Review branch or bookmark to derive workspace name/revision from.
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Explicit workspace path. Defaults to
+    /// ~/work/<relative-path-from-home>/<focus-path>/<workspace>.
+    #[arg(long)]
+    path: Option<PathBuf>,
+
+    /// Revision passed to `jj workspace add --revision`.
+    #[arg(long)]
+    revision: Option<String>,
+
+    /// JJ binary path. Use this to point at a custom JJ fork.
+    #[arg(long)]
+    jj_bin: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+struct BootstrapArgs {
+    #[command(flatten)]
+    workspace: WorkspaceArgs,
+
+    /// Hydration source root. Defaults to `--repo` when hydration is enabled.
+    #[arg(long)]
+    hydrate_from: Option<PathBuf>,
+
+    /// Cache profile to discover under the source tree.
+    #[arg(long, value_enum)]
+    profile: Option<CacheProfile>,
+
+    /// Explicit cache paths to hydrate, relative to the source/target roots.
+    #[arg(long = "include")]
+    include: Vec<PathBuf>,
+
+    /// Replace existing cache paths in the target instead of skipping them.
+    #[arg(long)]
+    replace_existing: bool,
+
+    /// Allow hydration even when no dependency fingerprint inputs are found.
+    #[arg(long)]
+    allow_unverified: bool,
+
+    /// Warm the hydrated paths after bootstrap completes.
+    #[arg(long)]
+    warm: bool,
+
+    /// Extra warm paths, relative to the workspace root.
+    #[arg(long = "warm-path")]
+    warm_path: Vec<PathBuf>,
+
+    /// Maximum concurrent copy/read workers. Defaults to a bounded value.
+    #[arg(long)]
+    jobs: Option<usize>,
+}
+
+#[derive(Args, Debug, Clone)]
+struct HydrateArgs {
+    /// Existing source tree with warm caches.
+    #[arg(long)]
+    source: PathBuf,
+
+    /// Existing target tree to hydrate.
+    #[arg(long)]
+    target: PathBuf,
+
+    /// Cache profile to discover under the source tree.
+    #[arg(long, value_enum)]
+    profile: Option<CacheProfile>,
+
+    /// Explicit cache paths to hydrate, relative to the source/target roots.
+    #[arg(long = "include")]
+    include: Vec<PathBuf>,
+
+    /// Replace existing cache paths in the target instead of skipping them.
+    #[arg(long)]
+    replace_existing: bool,
+
+    /// Allow hydration even when no dependency fingerprint inputs are found.
+    #[arg(long)]
+    allow_unverified: bool,
+
+    /// Maximum concurrent copy workers. Defaults to a bounded value.
+    #[arg(long)]
+    jobs: Option<usize>,
+}
+
+#[derive(Args, Debug, Clone)]
+struct WarmArgs {
+    /// Root to warm. Paths are resolved relative to this root unless absolute.
+    #[arg(long)]
+    root: PathBuf,
+
+    /// Paths to warm, relative to `--root`. If omitted, warm the root itself.
+    #[arg(long = "path")]
+    path: Vec<PathBuf>,
+
+    /// Maximum concurrent read workers. Defaults to a bounded value.
+    #[arg(long)]
+    jobs: Option<usize>,
+
+    /// Bytes to read from each file while warming.
+    #[arg(long, default_value_t = DEFAULT_WARM_BYTES_PER_FILE)]
+    bytes_per_file: usize,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceSpec {
+    repo_root: PathBuf,
+    focus_path: PathBuf,
+    workspace_name: String,
+    workspace_path: PathBuf,
+    revision: Option<String>,
+    jj_bin: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum CacheProfile {
+    Rust,
+    Web,
+    Designer,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkspaceStatus {
+    Created,
+    Reused,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkspaceSummary {
+    status: WorkspaceStatus,
+    repo_root: String,
+    focus_path: String,
+    workspace_name: String,
+    workspace_path: String,
+    revision: Option<String>,
+    jj_bin: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FingerprintSnapshot {
+    hash: String,
+    files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum VerificationStatus {
+    Matched,
+    Mismatch,
+    Unverified,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VerificationSummary {
+    approved: bool,
+    status: VerificationStatus,
+    reason: Option<String>,
+    source: Option<FingerprintSnapshot>,
+    target: Option<FingerprintSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CopyStatus {
+    Copied,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CopyEntry {
+    path: String,
+    status: CopyStatus,
+    reason: Option<String>,
+    method: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HydrationSummary {
+    source_root: String,
+    target_root: String,
+    profile: Option<CacheProfile>,
+    verification: VerificationSummary,
+    entries: Vec<CopyEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WarmSummary {
+    root: String,
+    roots: Vec<String>,
+    file_count: usize,
+    bytes_read: u64,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BootstrapSummary {
+    timestamp: String,
+    workspace: WorkspaceSummary,
+    hydration: Option<HydrationSummary>,
+    warm: Option<WarmSummary>,
+    stamp_path: String,
+}
+
+fn main() -> Result<()> {
+    init_tracing();
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Bootstrap(args) => {
+            let summary = run_bootstrap(args)?;
+            emit_summary(&summary, cli.json)?;
+        }
+        Commands::Hydrate(args) => {
+            let summary = run_hydrate(args)?;
+            emit_summary(&summary, cli.json)?;
+        }
+        Commands::Warm(args) => {
+            let summary = run_warm_command(args)?;
+            emit_summary(&summary, cli.json)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_bootstrap(args: BootstrapArgs) -> Result<BootstrapSummary> {
+    let spec = resolve_workspace_spec(args.workspace)?;
+    let workspace = ensure_workspace(&spec)?;
+
+    let hydration =
+        if args.profile.is_some() || !args.include.is_empty() || args.hydrate_from.is_some() {
+            let source_root = expand_path(
+                args.hydrate_from
+                    .as_deref()
+                    .unwrap_or(spec.repo_root.as_path()),
+            )?;
+            Some(hydrate(
+                source_root,
+                spec.workspace_path.clone(),
+                args.profile,
+                &args.include,
+                args.replace_existing,
+                args.allow_unverified,
+                args.jobs,
+            )?)
+        } else {
+            None
+        };
+
+    let warm_roots =
+        collect_bootstrap_warm_roots(&spec.workspace_path, &args.warm_path, hydration.as_ref())?;
+    let warm = if args.warm {
+        Some(run_warm(
+            spec.workspace_path.clone(),
+            warm_roots,
+            args.jobs,
+            DEFAULT_WARM_BYTES_PER_FILE,
+        )?)
+    } else {
+        None
+    };
+
+    let summary = BootstrapSummary {
+        timestamp: Utc::now().to_rfc3339(),
+        stamp_path: spec.workspace_path.join(STAMP_FILE).display().to_string(),
+        workspace,
+        hydration,
+        warm,
+    };
+    write_stamp(spec.workspace_path.as_path(), &summary)?;
+    Ok(summary)
+}
+
+fn run_hydrate(args: HydrateArgs) -> Result<HydrationSummary> {
+    let source_root = expand_path(&args.source)?;
+    let target_root = expand_path(&args.target)?;
+    let summary = hydrate(
+        source_root,
+        target_root.clone(),
+        args.profile,
+        &args.include,
+        args.replace_existing,
+        args.allow_unverified,
+        args.jobs,
+    )?;
+    write_stamp(&target_root, &summary)?;
+    Ok(summary)
+}
+
+fn run_warm_command(args: WarmArgs) -> Result<WarmSummary> {
+    let root = expand_path(&args.root)?;
+    let warm_roots = normalize_paths_under_root(&root, &args.path)?;
+    run_warm(root, warm_roots, args.jobs, args.bytes_per_file)
+}
+
+fn resolve_workspace_spec(args: WorkspaceArgs) -> Result<WorkspaceSpec> {
+    let repo_root = expand_path(&args.repo)?;
+    let branch = args
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let workspace_name = match args
+        .workspace
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(name) => name.to_string(),
+        None => {
+            let branch = branch
+                .as_deref()
+                .context("set either --workspace or --branch")?;
+            sanitize_workspace_name(branch)
+        }
+    };
+    if workspace_name.is_empty() {
+        bail!("workspace name resolved to empty");
+    }
+
+    let revision = args
+        .revision
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or(branch);
+
+    let focus_path = resolve_focus_path(&repo_root, args.focus_path.as_deref())?;
+
+    let workspace_path = match args.path {
+        Some(path) => expand_path(&path)?,
+        None => default_workspace_path(&repo_root, &focus_path, &workspace_name)?,
+    };
+
+    Ok(WorkspaceSpec {
+        jj_bin: resolve_jj_bin(args.jj_bin.as_deref()),
+        repo_root,
+        focus_path,
+        workspace_name,
+        workspace_path,
+        revision,
+    })
+}
+
+fn ensure_workspace(spec: &WorkspaceSpec) -> Result<WorkspaceSummary> {
+    if let Some(existing_path) = existing_workspace_path(spec)? {
+        if existing_path.join(".jj").exists() {
+            return Ok(WorkspaceSummary {
+                status: WorkspaceStatus::Reused,
+                repo_root: spec.repo_root.display().to_string(),
+                focus_path: infer_focus_path_from_workspace_root(
+                    &spec.repo_root,
+                    &spec.workspace_name,
+                    &existing_path,
+                )
+                .display()
+                .to_string(),
+                workspace_name: spec.workspace_name.clone(),
+                workspace_path: existing_path.display().to_string(),
+                revision: spec.revision.clone(),
+                jj_bin: spec.jj_bin.display().to_string(),
+            });
+        }
+        bail!(
+            "workspace {} is already registered at missing path {}; run `jj workspace forget {}` or pick a new workspace name",
+            spec.workspace_name,
+            existing_path.display(),
+            spec.workspace_name
+        );
+    }
+
+    if spec.workspace_path.join(".jj").exists() {
+        return Ok(WorkspaceSummary {
+            status: WorkspaceStatus::Reused,
+            repo_root: spec.repo_root.display().to_string(),
+            focus_path: spec.focus_path.display().to_string(),
+            workspace_name: spec.workspace_name.clone(),
+            workspace_path: spec.workspace_path.display().to_string(),
+            revision: spec.revision.clone(),
+            jj_bin: spec.jj_bin.display().to_string(),
+        });
+    }
+
+    if spec.workspace_path.exists()
+        && fs::read_dir(&spec.workspace_path)?
+            .next()
+            .transpose()?
+            .is_some()
+    {
+        bail!(
+            "workspace path exists but is not an initialized JJ workspace: {}",
+            spec.workspace_path.display()
+        );
+    }
+
+    if let Some(parent) = spec.workspace_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut command = Command::new(&spec.jj_bin);
+    command
+        .current_dir(&spec.repo_root)
+        .arg("workspace")
+        .arg("add")
+        .arg(&spec.workspace_path)
+        .arg("--name")
+        .arg(&spec.workspace_name);
+    if let Some(revision) = spec.revision.as_deref() {
+        command.arg("--revision").arg(revision);
+    }
+    run_command(&mut command, "jj workspace add")?;
+
+    Ok(WorkspaceSummary {
+        status: WorkspaceStatus::Created,
+        repo_root: spec.repo_root.display().to_string(),
+        focus_path: spec.focus_path.display().to_string(),
+        workspace_name: spec.workspace_name.clone(),
+        workspace_path: spec.workspace_path.display().to_string(),
+        revision: spec.revision.clone(),
+        jj_bin: spec.jj_bin.display().to_string(),
+    })
+}
+
+fn hydrate(
+    source_root: PathBuf,
+    target_root: PathBuf,
+    profile: Option<CacheProfile>,
+    include: &[PathBuf],
+    replace_existing: bool,
+    allow_unverified: bool,
+    jobs: Option<usize>,
+) -> Result<HydrationSummary> {
+    if !source_root.exists() {
+        bail!("source root does not exist: {}", source_root.display());
+    }
+    if !target_root.exists() {
+        bail!("target root does not exist: {}", target_root.display());
+    }
+
+    let rel_paths = hydration_paths(&source_root, profile, include)?;
+    let verification =
+        verify_fingerprints(&source_root, &target_root, &rel_paths, allow_unverified)?;
+    let mut entries = Vec::new();
+
+    if !verification_approved(&verification) {
+        for rel in rel_paths {
+            entries.push(CopyEntry {
+                path: rel.display().to_string(),
+                status: CopyStatus::Skipped,
+                reason: verification.reason.clone(),
+                method: None,
+            });
+        }
+        return Ok(HydrationSummary {
+            source_root: source_root.display().to_string(),
+            target_root: target_root.display().to_string(),
+            profile,
+            verification,
+            entries,
+        });
+    }
+
+    let jobs = resolve_jobs(jobs);
+    let queue = Arc::new(Mutex::new(VecDeque::from(rel_paths)));
+    let results = Arc::new(Mutex::new(Vec::<CopyEntry>::new()));
+
+    let mut handles = Vec::new();
+    for _ in 0..jobs {
+        let queue = Arc::clone(&queue);
+        let results = Arc::clone(&results);
+        let source_root = source_root.clone();
+        let target_root = target_root.clone();
+        let handle = std::thread::spawn(move || {
+            loop {
+                let rel = {
+                    let mut guard = queue.lock().expect("queue poisoned");
+                    guard.pop_front()
+                };
+                let Some(rel) = rel else {
+                    break;
+                };
+                let entry = hydrate_one(&source_root, &target_root, &rel, replace_existing);
+                let mut guard = results.lock().expect("results poisoned");
+                guard.push(entry);
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().expect("worker thread panicked");
+    }
+
+    entries = Arc::try_unwrap(results)
+        .expect("results still shared")
+        .into_inner()
+        .expect("results poisoned");
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+
+    Ok(HydrationSummary {
+        source_root: source_root.display().to_string(),
+        target_root: target_root.display().to_string(),
+        profile,
+        verification,
+        entries,
+    })
+}
+
+fn hydrate_one(
+    source_root: &Path,
+    target_root: &Path,
+    rel: &Path,
+    replace_existing: bool,
+) -> CopyEntry {
+    let source = source_root.join(rel);
+    let target = target_root.join(rel);
+
+    if !source.exists() {
+        return CopyEntry {
+            path: rel.display().to_string(),
+            status: CopyStatus::Skipped,
+            reason: Some("source path missing".to_string()),
+            method: None,
+        };
+    }
+
+    if target.exists() {
+        if !replace_existing {
+            return CopyEntry {
+                path: rel.display().to_string(),
+                status: CopyStatus::Skipped,
+                reason: Some("target path already exists".to_string()),
+                method: None,
+            };
+        }
+        if let Err(err) = remove_path(&target) {
+            return CopyEntry {
+                path: rel.display().to_string(),
+                status: CopyStatus::Failed,
+                reason: Some(format!("failed to remove existing target: {err:#}")),
+                method: None,
+            };
+        }
+    }
+
+    if let Some(parent) = target.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            return CopyEntry {
+                path: rel.display().to_string(),
+                status: CopyStatus::Failed,
+                reason: Some(format!("failed to create target parent: {err:#}")),
+                method: None,
+            };
+        }
+    }
+
+    match clone_copy_path(&source, &target) {
+        Ok(method) => CopyEntry {
+            path: rel.display().to_string(),
+            status: CopyStatus::Copied,
+            reason: None,
+            method: Some(method),
+        },
+        Err(err) => CopyEntry {
+            path: rel.display().to_string(),
+            status: CopyStatus::Failed,
+            reason: Some(format!("{err:#}")),
+            method: None,
+        },
+    }
+}
+
+fn run_warm(
+    root: PathBuf,
+    warm_roots: Vec<PathBuf>,
+    jobs: Option<usize>,
+    bytes_per_file: usize,
+) -> Result<WarmSummary> {
+    let warm_roots = if warm_roots.is_empty() {
+        vec![root.clone()]
+    } else {
+        warm_roots
+    };
+
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    for path in &warm_roots {
+        collect_files_for_warm(path, &mut files, &mut errors)?;
+    }
+    files.sort();
+    files.dedup();
+
+    let file_count = files.len();
+    let jobs = resolve_jobs(jobs);
+    let queue = Arc::new(Mutex::new(VecDeque::from(files)));
+    let stats = Arc::new(Mutex::new((0_u64, Vec::<String>::new())));
+
+    let mut handles = Vec::new();
+    for _ in 0..jobs {
+        let queue = Arc::clone(&queue);
+        let stats = Arc::clone(&stats);
+        let handle = std::thread::spawn(move || {
+            let mut buffer = vec![0_u8; bytes_per_file.max(1)];
+            loop {
+                let path = {
+                    let mut guard = queue.lock().expect("queue poisoned");
+                    guard.pop_front()
+                };
+                let Some(path) = path else {
+                    break;
+                };
+
+                match warm_one_file(&path, &mut buffer) {
+                    Ok(read) => {
+                        let mut guard = stats.lock().expect("stats poisoned");
+                        guard.0 += read as u64;
+                    }
+                    Err(err) => {
+                        let mut guard = stats.lock().expect("stats poisoned");
+                        if guard.1.len() < MAX_RECORDED_ERRORS {
+                            guard.1.push(format!("{}: {}", path.display(), err));
+                        }
+                    }
+                }
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().expect("worker thread panicked");
+    }
+
+    let (bytes_read, worker_errors) = Arc::try_unwrap(stats)
+        .expect("stats still shared")
+        .into_inner()
+        .expect("stats poisoned");
+    errors.extend(worker_errors);
+    errors.truncate(MAX_RECORDED_ERRORS);
+
+    Ok(WarmSummary {
+        root: root.display().to_string(),
+        roots: warm_roots
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        file_count,
+        bytes_read,
+        errors,
+    })
+}
+
+fn collect_bootstrap_warm_roots(
+    workspace_root: &Path,
+    explicit: &[PathBuf],
+    hydration: Option<&HydrationSummary>,
+) -> Result<Vec<PathBuf>> {
+    let mut roots = normalize_paths_under_root(workspace_root, explicit)?;
+    if roots.is_empty() {
+        if let Some(hydration) = hydration {
+            for entry in &hydration.entries {
+                if matches!(entry.status, CopyStatus::Copied) {
+                    roots.push(workspace_root.join(&entry.path));
+                }
+            }
+        }
+    }
+    if roots.is_empty() {
+        roots.push(workspace_root.to_path_buf());
+    }
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+fn emit_summary<T: Serialize>(summary: &T, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(summary)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(summary)?);
+    }
+    Ok(())
+}
+
+fn write_stamp<T: Serialize>(target_root: &Path, summary: &T) -> Result<()> {
+    let stamp_path = target_root.join(STAMP_FILE);
+    let payload = serde_json::to_vec_pretty(summary)?;
+    fs::write(&stamp_path, payload)
+        .with_context(|| format!("failed to write stamp {}", stamp_path.display()))?;
+    Ok(())
+}
+
+fn verify_fingerprints(
+    source_root: &Path,
+    target_root: &Path,
+    cache_paths: &[PathBuf],
+    allow_unverified: bool,
+) -> Result<VerificationSummary> {
+    let source = fingerprint_snapshot_for_cache_paths(source_root, cache_paths)?;
+    let target = fingerprint_snapshot_for_cache_paths(target_root, cache_paths)?;
+
+    match (source, target) {
+        (Some(source), Some(target)) if source.hash == target.hash => Ok(VerificationSummary {
+            approved: true,
+            status: VerificationStatus::Matched,
+            reason: None,
+            source: Some(source),
+            target: Some(target),
+        }),
+        (Some(source), Some(target)) => Ok(VerificationSummary {
+            approved: false,
+            status: VerificationStatus::Mismatch,
+            reason: Some("dependency fingerprints differ; refusing to hydrate caches".to_string()),
+            source: Some(source),
+            target: Some(target),
+        }),
+        (source, target) if allow_unverified => Ok(VerificationSummary {
+            approved: true,
+            status: VerificationStatus::Unverified,
+            reason: Some("dependency fingerprint inputs not found; proceeding because --allow-unverified was set".to_string()),
+            source,
+            target,
+        }),
+        (source, target) => Ok(VerificationSummary {
+            approved: false,
+            status: VerificationStatus::Unverified,
+            reason: Some("dependency fingerprint inputs not found; pass --allow-unverified to override".to_string()),
+            source,
+            target,
+        }),
+    }
+}
+
+fn verification_approved(summary: &VerificationSummary) -> bool {
+    summary.approved
+}
+
+fn fingerprint_snapshot_for_cache_paths(
+    root: &Path,
+    cache_paths: &[PathBuf],
+) -> Result<Option<FingerprintSnapshot>> {
+    let scope_roots = derive_fingerprint_scope_roots(root, cache_paths)?;
+    if scope_roots.is_empty() {
+        return fingerprint_root(root);
+    }
+
+    let mut files = Vec::new();
+    for scope_root in scope_roots {
+        let dir = if scope_root == Path::new(".") {
+            root.to_path_buf()
+        } else {
+            root.join(&scope_root)
+        };
+        if !dir.exists() {
+            continue;
+        }
+        collect_fingerprint_files(root, &dir, &mut files)?;
+    }
+    files.sort();
+    files.dedup();
+    fingerprint_snapshot_from_files(root, files)
+}
+
+fn fingerprint_root(root: &Path) -> Result<Option<FingerprintSnapshot>> {
+    let mut files = Vec::new();
+    collect_fingerprint_files(root, root, &mut files)?;
+    files.sort();
+    files.dedup();
+    fingerprint_snapshot_from_files(root, files)
+}
+
+fn fingerprint_snapshot_from_files(
+    root: &Path,
+    files: Vec<PathBuf>,
+) -> Result<Option<FingerprintSnapshot>> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+
+    let mut hasher = Sha256::new();
+    let mut listed = Vec::new();
+    for rel in files {
+        let path = root.join(&rel);
+        let bytes = fs::read(&path)
+            .with_context(|| format!("failed to read fingerprint input {}", path.display()))?;
+        hasher.update(rel.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(bytes.len().to_le_bytes());
+        hasher.update([0]);
+        hasher.update(&bytes);
+        listed.push(rel.display().to_string());
+    }
+
+    Ok(Some(FingerprintSnapshot {
+        hash: format!("{:x}", hasher.finalize()),
+        files: listed,
+    }))
+}
+
+fn derive_fingerprint_scope_roots(root: &Path, cache_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut scopes = BTreeSet::new();
+    for cache_path in cache_paths {
+        scopes.insert(resolve_fingerprint_scope_root(root, cache_path)?);
+    }
+
+    let mut collapsed: Vec<PathBuf> = Vec::new();
+    for scope in scopes {
+        if collapsed
+            .iter()
+            .any(|existing| path_is_same_or_ancestor(existing, &scope))
+        {
+            continue;
+        }
+        collapsed.retain(|existing| !path_is_same_or_ancestor(&scope, existing));
+        collapsed.push(scope);
+    }
+    Ok(collapsed)
+}
+
+fn resolve_fingerprint_scope_root(root: &Path, cache_path: &Path) -> Result<PathBuf> {
+    let mut candidate = cache_scope_parent(cache_path);
+    if candidate.as_os_str().is_empty() {
+        return Ok(PathBuf::from("."));
+    }
+
+    loop {
+        let dir = root.join(&candidate);
+        if directory_has_direct_fingerprint_files(&dir)? {
+            return Ok(candidate);
+        }
+        if candidate == Path::new(".") {
+            return Ok(candidate);
+        }
+        match candidate.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => candidate = parent.to_path_buf(),
+            _ => return Ok(PathBuf::from(".")),
+        }
+    }
+}
+
+fn cache_scope_parent(cache_path: &Path) -> PathBuf {
+    let name = cache_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    match name {
+        "node_modules" | "target" | ".turbo" | ".vite" => cache_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        "cache"
+            if cache_path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|value| value.to_str())
+                == Some(".next") =>
+        {
+            cache_path
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        }
+        _ => cache_path.to_path_buf(),
+    }
+}
+
+fn directory_has_direct_fingerprint_files(dir: &Path) -> Result<bool> {
+    if !dir.exists() {
+        return Ok(false);
+    }
+    for entry in sorted_read_dir(dir)? {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        if is_fingerprint_file(&name.to_string_lossy()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn path_is_same_or_ancestor(base: &Path, candidate: &Path) -> bool {
+    base == Path::new(".") || base == candidate || candidate.starts_with(base)
+}
+
+fn collect_fingerprint_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = sorted_read_dir(dir)?;
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+
+        if file_type.is_dir() {
+            if should_skip_scan_dir(&name) || is_cache_dir(rel) {
+                continue;
+            }
+            collect_fingerprint_files(root, &path, out)?;
+            continue;
+        }
+
+        if file_type.is_file() && is_fingerprint_file(&name) {
+            out.push(rel.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn hydration_paths(
+    source_root: &Path,
+    profile: Option<CacheProfile>,
+    include: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let mut paths = BTreeSet::new();
+    if let Some(profile) = profile {
+        discover_profile_paths(source_root, profile, source_root, &mut paths)?;
+    }
+    for path in include {
+        paths.insert(normalize_relative_path(source_root, path)?);
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn discover_profile_paths(
+    root: &Path,
+    profile: CacheProfile,
+    dir: &Path,
+    out: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    for entry in sorted_read_dir(dir)? {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+
+        if should_skip_scan_dir(&name) {
+            continue;
+        }
+
+        if profile_matches_cache_dir(profile, rel) {
+            out.insert(rel.to_path_buf());
+            continue;
+        }
+
+        discover_profile_paths(root, profile, &path, out)?;
+    }
+    Ok(())
+}
+
+fn normalize_paths_under_root(root: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for path in paths {
+        let rel = normalize_relative_path(root, path)?;
+        out.push(root.join(rel));
+    }
+    Ok(out)
+}
+
+fn normalize_relative_path(root: &Path, raw: &Path) -> Result<PathBuf> {
+    let raw_text = raw.to_string_lossy();
+    if raw.is_absolute() || raw_text.starts_with('~') {
+        let path = expand_path(raw)?;
+        let rel = path.strip_prefix(root).with_context(|| {
+            format!("path {} is outside root {}", path.display(), root.display())
+        })?;
+        if rel
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            bail!("path escapes root: {}", path.display());
+        }
+        return Ok(rel.to_path_buf());
+    }
+
+    if raw
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!("relative path may not contain `..`: {}", raw.display());
+    }
+
+    Ok(raw.to_path_buf())
+}
+
+fn profile_matches_cache_dir(profile: CacheProfile, rel: &Path) -> bool {
+    let name = rel
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    match profile {
+        CacheProfile::Rust => name == "target",
+        CacheProfile::Web => matches_web_cache(rel),
+        CacheProfile::Designer => name == "target" || matches_web_cache(rel),
+    }
+}
+
+fn matches_web_cache(rel: &Path) -> bool {
+    let name = rel
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if matches!(name, "node_modules" | ".turbo" | ".vite") {
+        return true;
+    }
+    if name != "cache" {
+        return false;
+    }
+    rel.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|value| value.to_str())
+        == Some(".next")
+}
+
+fn is_cache_dir(rel: &Path) -> bool {
+    let name = rel
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    matches!(name, "node_modules" | "target" | ".turbo" | ".vite")
+        || (name == "cache"
+            && rel
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|value| value.to_str())
+                == Some(".next"))
+}
+
+fn is_fingerprint_file(name: &str) -> bool {
+    matches!(
+        name,
+        "Cargo.lock"
+            | "rust-toolchain"
+            | "rust-toolchain.toml"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "bun.lock"
+            | "bun.lockb"
+            | "yarn.lock"
+            | "package.json"
+            | "uv.lock"
+            | "poetry.lock"
+            | "pyproject.toml"
+    )
+}
+
+fn should_skip_scan_dir(name: &str) -> bool {
+    matches!(name, ".git" | ".jj" | ".svn")
+}
+
+fn collect_files_for_warm(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    errors: &mut Vec<String>,
+) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    let metadata =
+        fs::symlink_metadata(dir).with_context(|| format!("failed to stat {}", dir.display()))?;
+    if metadata.file_type().is_symlink() {
+        if fs::metadata(dir)
+            .map(|meta| meta.is_file())
+            .unwrap_or(false)
+        {
+            files.push(dir.to_path_buf());
+        }
+        return Ok(());
+    }
+    if metadata.is_file() {
+        files.push(dir.to_path_buf());
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+
+    for entry in sorted_read_dir(dir)? {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) => {
+                if errors.len() < MAX_RECORDED_ERRORS {
+                    errors.push(format!("{}: {}", path.display(), err));
+                }
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if file_type.is_dir() {
+            if should_skip_scan_dir(&name) {
+                continue;
+            }
+            collect_files_for_warm(&path, files, errors)?;
+        } else if file_type.is_file() || file_type.is_symlink() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn warm_one_file(path: &Path, buffer: &mut [u8]) -> Result<usize> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let read = file
+        .read(buffer)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(read)
+}
+
+fn sorted_read_dir(dir: &Path) -> Result<Vec<fs::DirEntry>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        entries.push(entry?);
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+fn clone_copy_path(source: &Path, target: &Path) -> Result<String> {
+    let mut command = Command::new("/bin/cp");
+    #[cfg(target_os = "macos")]
+    {
+        command.arg("-c").arg("-R").arg("-p");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        command.arg("-a");
+    }
+    command.arg(source).arg(target);
+    run_command(&mut command, "clone copy")?;
+    #[cfg(target_os = "macos")]
+    {
+        Ok("cp -cRp".to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("cp -a".to_string())
+    }
+}
+
+fn run_command(command: &mut Command, label: &str) -> Result<()> {
+    let output = command
+        .output()
+        .with_context(|| format!("failed to spawn {label}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    bail!("{label} failed: {}", detail.if_empty("unknown error"))
+}
+
+fn remove_path(path: &Path) -> Result<()> {
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)
+            .with_context(|| format!("failed to remove directory {}", path.display()))?;
+    } else {
+        fs::remove_file(path)
+            .with_context(|| format!("failed to remove file {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn resolve_jobs(jobs: Option<usize>) -> usize {
+    jobs.filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(4)
+        })
+        .clamp(1, 6)
+}
+
+fn default_workspace_path(
+    repo_root: &Path,
+    focus_path: &Path,
+    workspace_name: &str,
+) -> Result<PathBuf> {
+    if workspace_name == "default" {
+        return Ok(repo_root.to_path_buf());
+    }
+    Ok(default_workspace_root(repo_root, focus_path)?.join(workspace_name))
+}
+
+fn default_workspace_root(repo_root: &Path, focus_path: &Path) -> Result<PathBuf> {
+    let home = home_dir()?;
+    let mut root = if repo_root == home {
+        home.join("work")
+    } else if let Ok(relative) = repo_root.strip_prefix(&home) {
+        home.join("work").join(relative)
+    } else if repo_root.is_absolute() {
+        let relative = repo_root.strip_prefix(Path::new("/")).unwrap_or(repo_root);
+        home.join("work").join("_abs").join(relative)
+    } else {
+        home.join("work").join("_relative").join(repo_root)
+    };
+
+    if !is_repo_root_focus_path(focus_path) {
+        root = root.join(focus_path);
+    }
+    Ok(root)
+}
+
+fn home_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    Ok(PathBuf::from(home))
+}
+
+fn resolve_jj_bin(explicit: Option<&Path>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path.to_path_buf();
+    }
+    for key in ["FLOW_JJ_BIN", "FORGE_JJ_BIN", "JJ_BIN"] {
+        if let Some(value) = std::env::var_os(key) {
+            if !value.is_empty() {
+                return PathBuf::from(value);
+            }
+        }
+    }
+    PathBuf::from("jj")
+}
+
+fn expand_path(path: &Path) -> Result<PathBuf> {
+    let raw = path.to_string_lossy();
+    let expanded = shellexpand::full(&raw)
+        .with_context(|| format!("failed to expand path {}", raw))?
+        .into_owned();
+    let path = PathBuf::from(expanded);
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    Ok(std::env::current_dir()?.join(path))
+}
+
+fn sanitize_workspace_name(branch: &str) -> String {
+    let trimmed = branch.trim().trim_matches('/');
+    let mut out = String::new();
+    let mut previous_was_dash = false;
+    for ch in trimmed.chars() {
+        let normalized = if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+            previous_was_dash = false;
+            ch
+        } else {
+            if previous_was_dash {
+                continue;
+            }
+            previous_was_dash = true;
+            '-'
+        };
+        out.push(normalized);
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn existing_workspace_path(spec: &WorkspaceSpec) -> Result<Option<PathBuf>> {
+    let output = Command::new(&spec.jj_bin)
+        .current_dir(&spec.repo_root)
+        .arg("workspace")
+        .arg("root")
+        .arg("--name")
+        .arg(&spec.workspace_name)
+        .output()
+        .with_context(|| "failed to query existing JJ workspace root".to_string())?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout.is_empty() {
+            bail!(
+                "jj workspace root returned an empty path for workspace {}",
+                spec.workspace_name
+            );
+        }
+        return Ok(Some(PathBuf::from(stdout)));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.contains("No such workspace") {
+        return Ok(None);
+    }
+    bail!(
+        "failed to query workspace {}: {}",
+        spec.workspace_name,
+        stderr.if_empty("unknown error")
+    )
+}
+
+fn resolve_focus_path(repo_root: &Path, explicit: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(normalize_focus_path(normalize_relative_path(
+            repo_root, path,
+        )?));
+    }
+
+    let cwd = std::env::current_dir()?;
+    Ok(infer_focus_path(repo_root, &cwd))
+}
+
+fn infer_focus_path(repo_root: &Path, cwd: &Path) -> PathBuf {
+    match cwd.strip_prefix(repo_root) {
+        Ok(relative) => normalize_focus_path(relative.to_path_buf()),
+        Err(_) => PathBuf::from("."),
+    }
+}
+
+fn infer_focus_path_from_workspace_root(
+    repo_root: &Path,
+    workspace_name: &str,
+    workspace_root: &Path,
+) -> PathBuf {
+    let base = if workspace_name == "default" {
+        return PathBuf::from(".");
+    } else {
+        match default_workspace_root(repo_root, Path::new(".")) {
+            Ok(root) => root,
+            Err(_) => return PathBuf::from("."),
+        }
+    };
+
+    match workspace_root
+        .parent()
+        .and_then(|parent| parent.strip_prefix(&base).ok())
+    {
+        Some(relative) => normalize_focus_path(relative.to_path_buf()),
+        None => PathBuf::from("."),
+    }
+}
+
+fn normalize_focus_path(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(value) => normalized.push(value),
+            _ => {}
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+fn is_repo_root_focus_path(path: &Path) -> bool {
+    path.as_os_str().is_empty() || path == Path::new(".")
+}
+
+trait EmptyFallback {
+    fn if_empty(self, fallback: &str) -> String;
+}
+
+impl EmptyFallback for String {
+    fn if_empty(self, fallback: &str) -> String {
+        if self.is_empty() {
+            fallback.to_string()
+        } else {
+            self
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn sanitize_workspace_name_matches_flow_behavior() {
+        assert_eq!(
+            sanitize_workspace_name("/review//messy branch/"),
+            "review-messy-branch"
+        );
+    }
+
+    #[test]
+    fn default_workspace_root_uses_home_relative_layout() {
+        let home = home_dir().unwrap();
+        let repo = home.join("code/app");
+        let root = default_workspace_root(&repo, Path::new(".")).unwrap();
+        assert_eq!(root, home.join("work/code/app"));
+    }
+
+    #[test]
+    fn default_workspace_root_appends_focus_path() {
+        let home = home_dir().unwrap();
+        let repo = home.join("code/app");
+        let root = default_workspace_root(&repo, Path::new("apps/editor")).unwrap();
+        assert_eq!(root, home.join("work/code/app/apps/editor"));
+    }
+
+    #[test]
+    fn infer_focus_path_uses_repo_relative_cwd() {
+        let home = home_dir().unwrap();
+        let repo = home.join("code/app");
+        let cwd = repo.join("apps/editor");
+        assert_eq!(infer_focus_path(&repo, &cwd), PathBuf::from("apps/editor"));
+    }
+
+    #[test]
+    fn infer_focus_path_defaults_to_repo_root_outside_repo() {
+        let home = home_dir().unwrap();
+        let repo = home.join("code/app");
+        let cwd = home.join("run");
+        assert_eq!(infer_focus_path(&repo, &cwd), PathBuf::from("."));
+    }
+
+    #[test]
+    fn infer_focus_path_from_workspace_root_reads_nested_layout() {
+        let home = home_dir().unwrap();
+        let repo = home.join("code/app");
+        let workspace_root = home.join("work/code/app/apps/editor/review-feature");
+        assert_eq!(
+            infer_focus_path_from_workspace_root(&repo, "review-feature", &workspace_root),
+            PathBuf::from("apps/editor")
+        );
+    }
+
+    #[test]
+    fn infer_focus_path_from_workspace_root_defaults_to_repo_root_layout() {
+        let home = home_dir().unwrap();
+        let repo = home.join("code/app");
+        let workspace_root = home.join("work/code/app/review-feature");
+        assert_eq!(
+            infer_focus_path_from_workspace_root(&repo, "review-feature", &workspace_root),
+            PathBuf::from(".")
+        );
+    }
+
+    #[test]
+    fn profile_matches_nested_next_cache() {
+        assert!(profile_matches_cache_dir(
+            CacheProfile::Designer,
+            Path::new("apps/web/.next/cache")
+        ));
+        assert!(!profile_matches_cache_dir(
+            CacheProfile::Designer,
+            Path::new("apps/web/.next/static")
+        ));
+    }
+
+    #[test]
+    fn fingerprint_collection_skips_cache_dirs() {
+        let tmp = tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("node_modules/pkg")).unwrap();
+        fs::write(tmp.path().join("node_modules/pkg/package.json"), "{}").unwrap();
+        fs::write(tmp.path().join("package.json"), "{}").unwrap();
+
+        let fingerprint = fingerprint_root(tmp.path()).unwrap().unwrap();
+        assert_eq!(fingerprint.files, vec!["package.json"]);
+    }
+
+    #[test]
+    fn scoped_fingerprint_ignores_unrelated_package_roots() {
+        let source = tempdir().unwrap();
+        let target = tempdir().unwrap();
+
+        fs::create_dir_all(source.path().join("apps/studio/node_modules")).unwrap();
+        fs::create_dir_all(source.path().join("engine/node_modules")).unwrap();
+        fs::create_dir_all(
+            source
+                .path()
+                .join("apps/studio/native/modules/mesh-napi/target"),
+        )
+        .unwrap();
+
+        fs::create_dir_all(target.path().join("apps/studio/node_modules")).unwrap();
+        fs::create_dir_all(target.path().join("engine/node_modules")).unwrap();
+        fs::create_dir_all(
+            target
+                .path()
+                .join("apps/studio/native/modules/mesh-napi/target"),
+        )
+        .unwrap();
+        fs::create_dir_all(target.path().join("apps/other-tool")).unwrap();
+
+        for root in [source.path(), target.path()] {
+            fs::write(
+                root.join("apps/studio/package.json"),
+                "{\"name\":\"studio\"}",
+            )
+            .unwrap();
+            fs::write(root.join("apps/studio/package-lock.json"), "{}").unwrap();
+            fs::write(root.join("engine/package.json"), "{\"name\":\"engine\"}").unwrap();
+            fs::write(root.join("engine/package-lock.json"), "{}").unwrap();
+            fs::write(
+                root.join("apps/studio/native/modules/mesh-napi/Cargo.lock"),
+                "mesh-lock",
+            )
+            .unwrap();
+            fs::write(
+                root.join("apps/studio/native/modules/mesh-napi/package.json"),
+                "{\"name\":\"mesh-napi\"}",
+            )
+            .unwrap();
+        }
+
+        fs::write(
+            target.path().join("apps/other-tool/package.json"),
+            "{\"name\":\"other-tool\"}",
+        )
+        .unwrap();
+
+        let rel_paths = hydration_paths(source.path(), Some(CacheProfile::Designer), &[]).unwrap();
+        let verification =
+            verify_fingerprints(source.path(), target.path(), &rel_paths, false).unwrap();
+
+        assert!(verification.approved);
+        let source_files = verification
+            .source
+            .as_ref()
+            .map(|snapshot| snapshot.files.clone())
+            .unwrap();
+        assert!(source_files.contains(&"apps/studio/package.json".to_string()));
+        assert!(source_files.contains(&"engine/package.json".to_string()));
+        assert!(!source_files.contains(&"apps/other-tool/package.json".to_string()));
+    }
+}

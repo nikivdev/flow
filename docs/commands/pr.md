@@ -41,9 +41,9 @@ It then:
 1. Prints an actionable list in terminal with inline review state and diff hunk context by default.
 2. Writes a markdown snapshot to `.ai/reviews/pr-feedback-<pr>.md`.
 3. Writes a machine-readable JSON snapshot to `.ai/reviews/pr-feedback-<pr>.json`.
-4. Writes a human review plan to `~/plan/review/<repo>-pr-<pr>-feedback.md`.
-5. Writes a PR-local execution artifact to `~/plan/review/<repo>-pr-<pr>-review-rules.md`.
-6. Writes a Kit system prompt to `~/plan/review/<repo>-pr-<pr>-kit-system.md`.
+4. Writes a human review plan to `~/docs/plan/review/<repo>-pr-<pr>-feedback.md`.
+5. Writes a PR-local execution artifact to `~/docs/plan/review/<repo>-pr-<pr>-review-rules.md`.
+6. Writes a Kit system prompt to `~/docs/plan/review/<repo>-pr-<pr>-kit-system.md`.
 7. Optionally (`--todo`) records feedback into `.ai/todos/todos.json` with dedupe via external refs.
 
 The review plan includes ready-to-run `kit` commands for:

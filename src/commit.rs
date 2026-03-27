@@ -10324,10 +10324,7 @@ fn pr_feedback_plan_root() -> PathBuf {
     if let Some(root) = env::var_os("FLOW_PR_FEEDBACK_PLAN_ROOT").map(PathBuf::from) {
         return root;
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("plan")
-        .join("review")
+    crate::codex_runtime::default_plan_root().join("review")
 }
 
 fn pr_feedback_repo_slug(repo: &str) -> String {

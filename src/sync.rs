@@ -9,8 +9,8 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 use std::{cell::RefCell, collections::HashMap, collections::HashSet};
 
 use anyhow::{Context, Result, bail};
@@ -136,6 +136,7 @@ enum JjWorkingCopyUpdate {
 
 // Use the Claude family alias so sync always targets the latest Opus model.
 const SYNC_CLAUDE_MODEL: &str = "opus";
+const JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS: &[u64] = &[150, 400, 900];
 
 thread_local! {
     static ACTIVE_SYNC_STATUS: RefCell<Option<StatusLine>> = const { RefCell::new(None) };
@@ -2894,7 +2895,7 @@ fn run_jj_sync(
 
         if needs_git_export {
             recorder.record("jj", "jj git export");
-            jj_run_in(repo_root, &["--quiet", "git", "export"])?;
+            jj_git_export_with_retry_in(repo_root, recorder)?;
 
             // After jj git export, git HEAD may be detached (or on a jj/keep/ ref)
             // because the jj working copy commit isn't on any bookmark. Re-attach
@@ -3315,6 +3316,8 @@ fn is_jj_corruption_error(err: &anyhow::Error) -> bool {
 fn is_git_index_lock_error(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("index.lock")
+        || lower.contains("could not acquire lock for index file")
+        || lower.contains("lock for resource")
         || lower.contains("another git process seems to be running")
         || lower.contains("could not write index")
 }
@@ -3586,12 +3589,37 @@ fn git_ref_exists(reference: &str) -> bool {
     git_capture(&["rev-parse", "--verify", reference]).is_ok()
 }
 
-fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("jj")
+fn jj_run_output_in(repo_root: &Path, args: &[&str]) -> Result<Output> {
+    Command::new("jj")
         .current_dir(repo_root)
         .args(args)
         .output()
-        .with_context(|| format!("failed to run jj {}", args.join(" ")))?;
+        .with_context(|| format!("failed to run jj {}", args.join(" ")))
+}
+
+fn jj_output_text(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut lines = Vec::new();
+    lines.extend(
+        stderr
+            .lines()
+            .filter(|line| !line.contains("Refused to snapshot"))
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string),
+    );
+    lines.extend(
+        stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string),
+    );
+    lines.join("\n")
+}
+
+fn jj_print_output(output: &Output) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.trim().is_empty() {
         print!("{}", stdout);
@@ -3603,8 +3631,79 @@ fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
         }
         eprintln!("{}", line);
     }
+}
+
+fn jj_failure_message(args: &[&str], output: &Output) -> String {
+    let detail = jj_output_text(output);
+    if detail.is_empty() {
+        format!("jj {} failed", args.join(" "))
+    } else {
+        format!("jj {} failed: {}", args.join(" "), detail)
+    }
+}
+
+fn jj_git_export_retry_delay(attempt: usize, message: &str) -> Option<Duration> {
+    if !is_git_index_lock_error(message) {
+        return None;
+    }
+    JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS
+        .get(attempt)
+        .copied()
+        .map(Duration::from_millis)
+}
+
+fn jj_git_export_with_retry_in(repo_root: &Path, recorder: &mut SyncRecorder) -> Result<()> {
+    let args = ["--quiet", "git", "export"];
+    for attempt in 0..=JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS.len() {
+        let output = jj_run_output_in(repo_root, &args)?;
+        if output.status.success() {
+            jj_print_output(&output);
+            return Ok(());
+        }
+
+        let failure_text = jj_output_text(&output);
+        if let Some(delay) = jj_git_export_retry_delay(attempt, &failure_text) {
+            let retry_num = attempt + 1;
+            let max_retries = JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS.len();
+            recorder.record(
+                "jj",
+                format!(
+                    "jj git export hit Git index lock; retrying {retry_num}/{max_retries} in {}ms",
+                    delay.as_millis()
+                ),
+            );
+            sync_progressln!(
+                "jj git export hit a transient Git index lock; retrying ({}/{}) in {}ms...",
+                retry_num,
+                max_retries,
+                delay.as_millis()
+            );
+            std::thread::sleep(delay);
+            continue;
+        }
+
+        jj_print_output(&output);
+        let failure = jj_failure_message(&args, &output);
+        if is_git_index_lock_error(&failure_text) {
+            let retries = JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS.len();
+            bail!(
+                "{}. Git index stayed locked after {} retr{}; close competing git/jj processes or remove stale .git/index.lock, then retry.",
+                failure,
+                retries,
+                if retries == 1 { "y" } else { "ies" }
+            );
+        }
+        bail!("{}", failure);
+    }
+
+    unreachable!("jj git export retry loop should always return");
+}
+
+fn jj_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
+    let output = jj_run_output_in(repo_root, args)?;
+    jj_print_output(&output);
     if !output.status.success() {
-        bail!("jj {} failed", args.join(" "));
+        bail!("{}", jj_failure_message(args, &output));
     }
     Ok(())
 }
@@ -3680,13 +3779,9 @@ fn jj_bookmark_create_or_set(repo_root: &Path, name: &str, rev: &str) -> Result<
 }
 
 fn jj_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("jj")
-        .current_dir(repo_root)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run jj {}", args.join(" ")))?;
+    let output = jj_run_output_in(repo_root, args)?;
     if !output.status.success() {
-        bail!("jj {} failed", args.join(" "));
+        bail!("{}", jj_failure_message(args, &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -4930,5 +5025,31 @@ mod tests {
                 "resolve this",
             ]
         );
+    }
+
+    #[test]
+    fn git_index_lock_error_matches_jj_head_reset_failure() {
+        let message = "Failed to reset Git HEAD state\nCaused by:\n1: Could not acquire lock for index file\n2: The lock for resource '/tmp/repo/.git/index' could not be obtained immediately after 1 attempt(s). The lockfile at '/tmp/repo/.git/index.lock' might need manual deletion.";
+
+        assert!(is_git_index_lock_error(message));
+    }
+
+    #[test]
+    fn jj_git_export_retry_delay_retries_only_lock_failures_within_budget() {
+        let message = "Could not acquire lock for index file";
+
+        assert_eq!(
+            jj_git_export_retry_delay(0, message),
+            Some(Duration::from_millis(JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS[0]))
+        );
+        assert_eq!(
+            jj_git_export_retry_delay(1, message),
+            Some(Duration::from_millis(JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS[1]))
+        );
+        assert_eq!(
+            jj_git_export_retry_delay(JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS.len(), message),
+            None
+        );
+        assert_eq!(jj_git_export_retry_delay(0, "permission denied"), None);
     }
 }

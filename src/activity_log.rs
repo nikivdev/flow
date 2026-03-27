@@ -451,6 +451,9 @@ fn path_scope_label(path: &str) -> Option<String> {
     if path.starts_with(home.join("config")) {
         return Some("config".to_string());
     }
+    if path.starts_with(home.join("docs").join("plan")) {
+        return Some("plan".to_string());
+    }
     if path.starts_with(home.join("docs")) {
         return Some("docs".to_string());
     }

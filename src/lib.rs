@@ -21,6 +21,7 @@ pub mod code;
 pub mod codex_memory;
 pub mod codex_runtime;
 pub mod codex_session_docs;
+pub mod codex_session_index;
 pub mod codex_skill_eval;
 pub mod codex_telemetry;
 pub mod codex_text;

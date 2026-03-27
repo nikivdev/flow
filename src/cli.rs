@@ -2651,6 +2651,12 @@ pub enum ProviderAiAction {
         /// Emit machine-readable JSON for the selected session instead of resuming it.
         #[arg(long, alias = "print")]
         json: bool,
+        /// Prefer candidates from the last N days before widening to older history.
+        #[arg(long, value_name = "DAYS", value_parser = clap::value_parser!(u32).range(1..))]
+        recent_days: Option<u32>,
+        /// Search the full history immediately instead of preferring recent sessions first.
+        #[arg(long, conflicts_with = "recent_days")]
+        all_history: bool,
         /// Natural-language query describing the target session. Defaults to the latest session.
         #[arg(value_name = "QUERY", trailing_var_arg = true)]
         query: Vec<String>,
@@ -2813,6 +2819,18 @@ pub enum ProviderAiAction {
         /// Restrict --path lookup to an exact cwd instead of a repo-tree prefix.
         #[arg(long, requires = "path")]
         exact_cwd: bool,
+        /// Emit machine-readable JSON for the matched candidates instead of resuming the top hit.
+        #[arg(long)]
+        json: bool,
+        /// Maximum number of candidate sessions to include in JSON output.
+        #[arg(long, default_value = "5")]
+        limit: usize,
+        /// Prefer candidates from the last N days before widening to older history.
+        #[arg(long, value_name = "DAYS", value_parser = clap::value_parser!(u32).range(1..))]
+        recent_days: Option<u32>,
+        /// Search the full history immediately instead of preferring recent sessions first.
+        #[arg(long, conflicts_with = "recent_days")]
+        all_history: bool,
         /// Prompt or transcript text to search for.
         #[arg(value_name = "QUERY", trailing_var_arg = true)]
         query: Vec<String>,
@@ -3141,7 +3159,7 @@ pub enum CodexRuntimeAction {
     Show,
     /// Remove Flow-managed runtime skill state and stale symlinks.
     Clear,
-    /// Write a markdown plan to today's ~/plan/<day-of-month> bucket and print the final path.
+    /// Write a markdown plan to today's ~/docs/plan/<day-of-month> bucket and print the final path.
     WritePlan {
         /// Human-readable title used to derive the filename.
         #[arg(long)]
@@ -3149,7 +3167,7 @@ pub enum CodexRuntimeAction {
         /// Explicit filename stem to use instead of deriving from the title.
         #[arg(long)]
         stem: Option<String>,
-        /// Destination directory (default root: ~/plan, which auto-buckets to ~/plan/<day-of-month>).
+        /// Destination directory (default root: ~/docs/plan, which auto-buckets to ~/docs/plan/<day-of-month>).
         #[arg(long)]
         dir: Option<String>,
         /// Codex session id to append as a footer (defaults to $CODEX_THREAD_ID).
@@ -5282,13 +5300,125 @@ mod tests {
                             Some(ProviderAiAction::Find {
                                 path,
                                 exact_cwd,
+                                json,
+                                limit,
+                                recent_days,
+                                all_history,
                                 query,
                             }),
                     }),
             })) => {
                 assert_eq!(path.as_deref(), Some("~/repos/acme/app"));
                 assert!(!exact_cwd);
+                assert!(!json);
+                assert_eq!(limit, 5);
+                assert_eq!(recent_days, None);
+                assert!(!all_history);
                 assert_eq!(query, vec!["make", "plan", "designer"]);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_find_json_with_limit() {
+        let cli = Cli::parse_from([
+            "f", "ai", "codex", "find", "--json", "--limit", "7", "thread", "read",
+        ]);
+
+        match cli.command {
+            Some(Commands::Ai(AiCommand {
+                action:
+                    Some(AiAction::Codex {
+                        action:
+                            Some(ProviderAiAction::Find {
+                                path,
+                                exact_cwd,
+                                json,
+                                limit,
+                                recent_days,
+                                all_history,
+                                query,
+                            }),
+                    }),
+            })) => {
+                assert_eq!(path, None);
+                assert!(!exact_cwd);
+                assert!(json);
+                assert_eq!(limit, 7);
+                assert_eq!(recent_days, None);
+                assert!(!all_history);
+                assert_eq!(query, vec!["thread", "read"]);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_find_all_history() {
+        let cli = Cli::parse_from([
+            "f",
+            "ai",
+            "codex",
+            "find",
+            "--all-history",
+            "thread",
+            "read",
+        ]);
+
+        match cli.command {
+            Some(Commands::Ai(AiCommand {
+                action:
+                    Some(AiAction::Codex {
+                        action:
+                            Some(ProviderAiAction::Find {
+                                recent_days,
+                                all_history,
+                                query,
+                                ..
+                            }),
+                    }),
+            })) => {
+                assert_eq!(recent_days, None);
+                assert!(all_history);
+                assert_eq!(query, vec!["thread", "read"]);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_connect_recent_days() {
+        let cli = Cli::parse_from([
+            "f",
+            "codex",
+            "connect",
+            "--path",
+            "~/repos/acme/app",
+            "--recent-days",
+            "30",
+            "thread",
+            "read",
+        ]);
+
+        match cli.command {
+            Some(Commands::Codex {
+                action:
+                    Some(ProviderAiAction::Connect {
+                        path,
+                        exact_cwd,
+                        json,
+                        recent_days,
+                        all_history,
+                        query,
+                    }),
+            }) => {
+                assert_eq!(path.as_deref(), Some("~/repos/acme/app"));
+                assert!(!exact_cwd);
+                assert!(!json);
+                assert_eq!(recent_days, Some(30));
+                assert!(!all_history);
+                assert_eq!(query, vec!["thread", "read"]);
             }
             other => panic!("unexpected parsed command: {other:?}"),
         }

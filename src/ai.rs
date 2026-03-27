@@ -37,8 +37,8 @@ use crate::cli::{
 use crate::commit::configured_codex_bin_for_workdir;
 use crate::env as flow_env;
 use crate::{
-    ai_project_manifest, codex_memory, codex_session_docs, codex_telemetry, codex_text, codexd,
-    config, project_snapshot, repo_capsule, url_inspect,
+    ai_project_manifest, codex_memory, codex_session_docs, codex_session_index, codex_telemetry,
+    codex_text, codexd, config, project_snapshot, repo_capsule, url_inspect,
 };
 use crate::{codex_runtime, codex_skill_eval};
 
@@ -192,6 +192,8 @@ struct SessionMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CodexRecoverRow {
     pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) rollout_path: Option<String>,
     pub(crate) updated_at: i64,
     pub(crate) cwd: String,
     pub(crate) title: Option<String>,
@@ -223,6 +225,17 @@ struct CodexRecoverOutput {
     query: Option<String>,
     recommended_route: String,
     summary: String,
+    candidates: Vec<CodexRecoverCandidate>,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexFindOutput {
+    target_path: Option<String>,
+    exact_cwd: bool,
+    query: String,
+    recent_days: Option<u32>,
+    all_history: bool,
+    selected_session_id: Option<String>,
     candidates: Vec<CodexRecoverCandidate>,
 }
 
@@ -395,6 +408,56 @@ enum LinearUrlKind {
 }
 
 const CODEX_QUERY_CACHE_VERSION: u32 = 1;
+pub(crate) const CODEX_FIND_DEFAULT_RECENT_DAYS: u32 = 7;
+const CODEX_FIND_RECENT_DAY_SECS: i64 = 24 * 60 * 60;
+const CODEX_FIND_RECENT_MONTH_SECS: i64 = 30 * 24 * 60 * 60;
+const CODEX_FIND_STRONG_MATCH_SCORE: i64 = 100;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CodexFindScope {
+    #[serde(default)]
+    pub(crate) recent_days: Option<u32>,
+    #[serde(default)]
+    pub(crate) all_history: bool,
+}
+
+impl Default for CodexFindScope {
+    fn default() -> Self {
+        Self {
+            recent_days: Some(CODEX_FIND_DEFAULT_RECENT_DAYS),
+            all_history: false,
+        }
+    }
+}
+
+impl CodexFindScope {
+    fn from_cli(recent_days: Option<u32>, all_history: bool) -> Self {
+        if all_history {
+            Self {
+                recent_days: None,
+                all_history: true,
+            }
+        } else {
+            Self {
+                recent_days,
+                all_history: false,
+            }
+        }
+    }
+
+    pub(crate) fn effective_recent_days(self) -> Option<u32> {
+        if self.all_history {
+            None
+        } else {
+            Some(self.recent_days.unwrap_or(CODEX_FIND_DEFAULT_RECENT_DAYS))
+        }
+    }
+
+    pub(crate) fn recent_cutoff_unix(self, now_unix: i64) -> Option<i64> {
+        self.effective_recent_days()
+            .map(|days| now_unix.saturating_sub((days as i64) * CODEX_FIND_RECENT_DAY_SECS))
+    }
+}
 const CODEX_QUERY_CACHE_ENV_DISABLE: &str = "FLOW_DISABLE_CODEX_QUERY_CACHE";
 const CODEX_SESSION_COMPLETION_DEFAULT_SCAN_LIMIT: usize = 24;
 const CODEX_SESSION_COMPLETION_DEFAULT_IDLE_SECS: u64 = 90;
@@ -416,7 +479,8 @@ struct CodexQueryCacheEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CodexThreadSchema {
+pub(crate) struct CodexThreadSchema {
+    has_rollout_path: bool,
     has_model: bool,
     has_reasoning_effort: bool,
 }
@@ -560,8 +624,17 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
             path,
             exact_cwd,
             json,
+            recent_days,
+            all_history,
             query,
-        }) => connect_codex_session(path, query, exact_cwd, json, provider)?,
+        }) => connect_codex_session(
+            path,
+            query,
+            exact_cwd,
+            json,
+            CodexFindScope::from_cli(recent_days, all_history),
+            provider,
+        )?,
         Some(ProviderAiAction::Open {
             path,
             exact_cwd,
@@ -634,8 +707,20 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
         Some(ProviderAiAction::Find {
             path,
             exact_cwd,
+            json,
+            limit,
+            recent_days,
+            all_history,
             query,
-        }) => find_codex_session(path, query, exact_cwd, provider)?,
+        }) => find_codex_session(
+            path,
+            query,
+            exact_cwd,
+            json,
+            limit,
+            CodexFindScope::from_cli(recent_days, all_history),
+            provider,
+        )?,
         Some(ProviderAiAction::FindAndCopy {
             path,
             exact_cwd,
@@ -750,8 +835,20 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::Find {
                 path,
                 exact_cwd,
+                json,
+                limit,
+                recent_days,
+                all_history,
                 query,
-            }) => find_codex_session(path, query, exact_cwd, Provider::Claude)?,
+            }) => find_codex_session(
+                path,
+                query,
+                exact_cwd,
+                json,
+                limit,
+                CodexFindScope::from_cli(recent_days, all_history),
+                Provider::Claude,
+            )?,
             Some(ProviderAiAction::FindAndCopy {
                 path,
                 exact_cwd,
@@ -803,8 +900,17 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
                 path,
                 exact_cwd,
                 json,
+                recent_days,
+                all_history,
                 query,
-            }) => connect_codex_session(path, query, exact_cwd, json, Provider::Codex)?,
+            }) => connect_codex_session(
+                path,
+                query,
+                exact_cwd,
+                json,
+                CodexFindScope::from_cli(recent_days, all_history),
+                Provider::Codex,
+            )?,
             Some(ProviderAiAction::Open {
                 path,
                 exact_cwd,
@@ -893,8 +999,20 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::Find {
                 path,
                 exact_cwd,
+                json,
+                limit,
+                recent_days,
+                all_history,
                 query,
-            }) => find_codex_session(path, query, exact_cwd, Provider::Codex)?,
+            }) => find_codex_session(
+                path,
+                query,
+                exact_cwd,
+                json,
+                limit,
+                CodexFindScope::from_cli(recent_days, all_history),
+                Provider::Codex,
+            )?,
             Some(ProviderAiAction::FindAndCopy {
                 path,
                 exact_cwd,
@@ -2455,6 +2573,34 @@ fn truncate_before_heading(text: &str, heading: &str) -> String {
     text.trim().to_string()
 }
 
+fn keep_from_heading(text: &str, heading: &str) -> String {
+    let mut offset = 0usize;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(heading) {
+            let suffix = trimmed[heading.len()..].trim_start_matches(':').trim();
+            let mut result = String::new();
+            if !suffix.is_empty() {
+                result.push_str(suffix);
+            }
+            let remainder_start = offset + line.len();
+            let remainder = text[remainder_start..].trim_start_matches('\n').trim();
+            if !remainder.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(remainder);
+            }
+            return result.trim().to_string();
+        }
+        offset += line.len();
+        if offset < text.len() {
+            offset += 1;
+        }
+    }
+    text.trim().to_string()
+}
+
 fn collapse_blank_lines(text: &str) -> String {
     let mut out = String::new();
     let mut saw_blank = false;
@@ -2502,6 +2648,9 @@ fn strip_known_transcript_scaffolding(role: &str, text: &str) -> String {
     cleaned = truncate_before_heading(&cleaned, "Workflow context:");
     cleaned = truncate_before_heading(&cleaned, "Start by checking:");
     cleaned = truncate_before_heading(&cleaned, "Designer stack notes:");
+    if role == "user" && cleaned.contains("User request:") {
+        cleaned = keep_from_heading(&cleaned, "User request:");
+    }
 
     if role == "assistant" {
         let trimmed = cleaned.trim_start();
@@ -4613,9 +4762,70 @@ fn find_codex_session(
     path: Option<String>,
     query: Vec<String>,
     exact_cwd: bool,
+    json_output: bool,
+    limit: usize,
+    scope: CodexFindScope,
     provider: Provider,
 ) -> Result<()> {
-    let selected = find_best_codex_session_match(path, query, exact_cwd, provider, "find", true)?;
+    if provider != Provider::Codex {
+        bail!("find is only supported for Codex sessions; use `f ai codex find ...`");
+    }
+
+    let query_text = normalize_recover_query(&query).ok_or_else(|| {
+        anyhow::anyhow!(
+            "find requires a query, for example: `f ai codex find \"make plan to get designer\"`"
+        )
+    })?;
+    let target_path = path
+        .clone()
+        .map(|value| canonicalize_recover_path(Some(value)))
+        .transpose()?;
+    let rows = search_codex_threads_for_find(
+        target_path.as_deref(),
+        exact_cwd,
+        &query_text,
+        limit.max(1),
+        scope,
+    )?;
+
+    if json_output {
+        let output = CodexFindOutput {
+            target_path: target_path
+                .as_ref()
+                .map(|value| value.display().to_string()),
+            exact_cwd,
+            query: query_text,
+            recent_days: scope.effective_recent_days(),
+            all_history: scope.all_history,
+            selected_session_id: rows.first().map(|row| row.id.clone()),
+            candidates: rows_to_recover_candidates(rows),
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("failed to encode Codex find JSON")?
+        );
+        return Ok(());
+    }
+
+    let selected = rows.first().ok_or_else(|| match target_path.as_ref() {
+        Some(target_path) => anyhow::anyhow!(
+            "No matching Codex sessions found for {:?} under {}",
+            query_text,
+            target_path.display()
+        ),
+        None => anyhow::anyhow!("No matching Codex sessions found for {:?}", query_text),
+    })?;
+    println!(
+        "Matched Codex session {} | {} | {}",
+        truncate_recover_id(&selected.id),
+        format_unix_ts(selected.updated_at),
+        selected.cwd
+    );
+    if let Some(first) = selected.first_user_message.as_deref() {
+        println!("Prompt: {}", truncate_recover_text(first));
+    } else if let Some(title) = selected.title.as_deref() {
+        println!("Title: {}", truncate_recover_text(title));
+    }
     resume_session(Some(selected.id.clone()), None, Provider::Codex)
 }
 
@@ -4625,8 +4835,15 @@ fn find_and_copy_codex_session(
     exact_cwd: bool,
     provider: Provider,
 ) -> Result<()> {
-    let selected =
-        find_best_codex_session_match(path, query, exact_cwd, provider, "findAndCopy", false)?;
+    let selected = find_best_codex_session_match(
+        path,
+        query,
+        exact_cwd,
+        CodexFindScope::default(),
+        provider,
+        "findAndCopy",
+        false,
+    )?;
     copy_session_history_to_clipboard(&selected.id, Provider::Codex)?;
     println!(
         "Session {} found and copied to clipboard",
@@ -4639,6 +4856,7 @@ fn find_best_codex_session_match(
     path: Option<String>,
     query: Vec<String>,
     exact_cwd: bool,
+    scope: CodexFindScope,
     provider: Provider,
     action_name: &str,
     verbose: bool,
@@ -4661,7 +4879,8 @@ fn find_best_codex_session_match(
     let target_path = path
         .map(|value| canonicalize_recover_path(Some(value)))
         .transpose()?;
-    let rows = search_codex_threads_for_find(target_path.as_deref(), exact_cwd, &query_text, 5)?;
+    let rows =
+        search_codex_threads_for_find(target_path.as_deref(), exact_cwd, &query_text, 5, scope)?;
     let selected = rows.first().ok_or_else(|| match target_path.as_ref() {
         Some(target_path) => anyhow::anyhow!(
             "No matching Codex sessions found for {:?} under {}",
@@ -5116,7 +5335,7 @@ fn select_codex_state_db_path(sqlite_home: &Path) -> Result<PathBuf> {
     )
 }
 
-fn codex_state_db_path() -> Result<PathBuf> {
+pub(crate) fn codex_state_db_path() -> Result<PathBuf> {
     select_codex_state_db_path(&codex_sqlite_home()?)
 }
 
@@ -5263,12 +5482,13 @@ fn read_codex_thread_schema(conn: &Connection) -> Result<CodexThreadSchema> {
         names.insert(column?);
     }
     Ok(CodexThreadSchema {
+        has_rollout_path: names.contains("rollout_path"),
         has_model: names.contains("model"),
         has_reasoning_effort: names.contains("reasoning_effort"),
     })
 }
 
-fn load_codex_thread_schema(db_path: &Path) -> Result<CodexThreadSchema> {
+pub(crate) fn load_codex_thread_schema(db_path: &Path) -> Result<CodexThreadSchema> {
     let stamp = codex_state_db_stamp(db_path)?;
     if let Ok(cache) = codex_thread_schema_cache().lock() {
         if let Some(entry) = cache.get(db_path) {
@@ -5293,7 +5513,12 @@ fn load_codex_thread_schema(db_path: &Path) -> Result<CodexThreadSchema> {
     Ok(schema)
 }
 
-fn codex_recover_select_sql(schema: &CodexThreadSchema) -> String {
+pub(crate) fn codex_recover_select_sql(schema: &CodexThreadSchema) -> String {
+    let rollout_expr = if schema.has_rollout_path {
+        "rollout_path"
+    } else {
+        "NULL as rollout_path"
+    };
     let model_expr = if schema.has_model {
         "model"
     } else {
@@ -5308,6 +5533,7 @@ fn codex_recover_select_sql(schema: &CodexThreadSchema) -> String {
         r#"
 select
   id,
+  {rollout_expr},
   updated_at,
   cwd,
   title,
@@ -5320,9 +5546,10 @@ from threads
     )
 }
 
-fn map_codex_recover_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodexRecoverRow> {
+pub(crate) fn map_codex_recover_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodexRecoverRow> {
     Ok(CodexRecoverRow {
         id: row.get("id")?,
+        rollout_path: row.get("rollout_path")?,
         updated_at: row.get("updated_at")?,
         cwd: row.get("cwd")?,
         title: row.get("title")?,
@@ -5446,6 +5673,57 @@ fn escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+pub(crate) fn codex_find_now_unix() -> i64 {
+    Utc::now().timestamp()
+}
+
+pub(crate) fn codex_find_recency_bonus(updated_at: i64, now_unix: i64) -> i64 {
+    let age_secs = if updated_at >= now_unix {
+        0
+    } else {
+        now_unix - updated_at
+    };
+
+    if age_secs <= CODEX_FIND_RECENT_DAY_SECS {
+        16
+    } else if age_secs <= (CODEX_FIND_DEFAULT_RECENT_DAYS as i64 * CODEX_FIND_RECENT_DAY_SECS) {
+        12
+    } else if age_secs <= CODEX_FIND_RECENT_MONTH_SECS {
+        4
+    } else {
+        0
+    }
+}
+
+pub(crate) fn codex_find_path_affinity(
+    cwd: &str,
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+) -> i64 {
+    let Some(target_path) = target_path else {
+        return 0;
+    };
+
+    let cwd_path = Path::new(cwd);
+    if cwd_path == target_path {
+        return if exact_cwd { 64 } else { 56 };
+    }
+    if exact_cwd {
+        return 0;
+    }
+
+    let Ok(relative) = cwd_path.strip_prefix(target_path) else {
+        return 0;
+    };
+    match relative.components().count() {
+        0 => 56,
+        1 => 24,
+        2 => 18,
+        3 => 12,
+        _ => 6,
+    }
+}
+
 fn read_recent_codex_threads(
     target_path: &Path,
     exact_cwd: bool,
@@ -5517,7 +5795,7 @@ limit ?3
         }
     })?;
 
-    rank_recover_rows(&mut rows, query);
+    rank_recover_rows(&mut rows, query, None, exact_cwd);
     rows.truncate(limit.max(1));
     Ok(rows)
 }
@@ -5605,12 +5883,17 @@ fn search_codex_threads_for_find(
     exact_cwd: bool,
     query: &str,
     limit: usize,
+    scope: CodexFindScope,
 ) -> Result<Vec<CodexRecoverRow>> {
-    match codexd::query_find(target_path, exact_cwd, query, limit) {
-        Ok(rows) => Ok(rows),
+    match codexd::query_find(target_path, exact_cwd, query, limit, scope) {
+        Ok(rows) if !rows.is_empty() => Ok(rows),
+        Ok(_) => {
+            debug!("codexd find query returned no rows; falling back to local query");
+            search_codex_threads_for_find_local(target_path, exact_cwd, query, limit, scope)
+        }
         Err(err) => {
             debug!(error = %err, "codexd find query failed; falling back to local query");
-            search_codex_threads_for_find_local(target_path, exact_cwd, query, limit)
+            search_codex_threads_for_find_local(target_path, exact_cwd, query, limit, scope)
         }
     }
 }
@@ -5620,11 +5903,13 @@ pub(crate) fn search_codex_threads_for_find_local(
     exact_cwd: bool,
     query: &str,
     limit: usize,
+    scope: CodexFindScope,
 ) -> Result<Vec<CodexRecoverRow>> {
     let normalized_query = query.trim().to_lowercase();
     if normalized_query.is_empty() {
         return Ok(vec![]);
     }
+    let now_unix = codex_find_now_unix();
 
     if let Some(session_hint) = extract_codex_session_hint(&normalized_query) {
         let rows = read_codex_threads_by_session_hint_local(&session_hint, limit.max(1))?;
@@ -5633,6 +5918,101 @@ pub(crate) fn search_codex_threads_for_find_local(
         }
     }
 
+    let mut index_hits = Vec::new();
+    match codex_session_index::search_codex_sessions(
+        target_path,
+        exact_cwd,
+        &normalized_query,
+        limit.max(1),
+        scope,
+    ) {
+        Ok(hits) => index_hits = hits,
+        Err(err) => {
+            debug!(error = %err, "codex session index query failed; falling back to local SQL search");
+        }
+    }
+
+    let mut rows = search_codex_threads_for_find_legacy_local(
+        target_path,
+        exact_cwd,
+        &normalized_query,
+        limit,
+        now_unix,
+        scope,
+    )?;
+    rows = merge_index_find_matches(
+        index_hits,
+        rows,
+        &normalized_query,
+        now_unix,
+        target_path,
+        exact_cwd,
+    );
+    rows = merge_transcript_find_matches(
+        rows,
+        target_path,
+        exact_cwd,
+        &normalized_query,
+        limit.max(1),
+        now_unix,
+        scope,
+    )?;
+    rows.truncate(limit.max(1));
+    Ok(rows)
+}
+
+fn search_codex_threads_for_find_legacy_local(
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+    normalized_query: &str,
+    limit: usize,
+    now_unix: i64,
+    scope: CodexFindScope,
+) -> Result<Vec<CodexRecoverRow>> {
+    let recent_cutoff = scope.recent_cutoff_unix(now_unix);
+    let mut rows = search_codex_threads_for_find_legacy_local_with_cutoff(
+        target_path,
+        exact_cwd,
+        normalized_query,
+        limit,
+        recent_cutoff,
+    )?;
+    if recent_cutoff.is_some()
+        && should_expand_find_scope(
+            &rows,
+            normalized_query,
+            now_unix,
+            target_path,
+            exact_cwd,
+            limit.max(1),
+        )
+    {
+        let expanded_rows = search_codex_threads_for_find_legacy_local_with_cutoff(
+            target_path,
+            exact_cwd,
+            normalized_query,
+            limit,
+            None,
+        )?;
+        rows = merge_legacy_find_rows(
+            rows,
+            expanded_rows,
+            normalized_query,
+            now_unix,
+            target_path,
+            exact_cwd,
+        );
+    }
+    Ok(rows)
+}
+
+fn search_codex_threads_for_find_legacy_local_with_cutoff(
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+    normalized_query: &str,
+    limit: usize,
+    recent_cutoff_unix: Option<i64>,
+) -> Result<Vec<CodexRecoverRow>> {
     let db_path = codex_state_db_path()?;
     let schema = load_codex_thread_schema(&db_path)?;
 
@@ -5652,7 +6032,12 @@ pub(crate) fn search_codex_threads_for_find_local(
         }
     }
 
-    let search_terms = codex_find_search_terms(&normalized_query);
+    if let Some(recent_cutoff_unix) = recent_cutoff_unix {
+        sql.push_str("  and updated_at >= ?\n");
+        params_vec.push(Box::new(recent_cutoff_unix));
+    }
+
+    let search_terms = codex_find_search_terms(normalized_query);
     let mut clauses = Vec::new();
     let mut search_columns = vec!["id", "first_user_message", "title", "git_branch", "cwd"];
     if schema.has_model {
@@ -5681,7 +6066,10 @@ pub(crate) fn search_codex_threads_for_find_local(
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let cache_key = format!(
-        "query={normalized_query}\nexact={exact_cwd}\ntarget={scope_target}\nfetch_limit={fetch_limit}"
+        "query={normalized_query}\nexact={exact_cwd}\ntarget={scope_target}\nfetch_limit={fetch_limit}\nrecent_cutoff={}",
+        recent_cutoff_unix
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "all".to_string())
     );
     let mut rows = with_codex_query_cache(&db_path, "find", &cache_key, |conn| {
         let params_refs: Vec<&dyn rusqlite::ToSql> =
@@ -5692,9 +6080,348 @@ pub(crate) fn search_codex_threads_for_find_local(
         let iter = stmt.query_map(params_refs.as_slice(), map_codex_recover_row)?;
         Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
     })?;
-    rank_recover_rows(&mut rows, Some(&normalized_query));
-    rows.truncate(limit.max(1));
+    rank_recover_rows(&mut rows, Some(normalized_query), target_path, exact_cwd);
     Ok(rows)
+}
+
+fn merge_index_find_matches(
+    index_hits: Vec<codex_session_index::CodexSessionIndexHit>,
+    rows: Vec<CodexRecoverRow>,
+    normalized_query: &str,
+    now_unix: i64,
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+) -> Vec<CodexRecoverRow> {
+    let tokens = tokenize_recover_query(normalized_query);
+    let mut merged = BTreeMap::<String, (CodexRecoverRow, i64)>::new();
+
+    for hit in index_hits {
+        merged.insert(hit.row.id.clone(), (hit.row, hit.score));
+    }
+
+    for row in rows {
+        merged.entry(row.id.clone()).or_insert((row, 0));
+    }
+
+    let mut values = merged.into_values().collect::<Vec<_>>();
+    values.sort_by(|(row_a, index_score_a), (row_b, index_score_b)| {
+        let lexical_a = recover_row_score(row_a, normalized_query, &tokens);
+        let lexical_b = recover_row_score(row_b, normalized_query, &tokens);
+        let total_a = recover_find_rank_score(
+            row_a,
+            normalized_query,
+            &tokens,
+            now_unix,
+            target_path,
+            exact_cwd,
+        ) * 20
+            + if lexical_a > 0 {
+                *index_score_a
+            } else {
+                *index_score_a / 6
+            };
+        let total_b = recover_find_rank_score(
+            row_b,
+            normalized_query,
+            &tokens,
+            now_unix,
+            target_path,
+            exact_cwd,
+        ) * 20
+            + if lexical_b > 0 {
+                *index_score_b
+            } else {
+                *index_score_b / 6
+            };
+        total_b
+            .cmp(&total_a)
+            .then_with(|| row_b.updated_at.cmp(&row_a.updated_at))
+            .then_with(|| row_a.cwd.cmp(&row_b.cwd))
+    });
+
+    values.into_iter().map(|(row, _)| row).collect()
+}
+
+fn should_expand_find_scope(
+    rows: &[CodexRecoverRow],
+    normalized_query: &str,
+    now_unix: i64,
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+    limit: usize,
+) -> bool {
+    let tokens = tokenize_recover_query(normalized_query);
+    rows.len() < limit
+        || rows
+            .first()
+            .map(|row| {
+                recover_find_rank_score(
+                    row,
+                    normalized_query,
+                    &tokens,
+                    now_unix,
+                    target_path,
+                    exact_cwd,
+                )
+            })
+            .unwrap_or_default()
+            < CODEX_FIND_STRONG_MATCH_SCORE
+}
+
+fn merge_legacy_find_rows(
+    rows: Vec<CodexRecoverRow>,
+    expanded_rows: Vec<CodexRecoverRow>,
+    normalized_query: &str,
+    now_unix: i64,
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+) -> Vec<CodexRecoverRow> {
+    let tokens = tokenize_recover_query(normalized_query);
+    let mut merged = BTreeMap::<String, CodexRecoverRow>::new();
+
+    for row in rows.into_iter().chain(expanded_rows.into_iter()) {
+        merged.entry(row.id.clone()).or_insert(row);
+    }
+
+    let mut values = merged.into_values().collect::<Vec<_>>();
+    values.sort_by(|row_a, row_b| {
+        let total_a = recover_find_rank_score(
+            row_a,
+            normalized_query,
+            &tokens,
+            now_unix,
+            target_path,
+            exact_cwd,
+        );
+        let total_b = recover_find_rank_score(
+            row_b,
+            normalized_query,
+            &tokens,
+            now_unix,
+            target_path,
+            exact_cwd,
+        );
+        total_b
+            .cmp(&total_a)
+            .then_with(|| row_b.updated_at.cmp(&row_a.updated_at))
+            .then_with(|| row_a.cwd.cmp(&row_b.cwd))
+    });
+    values
+}
+
+fn merge_transcript_find_matches(
+    rows: Vec<CodexRecoverRow>,
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+    normalized_query: &str,
+    limit: usize,
+    now_unix: i64,
+    _scope: CodexFindScope,
+) -> Result<Vec<CodexRecoverRow>> {
+    let should_scan_transcripts = target_path.is_some() || rows.is_empty();
+    if !should_scan_transcripts {
+        return Ok(rows);
+    }
+
+    let transcript_rows =
+        search_codex_transcript_rows(target_path, exact_cwd, normalized_query, limit, now_unix)?;
+    if transcript_rows.is_empty() {
+        return Ok(rows);
+    }
+
+    let tokens = tokenize_recover_query(normalized_query);
+    let mut merged = BTreeMap::<String, (CodexRecoverRow, i64)>::new();
+    for (row, transcript_score) in transcript_rows {
+        merged.insert(row.id.clone(), (row, transcript_score));
+    }
+    for row in rows {
+        merged.entry(row.id.clone()).or_insert((row, 0));
+    }
+
+    let mut values = merged.into_values().collect::<Vec<_>>();
+    values.sort_by(|(row_a, transcript_score_a), (row_b, transcript_score_b)| {
+        let lexical_a = recover_row_score(row_a, normalized_query, &tokens);
+        let lexical_b = recover_row_score(row_b, normalized_query, &tokens);
+        let total_a = recover_find_rank_score(
+            row_a,
+            normalized_query,
+            &tokens,
+            now_unix,
+            target_path,
+            exact_cwd,
+        ) * 20
+            + if lexical_a > 0 {
+                *transcript_score_a
+            } else {
+                *transcript_score_a / 6
+            };
+        let total_b = recover_find_rank_score(
+            row_b,
+            normalized_query,
+            &tokens,
+            now_unix,
+            target_path,
+            exact_cwd,
+        ) * 20
+            + if lexical_b > 0 {
+                *transcript_score_b
+            } else {
+                *transcript_score_b / 6
+            };
+        total_b
+            .cmp(&total_a)
+            .then_with(|| row_b.updated_at.cmp(&row_a.updated_at))
+            .then_with(|| row_a.cwd.cmp(&row_b.cwd))
+    });
+    Ok(values.into_iter().map(|(row, _)| row).collect())
+}
+
+fn search_codex_transcript_rows(
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+    normalized_query: &str,
+    limit: usize,
+    now_unix: i64,
+) -> Result<Vec<(CodexRecoverRow, i64)>> {
+    let terms = codex_find_search_terms(normalized_query);
+    if terms.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let scan_limit = (limit.max(3) * 4).clamp(8, 16);
+    let candidate_rows = match target_path {
+        Some(path) => read_recent_codex_threads_local(path, exact_cwd, scan_limit, None)?,
+        None => read_recent_codex_threads_global_local(scan_limit)?,
+    };
+
+    let mut matches = Vec::new();
+    for row in candidate_rows {
+        let score = codex_transcript_match_score_for_row(&row, normalized_query, &terms)?;
+        if score > 0 {
+            let transcript_score = score
+                + codex_find_recency_bonus(row.updated_at, now_unix)
+                + codex_find_path_affinity(&row.cwd, target_path, exact_cwd);
+            matches.push((row, transcript_score));
+        }
+    }
+
+    matches.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.0.updated_at.cmp(&a.0.updated_at))
+            .then_with(|| a.0.cwd.cmp(&b.0.cwd))
+    });
+
+    Ok(matches.into_iter().take(limit.max(1)).collect())
+}
+
+fn codex_transcript_match_score_for_row(
+    row: &CodexRecoverRow,
+    normalized_query: &str,
+    terms: &[String],
+) -> Result<i64> {
+    let Some(session_file) = codex_session_file_for_recover_row(row) else {
+        return Ok(0);
+    };
+    codex_transcript_match_score(&session_file, normalized_query, terms)
+}
+
+fn codex_session_file_for_recover_row(row: &CodexRecoverRow) -> Option<PathBuf> {
+    row.rollout_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .or_else(|| find_codex_session_file(&row.id))
+}
+
+pub(crate) fn read_codex_session_search_excerpt(
+    row: &CodexRecoverRow,
+    max_snippets: usize,
+    max_chars: usize,
+) -> Result<Option<String>> {
+    let Some(session_file) = codex_session_file_for_recover_row(row) else {
+        return Ok(None);
+    };
+
+    let mut snippets = VecDeque::new();
+    for_each_nonempty_jsonl_line(&session_file, |line| {
+        let entry: CodexEntry = match crate::json_parse::parse_json_line(line) {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let Some((role, text)) = extract_codex_message(&entry) else {
+            return;
+        };
+        let clean = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if clean.is_empty() {
+            return;
+        }
+
+        let role_label = if role.eq_ignore_ascii_case("assistant") {
+            "Assistant"
+        } else {
+            "User"
+        };
+        let snippet_limit = (max_chars / max_snippets.max(1)).clamp(80, 280);
+        let snippet = truncate_search_excerpt_text(&clean, snippet_limit);
+        if snippet.is_empty() {
+            return;
+        }
+        if snippets.len() == max_snippets.max(1) {
+            snippets.pop_front();
+        }
+        snippets.push_back(format!("{role_label}: {snippet}"));
+    })?;
+
+    if snippets.is_empty() {
+        return Ok(None);
+    }
+
+    let joined = snippets.into_iter().collect::<Vec<_>>().join("\n");
+    Ok(Some(truncate_search_excerpt_text(
+        &joined,
+        max_chars.max(120),
+    )))
+}
+
+fn codex_transcript_match_score(
+    session_file: &Path,
+    normalized_query: &str,
+    terms: &[String],
+) -> Result<i64> {
+    if normalized_query.trim().is_empty() {
+        return Ok(0);
+    }
+
+    let mut score = 0i64;
+    let mut phrase_matched = false;
+    let mut matched_terms = BTreeSet::new();
+
+    for_each_nonempty_jsonl_line(session_file, |line| {
+        let entry: CodexEntry = match crate::json_parse::parse_json_line(line) {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let Some((_role, text)) = extract_codex_message(&entry) else {
+            return;
+        };
+        let haystack = text.to_lowercase();
+
+        if !phrase_matched && haystack.contains(normalized_query) {
+            score += 900;
+            phrase_matched = true;
+        }
+
+        for term in terms {
+            if term == normalized_query || term.len() <= 2 {
+                continue;
+            }
+            if haystack.contains(term) && matched_terms.insert(term.clone()) {
+                score += if term.contains('/') { 90 } else { 70 };
+            }
+        }
+    })?;
+
+    Ok(score)
 }
 
 fn codex_find_search_terms(query: &str) -> Vec<String> {
@@ -5716,7 +6443,7 @@ fn codex_find_search_terms(query: &str) -> Vec<String> {
     terms
 }
 
-fn tokenize_recover_query(query: &str) -> Vec<String> {
+pub(crate) fn tokenize_recover_query(query: &str) -> Vec<String> {
     query
         .split(|ch: char| {
             !ch.is_ascii_alphanumeric() && ch != '/' && ch != '-' && ch != '_' && ch != '#'
@@ -5727,13 +6454,46 @@ fn tokenize_recover_query(query: &str) -> Vec<String> {
         .collect()
 }
 
-fn rank_recover_rows(rows: &mut Vec<CodexRecoverRow>, query: Option<&str>) {
+pub(crate) fn is_structured_find_token(token: &str) -> bool {
+    token.contains('/') || token.contains('-') || token.contains('_') || token.contains('#')
+}
+
+pub(crate) fn codex_find_search_text(role: &str, value: Option<&str>) -> String {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return String::new();
+    };
+    normalize_session_message(role, raw)
+        .unwrap_or_else(|| raw.to_string())
+        .to_lowercase()
+}
+
+fn rank_recover_rows(
+    rows: &mut Vec<CodexRecoverRow>,
+    query: Option<&str>,
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+) {
     let normalized_query = query.map(|q| q.to_lowercase()).unwrap_or_default();
     let tokens = tokenize_recover_query(&normalized_query);
+    let now_unix = codex_find_now_unix();
 
     rows.sort_by(|a, b| {
-        let score_a = recover_row_score(a, &normalized_query, &tokens);
-        let score_b = recover_row_score(b, &normalized_query, &tokens);
+        let score_a = recover_find_rank_score(
+            a,
+            &normalized_query,
+            &tokens,
+            now_unix,
+            target_path,
+            exact_cwd,
+        );
+        let score_b = recover_find_rank_score(
+            b,
+            &normalized_query,
+            &tokens,
+            now_unix,
+            target_path,
+            exact_cwd,
+        );
         score_b
             .cmp(&score_a)
             .then_with(|| b.updated_at.cmp(&a.updated_at))
@@ -5749,7 +6509,11 @@ fn rank_recover_rows(rows: &mut Vec<CodexRecoverRow>, query: Option<&str>) {
     }
 }
 
-fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[String]) -> i64 {
+pub(crate) fn recover_row_score(
+    row: &CodexRecoverRow,
+    normalized_query: &str,
+    tokens: &[String],
+) -> i64 {
     if tokens.is_empty() && normalized_query.is_empty() {
         return 0;
     }
@@ -5763,12 +6527,8 @@ fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[St
         .clone()
         .unwrap_or_default()
         .to_lowercase();
-    let title = row.title.clone().unwrap_or_default().to_lowercase();
-    let first = row
-        .first_user_message
-        .clone()
-        .unwrap_or_default()
-        .to_lowercase();
+    let title = codex_find_search_text("user", row.title.as_deref());
+    let first = codex_find_search_text("user", row.first_user_message.as_deref());
 
     let mut score = 0i64;
 
@@ -5801,32 +6561,46 @@ fn recover_row_score(row: &CodexRecoverRow, normalized_query: &str, tokens: &[St
     }
 
     for token in tokens {
+        let structured = is_structured_find_token(token);
         if id.starts_with(token) {
-            score += 90;
+            score += if structured { 110 } else { 90 };
         } else if id.contains(token) {
-            score += 60;
+            score += if structured { 72 } else { 60 };
         }
         if first.contains(token) {
-            score += 18;
+            score += if structured { 42 } else { 18 };
         }
         if title.contains(token) {
-            score += 14;
+            score += if structured { 32 } else { 14 };
         }
         if branch.contains(token) {
-            score += 12;
+            score += if structured { 20 } else { 12 };
         }
         if model.contains(token) {
-            score += 12;
+            score += if structured { 18 } else { 12 };
         }
         if reasoning_effort.contains(token) {
-            score += 6;
+            score += if structured { 10 } else { 6 };
         }
         if cwd.contains(token) {
-            score += 8;
+            score += if structured { 12 } else { 8 };
         }
     }
 
     score
+}
+
+fn recover_find_rank_score(
+    row: &CodexRecoverRow,
+    normalized_query: &str,
+    tokens: &[String],
+    now_unix: i64,
+    target_path: Option<&Path>,
+    exact_cwd: bool,
+) -> i64 {
+    recover_row_score(row, normalized_query, tokens)
+        + codex_find_recency_bonus(row.updated_at, now_unix)
+        + codex_find_path_affinity(&row.cwd, target_path, exact_cwd)
 }
 
 fn build_recover_output(
@@ -5835,24 +6609,7 @@ fn build_recover_output(
     query: Option<String>,
     rows: Vec<CodexRecoverRow>,
 ) -> CodexRecoverOutput {
-    let candidates: Vec<CodexRecoverCandidate> = rows
-        .into_iter()
-        .map(|row| CodexRecoverCandidate {
-            id: row.id,
-            updated_at: format_unix_ts(row.updated_at),
-            updated_at_unix: row.updated_at,
-            cwd: row.cwd,
-            git_branch: row.git_branch.filter(|value| !value.trim().is_empty()),
-            model: row.model.filter(|value| !value.trim().is_empty()),
-            reasoning_effort: row
-                .reasoning_effort
-                .filter(|value| !value.trim().is_empty()),
-            title: row.title.filter(|value| !value.trim().is_empty()),
-            first_user_message: row
-                .first_user_message
-                .filter(|value| !value.trim().is_empty()),
-        })
-        .collect();
+    let candidates = rows_to_recover_candidates(rows);
 
     let recommended_route = infer_recover_route(
         target_path,
@@ -5869,6 +6626,26 @@ fn build_recover_output(
         summary,
         candidates,
     }
+}
+
+fn rows_to_recover_candidates(rows: Vec<CodexRecoverRow>) -> Vec<CodexRecoverCandidate> {
+    rows.into_iter()
+        .map(|row| CodexRecoverCandidate {
+            id: row.id,
+            updated_at: format_unix_ts(row.updated_at),
+            updated_at_unix: row.updated_at,
+            cwd: row.cwd,
+            git_branch: row.git_branch.filter(|value| !value.trim().is_empty()),
+            model: row.model.filter(|value| !value.trim().is_empty()),
+            reasoning_effort: row
+                .reasoning_effort
+                .filter(|value| !value.trim().is_empty()),
+            title: row.title.filter(|value| !value.trim().is_empty()),
+            first_user_message: row
+                .first_user_message
+                .filter(|value| !value.trim().is_empty()),
+        })
+        .collect()
 }
 
 fn infer_recover_route(
@@ -5961,6 +6738,19 @@ fn truncate_recover_text(value: &str) -> String {
     format!("{truncated}...")
 }
 
+fn truncate_search_excerpt_text(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.chars().count() <= max_chars {
+        return clean;
+    }
+    let keep = max_chars.saturating_sub(3);
+    let truncated: String = clean.chars().take(keep).collect();
+    format!("{truncated}...")
+}
+
 fn format_unix_ts(ts: i64) -> String {
     DateTime::<Utc>::from_timestamp(ts, 0)
         .map(|value| value.format("%Y-%m-%d %H:%M").to_string())
@@ -6049,6 +6839,7 @@ fn connect_codex_session(
     query: Vec<String>,
     exact_cwd: bool,
     json_output: bool,
+    scope: CodexFindScope,
     provider: Provider,
 ) -> Result<()> {
     if provider != Provider::Codex {
@@ -6064,7 +6855,20 @@ fn connect_codex_session(
             .next()
             .map(|row| (row, "latest recent session".to_string()))
     } else {
-        resolve_codex_session_lookup(&target_path, exact_cwd, &query_text, &normalized_query)?
+        resolve_codex_session_lookup(
+            &target_path,
+            exact_cwd,
+            &query_text,
+            &normalized_query,
+            scope,
+        )?
+        .or_else(|| {
+            search_codex_threads_for_find(Some(&target_path), exact_cwd, &query_text, 1, scope)
+                .ok()?
+                .into_iter()
+                .next()
+                .map(|row| (row, "matched session search query".to_string()))
+        })
     };
 
     let Some((row, reason)) = resolved else {
@@ -6092,6 +6896,8 @@ fn connect_codex_session(
                 "reason": reason,
                 "targetPath": target_path.display().to_string(),
                 "exactCwd": exact_cwd,
+                "recentDays": scope.effective_recent_days(),
+                "allHistory": scope.all_history,
                 "query": if query_text.is_empty() { None::<String> } else { Some(query_text) },
             }))
             .context("failed to encode codex connect JSON")?
@@ -9577,9 +10383,13 @@ fn build_codex_open_plan(
         );
     }
 
-    if let Some((session, reason)) =
-        resolve_codex_session_lookup(&target_path, exact_cwd, &query_text, &normalized_query)?
-    {
+    if let Some((session, reason)) = resolve_codex_session_lookup(
+        &target_path,
+        exact_cwd,
+        &query_text,
+        &normalized_query,
+        CodexFindScope::default(),
+    )? {
         return Ok(finalize_codex_open_plan(CodexOpenPlan {
             action: "resume".to_string(),
             route: "resume-existing".to_string(),
@@ -10202,6 +11012,7 @@ fn resolve_codex_session_lookup(
     exact_cwd: bool,
     query_text: &str,
     normalized_query: &str,
+    scope: CodexFindScope,
 ) -> Result<Option<(CodexRecoverRow, String)>> {
     if let Some(session_hint) = extract_codex_session_hint(normalized_query) {
         let rows = read_codex_threads_by_session_hint(&session_hint, 1)?;
@@ -10214,7 +11025,7 @@ fn resolve_codex_session_lookup(
     }
 
     if let Some((row, reason)) =
-        resolve_directional_session_lookup(target_path, exact_cwd, normalized_query)?
+        resolve_directional_session_lookup(target_path, exact_cwd, normalized_query, scope)?
     {
         return Ok(Some((row, reason)));
     }
@@ -10234,7 +11045,8 @@ fn resolve_codex_session_lookup(
     }
 
     if looks_like_session_lookup_query(normalized_query) {
-        let rows = search_codex_threads_for_find(Some(target_path), exact_cwd, query_text, 1)?;
+        let rows =
+            search_codex_threads_for_find(Some(target_path), exact_cwd, query_text, 1, scope)?;
         if let Some(row) = rows.into_iter().next() {
             return Ok(Some((row, "matched session search query".to_string())));
         }
@@ -10247,6 +11059,7 @@ fn resolve_directional_session_lookup(
     target_path: &Path,
     exact_cwd: bool,
     normalized_query: &str,
+    scope: CodexFindScope,
 ) -> Result<Option<(CodexRecoverRow, String)>> {
     if !looks_like_directional_session_query(normalized_query) {
         return Ok(None);
@@ -10268,7 +11081,7 @@ fn resolve_directional_session_lookup(
             .into_iter()
             .next()
     } else {
-        search_codex_threads_for_find(Some(target_path), exact_cwd, &anchor_text, 1)?
+        search_codex_threads_for_find(Some(target_path), exact_cwd, &anchor_text, 1, scope)?
             .into_iter()
             .next()
     };
@@ -14371,6 +15184,17 @@ mod tests {
             normalize_session_message("assistant", assistant_setup),
             None
         );
+
+        let context_packet = concat!(
+            "Context packet:\n",
+            "- agents: ci, designer\n\n",
+            "User request:\n",
+            "State your role in one sentence.\n"
+        );
+        assert_eq!(
+            normalize_session_message("user", context_packet).as_deref(),
+            Some("State your role in one sentence.")
+        );
     }
 
     #[test]
@@ -14426,6 +15250,7 @@ create table threads (
         assert_eq!(
             initial,
             CodexThreadSchema {
+                has_rollout_path: false,
                 has_model: false,
                 has_reasoning_effort: false,
             }
@@ -14443,10 +15268,33 @@ alter table threads add column reasoning_effort text;
         assert_eq!(
             updated,
             CodexThreadSchema {
+                has_rollout_path: false,
                 has_model: true,
                 has_reasoning_effort: true,
             }
         );
+    }
+
+    #[test]
+    fn codex_transcript_match_score_finds_phrase_in_assistant_message() {
+        let root = tempdir().expect("tempdir");
+        let session_file = root.path().join("codex.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-24T15:37:50Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"explain rust-analyzer server design\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-24T15:37:54Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"- keep LSP/JSON conversion at the outer boundary only\\n- maintain one mutable server state\"}]}}\n"
+            ),
+        )
+        .expect("write session file");
+
+        let score = codex_transcript_match_score(
+            &session_file,
+            "keep lsp/json conversion",
+            &codex_find_search_terms("keep lsp/json conversion"),
+        )
+        .expect("score transcript");
+        assert!(score >= 900);
     }
 
     #[test]
@@ -14526,6 +15374,7 @@ alter table threads add column reasoning_effort text;
         let mut rows = vec![
             CodexRecoverRow {
                 id: "019caaaa-0000-7000-8000-aaaaaaaaaaaa".to_string(),
+                rollout_path: None,
                 updated_at: 10,
                 cwd: "/tmp/repo".to_string(),
                 title: Some("one remaining unrelated issue".to_string()),
@@ -14536,6 +15385,7 @@ alter table threads add column reasoning_effort text;
             },
             CodexRecoverRow {
                 id: "019cdcff-0b3a-7a80-b22b-5ac4ff076eff".to_string(),
+                rollout_path: None,
                 updated_at: 5,
                 cwd: "/tmp/other".to_string(),
                 title: Some("something else".to_string()),
@@ -14546,9 +15396,164 @@ alter table threads add column reasoning_effort text;
             },
         ];
 
-        rank_recover_rows(&mut rows, Some("019cdcff"));
+        rank_recover_rows(&mut rows, Some("019cdcff"), None, false);
 
         assert_eq!(rows[0].id, "019cdcff-0b3a-7a80-b22b-5ac4ff076eff");
+    }
+
+    #[test]
+    fn rank_recover_rows_prefers_recent_match_when_scores_tie() {
+        let now_unix = codex_find_now_unix();
+        let mut rows = vec![
+            CodexRecoverRow {
+                id: "019caaaa-0000-7000-8000-aaaaaaaaaaaa".to_string(),
+                rollout_path: None,
+                updated_at: now_unix - (14 * 24 * 60 * 60),
+                cwd: "/tmp/repo".to_string(),
+                title: Some("thread read planner".to_string()),
+                first_user_message: Some("explain thread read flow".to_string()),
+                git_branch: Some("main".to_string()),
+                model: None,
+                reasoning_effort: None,
+            },
+            CodexRecoverRow {
+                id: "019cbbbb-0000-7000-8000-bbbbbbbbbbbb".to_string(),
+                rollout_path: None,
+                updated_at: now_unix - (2 * 24 * 60 * 60),
+                cwd: "/tmp/repo".to_string(),
+                title: Some("thread read planner".to_string()),
+                first_user_message: Some("explain thread read flow".to_string()),
+                git_branch: Some("main".to_string()),
+                model: None,
+                reasoning_effort: None,
+            },
+        ];
+
+        rank_recover_rows(&mut rows, Some("thread read"), None, false);
+
+        assert_eq!(rows[0].id, "019cbbbb-0000-7000-8000-bbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn rank_recover_rows_prefers_exact_target_path_over_descendant() {
+        let now_unix = codex_find_now_unix();
+        let target_path = Path::new("/tmp/run");
+        let mut rows = vec![
+            CodexRecoverRow {
+                id: "019caaaa-0000-7000-8000-aaaaaaaaaaaa".to_string(),
+                rollout_path: None,
+                updated_at: now_unix - (3 * 24 * 60 * 60),
+                cwd: "/tmp/run".to_string(),
+                title: Some("ci/cd designer".to_string()),
+                first_user_message: Some("plan ci/cd designer rollout".to_string()),
+                git_branch: Some("main".to_string()),
+                model: None,
+                reasoning_effort: None,
+            },
+            CodexRecoverRow {
+                id: "019cbbbb-0000-7000-8000-bbbbbbbbbbbb".to_string(),
+                rollout_path: None,
+                updated_at: now_unix - (60 * 60),
+                cwd: "/tmp/run/ide/designer".to_string(),
+                title: Some("ci/cd designer".to_string()),
+                first_user_message: Some("plan ci/cd designer rollout".to_string()),
+                git_branch: Some("main".to_string()),
+                model: None,
+                reasoning_effort: None,
+            },
+        ];
+
+        rank_recover_rows(&mut rows, Some("ci/cd designer"), Some(target_path), false);
+
+        assert_eq!(rows[0].id, "019caaaa-0000-7000-8000-aaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn rank_recover_rows_prefers_structured_query_token_match() {
+        let now_unix = codex_find_now_unix();
+        let target_path = Path::new("/tmp/run");
+        let mut rows = vec![
+            CodexRecoverRow {
+                id: "019caaaa-0000-7000-8000-aaaaaaaaaaaa".to_string(),
+                rollout_path: None,
+                updated_at: now_unix - (10 * 24 * 60 * 60),
+                cwd: "/tmp/run".to_string(),
+                title: Some("ci/cd rollout".to_string()),
+                first_user_message: Some(
+                    "ci/cd in both mac mini and github action mac minis".to_string(),
+                ),
+                git_branch: Some("main".to_string()),
+                model: None,
+                reasoning_effort: None,
+            },
+            CodexRecoverRow {
+                id: "019cbbbb-0000-7000-8000-bbbbbbbbbbbb".to_string(),
+                rollout_path: None,
+                updated_at: now_unix - (60 * 60),
+                cwd: "/tmp/run".to_string(),
+                title: Some("designer agent inventory".to_string()),
+                first_user_message: Some("designer agent summary for run".to_string()),
+                git_branch: Some("main".to_string()),
+                model: None,
+                reasoning_effort: None,
+            },
+        ];
+
+        rank_recover_rows(&mut rows, Some("ci/cd designer"), Some(target_path), false);
+
+        assert_eq!(rows[0].id, "019caaaa-0000-7000-8000-aaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn merge_index_find_matches_demotes_index_only_noise() {
+        let now_unix = codex_find_now_unix();
+        let target_path = Path::new("/tmp/run");
+        let metadata_row = CodexRecoverRow {
+            id: "019caaaa-0000-7000-8000-aaaaaaaaaaaa".to_string(),
+            rollout_path: None,
+            updated_at: now_unix - (2 * 24 * 60 * 60),
+            cwd: "/tmp/run".to_string(),
+            title: Some("ci/cd rollout".to_string()),
+            first_user_message: Some(
+                "ci/cd in both mac mini and github action mac minis".to_string(),
+            ),
+            git_branch: Some("main".to_string()),
+            model: None,
+            reasoning_effort: None,
+        };
+        let noisy_row = CodexRecoverRow {
+            id: "019cbbbb-0000-7000-8000-bbbbbbbbbbbb".to_string(),
+            rollout_path: None,
+            updated_at: now_unix - (60 * 60),
+            cwd: "/tmp/run".to_string(),
+            title: Some("check how many agents we have now defined in run".to_string()),
+            first_user_message: Some(
+                "check how many agents we have now defined in run".to_string(),
+            ),
+            git_branch: Some("main".to_string()),
+            model: None,
+            reasoning_effort: None,
+        };
+
+        let rows = merge_index_find_matches(
+            vec![
+                codex_session_index::CodexSessionIndexHit {
+                    row: noisy_row.clone(),
+                    score: 2400,
+                },
+                codex_session_index::CodexSessionIndexHit {
+                    row: metadata_row.clone(),
+                    score: 900,
+                },
+            ],
+            vec![metadata_row, noisy_row],
+            "ci/cd designer",
+            now_unix,
+            Some(target_path),
+            false,
+        );
+
+        assert_eq!(rows[0].id, "019caaaa-0000-7000-8000-aaaaaaaaaaaa");
     }
 
     #[test]
@@ -14618,10 +15623,7 @@ alter table threads add column reasoning_effort text;
             request.session_hints,
             vec!["019d035d-99b3-7461-9f15-73306348aa28".to_string()]
         );
-        assert_eq!(
-            request.user_request,
-            "study /tmp/review-sync-plan.md"
-        );
+        assert_eq!(request.user_request, "study /tmp/review-sync-plan.md");
         assert_eq!(request.count, 12);
     }
 
@@ -14671,6 +15673,7 @@ alter table threads add column reasoning_effort text;
             Some("019cdcff-0b3a-7a80-b22b-5ac4ff076eff".to_string()),
             vec![CodexRecoverRow {
                 id: "019cdcff-0b3a-7a80-b22b-5ac4ff076eff".to_string(),
+                rollout_path: None,
                 updated_at: 5,
                 cwd: "/tmp/other".to_string(),
                 title: Some("something else".to_string()),
@@ -15327,6 +16330,7 @@ alter table threads add column reasoning_effort text;
     fn select_codex_session_completion_summary_prefers_last_user_message() {
         let row = CodexRecoverRow {
             id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
+            rollout_path: None,
             updated_at: 0,
             cwd: "/tmp/repo".to_string(),
             title: Some("fallback title".to_string()),
@@ -15394,6 +16398,7 @@ L now delegates to j. old k moved to cl. old l moved to cf. old L moved to cF.",
 
         let row = CodexRecoverRow {
             id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
+            rollout_path: None,
             updated_at: 0,
             cwd: "/tmp/code/flow".to_string(),
             title: None,
@@ -15450,6 +16455,7 @@ l is now Kit. L now delegates to j. old k moved to cl. old l moved to cf. old L 
     fn ai_session_from_codex_recover_row_prefers_title_for_preview() {
         let session = ai_session_from_codex_recover_row(CodexRecoverRow {
             id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
+            rollout_path: None,
             updated_at: 1_773_776_290,
             cwd: "/tmp/repo".to_string(),
             title: Some("review github integration".to_string()),
@@ -15472,6 +16478,7 @@ l is now Kit. L now delegates to j. old k moved to cl. old l moved to cf. old L 
     fn ai_session_from_codex_recover_row_falls_back_to_first_user_message() {
         let session = ai_session_from_codex_recover_row(CodexRecoverRow {
             id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
+            rollout_path: None,
             updated_at: 1_773_776_290,
             cwd: "/tmp/repo".to_string(),
             title: None,

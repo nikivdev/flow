@@ -6,6 +6,10 @@ Flow reads local session stores, filters by current project path, and gives you 
 When you need to reopen a repo's session from another working directory, use `--path <project-root>` on `resume` or provider-specific `continue`.
 Cursor transcripts are supported for reading only.
 
+Architecture note:
+
+- for the underlying transport split between wrapped Codex CLI, `codexd`, and `codex app-server`, see `docs/codex-interface.md`
+
 ## Quick Start
 
 ```bash
@@ -27,6 +31,12 @@ f ai claude resume <session-id-or-name>
 f ai codex resume <session-id-or-name>
 f ai codex resume --path ~/work/example-project
 f ai codex continue --path ~/work/example-project
+f ai codex find --path ~/repos/openai/codex "where does codex store"
+f ai codex find --all-history --path ~/repos/openai/codex "older migration plan"
+f ai codex find --recent-days 30 --path ~/repos/openai/codex "thread/read"
+f ai codex find --json --limit 5 --path ~/repos/openai/codex "thread/read"
+f codex connect --path ~/repos/openai/codex --exact-cwd --json "app-server"
+f codex connect --all-history --path ~/repos/openai/codex "old designer cutover"
 f ai cursor context - /path/to/repo 3
 f cursor copy
 
@@ -100,6 +110,39 @@ Behavior:
 
 This keeps prompt cost flat unless Flow has a strong reason to recover or unroll context.
 Use `f codex doctor` to confirm whether wrapper transport, runtime skills, and context budgets are actually active for the current repo.
+
+### Codex connect and find
+
+`f codex connect` and `f ai codex find` now use a Flow-managed local session-search index before
+falling back to direct SQLite/transcript scans. The index is repo-scoped at query time, rebuilt
+from the Codex state DB when needed, and keeps transcript snippets for better recall on natural
+language queries.
+
+By default, search now prefers sessions from roughly the last 7 days for faster and more accurate
+ranking on active work, then automatically widens back to the full session history when the recent
+window looks weak or sparse.
+
+Useful commands:
+
+```bash
+f codex connect --path ~/repos/openai/codex --exact-cwd "app-server"
+f codex connect --path ~/repos/openai/codex --exact-cwd --json "thread/read"
+f codex connect --all-history --path ~/repos/openai/codex "old migration plan"
+f ai codex find --path ~/repos/openai/codex "where does codex store"
+f ai codex find --recent-days 30 --path ~/repos/openai/codex "thread/read"
+f ai codex find --json --limit 5 --path ~/repos/openai/codex "where does codex store"
+```
+
+Behavior:
+
+- `connect` stays the interactive handoff path and returns the exact session match
+- `connect --json` prints the selected session instead of attaching
+- `find` still resumes the top hit
+- `find --json` is read-only and prints ranked candidates for inspection/eval work
+- by default both commands prefer the last 7 days first, then widen if the recent window is weak
+- use `--recent-days <N>` to widen the preferred recent window without fully disabling recency bias
+- use `--all-history` to search the full history immediately
+- if confidence is weak or the index misses, Flow still falls back to the older metadata and transcript paths instead of silently opening an arbitrary session
 
 ### Codex sessions after a crash or restart
 
@@ -234,8 +277,8 @@ cat <<'EOF' | f codex runtime write-plan --title "Example Plan"
 EOF
 ```
 
-By default this writes to today's `~/plan/<day-of-month>/` bucket, for example
-`~/plan/23/` on the 23rd day of the month.
+By default this writes to today's `~/docs/plan/<day-of-month>/` bucket, for
+example `~/docs/plan/23/` on the 23rd day of the month.
 
 ### Run-owned agent bridge
 
