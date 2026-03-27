@@ -47,6 +47,8 @@ enum CodexdRequest {
         exact_cwd: bool,
         query: String,
         limit: usize,
+        #[serde(default)]
+        scope: ai::CodexFindScope,
     },
     ProjectAiManifest {
         target_path: String,
@@ -327,13 +329,15 @@ pub(crate) fn query_find(
     exact_cwd: bool,
     query: &str,
     limit: usize,
+    scope: ai::CodexFindScope,
 ) -> Result<Vec<ai::CodexRecoverRow>> {
     ensure_running()?;
-    let response = send_request(&CodexdRequest::Find {
+    let response = send_request_with_restart(CodexdRequest::Find {
         target_path: target_path.map(|path| path.display().to_string()),
         exact_cwd,
         query: query.to_string(),
         limit,
+        scope,
     })?;
     if response.ok {
         Ok(response.rows)
@@ -526,11 +530,13 @@ fn handle_request(request: CodexdRequest) -> CodexdResponse {
             exact_cwd,
             query,
             limit,
+            scope,
         } => match ai::search_codex_threads_for_find_local(
             target_path.as_deref().map(Path::new),
             exact_cwd,
             &query,
             limit,
+            scope,
         ) {
             Ok(rows) => CodexdResponse {
                 ok: true,

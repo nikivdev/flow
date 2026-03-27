@@ -604,10 +604,11 @@ fn derive_plan_title(body: &str) -> String {
     "Plan".to_string()
 }
 
-fn home_plan_root() -> Option<PathBuf> {
+pub(crate) fn default_plan_root() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("plan"))
+        .map(|home| home.join("docs").join("plan"))
+        .unwrap_or_else(|| PathBuf::from("./plan"))
 }
 
 fn today_plan_bucket_name() -> String {
@@ -615,16 +616,15 @@ fn today_plan_bucket_name() -> String {
 }
 
 fn resolve_plan_root(dir: Option<&str>) -> PathBuf {
-    let home_root = home_plan_root();
+    let default_root = default_plan_root();
     let root = dir
         .map(|value| PathBuf::from(shellexpand::tilde(value).into_owned()))
-        .or_else(|| home_root.clone())
-        .unwrap_or_else(|| PathBuf::from("./plan"));
+        .unwrap_or_else(|| default_root.clone());
 
-    match home_root {
-        Some(home_root) if root == home_root => root.join(today_plan_bucket_name()),
-        None if dir.is_none() => root.join(today_plan_bucket_name()),
-        _ => root,
+    if root == default_root {
+        root.join(today_plan_bucket_name())
+    } else {
+        root
     }
 }
 
@@ -668,7 +668,7 @@ fn build_plan_skill_markdown(skill_name: &str) -> String {
     format!(
         r#"---
 name: {skill_name}
-description: Write the finished markdown plan for this task into today's `~/plan/<day-of-month>` bucket using `f codex runtime write-plan`. Use only for the current task.
+description: Write the finished markdown plan for this task into today's `~/docs/plan/<day-of-month>` bucket using `f codex runtime write-plan`. Use only for the current task.
 policy:
   allow_implicit_invocation: false
 ---
@@ -691,7 +691,7 @@ The command prints the absolute path after writing.
 
 ## Hard rules
 
-- write the finished plan to today's `~/plan/<day-of-month>` bucket, for example `~/plan/23`
+- write the finished plan to today's `~/docs/plan/<day-of-month>` bucket, for example `~/docs/plan/23`
 - keep the chat response short
 - end with the absolute path on its own line
 - do not leave the plan only in chat when the user explicitly asked to write it
@@ -722,6 +722,7 @@ fn looks_like_plan_request(query: &str) -> bool {
         "save the plan",
         "document the plan",
         "document this plan",
+        "put the plan in ~/docs/plan",
         "put the plan in ~/plan",
         "write this up as a plan",
         "turn this into a plan",
@@ -1321,40 +1322,40 @@ mod tests {
         assert!(looks_like_plan_request("write plan"));
         assert!(looks_like_plan_request("make a plan for this"));
         assert!(looks_like_plan_request("Please document the plan"));
+        assert!(looks_like_plan_request("put the plan in ~/docs/plan"));
         assert!(!looks_like_plan_request("document this feature"));
         assert!(!looks_like_plan_request("planning support cleanup"));
         assert!(!looks_like_plan_request("review this plan tomorrow"));
     }
 
     #[test]
-    fn resolve_plan_root_buckets_home_plan_root() {
+    fn resolve_plan_root_buckets_default_docs_plan_root() {
         let temp = tempdir().expect("tempdir");
-        let home_plan = temp.path().join("plan");
+        let docs_plan = temp.path().join("docs").join("plan");
         let other_root = temp.path().join("elsewhere");
 
         assert_eq!(
-            resolve_plan_root_for_test(Some(&home_plan), Some(home_plan.as_path()), "23"),
-            home_plan.join("23")
+            resolve_plan_root_for_test(Some(&docs_plan), &docs_plan, "23"),
+            docs_plan.join("23")
         );
         assert_eq!(
-            resolve_plan_root_for_test(Some(&other_root), Some(home_plan.as_path()), "23"),
+            resolve_plan_root_for_test(Some(&other_root), &docs_plan, "23"),
             other_root
         );
     }
 
     fn resolve_plan_root_for_test(
         root: Option<&Path>,
-        home_root: Option<&Path>,
+        default_root: &Path,
         bucket_name: &str,
     ) -> PathBuf {
         let resolved = root
             .map(Path::to_path_buf)
-            .or_else(|| home_root.map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("./plan"));
-        match home_root {
-            Some(home_root) if resolved == home_root => resolved.join(bucket_name),
-            None if root.is_none() => resolved.join(bucket_name),
-            _ => resolved,
+            .unwrap_or_else(|| default_root.to_path_buf());
+        if resolved == default_root {
+            resolved.join(bucket_name)
+        } else {
+            resolved
         }
     }
 

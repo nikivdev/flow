@@ -29,6 +29,10 @@ path = "src/main.rs"
 name = "lin"
 path = "src/bin/lin.rs"
 
+[[bin]]
+name = "flow-workspace-bootstrap"
+path = "src/bin/flow-workspace-bootstrap.rs"
+
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 tower-http = { version = "0.6", features = ["cors"] }
