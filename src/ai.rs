@@ -15,7 +15,8 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -3804,6 +3805,12 @@ struct CodexSessionReportBaseline {
     tree_ids: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug)]
+struct CodexSessionReportHandle {
+    cancel: Arc<AtomicBool>,
+    report_path: PathBuf,
+}
+
 fn codex_session_report_path_from_env() -> Option<PathBuf> {
     env::var(FLOW_CODEX_SESSION_REPORT_PATH_ENV)
         .ok()
@@ -3901,16 +3908,25 @@ fn find_new_codex_session_report_id(
         .map(|row| row.id)
 }
 
-fn start_new_codex_session_reporter(report_path: PathBuf, target_path: PathBuf) {
+fn start_new_codex_session_reporter(
+    report_path: PathBuf,
+    target_path: PathBuf,
+) -> CodexSessionReportHandle {
     let baseline = capture_codex_session_report_baseline(&target_path);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_worker = Arc::clone(&cancel);
+    let worker_report_path = report_path.clone();
     thread::spawn(move || {
         let started_at = Instant::now();
         while started_at.elapsed() < CODEX_SESSION_REPORT_POLL_TIMEOUT {
+            if cancel_worker.load(Ordering::Relaxed) {
+                return;
+            }
             if let Some(session_id) = find_new_codex_session_report_id(&target_path, &baseline) {
-                if let Err(err) = write_codex_session_report(&report_path, &session_id) {
+                if let Err(err) = write_codex_session_report(&worker_report_path, &session_id) {
                     debug!(
                         error = %err,
-                        path = %report_path.display(),
+                        path = %worker_report_path.display(),
                         "failed to write new Codex session report"
                     );
                 }
@@ -3920,13 +3936,18 @@ fn start_new_codex_session_reporter(report_path: PathBuf, target_path: PathBuf) 
             thread::sleep(CODEX_SESSION_REPORT_POLL_INTERVAL);
         }
 
-        clear_pending_codex_session_report(&report_path);
+        clear_pending_codex_session_report(&worker_report_path);
         debug!(
-            path = %report_path.display(),
+            path = %worker_report_path.display(),
             target_path = %target_path.display(),
             "timed out while waiting for a new Codex session id to appear"
         );
     });
+
+    CodexSessionReportHandle {
+        cancel,
+        report_path,
+    }
 }
 
 fn launch_session_for_target(
@@ -4531,15 +4552,34 @@ fn launch_codex_resume_picker() -> Result<bool> {
     Ok(status.success())
 }
 
-fn launch_codex_continue_last_for_target(target_path: Option<&Path>) -> Result<bool> {
+fn launch_codex_continue_last_for_target(
+    target_path: Option<&Path>,
+    require_existing_session: bool,
+) -> Result<bool> {
     let workdir = target_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    if let Some(session_id) = read_recent_codex_threads(&workdir, true, 1, None)?
-        .first()
-        .map(|row| row.id.clone())
+    let report_path = codex_session_report_path_from_env();
+    let recent_session_id = if require_existing_session || report_path.is_some() {
+        read_recent_codex_threads(&workdir, true, 1, None)?
+            .first()
+            .map(|row| row.id.clone())
+    } else {
+        None
+    };
+    if require_existing_session && recent_session_id.is_none() {
+        return Ok(false);
+    }
+    if let (Some(report_path), Some(session_id)) =
+        (report_path.as_deref(), recent_session_id.as_deref())
     {
-        maybe_write_codex_session_report(&session_id);
+        if let Err(err) = write_codex_session_report(report_path, session_id) {
+            debug!(
+                error = %err,
+                path = %report_path.display(),
+                "failed to write Codex session report"
+            );
+        }
     }
     let trace = new_codex_session_trace("continue_last_session");
     let mut command = Command::new(configured_codex_bin_for_workdir(&workdir));
@@ -4800,7 +4840,7 @@ fn continue_session(
 
     let launched = match provider {
         Provider::Claude => launch_claude_continue()?,
-        Provider::Codex => launch_codex_continue_last_for_target(None)?,
+        Provider::Codex => launch_codex_continue_last_for_target(None, false)?,
         Provider::Cursor => false,
         Provider::All => false,
     };
@@ -4815,7 +4855,7 @@ fn continue_session(
 /// Quick start: continue last session or create new one with dangerous flags.
 pub fn quick_start_session(provider: Provider) -> Result<()> {
     if provider == Provider::Codex {
-        let launched = launch_codex_continue_last_for_target(None)?;
+        let launched = launch_codex_continue_last_for_target(None, false)?;
         if !launched {
             new_session(provider)?;
         }
@@ -4891,24 +4931,29 @@ fn new_session_for_target(
             if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
                 command.arg(prompt);
             }
-            let report_path = codex_session_report_path_from_env();
-            if let Some(report_path) = report_path.clone() {
+            let report_handle = if let Some(report_path) = codex_session_report_path_from_env() {
                 if let Err(err) =
                     write_codex_session_report(&report_path, CODEX_SESSION_REPORT_PENDING)
                 {
                     debug!(
                         error = %err,
                         path = %report_path.display(),
-                        "failed to clear stale Codex session report before new launch"
+                        "failed to write pending Codex session report before new launch"
                     );
                 }
-                start_new_codex_session_reporter(report_path, workdir.clone());
-            }
+                Some(start_new_codex_session_reporter(
+                    report_path,
+                    workdir.clone(),
+                ))
+            } else {
+                None
+            };
             let status = command.status().with_context(|| "failed to launch codex")?;
-            if !status.success()
-                && let Some(report_path) = report_path.as_deref()
-            {
-                clear_pending_codex_session_report(report_path);
+            if !status.success() {
+                if let Some(report_handle) = report_handle {
+                    report_handle.cancel.store(true, Ordering::Relaxed);
+                    clear_pending_codex_session_report(&report_handle.report_path);
+                }
             }
             if status.success() && direct_log {
                 record_direct_codex_launch_event(
@@ -7034,7 +7079,7 @@ fn connect_codex_session(
     let query_text = query.join(" ").trim().to_string();
     if should_fast_path_codex_connect(&query_text, exact_cwd, json_output) {
         ensure_provider_tty(Provider::Codex, "connect")?;
-        if launch_codex_continue_last_for_target(Some(&target_path))? {
+        if launch_codex_continue_last_for_target(Some(&target_path), true)? {
             record_codex_connect_activity(
                 "resume latest recent session",
                 "latest",
@@ -15426,6 +15471,24 @@ mod tests {
         ));
         assert!(!should_fast_path_codex_connect("", false, false));
         assert!(!should_fast_path_codex_connect("", true, true));
+    }
+
+    #[test]
+    fn clear_pending_codex_session_report_only_removes_pending_marker() {
+        let root = tempdir().expect("tempdir");
+        let report_path = root.path().join("codex-session-report.txt");
+
+        fs::write(&report_path, format!("{CODEX_SESSION_REPORT_PENDING}\n"))
+            .expect("write pending marker");
+        clear_pending_codex_session_report(&report_path);
+        assert!(!report_path.exists());
+
+        fs::write(&report_path, "session-123\n").expect("write session id");
+        clear_pending_codex_session_report(&report_path);
+        assert_eq!(
+            fs::read_to_string(&report_path).expect("read session id"),
+            "session-123\n"
+        );
     }
 
     #[test]
