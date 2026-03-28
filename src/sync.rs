@@ -248,6 +248,31 @@ fn resolve_home_branch_sync_target(
     })
 }
 
+fn origin_fetch_branches_for_jj_sync(
+    current_branch: &str,
+    origin_default_branch: Option<&str>,
+    home_branch_sync_target: Option<&HomeBranchSyncTarget>,
+) -> Vec<String> {
+    let mut branches = Vec::new();
+
+    if home_branch_sync_target.is_none() {
+        let current_branch = current_branch.trim();
+        if !current_branch.is_empty() {
+            branches.push(current_branch.to_string());
+        }
+    }
+
+    if let Some(default_branch) = origin_default_branch
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        && !branches.iter().any(|branch| branch == default_branch)
+    {
+        branches.push(default_branch.to_string());
+    }
+
+    branches
+}
+
 fn select_jj_sync_branch(
     git_head_ref: &str,
     current_bookmarks: &[String],
@@ -2629,46 +2654,23 @@ fn run_jj_sync(
         let mut failures: Vec<String> = Vec::new();
 
         if has_origin && origin_reachable {
-            track_remote_ref(&mut tracked_refs, repo_root, "origin", &current_branch);
-            recorder.record(
-                "jj",
-                format!("jj git fetch --remote origin --branch {}", current_branch),
-            );
-            if let Err(err) = jj_run_in(
-                repo_root,
-                &[
-                    "--quiet",
-                    "git",
-                    "fetch",
-                    "--remote",
-                    "origin",
-                    "--branch",
-                    &current_branch,
-                ],
+            for branch in origin_fetch_branches_for_jj_sync(
+                &current_branch,
+                origin_default_branch.as_deref(),
+                home_branch_sync_target.as_ref(),
             ) {
-                failures.push(format!("origin: {}", err));
-            } else {
-                fetched_any = true;
-            }
-            if let Some(default_branch) = origin_default_branch.as_deref() {
-                track_remote_ref(&mut tracked_refs, repo_root, "origin", default_branch);
+                track_remote_ref(&mut tracked_refs, repo_root, "origin", &branch);
                 recorder.record(
                     "jj",
-                    format!("jj git fetch --remote origin --branch {}", default_branch),
+                    format!("jj git fetch --remote origin --branch {}", branch),
                 );
                 if let Err(err) = jj_run_in(
                     repo_root,
                     &[
-                        "--quiet",
-                        "git",
-                        "fetch",
-                        "--remote",
-                        "origin",
-                        "--branch",
-                        default_branch,
+                        "--quiet", "git", "fetch", "--remote", "origin", "--branch", &branch,
                     ],
                 ) {
-                    failures.push(format!("origin default {}: {}", default_branch, err));
+                    failures.push(format!("origin {}: {}", branch, err));
                 } else {
                     fetched_any = true;
                 }
@@ -5032,6 +5034,31 @@ mod tests {
         assert!(home_branch_mode_active("nikiv", Some("nikiv")));
         assert!(!home_branch_mode_active("review/demo", Some("nikiv")));
         assert!(!home_branch_mode_active("nikiv", None));
+    }
+
+    #[test]
+    fn origin_fetch_branches_for_home_branch_mode_skips_local_home_branch() {
+        let home_target = HomeBranchSyncTarget {
+            home_branch: "nikiv".to_string(),
+            origin_default_branch: "main".to_string(),
+        };
+
+        assert_eq!(
+            origin_fetch_branches_for_jj_sync("nikiv", Some("main"), Some(&home_target)),
+            vec!["main".to_string()]
+        );
+    }
+
+    #[test]
+    fn origin_fetch_branches_for_regular_sync_dedupes_branches() {
+        assert_eq!(
+            origin_fetch_branches_for_jj_sync("feature/demo", Some("main"), None),
+            vec!["feature/demo".to_string(), "main".to_string()]
+        );
+        assert_eq!(
+            origin_fetch_branches_for_jj_sync("main", Some("main"), None),
+            vec!["main".to_string()]
+        );
     }
 
     #[test]

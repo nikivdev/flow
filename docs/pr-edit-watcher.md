@@ -68,7 +68,7 @@ If the frontmatter is missing, Flow may fall back to `~/.flow/pr-edit/.index.jso
 - Finds the open PR for the current branch (fallback: queued commit PR)
 - Creates `~/.flow/pr-edit/<project>-<pr>.md` if missing
 - Ensures the file contains PR frontmatter
-- Opens the file in Zed Preview
+- Opens the file in Zed
 - Starts a foreground watcher that syncs on save (Ctrl-C to stop)
 
 ## Status JSON
