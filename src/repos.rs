@@ -70,12 +70,19 @@ pub fn clone_git_like(opts: CloneOpts) -> Result<()> {
 }
 
 fn open_in_zed(path: &std::path::Path) -> Result<()> {
-    std::process::Command::new("open")
-        .args(["-a", "/Applications/Zed Preview.app"])
-        .arg(path)
-        .status()
-        .context("failed to open Zed")?;
-    Ok(())
+    let try_open = |app: &str| -> Result<()> {
+        let status = std::process::Command::new("open")
+            .args(["-a", app])
+            .arg(path)
+            .status()
+            .with_context(|| format!("failed to open {app}"))?;
+        if !status.success() {
+            bail!("{app} exited with status {status}");
+        }
+        Ok(())
+    };
+
+    try_open("/Applications/Zed.app").or_else(|_| try_open("/Applications/Zed Preview.app"))
 }
 
 /// Fuzzy search through repos in ~/repos and print the selected path.

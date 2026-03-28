@@ -9606,7 +9606,7 @@ pub fn run_pr(opts: PrOpts) -> Result<()> {
         // Convenience: `f pr open` opens the PR for the current branch (or queued commit) without
         // creating a new commit.
         [a] if a == "open" => return run_pr_open(&repo_root, &opts),
-        // Convenience: `f pr open edit` opens a local markdown file in Zed Preview and syncs PR
+        // Convenience: `f pr open edit` opens a local markdown file in Zed and syncs PR
         // title/body on save.
         [a, b] if a == "open" && b == "edit" => return run_pr_open_edit(&repo_root, &opts),
         _ => {}
@@ -11594,17 +11594,20 @@ fn flow_project_name(repo_root: &Path) -> String {
 }
 
 fn open_in_zed_preview(path: &Path) -> Result<()> {
-    // Prefer Zed Preview if installed, otherwise fall back to Zed.
+    // Prefer the local Zed.app fork and fall back to Preview if that app is not installed.
     let try_open = |app: &str| -> Result<()> {
-        Command::new("open")
+        let status = Command::new("open")
             .args(["-a", app])
             .arg(path)
             .status()
             .with_context(|| format!("failed to open {app}"))?;
+        if !status.success() {
+            bail!("{app} exited with status {status}");
+        }
         Ok(())
     };
 
-    try_open("/Applications/Zed Preview.app").or_else(|_| try_open("/Applications/Zed.app"))
+    try_open("/Applications/Zed.app").or_else(|_| try_open("/Applications/Zed Preview.app"))
 }
 
 fn parse_pr_edit_markdown(text: &str) -> Result<(String, String)> {
