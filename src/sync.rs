@@ -134,6 +134,12 @@ enum JjWorkingCopyUpdate {
     RebaseToDest(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HomeBranchSyncTarget {
+    home_branch: String,
+    origin_default_branch: String,
+}
+
 // Use the Claude family alias so sync always targets the latest Opus model.
 const SYNC_CLAUDE_MODEL: &str = "opus";
 const JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS: &[u64] = &[150, 400, 900];
@@ -215,6 +221,31 @@ fn jj_working_copy_update(
     } else {
         JjWorkingCopyUpdate::RebaseToDest(dest.to_string())
     }
+}
+
+fn home_branch_mode_active(current_branch: &str, home_branch: Option<&str>) -> bool {
+    matches!(home_branch, Some(home_branch) if current_branch == home_branch)
+}
+
+fn resolve_home_branch_sync_target(
+    repo_root: &Path,
+    current_branch: &str,
+    default_branch: &str,
+) -> Option<HomeBranchSyncTarget> {
+    let home_branch = config::resolved_home_branch_for_repo(repo_root, Some(default_branch))?;
+    if !home_branch_mode_active(current_branch, Some(&home_branch)) {
+        return None;
+    }
+
+    let origin_default_branch = resolve_remote_default_branch_in(repo_root, "origin")?;
+    if origin_default_branch == current_branch {
+        return None;
+    }
+
+    Some(HomeBranchSyncTarget {
+        home_branch,
+        origin_default_branch,
+    })
 }
 
 fn select_jj_sync_branch(
@@ -761,10 +792,25 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
         let push_remote_reachable =
             remote_probe_cache.remote_reachable(repo_root_path, &push_remote);
         let origin_reachable = remote_probe_cache.remote_reachable(repo_root_path, "origin");
+        let default_branch = jj_default_branch(repo_root_path);
+        let home_branch_sync_target = if has_origin && origin_reachable {
+            resolve_home_branch_sync_target(repo_root_path, current, &default_branch)
+        } else {
+            None
+        };
+        if let Some(target) = home_branch_sync_target.as_ref() {
+            recorder.record(
+                "mode",
+                format!(
+                    "home branch mode: syncing origin/{} into {}",
+                    target.origin_default_branch, target.home_branch
+                ),
+            );
+        }
 
         // Step 1: Pull from tracking branch.
         let mut tracking = resolve_tracking_remote_branch_in(repo_root_path, Some(current));
-        if current != "HEAD" && has_push_remote {
+        if home_branch_sync_target.is_none() && current != "HEAD" && has_push_remote {
             let should_retarget = tracking
                 .as_ref()
                 .map(|(remote, _)| remote != &push_remote)
@@ -785,7 +831,19 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
             }
         }
 
-        if let Some((tracking_remote, tracking_branch)) = tracking.as_ref() {
+        if let Some(target) = home_branch_sync_target.as_ref() {
+            sync_progressln!(
+                "==> Home branch mode: skipping tracking pull; trunk is origin/{}...",
+                target.origin_default_branch
+            );
+            recorder.record(
+                "pull",
+                format!(
+                    "skipped (home branch mode; using origin/{})",
+                    target.origin_default_branch
+                ),
+            );
+        } else if let Some((tracking_remote, tracking_branch)) = tracking.as_ref() {
             let tracking_before_tip =
                 remote_branch_tip(repo_root_path, &tracking_remote, &tracking_branch);
             let tracking_reachable =
@@ -929,7 +987,30 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
 
         // Step 2: Sync upstream if it exists. If no upstream remote is configured and we're on
         // a feature branch, fall back to syncing from origin's default branch.
-        if has_upstream {
+        if let Some(target) = home_branch_sync_target.as_ref() {
+            sync_progressln!(
+                "Syncing origin/{} into {}...",
+                target.origin_default_branch,
+                current
+            );
+            recorder.record(
+                "upstream",
+                format!(
+                    "home branch mode: syncing origin/{} into {}",
+                    target.origin_default_branch, current
+                ),
+            );
+            if let Err(e) = sync_origin_default_internal(
+                repo_root_path,
+                current,
+                &target.origin_default_branch,
+                auto_fix,
+                &mut recorder,
+            ) {
+                restore_stash(repo_root_path, stashed);
+                return Err(e);
+            }
+        } else if has_upstream {
             let upstream_branch = resolve_upstream_branch_in(repo_root_path, Some(current));
             let upstream_sync_remote = if use_origin_for_upstream {
                 "origin"
@@ -2503,7 +2584,28 @@ fn run_jj_sync(
     let use_origin_for_upstream =
         origin_matches_upstream && remote_probe_cache.remote_reachable(repo_root, "origin");
     let should_push = sync_should_push(cmd);
-    let origin_default_branch = if !has_upstream && has_origin && origin_reachable {
+    let home_branch_sync_target = if has_origin && origin_reachable {
+        resolve_home_branch_sync_target(repo_root, &current_branch, &default_branch)
+    } else {
+        None
+    };
+    if let Some(target) = home_branch_sync_target.as_ref() {
+        sync_progressln!(
+            "Home branch mode: syncing origin/{} into {}...",
+            target.origin_default_branch,
+            target.home_branch
+        );
+        recorder.record(
+            "mode",
+            format!(
+                "home branch mode: syncing origin/{} into {}",
+                target.origin_default_branch, target.home_branch
+            ),
+        );
+    }
+    let origin_default_branch = if let Some(target) = home_branch_sync_target.as_ref() {
+        Some(target.origin_default_branch.clone())
+    } else if !has_upstream && has_origin && origin_reachable {
         origin_default_branch_for_feature_sync(repo_root, &current_branch)
     } else {
         None
@@ -2511,10 +2613,14 @@ fn run_jj_sync(
 
     // Keep jj fetch output small. In most workflows, only the current branch + upstream trunk are
     // needed for a sync/rebase.
-    let mut upstream_branch_opt = resolve_upstream_branch_in(repo_root, Some(&current_branch));
+    let mut upstream_branch_opt = if home_branch_sync_target.is_some() {
+        None
+    } else {
+        resolve_upstream_branch_in(repo_root, Some(&current_branch))
+    };
     let upstream_branch_for_fetch = upstream_branch_opt
         .clone()
-        .unwrap_or_else(|| jj_default_branch(repo_root));
+        .unwrap_or_else(|| default_branch.clone());
 
     let mut tracked_refs: Vec<TrackedRemoteRef> = Vec::new();
     if has_origin || has_upstream {
@@ -2608,7 +2714,7 @@ fn run_jj_sync(
             recorder.record("jj", format!("skip {} (unreachable)", push_remote));
         }
 
-        if has_upstream && !use_origin_for_upstream {
+        if has_upstream && home_branch_sync_target.is_none() && !use_origin_for_upstream {
             track_remote_ref(
                 &mut tracked_refs,
                 repo_root,
@@ -2656,6 +2762,7 @@ fn run_jj_sync(
                 fetched_any = true;
             }
         } else if has_upstream
+            && home_branch_sync_target.is_none()
             && use_origin_for_upstream
             && upstream_branch_for_fetch != current_branch
         {
@@ -2698,7 +2805,9 @@ fn run_jj_sync(
             let _ = jj_run_in(repo_root, &["--quiet", "git", "import"]);
             print_fetched_remote_commits(repo_root, &tracked_refs, recorder, cmd.compact);
             // Re-resolve after fetch/import so we can pick up newly discovered upstream refs.
-            upstream_branch_opt = resolve_upstream_branch_in(repo_root, Some(&current_branch));
+            if home_branch_sync_target.is_none() {
+                upstream_branch_opt = resolve_upstream_branch_in(repo_root, Some(&current_branch));
+            }
         } else if !failures.is_empty() {
             bail!("jj git fetch failed: {}", failures.join(", "));
         }
@@ -2712,7 +2821,9 @@ fn run_jj_sync(
         has_upstream && normalize_git_url(&push_remote_url) == normalize_git_url(&upstream_url);
 
     let mut dest_ref: Option<String> = None;
-    if has_upstream {
+    if let Some(target) = home_branch_sync_target.as_ref() {
+        dest_ref = Some(format!("{}@origin", target.origin_default_branch));
+    } else if has_upstream {
         if let Some(branch) = upstream_branch_opt {
             let dest_remote = if use_origin_for_upstream {
                 "origin"
@@ -3553,24 +3664,10 @@ fn jj_workspace_healthy(repo_root: &Path) -> bool {
 }
 
 fn jj_default_branch(repo_root: &Path) -> String {
-    let local_config = repo_root.join("flow.toml");
-    if local_config.exists() {
-        if let Ok(cfg) = config::load(&local_config) {
-            if let Some(jj_cfg) = cfg.jj {
-                if let Some(branch) = jj_cfg.default_branch {
-                    return branch;
-                }
-            }
-        }
-    }
-
-    let global_config = config::default_config_path();
-    if global_config.exists() {
-        if let Ok(cfg) = config::load(&global_config) {
-            if let Some(jj_cfg) = cfg.jj {
-                if let Some(branch) = jj_cfg.default_branch {
-                    return branch;
-                }
+    if let Some(jj_cfg) = config::effective_jj_config_for_repo(repo_root) {
+        if let Some(branch) = jj_cfg.default_branch {
+            if !branch.trim().is_empty() {
+                return branch;
             }
         }
     }
@@ -4839,6 +4936,39 @@ fn build_sync_plan_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    fn git(repo_root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(repo_root)
+            .args(args)
+            .status()
+            .expect("git command should run");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    fn git_capture_for_test(repo_root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(repo_root)
+            .args(args)
+            .output()
+            .expect("git command should run");
+        assert!(output.status.success(), "git {:?} failed", args);
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_git_repo(repo_root: &Path) {
+        git(repo_root, &["init", "-q"]);
+        git(repo_root, &["config", "user.name", "Flow Tests"]);
+        git(repo_root, &["config", "user.email", "flow@example.com"]);
+        fs::write(repo_root.join("README.md"), "init\n").expect("write README");
+        git(repo_root, &["add", "README.md"]);
+        git(repo_root, &["commit", "-q", "-m", "init"]);
+        git(repo_root, &["branch", "-M", "main"]);
+    }
 
     #[test]
     fn parse_branch_merge_ref_strips_heads_prefix() {
@@ -4894,6 +5024,76 @@ mod tests {
         assert_eq!(
             jj_working_copy_update(false, "home", "main@origin"),
             JjWorkingCopyUpdate::RebaseToDest("main@origin".to_string())
+        );
+    }
+
+    #[test]
+    fn home_branch_mode_active_only_for_matching_branch() {
+        assert!(home_branch_mode_active("nikiv", Some("nikiv")));
+        assert!(!home_branch_mode_active("review/demo", Some("nikiv")));
+        assert!(!home_branch_mode_active("nikiv", None));
+    }
+
+    #[test]
+    fn resolve_home_branch_sync_target_uses_origin_default_for_home_branch() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+        init_git_repo(repo_root);
+        git(repo_root, &["checkout", "-q", "-b", "nikiv"]);
+
+        let main_sha = git_capture_for_test(repo_root, &["rev-parse", "refs/heads/main"]);
+        git(
+            repo_root,
+            &["update-ref", "refs/remotes/origin/main", &main_sha],
+        );
+        git(
+            repo_root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        fs::write(
+            repo_root.join("flow.toml"),
+            "[jj]\nhome_branch = \"nikiv\"\n",
+        )
+        .expect("write flow.toml");
+
+        let target = resolve_home_branch_sync_target(repo_root, "nikiv", "main")
+            .expect("home branch sync target");
+        assert_eq!(target.home_branch, "nikiv");
+        assert_eq!(target.origin_default_branch, "main");
+    }
+
+    #[test]
+    fn resolve_home_branch_sync_target_skips_non_home_branches() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+        init_git_repo(repo_root);
+
+        let main_sha = git_capture_for_test(repo_root, &["rev-parse", "refs/heads/main"]);
+        git(
+            repo_root,
+            &["update-ref", "refs/remotes/origin/main", &main_sha],
+        );
+        git(
+            repo_root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        fs::write(
+            repo_root.join("flow.toml"),
+            "[jj]\nhome_branch = \"nikiv\"\n",
+        )
+        .expect("write flow.toml");
+
+        assert_eq!(
+            resolve_home_branch_sync_target(repo_root, "review/demo", "main"),
+            None
         );
     }
 

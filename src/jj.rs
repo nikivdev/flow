@@ -1731,10 +1731,7 @@ fn current_workspace_name(workspace_root: &Path) -> Result<String> {
 }
 
 fn configured_home_branch(repo_root: &Path) -> Option<String> {
-    load_jj_config(repo_root)
-        .and_then(|cfg| cfg.home_branch)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    config::configured_home_branch_for_repo(repo_root)
 }
 
 fn git_current_branch(repo_root: &Path) -> Option<String> {
@@ -2316,23 +2313,7 @@ fn auto_track_enabled(repo_root: &Path) -> bool {
 }
 
 fn load_jj_config(repo_root: &Path) -> Option<config::JjConfig> {
-    let local = repo_root.join("flow.toml");
-    if local.exists() {
-        if let Ok(cfg) = config::load(&local) {
-            if cfg.jj.is_some() {
-                return cfg.jj;
-            }
-        }
-    }
-    let global = config::default_config_path();
-    if global.exists() {
-        if let Ok(cfg) = config::load(&global) {
-            if cfg.jj.is_some() {
-                return cfg.jj;
-            }
-        }
-    }
-    None
+    config::effective_jj_config_for_repo(repo_root)
 }
 
 fn review_workspace_name(branch: &str) -> String {

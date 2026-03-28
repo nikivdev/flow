@@ -158,6 +158,7 @@ fr = "f run"
 - `[commit.skill_gate]`: optional required-skill policy for `f commit`; can enforce presence and minimum skill versions.
 - `[invariants]`: optional policy checks for forbidden patterns, dependency allowlists, terminology context, and file-size limits. `mode = "block"` makes invariant warnings fail `f invariants` and commit-time invariant gate checks.
 - `[git].remote`: preferred writable remote used by `f commit`/`f sync --push` (and jj remote defaults). Fallback order is `[git].remote`, then legacy `[jj].remote`, then `origin`.
+- `[jj].home_branch`: optional long-lived personal integration branch. When the current branch matches it, `f sync` switches into home-branch mode and syncs `origin/<default-branch>` into that branch. Resolution order is repo `flow.toml`, then `~/.config/flow/flow.toml`, then the basename of `$HOME`, then `USER` / `USERNAME`.
 
 ## Notes
 

@@ -505,6 +505,34 @@ pub struct JjConfig {
     pub review_prefix: Option<String>,
 }
 
+impl JjConfig {
+    pub(crate) fn merge(&mut self, other: JjConfig) {
+        if self.default_branch.is_none() {
+            self.default_branch = other.default_branch;
+        }
+        if self.remote.is_none() {
+            self.remote = other.remote;
+        }
+        if self.auto_track.is_none() {
+            self.auto_track = other.auto_track;
+        }
+        if self.home_branch.is_none() {
+            self.home_branch = other.home_branch;
+        }
+        if self.review_prefix.is_none() {
+            self.review_prefix = other.review_prefix;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.default_branch.is_none()
+            && self.remote.is_none()
+            && self.auto_track.is_none()
+            && self.home_branch.is_none()
+            && self.review_prefix.is_none()
+    }
+}
+
 /// Git workflow config.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct GitConfig {
@@ -2489,6 +2517,8 @@ fn merge_config(base: &mut Config, other: Config) {
     }
     if base.jj.is_none() {
         base.jj = other.jj;
+    } else if let (Some(base_jj), Some(other_jj)) = (base.jj.as_mut(), other.jj) {
+        base_jj.merge(other_jj);
     }
     if base.everruns.is_none() {
         base.everruns = other.everruns;
@@ -2594,6 +2624,87 @@ fn preferred_git_remote_from_cfg(cfg: &Config) -> Option<String> {
         .and_then(|jj_cfg| first_non_empty_remote(jj_cfg.remote.as_deref()))
 }
 
+fn load_jj_config_from_path(path: &Path) -> Option<JjConfig> {
+    load(path).ok()?.jj
+}
+
+pub fn effective_jj_config_for_repo(repo_root: &Path) -> Option<JjConfig> {
+    let local_config = repo_root.join("flow.toml");
+    let local = if local_config.exists() {
+        load_jj_config_from_path(&local_config)
+    } else {
+        None
+    };
+
+    let global_config = default_config_path();
+    let global = if global_config.exists() {
+        load_jj_config_from_path(&global_config)
+    } else {
+        None
+    };
+
+    let merged = match (local, global) {
+        (Some(mut local), Some(global)) => {
+            local.merge(global);
+            Some(local)
+        }
+        (Some(local), None) => Some(local),
+        (None, Some(global)) => Some(global),
+        (None, None) => None,
+    }?;
+
+    (!merged.is_empty()).then_some(merged)
+}
+
+pub fn configured_home_branch_for_repo(repo_root: &Path) -> Option<String> {
+    effective_jj_config_for_repo(repo_root)
+        .and_then(|cfg| cfg.home_branch)
+        .and_then(|value| normalized_branch_name(&value))
+}
+
+fn normalized_branch_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn inferred_home_branch_from_sources(
+    home_dir: Option<&Path>,
+    user: Option<&str>,
+    username: Option<&str>,
+) -> Option<String> {
+    home_dir
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .and_then(normalized_branch_name)
+        .or_else(|| user.and_then(normalized_branch_name))
+        .or_else(|| username.and_then(normalized_branch_name))
+}
+
+pub fn resolved_home_branch_for_repo(
+    repo_root: &Path,
+    default_branch: Option<&str>,
+) -> Option<String> {
+    if let Some(configured) = configured_home_branch_for_repo(repo_root) {
+        return Some(configured);
+    }
+
+    let home_dir = std::env::var_os("HOME").map(PathBuf::from);
+    let derived = inferred_home_branch_from_sources(
+        home_dir.as_deref(),
+        std::env::var("USER").ok().as_deref(),
+        std::env::var("USERNAME").ok().as_deref(),
+    )?;
+    let default_branch = default_branch.and_then(normalized_branch_name);
+    if default_branch.as_deref() == Some(derived.as_str()) {
+        return None;
+    }
+    Some(derived)
+}
+
 /// Resolve the preferred writable git remote for a repository.
 ///
 /// Precedence:
@@ -2643,7 +2754,7 @@ pub fn load_or_default<P: AsRef<Path>>(path: P) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     fn fixture_path(relative: &str) -> PathBuf {
@@ -3281,6 +3392,76 @@ remote = "myflow-i"
         assert_eq!(
             preferred_git_remote_from_cfg(&cfg).as_deref(),
             Some("git-remote")
+        );
+    }
+
+    #[test]
+    fn jj_config_merge_fills_missing_fields_only() {
+        let mut local = JjConfig {
+            default_branch: Some("main".to_string()),
+            auto_track: Some(true),
+            ..Default::default()
+        };
+        let global = JjConfig {
+            default_branch: Some("trunk".to_string()),
+            remote: Some("origin".to_string()),
+            auto_track: Some(false),
+            home_branch: Some("nikiv".to_string()),
+            review_prefix: Some("review".to_string()),
+        };
+
+        local.merge(global);
+
+        assert_eq!(local.default_branch.as_deref(), Some("main"));
+        assert_eq!(local.remote.as_deref(), Some("origin"));
+        assert_eq!(local.auto_track, Some(true));
+        assert_eq!(local.home_branch.as_deref(), Some("nikiv"));
+        assert_eq!(local.review_prefix.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn inferred_home_branch_prefers_home_dir_basename() {
+        let home = Path::new("/Users/nikitavoloboev");
+
+        assert_eq!(
+            inferred_home_branch_from_sources(Some(home), Some("other-user"), Some("third-user")),
+            Some("nikitavoloboev".to_string())
+        );
+    }
+
+    #[test]
+    fn inferred_home_branch_falls_back_to_user_then_username() {
+        assert_eq!(
+            inferred_home_branch_from_sources(None, Some("nikiv"), Some("ignored")),
+            Some("nikiv".to_string())
+        );
+        assert_eq!(
+            inferred_home_branch_from_sources(None, None, Some("windows-user")),
+            Some("windows-user".to_string())
+        );
+    }
+
+    #[test]
+    fn inferred_home_branch_ignores_blank_values() {
+        assert_eq!(
+            inferred_home_branch_from_sources(None, Some("  "), Some("")),
+            None
+        );
+    }
+
+    #[test]
+    fn resolved_home_branch_for_repo_prefers_repo_config() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+        fs::write(
+            repo_root.join("flow.toml"),
+            "[jj]\nhome_branch = \"nikiv\"\n",
+        )
+        .expect("write flow.toml");
+
+        assert_eq!(
+            resolved_home_branch_for_repo(repo_root, Some("main")),
+            Some("nikiv".to_string())
         );
     }
 
