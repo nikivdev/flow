@@ -13,6 +13,7 @@ Use this block when passing `f sync` behavior to another agent:
 - Default behavior: pull/sync only; push is off unless `--push`.
 - Defaults: `--stash=true`, `--fix=true`.
 - Modes: uses jj flow in healthy colocated workspaces, falls back to plain git when needed.
+- Home-branch mode: when the current branch matches `jj.home_branch`, `f sync` skips the normal tracking pull and syncs `origin/<default-branch>` into that branch.
 - Push target: configured `[git].remote` first, then standard fallback behavior.
 - Clipboard output: synced commit list is copied only when remote commit ranges are detected (typically jj fetch path).
 - Conflict note: jj can finish with unresolved conflicts and prints `jj resolve` guidance.
@@ -73,6 +74,25 @@ If an `upstream` remote exists (fork workflow), fetches and merges upstream chan
 
 If no `upstream` remote but on a feature branch, syncs from `origin/<default-branch>` (e.g. `origin/main`) into the current branch.
 
+### Home-branch mode
+
+If the current branch matches the resolved `jj.home_branch`, Flow treats that branch as your
+long-lived integration branch.
+
+In that mode, `f sync`:
+
+- skips the normal tracking-branch pull
+- leaves branch tracking config untouched
+- syncs `origin/<default-branch>` into the home branch
+- keeps all non-home branches on the existing sync behavior
+
+Home-branch resolution order is:
+
+1. `<repo>/flow.toml` `jj.home_branch`
+2. `~/.config/flow/flow.toml` `jj.home_branch`
+3. basename of `$HOME`
+4. `USER` or `USERNAME`
+
 ### Step 4: Push (optional)
 
 Only when `--push` is passed:
@@ -120,6 +140,9 @@ Set in `flow.toml` under `[git]`:
 ```toml
 [git]
 remote = "origin"  # default push remote
+
+[jj]
+home_branch = "alice" # optional long-lived personal integration branch
 ```
 
 ### Fork push

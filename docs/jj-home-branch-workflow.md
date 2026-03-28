@@ -7,6 +7,7 @@ Flow supports that model directly through:
 
 - `f status` for a workflow-aware status view
 - `jj.home_branch` in `flow.toml`
+- `f sync` home-branch mode for pulling `origin/<default-branch>` into the home branch
 - `f jj workspace review <branch>` for isolated branch-specific working copies
 
 ## Mental model
@@ -27,6 +28,9 @@ JJ workspaces.
 default_branch = "main"
 home_branch = "alice"
 ```
+
+For `f sync`, if `jj.home_branch` is omitted, Flow falls back to the basename of `$HOME` and then
+`USER` / `USERNAME`.
 
 ## Status as the preflight
 

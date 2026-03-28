@@ -119,6 +119,9 @@ This keeps jj aligned with Git remotes while you work locally in jj.
 If you keep a long-lived personal branch on top of trunk, set `jj.home_branch` and treat it as
 your integration branch.
 
+When the current branch matches that home branch, plain `f sync` also switches into home-branch
+mode and syncs `origin/<default-branch>` into it instead of using the normal tracking pull.
+
 Then use short-lived `review/*` or `codex/*` branches on top of that home branch for task-specific
 work. `f status` is optimized to make that shape visible.
 
