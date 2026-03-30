@@ -57,7 +57,8 @@ const FLOW_CODEX_SESSION_REPORT_PATH_ENV: &str = "FLOW_ZED_CODEX_SESSION_REPORT_
 const CODEX_SESSION_REPORT_PENDING: &str = "__FLOW_ZED_CODEX_SESSION_PENDING__";
 const CODEX_SESSION_REPORT_POLL_LIMIT: usize = 8;
 const CODEX_SESSION_REPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const CODEX_SESSION_REPORT_POLL_TIMEOUT: Duration = Duration::from_secs(15);
+const CODEX_SESSION_REPORT_BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const CODEX_SESSION_REPORT_BACKGROUND_POLL_THRESHOLD: Duration = Duration::from_secs(15);
 
 /// Stored session metadata in .ai/sessions/<provider>/index.json
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -415,7 +416,7 @@ enum LinearUrlKind {
     Project,
 }
 
-const CODEX_QUERY_CACHE_VERSION: u32 = 1;
+const CODEX_QUERY_CACHE_VERSION: u32 = 2;
 pub(crate) const CODEX_FIND_DEFAULT_RECENT_DAYS: u32 = 7;
 const CODEX_FIND_RECENT_DAY_SECS: i64 = 24 * 60 * 60;
 const CODEX_FIND_RECENT_MONTH_SECS: i64 = 30 * 24 * 60 * 60;
@@ -472,11 +473,21 @@ const CODEX_SESSION_COMPLETION_DEFAULT_IDLE_SECS: u64 = 90;
 const FLOW_CODEX_TRACE_SERVICE_NAME: &str = "flow_codex";
 const RUN_AGENT_ROUTER_PATH: &str = "~/run/scripts/agent-router.sh";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct CodexStateDbFileStamp {
+    len: u64,
+    modified_unix_nanos: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 struct CodexStateDbStamp {
     path: String,
-    len: u64,
-    modified_unix_secs: u64,
+    #[serde(default)]
+    db: CodexStateDbFileStamp,
+    #[serde(default)]
+    wal: Option<CodexStateDbFileStamp>,
+    #[serde(default)]
+    shm: Option<CodexStateDbFileStamp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3410,23 +3421,85 @@ fn collect_codex_session_files(root: &PathBuf) -> Vec<PathBuf> {
     out
 }
 
-fn codex_session_id_from_path(path: &Path) -> Option<String> {
-    let filename = path.file_stem()?.to_str()?;
-    Some(filename.split('_').next().unwrap_or(filename).to_string())
-}
-
 fn cursor_session_id_from_path(path: &Path) -> Option<String> {
     path.file_stem()
         .and_then(|name| name.to_str())
         .map(str::to_string)
 }
 
-fn resolve_explicit_native_session(query: &str, provider: Provider) -> Option<(String, Provider)> {
-    if matches!(provider, Provider::Codex | Provider::All) {
-        if let Some(path) = find_codex_session_file(query) {
-            if let Some(session_id) = codex_session_id_from_path(&path) {
-                return Some((session_id, Provider::Codex));
+fn looks_like_explicit_codex_session_hint(query: &str) -> bool {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed.as_bytes().iter().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+
+    if looks_like_codex_session_token(trimmed) {
+        return true;
+    }
+
+    (8..=36).contains(&trimmed.len()) && trimmed.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn resolve_codex_session_identity_with<F>(
+    query: &str,
+    lookup: F,
+    lookup_label: &str,
+) -> Result<Option<(String, Option<PathBuf>)>>
+where
+    F: FnOnce(&str, usize) -> Result<Vec<CodexRecoverRow>>,
+{
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    match lookup(trimmed, 1) {
+        Ok(rows) => {
+            if let Some(row) = rows.into_iter().next() {
+                let cwd = PathBuf::from(row.cwd);
+                return Ok(Some((row.id, Some(cwd.canonicalize().unwrap_or(cwd)))));
             }
+        }
+        Err(err) => {
+            debug!(
+                error = %err,
+                session_hint = trimmed,
+                lookup = lookup_label,
+                "failed to resolve Codex session identity; falling back to session files"
+            );
+        }
+    }
+
+    let Some(path) = find_codex_session_file(trimmed) else {
+        return Ok(None);
+    };
+    let Some((session, cwd)) = parse_codex_session_file(&path, trimmed) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        session.session_id,
+        cwd.map(|path| path.canonicalize().unwrap_or(path)),
+    )))
+}
+
+fn resolve_codex_session_identity(query: &str) -> Result<Option<(String, Option<PathBuf>)>> {
+    resolve_codex_session_identity_with(query, read_codex_threads_by_session_hint, "codexd")
+}
+
+fn resolve_codex_session_identity_local(query: &str) -> Result<Option<(String, Option<PathBuf>)>> {
+    resolve_codex_session_identity_with(
+        query,
+        read_codex_threads_by_session_hint_local,
+        "local-state-db",
+    )
+}
+
+fn resolve_explicit_native_session(query: &str, provider: Provider) -> Option<(String, Provider)> {
+    if matches!(provider, Provider::Codex | Provider::All)
+        && looks_like_explicit_codex_session_hint(query)
+    {
+        if let Ok(Some((session_id, _))) = resolve_codex_session_identity(query) {
+            return Some((session_id, Provider::Codex));
         }
     }
 
@@ -3439,6 +3512,44 @@ fn resolve_explicit_native_session(query: &str, provider: Provider) -> Option<(S
     }
 
     None
+}
+
+fn maybe_resolve_direct_codex_resume<F>(
+    provider: Provider,
+    session_query: Option<&str>,
+    requested_target: Option<PathBuf>,
+    resolve_identity: F,
+) -> Result<Option<(String, Option<PathBuf>)>>
+where
+    F: FnOnce(&str) -> Result<Option<(String, Option<PathBuf>)>>,
+{
+    if provider != Provider::Codex {
+        return Ok(None);
+    }
+
+    let Some(trimmed_query) = session_query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    if !looks_like_explicit_codex_session_hint(trimmed_query) {
+        return Ok(None);
+    }
+
+    let resolved = resolve_identity(trimmed_query)?
+        .map(|(session_id, cwd)| (session_id, cwd.or(requested_target.clone())))
+        .unwrap_or_else(|| (trimmed_query.to_string(), requested_target.clone()));
+    Ok(Some(resolved))
+}
+
+fn session_query_matches_saved_name(session_query: Option<&str>, index: &SessionIndex) -> bool {
+    session_query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|query| index.sessions.contains_key(query))
+        .unwrap_or(false)
 }
 
 fn resolve_session_selection(
@@ -3470,11 +3581,39 @@ fn resolve_session_selection(
         return Ok((session.session_id.clone(), session.provider));
     }
 
+    if let Some(session_index) = resolve_session_list_index(query, sessions.len())? {
+        let session = &sessions[session_index];
+        return Ok((session.session_id.clone(), session.provider));
+    }
+
     if let Some((session_id, session_provider)) = resolve_explicit_native_session(query, provider) {
         return Ok((session_id, session_provider));
     }
 
     bail!("Session not found: {}", query);
+}
+
+fn resolve_session_list_index(query: &str, session_count: usize) -> Result<Option<usize>> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || !trimmed.as_bytes().iter().all(|byte| byte.is_ascii_digit()) {
+        return Ok(None);
+    }
+
+    let parsed = trimmed
+        .parse::<usize>()
+        .with_context(|| format!("failed to parse session index `{trimmed}`"))?;
+    if parsed == 0 {
+        bail!("Session index must be >= 1");
+    }
+    if parsed > session_count {
+        bail!(
+            "Session index {} out of range (1-{})",
+            parsed,
+            session_count.max(1)
+        );
+    }
+
+    Ok(Some(parsed - 1))
 }
 
 /// Get the most recent session ID for this project.
@@ -3798,17 +3937,35 @@ fn record_direct_codex_launch_event(
     let _ = codex_skill_eval::log_event(&event);
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct CodexSessionReportBaseline {
     started_at_unix: i64,
     exact_ids: BTreeSet<String>,
     tree_ids: BTreeSet<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CodexSessionReportActivity {
+    Idle,
+    Wip,
+}
+
+impl CodexSessionReportActivity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Wip => "wip",
+        }
+    }
+}
+
+#[derive(Debug)]
 struct CodexSessionReportHandle {
     cancel: Arc<AtomicBool>,
     report_path: PathBuf,
+    target_path: PathBuf,
+    baseline: CodexSessionReportBaseline,
+    join_handle: Option<thread::JoinHandle<()>>,
 }
 
 fn codex_session_report_path_from_env() -> Option<PathBuf> {
@@ -3819,20 +3976,52 @@ fn codex_session_report_path_from_env() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn write_codex_session_report(path: &Path, session_id: &str) -> Result<()> {
+fn first_nonempty_codex_session_report_line(contents: &str) -> Option<&str> {
+    contents
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
+fn write_codex_session_report(
+    path: &Path,
+    session_id: &str,
+    activity: CodexSessionReportActivity,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    fs::write(path, format!("{}\n", session_id.trim()))
-        .with_context(|| format!("failed to write {}", path.display()))
+    fs::write(
+        path,
+        format!("{}\nstate={}\n", session_id.trim(), activity.as_str()),
+    )
+    .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_pending_codex_session_report(path: &Path) -> Result<()> {
+    write_codex_session_report(
+        path,
+        CODEX_SESSION_REPORT_PENDING,
+        CodexSessionReportActivity::Wip,
+    )
+}
+
+fn read_codex_session_report_session_id(path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    let first_line = first_nonempty_codex_session_report_line(&contents)?;
+    if first_line == CODEX_SESSION_REPORT_PENDING {
+        None
+    } else {
+        Some(first_line.to_string())
+    }
 }
 
 fn clear_pending_codex_session_report(path: &Path) {
     let Ok(current) = fs::read_to_string(path) else {
         return;
     };
-    if current.trim() != CODEX_SESSION_REPORT_PENDING {
+    if first_nonempty_codex_session_report_line(&current) != Some(CODEX_SESSION_REPORT_PENDING) {
         return;
     }
     if let Err(err) = fs::remove_file(path) {
@@ -3844,12 +4033,12 @@ fn clear_pending_codex_session_report(path: &Path) {
     }
 }
 
-fn maybe_write_codex_session_report(session_id: &str) {
+fn maybe_write_codex_session_report(session_id: &str, activity: CodexSessionReportActivity) {
     let Some(report_path) = codex_session_report_path_from_env() else {
         return;
     };
 
-    if let Err(err) = write_codex_session_report(&report_path, session_id) {
+    if let Err(err) = write_codex_session_report(&report_path, session_id, activity) {
         debug!(
             error = %err,
             path = %report_path.display(),
@@ -3859,18 +4048,26 @@ fn maybe_write_codex_session_report(session_id: &str) {
 }
 
 fn capture_codex_session_report_baseline(target_path: &Path) -> CodexSessionReportBaseline {
-    let exact_ids =
-        read_recent_codex_threads_local(target_path, true, CODEX_SESSION_REPORT_POLL_LIMIT, None)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
-    let tree_ids =
-        read_recent_codex_threads_local(target_path, false, CODEX_SESSION_REPORT_POLL_LIMIT, None)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
+    let exact_ids = read_recent_codex_threads_local_uncached(
+        target_path,
+        true,
+        CODEX_SESSION_REPORT_POLL_LIMIT,
+        None,
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| row.id)
+    .collect();
+    let tree_ids = read_recent_codex_threads_local_uncached(
+        target_path,
+        false,
+        CODEX_SESSION_REPORT_POLL_LIMIT,
+        None,
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| row.id)
+    .collect();
 
     CodexSessionReportBaseline {
         started_at_unix: SystemTime::now()
@@ -3888,24 +4085,40 @@ fn find_new_codex_session_report_id(
 ) -> Option<String> {
     let min_updated_at = baseline.started_at_unix.saturating_sub(2);
 
-    let exact_rows =
-        read_recent_codex_threads_local(target_path, true, CODEX_SESSION_REPORT_POLL_LIMIT, None)
-            .ok()?;
+    let exact_rows = read_recent_codex_threads_local_uncached(
+        target_path,
+        true,
+        CODEX_SESSION_REPORT_POLL_LIMIT,
+        None,
+    )
+    .ok()?;
     if let Some(row) = exact_rows.into_iter().find(|row| {
         row.updated_at >= min_updated_at && !baseline.exact_ids.contains(row.id.as_str())
     }) {
         return Some(row.id);
     }
 
-    let tree_rows =
-        read_recent_codex_threads_local(target_path, false, CODEX_SESSION_REPORT_POLL_LIMIT, None)
-            .ok()?;
+    let tree_rows = read_recent_codex_threads_local_uncached(
+        target_path,
+        false,
+        CODEX_SESSION_REPORT_POLL_LIMIT,
+        None,
+    )
+    .ok()?;
     tree_rows
         .into_iter()
         .find(|row| {
             row.updated_at >= min_updated_at && !baseline.tree_ids.contains(row.id.as_str())
         })
         .map(|row| row.id)
+}
+
+fn codex_session_report_poll_interval(elapsed: Duration) -> Duration {
+    if elapsed < CODEX_SESSION_REPORT_BACKGROUND_POLL_THRESHOLD {
+        CODEX_SESSION_REPORT_POLL_INTERVAL
+    } else {
+        CODEX_SESSION_REPORT_BACKGROUND_POLL_INTERVAL
+    }
 }
 
 fn start_new_codex_session_reporter(
@@ -3916,14 +4129,24 @@ fn start_new_codex_session_reporter(
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_worker = Arc::clone(&cancel);
     let worker_report_path = report_path.clone();
-    thread::spawn(move || {
+    let worker_target_path = target_path.clone();
+    let worker_baseline = baseline.clone();
+    let join_handle = thread::spawn(move || {
         let started_at = Instant::now();
-        while started_at.elapsed() < CODEX_SESSION_REPORT_POLL_TIMEOUT {
+        let mut switched_to_background_polling = false;
+
+        loop {
             if cancel_worker.load(Ordering::Relaxed) {
                 return;
             }
-            if let Some(session_id) = find_new_codex_session_report_id(&target_path, &baseline) {
-                if let Err(err) = write_codex_session_report(&worker_report_path, &session_id) {
+            if let Some(session_id) =
+                find_new_codex_session_report_id(&worker_target_path, &worker_baseline)
+            {
+                if let Err(err) = write_codex_session_report(
+                    &worker_report_path,
+                    &session_id,
+                    CodexSessionReportActivity::Wip,
+                ) {
                     debug!(
                         error = %err,
                         path = %worker_report_path.display(),
@@ -3933,20 +4156,56 @@ fn start_new_codex_session_reporter(
                 return;
             }
 
-            thread::sleep(CODEX_SESSION_REPORT_POLL_INTERVAL);
-        }
+            let elapsed = started_at.elapsed();
+            if !switched_to_background_polling
+                && elapsed >= CODEX_SESSION_REPORT_BACKGROUND_POLL_THRESHOLD
+            {
+                switched_to_background_polling = true;
+                debug!(
+                    path = %worker_report_path.display(),
+                    target_path = %worker_target_path.display(),
+                    "switching Codex session report polling to background cadence"
+                );
+            }
 
-        clear_pending_codex_session_report(&worker_report_path);
-        debug!(
-            path = %worker_report_path.display(),
-            target_path = %target_path.display(),
-            "timed out while waiting for a new Codex session id to appear"
-        );
+            thread::sleep(codex_session_report_poll_interval(elapsed));
+        }
     });
 
     CodexSessionReportHandle {
         cancel,
         report_path,
+        target_path,
+        baseline,
+        join_handle: Some(join_handle),
+    }
+}
+
+fn finalize_new_codex_session_report(report_handle: &mut CodexSessionReportHandle) {
+    report_handle.cancel.store(true, Ordering::Relaxed);
+    if let Some(join_handle) = report_handle.join_handle.take() {
+        let _ = join_handle.join();
+    }
+
+    let session_id =
+        read_codex_session_report_session_id(&report_handle.report_path).or_else(|| {
+            find_new_codex_session_report_id(&report_handle.target_path, &report_handle.baseline)
+        });
+
+    if let Some(session_id) = session_id {
+        if let Err(err) = write_codex_session_report(
+            &report_handle.report_path,
+            &session_id,
+            CodexSessionReportActivity::Idle,
+        ) {
+            debug!(
+                error = %err,
+                path = %report_handle.report_path.display(),
+                "failed to finalize Codex session report"
+            );
+        }
+    } else {
+        clear_pending_codex_session_report(&report_handle.report_path);
     }
 }
 
@@ -3997,8 +4256,10 @@ fn launch_session_for_target(
             if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
                 command.arg(prompt);
             }
-            maybe_write_codex_session_report(session_id);
-            let status = command.status().with_context(|| "failed to launch codex")?;
+            maybe_write_codex_session_report(session_id, CodexSessionReportActivity::Wip);
+            let status = command.status().with_context(|| "failed to launch codex");
+            maybe_write_codex_session_report(session_id, CodexSessionReportActivity::Idle);
+            let status = status?;
             if status.success() && direct_log {
                 record_direct_codex_launch_event(
                     "resume",
@@ -4561,7 +4822,7 @@ fn launch_codex_continue_last_for_target(
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let report_path = codex_session_report_path_from_env();
     let recent_session_id = if require_existing_session || report_path.is_some() {
-        read_recent_codex_threads(&workdir, true, 1, None)?
+        read_recent_codex_threads_local(&workdir, true, 1, None)?
             .first()
             .map(|row| row.id.clone())
     } else {
@@ -4573,7 +4834,9 @@ fn launch_codex_continue_last_for_target(
     if let (Some(report_path), Some(session_id)) =
         (report_path.as_deref(), recent_session_id.as_deref())
     {
-        if let Err(err) = write_codex_session_report(report_path, session_id) {
+        if let Err(err) =
+            write_codex_session_report(report_path, session_id, CodexSessionReportActivity::Wip)
+        {
             debug!(
                 error = %err,
                 path = %report_path.display(),
@@ -4595,7 +4858,21 @@ fn launch_codex_continue_last_for_target(
         .arg("--dangerously-bypass-approvals-and-sandbox");
     let status = command
         .status()
-        .with_context(|| "failed to launch codex resume --last")?;
+        .with_context(|| "failed to launch codex resume --last");
+    if let (Some(report_path), Some(session_id)) =
+        (report_path.as_deref(), recent_session_id.as_deref())
+    {
+        if let Err(err) =
+            write_codex_session_report(report_path, session_id, CodexSessionReportActivity::Idle)
+        {
+            debug!(
+                error = %err,
+                path = %report_path.display(),
+                "failed to finalize Codex session report"
+            );
+        }
+    }
+    let status = status?;
     if status.success() {
         record_direct_codex_launch_event(
             "resume",
@@ -4932,9 +5209,7 @@ fn new_session_for_target(
                 command.arg(prompt);
             }
             let report_handle = if let Some(report_path) = codex_session_report_path_from_env() {
-                if let Err(err) =
-                    write_codex_session_report(&report_path, CODEX_SESSION_REPORT_PENDING)
-                {
+                if let Err(err) = write_pending_codex_session_report(&report_path) {
                     debug!(
                         error = %err,
                         path = %report_path.display(),
@@ -4948,13 +5223,11 @@ fn new_session_for_target(
             } else {
                 None
             };
-            let status = command.status().with_context(|| "failed to launch codex")?;
-            if !status.success() {
-                if let Some(report_handle) = report_handle {
-                    report_handle.cancel.store(true, Ordering::Relaxed);
-                    clear_pending_codex_session_report(&report_handle.report_path);
-                }
+            let status = command.status().with_context(|| "failed to launch codex");
+            if let Some(mut report_handle) = report_handle {
+                finalize_new_codex_session_report(&mut report_handle);
             }
+            let status = status?;
             if status.success() && direct_log {
                 record_direct_codex_launch_event(
                     "new",
@@ -5683,19 +5956,41 @@ fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn codex_state_db_stamp(path: &Path) -> Result<CodexStateDbStamp> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("failed to stat Codex state db {}", path.display()))?;
-    let modified = metadata
+fn codex_state_db_modified_unix_nanos(metadata: &fs::Metadata) -> u64 {
+    metadata
         .modified()
         .unwrap_or(SystemTime::UNIX_EPOCH)
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
+
+fn codex_state_db_file_stamp(path: &Path) -> Result<CodexStateDbFileStamp> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to stat Codex state db {}", path.display()))?;
+    Ok(CodexStateDbFileStamp {
+        len: metadata.len(),
+        modified_unix_nanos: codex_state_db_modified_unix_nanos(&metadata),
+    })
+}
+
+fn codex_state_db_optional_file_stamp(path: &Path) -> Option<CodexStateDbFileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(CodexStateDbFileStamp {
+        len: metadata.len(),
+        modified_unix_nanos: codex_state_db_modified_unix_nanos(&metadata),
+    })
+}
+
+fn codex_state_db_stamp(path: &Path) -> Result<CodexStateDbStamp> {
+    let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+    let shm_path = PathBuf::from(format!("{}-shm", path.display()));
     Ok(CodexStateDbStamp {
         path: path.display().to_string(),
-        len: metadata.len(),
-        modified_unix_secs: modified,
+        db: codex_state_db_file_stamp(path)?,
+        wal: codex_state_db_optional_file_stamp(&wal_path),
+        shm: codex_state_db_optional_file_stamp(&shm_path),
     })
 }
 
@@ -5968,14 +6263,15 @@ fn read_recent_codex_threads(
     }
 }
 
-pub(crate) fn read_recent_codex_threads_local(
+fn read_recent_codex_threads_local_with_db(
+    db_path: &Path,
     target_path: &Path,
     exact_cwd: bool,
     limit: usize,
     query: Option<&str>,
+    use_cache: bool,
 ) -> Result<Vec<CodexRecoverRow>> {
-    let db_path = codex_state_db_path()?;
-    let schema = load_codex_thread_schema(&db_path)?;
+    let schema = load_codex_thread_schema(db_path)?;
 
     let target = target_path.to_string_lossy().to_string();
     let like_target = format!("{}/%", escape_like(&target));
@@ -6004,7 +6300,7 @@ limit ?3
         codex_recover_select_sql(&schema)
     );
 
-    let mut rows = with_codex_query_cache(&db_path, "recent", &cache_key, |conn| {
+    let run_query = |conn: &Connection| -> Result<Vec<CodexRecoverRow>> {
         if exact_cwd {
             let mut stmt = conn
                 .prepare(&sql_exact)
@@ -6022,11 +6318,39 @@ limit ?3
             )?;
             Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
         }
-    })?;
+    };
+
+    let mut rows = if use_cache {
+        with_codex_query_cache(db_path, "recent", &cache_key, run_query)?
+    } else {
+        let conn = Connection::open(db_path)
+            .with_context(|| format!("failed to open {}", db_path.display()))?;
+        run_query(&conn)?
+    };
 
     rank_recover_rows(&mut rows, query, None, exact_cwd);
     rows.truncate(limit.max(1));
     Ok(rows)
+}
+
+pub(crate) fn read_recent_codex_threads_local(
+    target_path: &Path,
+    exact_cwd: bool,
+    limit: usize,
+    query: Option<&str>,
+) -> Result<Vec<CodexRecoverRow>> {
+    let db_path = codex_state_db_path()?;
+    read_recent_codex_threads_local_with_db(&db_path, target_path, exact_cwd, limit, query, true)
+}
+
+fn read_recent_codex_threads_local_uncached(
+    target_path: &Path,
+    exact_cwd: bool,
+    limit: usize,
+    query: Option<&str>,
+) -> Result<Vec<CodexRecoverRow>> {
+    let db_path = codex_state_db_path()?;
+    read_recent_codex_threads_local_with_db(&db_path, target_path, exact_cwd, limit, query, false)
 }
 
 fn read_recent_codex_threads_global_local(limit: usize) -> Result<Vec<CodexRecoverRow>> {
@@ -6074,6 +6398,15 @@ pub(crate) fn read_codex_threads_by_session_hint_local(
     limit: usize,
 ) -> Result<Vec<CodexRecoverRow>> {
     let db_path = codex_state_db_path()?;
+    read_codex_threads_by_session_hint_local_with_db(&db_path, session_hint, limit, true)
+}
+
+fn read_codex_threads_by_session_hint_local_with_db(
+    db_path: &Path,
+    session_hint: &str,
+    limit: usize,
+    use_cache: bool,
+) -> Result<Vec<CodexRecoverRow>> {
     let schema = load_codex_thread_schema(&db_path)?;
     let normalized_hint = session_hint.trim().to_ascii_lowercase();
     if normalized_hint.is_empty() {
@@ -6087,7 +6420,7 @@ pub(crate) fn read_codex_threads_by_session_hint_local(
 where archived = 0
   and (lower(id) = ?1 or lower(id) like ?2 escape '\')
 order by
-  case when lower(id) = ?1 then 0 else 1 end,
+        case when lower(id) = ?1 then 0 else 1 end,
   updated_at desc
 limit ?3
 "#,
@@ -6095,7 +6428,7 @@ limit ?3
     );
 
     let prefix_like = format!("{}%", escape_like(&normalized_hint));
-    with_codex_query_cache(&db_path, "session-hint", &cache_key, |conn| {
+    let run_query = |conn: &Connection| -> Result<Vec<CodexRecoverRow>> {
         let mut stmt = conn
             .prepare(&sql)
             .context("failed to prepare explicit session recover query")?;
@@ -6104,7 +6437,15 @@ limit ?3
             map_codex_recover_row,
         )?;
         Ok(iter.collect::<rusqlite::Result<Vec<_>>>()?)
-    })
+    };
+
+    if use_cache {
+        with_codex_query_cache(db_path, "session-hint", &cache_key, run_query)
+    } else {
+        let conn = Connection::open(db_path)
+            .with_context(|| format!("failed to open {}", db_path.display()))?;
+        run_query(&conn)
+    }
 }
 
 fn search_codex_threads_for_find(
@@ -13995,59 +14336,12 @@ fn get_session_last_timestamp_for_session(session: &CrossProjectSession) -> Resu
     )
 }
 
-/// Resume a session by name or ID.
-fn resume_session(session: Option<String>, path: Option<String>, provider: Provider) -> Result<()> {
-    let index = load_index()?;
-    let sessions = read_sessions_for_target(provider, path.as_deref())?;
-    let explicit_session_requested = session.is_some();
-    let default_provider = if provider == Provider::All {
-        Provider::Claude
-    } else {
-        provider
-    };
-
-    let (session_id, session_provider) = match session {
-        Some(s) => {
-            // Check if it's a saved name
-            if let Some(saved) = index.sessions.get(&s) {
-                // Find the provider for this session
-                let prov = sessions
-                    .iter()
-                    .find(|sess| sess.session_id == saved.id)
-                    .map(|sess| sess.provider)
-                    .unwrap_or(default_provider);
-                (saved.id.clone(), prov)
-            } else if s.len() >= 8 {
-                // Might be a session ID or prefix
-                if let Some(sess) = sessions.iter().find(|sess| sess.session_id.starts_with(&s)) {
-                    (sess.session_id.clone(), sess.provider)
-                } else {
-                    // Assume it's a full ID for requested provider.
-                    (s, default_provider)
-                }
-            } else {
-                // Try numeric index (1-based)
-                if let Ok(idx) = s.parse::<usize>() {
-                    if idx > 0 && idx <= sessions.len() {
-                        let sess = &sessions[idx - 1];
-                        (sess.session_id.clone(), sess.provider)
-                    } else {
-                        bail!("Session index {} out of range", idx);
-                    }
-                } else {
-                    bail!("Session '{}' not found", s);
-                }
-            }
-        }
-        None => {
-            // Resume most recent
-            let sess = sessions
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("No sessions found for this project"))?;
-            (sess.session_id.clone(), sess.provider)
-        }
-    };
-
+fn launch_resolved_resume_session(
+    session_id: String,
+    session_provider: Provider,
+    codex_launch_target: Option<PathBuf>,
+    explicit_session_requested: bool,
+) -> Result<()> {
     let has_tty = io::stdin().is_terminal() && io::stdout().is_terminal();
     if !has_tty {
         match session_provider {
@@ -14076,11 +14370,30 @@ fn resume_session(session: Option<String>, path: Option<String>, provider: Provi
         );
     }
 
-    println!(
-        "Resuming session {}...",
-        &session_id[..8.min(session_id.len())]
-    );
-    let launched = launch_session(&session_id, session_provider)?;
+    if let Some(launch_path) = codex_launch_target.as_ref() {
+        println!(
+            "Resuming session {} from {}...",
+            &session_id[..8.min(session_id.len())],
+            launch_path.display()
+        );
+    } else {
+        println!(
+            "Resuming session {}...",
+            &session_id[..8.min(session_id.len())]
+        );
+    }
+    let launched = if let Some(launch_path) = codex_launch_target.as_ref() {
+        launch_session_for_target(
+            &session_id,
+            session_provider,
+            None,
+            Some(launch_path),
+            None,
+            None,
+        )?
+    } else {
+        launch_session(&session_id, session_provider)?
+    };
     if launched {
         return Ok(());
     }
@@ -14121,6 +14434,74 @@ fn resume_session(session: Option<String>, path: Option<String>, provider: Provi
         provider_name(session_provider),
         session_id
     );
+}
+
+/// Resume a session by name or ID.
+fn resume_session(session: Option<String>, path: Option<String>, provider: Provider) -> Result<()> {
+    let explicit_session_requested = session.is_some();
+    let requested_target = path
+        .as_deref()
+        .map(|value| resolve_session_target_path(Some(value)))
+        .transpose()?;
+    let index = load_index()?;
+
+    if !session_query_matches_saved_name(session.as_deref(), &index) {
+        if let Some((session_id, codex_launch_target)) = maybe_resolve_direct_codex_resume(
+            provider,
+            session.as_deref(),
+            requested_target.clone(),
+            resolve_codex_session_identity_local,
+        )? {
+            return launch_resolved_resume_session(
+                session_id,
+                Provider::Codex,
+                codex_launch_target,
+                explicit_session_requested,
+            );
+        }
+    }
+
+    let sessions = read_sessions_for_target(provider, path.as_deref())?;
+    let default_provider = if provider == Provider::All {
+        Provider::Claude
+    } else {
+        provider
+    };
+
+    let (session_id, session_provider) = match session {
+        Some(s) => match resolve_session_selection(&s, &sessions, &index, provider) {
+            Ok(selection) => selection,
+            Err(_)
+                if s.trim().len() >= 8
+                    && !s.trim().as_bytes().iter().all(|byte| byte.is_ascii_digit()) =>
+            {
+                (s, default_provider)
+            }
+            Err(err) => return Err(err),
+        },
+        None => {
+            // Resume most recent
+            let sess = sessions
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("No sessions found for this project"))?;
+            (sess.session_id.clone(), sess.provider)
+        }
+    };
+
+    let codex_launch_target = if session_provider == Provider::Codex {
+        resolve_codex_session_identity_local(&session_id)?
+            .and_then(|(_, cwd)| cwd)
+            .or(requested_target.clone())
+    } else {
+        None
+    };
+
+    launch_resolved_resume_session(
+        session_id,
+        session_provider,
+        codex_launch_target,
+        explicit_session_requested,
+    )
 }
 
 /// Save a session with a name.
@@ -15090,6 +15471,10 @@ fn read_cross_project_context(
 }
 
 fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
+    if session_id.trim().len() < 8 {
+        return None;
+    }
+
     let root = get_codex_sessions_dir();
     if !root.exists() {
         return None;
@@ -15119,6 +15504,10 @@ fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
 }
 
 fn find_cursor_session_file(session_id: &str) -> Option<PathBuf> {
+    if session_id.trim().len() < 8 {
+        return None;
+    }
+
     let root = get_cursor_projects_dir();
     if !root.exists() {
         return None;
@@ -15336,6 +15725,7 @@ fn get_session_last_timestamp_for_path(
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
     use std::process::Command;
     use tempfile::tempdir;
 
@@ -15348,6 +15738,48 @@ mod tests {
             .expect("git init");
         assert!(status.success());
         root
+    }
+
+    fn init_test_codex_threads_db(path: &Path) -> Connection {
+        let connection = Connection::open(path).expect("open sqlite");
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .expect("enable wal");
+        connection
+            .execute_batch(
+                r#"
+create table threads (
+  id text primary key,
+  updated_at integer not null,
+  cwd text not null,
+  title text,
+  first_user_message text not null default '',
+  git_branch text,
+  archived integer not null default 0
+);
+"#,
+            )
+            .expect("create threads table");
+        connection
+    }
+
+    fn insert_test_codex_thread(connection: &Connection, id: &str, updated_at: i64, cwd: &str) {
+        connection
+            .execute(
+                r#"
+insert into threads (id, updated_at, cwd, title, first_user_message, git_branch, archived)
+values (?1, ?2, ?3, ?4, ?5, ?6, 0)
+"#,
+                rusqlite::params![
+                    id,
+                    updated_at,
+                    cwd,
+                    format!("title-{id}"),
+                    format!("prompt-{id}"),
+                    "main",
+                ],
+            )
+            .expect("insert thread");
     }
 
     #[test]
@@ -15478,16 +15910,55 @@ mod tests {
         let root = tempdir().expect("tempdir");
         let report_path = root.path().join("codex-session-report.txt");
 
-        fs::write(&report_path, format!("{CODEX_SESSION_REPORT_PENDING}\n"))
-            .expect("write pending marker");
+        fs::write(
+            &report_path,
+            format!("{CODEX_SESSION_REPORT_PENDING}\nstate=wip\n"),
+        )
+        .expect("write pending marker");
         clear_pending_codex_session_report(&report_path);
         assert!(!report_path.exists());
 
-        fs::write(&report_path, "session-123\n").expect("write session id");
+        fs::write(&report_path, "session-123\nstate=wip\n").expect("write session id");
         clear_pending_codex_session_report(&report_path);
         assert_eq!(
             fs::read_to_string(&report_path).expect("read session id"),
-            "session-123\n"
+            "session-123\nstate=wip\n"
+        );
+    }
+
+    #[test]
+    fn write_codex_session_report_appends_activity_state() {
+        let root = tempdir().expect("tempdir");
+        let report_path = root.path().join("codex-session-report.txt");
+
+        write_codex_session_report(
+            &report_path,
+            "session-123",
+            CodexSessionReportActivity::Idle,
+        )
+        .expect("write session report");
+
+        assert_eq!(
+            fs::read_to_string(&report_path).expect("read session report"),
+            "session-123\nstate=idle\n"
+        );
+    }
+
+    #[test]
+    fn codex_session_report_poll_interval_slows_after_initial_window() {
+        assert_eq!(
+            codex_session_report_poll_interval(Duration::from_secs(0)),
+            CODEX_SESSION_REPORT_POLL_INTERVAL
+        );
+        assert_eq!(
+            codex_session_report_poll_interval(
+                CODEX_SESSION_REPORT_BACKGROUND_POLL_THRESHOLD - Duration::from_millis(1)
+            ),
+            CODEX_SESSION_REPORT_POLL_INTERVAL
+        );
+        assert_eq!(
+            codex_session_report_poll_interval(CODEX_SESSION_REPORT_BACKGROUND_POLL_THRESHOLD),
+            CODEX_SESSION_REPORT_BACKGROUND_POLL_INTERVAL
         );
     }
 
@@ -15500,6 +15971,166 @@ mod tests {
 
         let selected = select_codex_state_db_path(root.path()).expect("select state db");
         assert_eq!(selected, root.path().join("state_5.sqlite"));
+    }
+
+    #[test]
+    fn codex_state_db_stamp_changes_when_wal_sidecar_changes() {
+        let root = tempdir().expect("tempdir");
+        let db_path = root.path().join("state_5.sqlite");
+        fs::write(&db_path, "sqlite").expect("write db");
+
+        let first = codex_state_db_stamp(&db_path).expect("first stamp");
+
+        std::thread::sleep(Duration::from_millis(2));
+        fs::write(root.path().join("state_5.sqlite-wal"), "wal-one").expect("write wal");
+        let second = codex_state_db_stamp(&db_path).expect("second stamp");
+        assert_ne!(first, second);
+
+        std::thread::sleep(Duration::from_millis(2));
+        fs::write(root.path().join("state_5.sqlite-wal"), "wal-two-updated").expect("rewrite wal");
+        let third = codex_state_db_stamp(&db_path).expect("third stamp");
+        assert_ne!(second, third);
+    }
+
+    #[test]
+    fn read_recent_codex_threads_local_reloads_when_only_wal_changes() {
+        let root = tempdir().expect("tempdir");
+        let db_path = root.path().join("state_5.sqlite");
+        let connection = init_test_codex_threads_db(&db_path);
+        let target_path = Path::new("/tmp/zed-project");
+
+        insert_test_codex_thread(&connection, "session-1", 10, target_path.to_str().unwrap());
+        let initial_rows =
+            read_recent_codex_threads_local_with_db(&db_path, target_path, true, 1, None, true)
+                .expect("initial rows");
+        assert_eq!(initial_rows[0].id, "session-1");
+
+        let first_stamp = codex_state_db_stamp(&db_path).expect("first stamp");
+        std::thread::sleep(Duration::from_millis(2));
+        insert_test_codex_thread(&connection, "session-2", 20, target_path.to_str().unwrap());
+        let second_stamp = codex_state_db_stamp(&db_path).expect("second stamp");
+        assert_ne!(first_stamp, second_stamp);
+
+        let cached_rows =
+            read_recent_codex_threads_local_with_db(&db_path, target_path, true, 1, None, true)
+                .expect("cached rows");
+        assert_eq!(cached_rows[0].id, "session-2");
+
+        let uncached_rows =
+            read_recent_codex_threads_local_with_db(&db_path, target_path, true, 1, None, false)
+                .expect("uncached rows");
+        assert_eq!(uncached_rows[0].id, "session-2");
+    }
+
+    #[test]
+    fn looks_like_explicit_codex_session_hint_accepts_uuid_prefix_without_hyphen() {
+        assert!(looks_like_explicit_codex_session_hint(
+            "019d3029a9ae7652b83553179b92cb72"
+        ));
+        assert!(looks_like_explicit_codex_session_hint("019d3029"));
+        assert!(looks_like_explicit_codex_session_hint(
+            "019d3029-a9ae-7652-b835-53179b92cb72"
+        ));
+        assert!(!looks_like_explicit_codex_session_hint("12345678"));
+        assert!(!looks_like_explicit_codex_session_hint("zed-session"));
+    }
+
+    #[test]
+    fn maybe_resolve_direct_codex_resume_ignores_non_codex_providers() {
+        let requested_target = PathBuf::from("/tmp/requested");
+        let resolved = maybe_resolve_direct_codex_resume(
+            Provider::Claude,
+            Some("019d3029"),
+            Some(requested_target),
+            |_| unreachable!("non-codex providers should not resolve codex identity"),
+        )
+        .expect("resolve");
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn maybe_resolve_direct_codex_resume_prefers_resolved_launch_path() {
+        let resolved = maybe_resolve_direct_codex_resume(
+            Provider::Codex,
+            Some("019d3029"),
+            Some(PathBuf::from("/tmp/requested")),
+            |query| {
+                assert_eq!(query, "019d3029");
+                Ok(Some((
+                    "019d3029-a9ae-7652-b835-53179b92cb72".to_string(),
+                    Some(PathBuf::from("/tmp/resolved")),
+                )))
+            },
+        )
+        .expect("resolve")
+        .expect("fast path");
+
+        assert_eq!(resolved.0, "019d3029-a9ae-7652-b835-53179b92cb72");
+        assert_eq!(resolved.1, Some(PathBuf::from("/tmp/resolved")));
+    }
+
+    #[test]
+    fn maybe_resolve_direct_codex_resume_falls_back_to_requested_target() {
+        let requested_target = PathBuf::from("/tmp/requested");
+        let resolved = maybe_resolve_direct_codex_resume(
+            Provider::Codex,
+            Some("019d3029"),
+            Some(requested_target.clone()),
+            |_query| Ok(None),
+        )
+        .expect("resolve")
+        .expect("fast path");
+
+        assert_eq!(resolved.0, "019d3029");
+        assert_eq!(resolved.1, Some(requested_target));
+    }
+
+    #[test]
+    fn session_query_matches_saved_name_respects_exact_saved_aliases() {
+        let mut index = SessionIndex::default();
+        index.sessions.insert(
+            "019d3029".to_string(),
+            SavedSession {
+                id: "session-123".to_string(),
+                provider: "codex".to_string(),
+                description: None,
+                saved_at: "2026-03-30T00:00:00Z".to_string(),
+                last_resumed: None,
+            },
+        );
+
+        assert!(session_query_matches_saved_name(Some("019d3029"), &index));
+        assert!(!session_query_matches_saved_name(
+            Some("019d3029 "),
+            &SessionIndex::default()
+        ));
+        assert!(!session_query_matches_saved_name(Some("deadbeef"), &index));
+    }
+
+    #[test]
+    fn read_codex_threads_by_session_hint_local_with_db_matches_uuid_prefix() {
+        let root = tempdir().expect("tempdir");
+        let db_path = root.path().join("state_5.sqlite");
+        let connection = init_test_codex_threads_db(&db_path);
+        insert_test_codex_thread(
+            &connection,
+            "019d3029-a9ae-7652-b835-53179b92cb72",
+            20,
+            "/tmp/zed",
+        );
+        insert_test_codex_thread(
+            &connection,
+            "019d9999-a9ae-7652-b835-53179b92cb72",
+            10,
+            "/tmp/other",
+        );
+
+        let rows = read_codex_threads_by_session_hint_local_with_db(&db_path, "019d3029", 1, false)
+            .expect("query rows");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "019d3029-a9ae-7652-b835-53179b92cb72");
+        assert_eq!(rows[0].cwd, "/tmp/zed");
     }
 
     #[test]
@@ -16722,6 +17353,56 @@ l is now Kit. L now delegates to j. old k moved to cl. old l moved to cf. old L 
             format_session_ref(&session, true),
             "codex:019ce791-7e05-7e51-b2b7-610dc7172e5c"
         );
+    }
+
+    #[test]
+    fn resolve_session_selection_accepts_numeric_index() {
+        let sessions = vec![
+            AiSession {
+                session_id: "session-one".to_string(),
+                provider: Provider::Codex,
+                timestamp: None,
+                last_message_at: None,
+                last_message: None,
+                first_message: None,
+                error_summary: None,
+            },
+            AiSession {
+                session_id: "session-two".to_string(),
+                provider: Provider::Claude,
+                timestamp: None,
+                last_message_at: None,
+                last_message: None,
+                first_message: None,
+                error_summary: None,
+            },
+        ];
+
+        let (session_id, provider) =
+            resolve_session_selection("2", &sessions, &SessionIndex::default(), Provider::All)
+                .expect("numeric session index should resolve");
+
+        assert_eq!(session_id, "session-two");
+        assert_eq!(provider, Provider::Claude);
+    }
+
+    #[test]
+    fn resolve_session_selection_rejects_out_of_range_numeric_index() {
+        let sessions = vec![AiSession {
+            session_id: "session-one".to_string(),
+            provider: Provider::Codex,
+            timestamp: None,
+            last_message_at: None,
+            last_message: None,
+            first_message: None,
+            error_summary: None,
+        }];
+
+        let err =
+            resolve_session_selection("2", &sessions, &SessionIndex::default(), Provider::All)
+                .expect_err("out of range numeric session index should fail");
+
+        assert!(err.to_string().contains("Session index 2 out of range"));
     }
 
     #[test]
