@@ -14,7 +14,8 @@ Generated outputs:
 - `~/.config/flow/generated/lin/intents.json`
 - `~/.config/flow/generated/lin/mac.toml`
 - `~/.config/flow/generated/ai/config.json`
-- `~/.config/flow/generated/hive/config.json`
+
+Hive config may still appear in the effective root config during migration, but Flow no longer emits or applies `~/.hive/config.json`.
 
 If `~/.flow/config.ts` does not exist yet, Flow currently falls back to:
 
@@ -76,7 +77,7 @@ export default {
   flow: { ... },
   lin: { ... },
   ai: { ... },
-  hive: { ... },
+  hive: { ... }, // parsed for migration compatibility, not applied to ~/.hive
   zerg: { ... },
   extensions: ["lin-compat"],
 }
@@ -94,3 +95,4 @@ Each extension can contribute partial config fragments plus optional generated f
 - Flow currently ships one built-in extension name: `lin-compat`
 - explicit extensions must exist or `f config build` fails
 - generated outputs are written atomically
+- if a `hive` section is present, `f config build/apply/eval` warns that Hive output is deprecated and ignored

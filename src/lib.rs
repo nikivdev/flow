@@ -43,6 +43,7 @@ pub mod env;
 pub mod env_setup;
 pub mod explain_commits;
 pub mod ext;
+pub mod failure;
 pub mod features;
 pub mod fish_install;
 pub mod fish_trace;

@@ -25,6 +25,7 @@ Complete documentation for all `f` (flow) commands.
 | [`down`](down.md) | Bring a project down with lifecycle conventions |
 | [`domains`](domains.md) | Shared local `*.localhost` route manager on port 80 |
 | [`tasks`](tasks.md) | List and run project tasks |
+| [`failure`](failure.md) | Inspect and copy recent task failures |
 | [`global`](global.md) | Run tasks from global flow config |
 | [`setup`](setup.md) | Print aliases or run setup task |
 | [`ai`](ai.md) | Manage AI coding sessions (Claude + Codex) |
@@ -65,6 +66,7 @@ f commit --help
 ### Task Management
 
 - **[tasks](tasks.md)** - List project tasks
+- **[failure](failure.md)** - Inspect and copy recent task failures
 - **[fast](fast.md)** - Run AI tasks through the low-latency fast client path
 - **[up](up.md)** - Start project lifecycle (`up`/`dev`) with optional domains setup
 - **[down](down.md)** - Stop project lifecycle with optional domains teardown

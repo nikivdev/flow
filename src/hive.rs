@@ -26,6 +26,22 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+fn deprecation_message() -> String {
+    let lines = [
+        "`f hive` is deprecated and currently disabled while Hive is being retired.",
+        "",
+        "Use these replacements instead:",
+        "  - Natural-language shell work: `do shell \"<query>\"`",
+        "  - Run-owned agents from `~/run`: `run <agent>` or `do <agent>`",
+        "  - Personal env vars: `f env guide` or `f env set KEY=VALUE`",
+        "  - Code move flows: `f migrate code`",
+        "  - AI session helpers: `f codex ...` or `f claude ...`",
+        "",
+        "Flow-side Hive cleanup is in progress. The old `f hive` entrypoint is no longer the supported path.",
+    ];
+    lines.join("\n")
+}
+
 /// Agent configuration from flow.toml
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AgentConfig {
@@ -134,19 +150,6 @@ pub fn load_hive_config() -> Option<HiveConfig> {
     let path = dirs::home_dir()?.join(".hive/config.json");
     let content = fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
-}
-
-/// Load project config for agents (best effort, returns default if not found)
-fn load_config_for_agents() -> crate::config::Config {
-    // Try to find and load flow.toml
-    let config_path = PathBuf::from("flow.toml");
-    if config_path.exists() {
-        if let Ok(cfg) = crate::config::load(&config_path) {
-            return cfg;
-        }
-    }
-    // Return default config if not found
-    crate::config::Config::default()
 }
 
 /// Find agent spec file in standard locations
@@ -483,87 +486,38 @@ pub fn match_agents(content: &str, project_agents: &[AgentConfig], max: usize) -
 
 /// Handle the `f hive` CLI command.
 pub fn run_command(cmd: crate::cli::HiveCommand) -> Result<()> {
-    use crate::cli::HiveAction;
-
-    // Load project config to get agents (if available)
-    let cfg = load_config_for_agents();
-
-    // Handle direct agent invocation: `f hive fish "wrap ls"`
-    if !cmd.agent.is_empty() {
-        let agent_name = &cmd.agent[0];
-        let prompt = if cmd.agent.len() > 1 {
-            cmd.agent[1..].join(" ")
-        } else {
-            String::new()
-        };
-
-        if prompt.is_empty() {
-            return run_agent_interactive(agent_name);
-        } else {
-            return run_agent(agent_name, &prompt);
-        }
-    }
-
-    match cmd.action {
-        None | Some(HiveAction::List) => {
-            list_agents(&cfg.agents);
-        }
-        Some(HiveAction::Run { agent, prompt }) => {
-            let prompt_str = prompt.join(" ");
-            if prompt_str.is_empty() {
-                run_agent_interactive(&agent)?;
-            } else {
-                run_agent(&agent, &prompt_str)?;
-            }
-        }
-        Some(HiveAction::New { name, global }) => {
-            let path = create_agent(&name, global)?;
-            println!("Created agent: {}", path.display());
-            println!("\nEdit with: f hive edit {}", name);
-        }
-        Some(HiveAction::Edit { agent }) => {
-            if let Some(name) = agent {
-                edit_agent(&name)?;
-            } else {
-                // List agents and ask user to specify
-                let agents = discover_agents(&cfg.agents);
-                if agents.is_empty() {
-                    println!("No agents found. Create one with: f hive new <name>");
-                } else {
-                    println!("Available agents:");
-                    for a in agents {
-                        println!("  {}", a.name);
-                    }
-                    println!("\nRun: f hive edit <agent>");
-                }
-            }
-        }
-        Some(HiveAction::Show { agent }) => {
-            if let Some(a) = get_agent(&agent, &cfg.agents) {
-                if let Some(path) = a.spec_path {
-                    let content = load_agent_spec(&path)?;
-                    println!("{}", content);
-                } else if let Some(desc) = a.config.description {
-                    println!("# Agent: {}\n\n{}", agent, desc);
-                } else {
-                    println!("Agent '{}' has no spec file.", agent);
-                }
-            } else {
-                anyhow::bail!("Agent '{}' not found", agent);
-            }
-        }
-    }
-
-    Ok(())
+    let _ = cmd;
+    anyhow::bail!(deprecation_message())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::HiveCommand;
 
     #[test]
     fn test_agent_source_display() {
         assert_eq!(format!("{}", AgentSource::ProjectConfig), "project");
         assert_eq!(format!("{}", AgentSource::GlobalHive), "hive");
+    }
+
+    #[test]
+    fn test_deprecation_message_mentions_shell_and_env_replacements() {
+        let message = deprecation_message();
+        assert!(message.contains("do shell"));
+        assert!(message.contains("run <agent>"));
+        assert!(message.contains("f env guide"));
+    }
+
+    #[test]
+    fn test_run_command_returns_deprecation_error() {
+        let err = run_command(HiveCommand {
+            action: None,
+            agent: Vec::new(),
+        })
+        .expect_err("f hive should be disabled");
+        let message = err.to_string();
+        assert!(message.contains("deprecated"));
+        assert!(message.contains("do shell"));
     }
 }

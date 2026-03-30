@@ -1,48 +1,34 @@
-# Set Env Vars with Hive
+# Set Env Vars with Flow Env
 
-This doc shows how to use `hive` to store env vars in Flow’s **local personal** env store.
-These values are global (not tied to a repo) and are later pulled during deploy.
+This doc replaces the old Hive-based env flow.
 
-## Prereqs
+Use Flow's env store directly for personal env vars. These values are global, not tied to one repo, and can later be read during deploy or local tooling.
 
-- `hive` installed (`f deploy` in `~/code/lang/mbt/hive`)
-- `env-help` installed (`f deploy-help` in `~/code/lang/mbt`)
-- Flow local env backend (default on this machine)
+## Recommended paths
 
-## Recommended: editor-based paste (multi-line)
+### Guided setup
 
-This opens your editor (Zed if installed, else nano), then saves and closes.
+If the current repo has env metadata and you want a guided prompt:
 
 ```bash
-hive --paste env
+f env guide
 ```
 
-Paste lines like:
+### Set one personal env var
 
 ```bash
-STREAM_SERVER_HETZNER_HOST=u533855.your-storagebox.de
-STREAM_SERVER_HETZNER_USER=u533855
-STREAM_SERVER_HETZNER_PATH=/backups/streams
-STREAM_SERVER_HETZNER_PORT=23
+f env set STREAM_SERVER_HETZNER_HOST=u533855.your-storagebox.de
 ```
 
-Save and close the editor to apply.
+### Set several personal env vars
 
-## One-liner (single line)
-
-```bash
-hive env STREAM_SERVER_HETZNER_HOST=u533855.your-storagebox.de STREAM_SERVER_HETZNER_USER=u533855 STREAM_SERVER_HETZNER_PATH=/backups/streams STREAM_SERVER_HETZNER_PORT=23
-```
-
-## Pipe (non-interactive)
+Run `f env set` once per pair:
 
 ```bash
-cat <<'EOF' | hive --paste env
-STREAM_SERVER_HETZNER_HOST=u533855.your-storagebox.de
-STREAM_SERVER_HETZNER_USER=u533855
-STREAM_SERVER_HETZNER_PATH=/backups/streams
-STREAM_SERVER_HETZNER_PORT=23
-EOF
+f env set STREAM_SERVER_HETZNER_HOST=u533855.your-storagebox.de
+f env set STREAM_SERVER_HETZNER_USER=u533855
+f env set STREAM_SERVER_HETZNER_PATH=/backups/streams
+f env set STREAM_SERVER_HETZNER_PORT=23
 ```
 
 ## Verify
@@ -51,21 +37,21 @@ EOF
 f env list
 ```
 
-This lists envs in `personal` + `production` scope (values are masked).
+This lists envs in the active Flow env store with values masked.
 
 ## Deploy using Flow env store
 
-From the repo using these envs (example: stream server):
+From the repo using these envs:
 
 ```bash
 cd ~/code/lang/cpp/stream
 f deploy host
 ```
 
-Flow writes `/opt/stream/.env` on the host using the local env store.
+Flow writes the target `.env` using the Flow env store.
 
 ## Notes
 
-- Env vars are stored at:
-  `~/.config/flow/env-local/personal/production.env`
-- Use `hive --paste env` whenever you need multi-line input.
+- Personal env vars are stored by Flow, not Hive.
+- For repo-aware guided setup, prefer `f env guide`.
+- For direct personal writes, prefer repeated `f env set KEY=VALUE`.

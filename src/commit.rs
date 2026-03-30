@@ -365,7 +365,6 @@ fn warn_secrets_in_diff(
     let agent_name =
         env::var("FLOW_FIX_COMMIT_AGENT").unwrap_or_else(|_| "fix-f-commit".to_string());
     let agent_enabled = agent_name.trim().to_lowercase() != "off";
-    let hive_available = which::which("hive").is_ok();
     let ai_available = which::which("ai").is_ok();
     let interactive = io::stdin().is_terminal();
     let mut current_findings = findings.to_vec();
@@ -379,29 +378,34 @@ fn warn_secrets_in_diff(
         Ok(())
     };
 
-    if interactive && agent_enabled && hive_available {
+    if interactive && agent_enabled {
         let task = build_fix_f_commit_task(&current_findings);
-        println!("Running fix-f-commit agent (hive)...");
-        if let Err(err) = run_fix_f_commit_agent(repo_root, &agent_name, &task) {
-            eprintln!("⚠ Failed to run fix-f-commit agent: {err}");
-            eprintln!(
-                "  Create the agent at ~/.config/flow/agents/fix-f-commit.md or ~/.hive/agents/fix-f-commit/spec.md"
-            );
-            eprintln!();
-        }
-        rescan_after_fix(&mut current_findings)?;
-        if current_findings.is_empty() {
-            if prompt_yes_no_default_yes(
-                "Secret scan is clean after auto-fix. Continue with commit?",
-            )? {
-                return Ok(());
+        eprintln!(
+            "ℹ️  fix-f-commit Hive agent '{}' is retired; continuing with manual/Codex handoff.",
+            agent_name
+        );
+        eprintln!("Suggested prompt (copy/paste into your model):");
+        eprintln!("────────────────────────────────────────");
+        eprintln!("{}", task);
+        eprintln!("────────────────────────────────────────");
+        if prompt_yes_no_default_yes(
+            "Pause now to fix these findings, then let Flow rescan staged changes?",
+        )? {
+            prompt_press_enter(
+                "Make the fixes, restage changes if needed, then press Enter to rescan staged changes.",
+            )?;
+            rescan_after_fix(&mut current_findings)?;
+            if current_findings.is_empty() {
+                if prompt_yes_no_default_yes(
+                    "Secret scan is clean after manual fix. Continue with commit?",
+                )? {
+                    return Ok(());
+                }
+                bail!("Commit aborted after manual fix. Review changes and retry.");
             }
-            bail!("Commit aborted after auto-fix. Review changes and retry.");
         }
     } else if !agent_enabled {
-        eprintln!("ℹ️  fix-f-commit agent disabled via FLOW_FIX_COMMIT_AGENT=off");
-    } else if !hive_available {
-        eprintln!("ℹ️  hive not found; skipping fix-f-commit agent");
+        eprintln!("ℹ️  manual fix-f-commit handoff disabled via FLOW_FIX_COMMIT_AGENT=off");
     }
 
     if interactive && !current_findings.is_empty() && ai_available {
@@ -452,9 +456,9 @@ fn should_run_sync_for_secret_fixes(repo_root: &Path) -> Result<bool> {
 
     let agent_name =
         env::var("FLOW_FIX_COMMIT_AGENT").unwrap_or_else(|_| "fix-f-commit".to_string());
-    let hive_enabled = agent_name.trim().to_lowercase() != "off" && which::which("hive").is_ok();
+    let handoff_enabled = agent_name.trim().to_lowercase() != "off";
     let ai_available = which::which("ai").is_ok();
-    if !hive_enabled && !ai_available {
+    if !handoff_enabled && !ai_available {
         return Ok(false);
     }
 
@@ -464,28 +468,6 @@ fn should_run_sync_for_secret_fixes(repo_root: &Path) -> Result<bool> {
     gitignore_policy::enforce_staged_policy(repo_root)?;
 
     Ok(!scan_diff_for_secrets(repo_root).is_empty())
-}
-
-fn run_fix_f_commit_agent(repo_root: &Path, agent: &str, task: &str) -> Result<()> {
-    if which::which("hive").is_err() {
-        bail!("hive not found in PATH");
-    }
-
-    let mut cmd = Command::new("hive");
-    cmd.args(["agent", &agent, task])
-        .current_dir(repo_root)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .envs(resolve_hive_env());
-
-    let status = cmd.status().context("failed to run hive agent")?;
-
-    if !status.success() {
-        bail!("hive agent '{}' failed", agent);
-    }
-
-    Ok(())
 }
 
 fn run_fix_f_commit_ai(repo_root: &Path, task: &str) -> Result<()> {
@@ -528,7 +510,7 @@ If you must keep the pattern but want it to pass the scanner, use 'xxx' placehol
 After fixing, restage changes."
     );
 
-    sanitize_hive_task(&task)
+    task
 }
 
 fn print_secret_findings(header: &str, findings: &[(String, usize, String, String)]) {
@@ -553,41 +535,6 @@ fn has_unstaged_changes(repo_root: &Path, file: &str) -> bool {
 
     let output = String::from_utf8_lossy(&output.stdout);
     output.lines().any(|line| line.trim() == file)
-}
-
-fn sanitize_hive_task(task: &str) -> String {
-    let mut cleaned = String::with_capacity(task.len());
-    for ch in task.chars() {
-        match ch {
-            '"' => cleaned.push('\''),
-            '\n' | '\r' | '\t' => cleaned.push(' '),
-            _ => cleaned.push(ch),
-        }
-    }
-    cleaned
-}
-
-fn resolve_hive_env() -> Vec<(String, String)> {
-    let mut vars = Vec::new();
-
-    if std::env::var("CEREBRAS_API_KEY")
-        .map(|v| v.trim().is_empty())
-        .unwrap_or(true)
-    {
-        if is_local_env_backend() {
-            if let Ok(store) =
-                crate::env::fetch_personal_env_vars(&["CEREBRAS_API_KEY".to_string()])
-            {
-                if let Some(value) = store.get("CEREBRAS_API_KEY") {
-                    if !value.trim().is_empty() {
-                        vars.push(("CEREBRAS_API_KEY".to_string(), value.to_string()));
-                    }
-                }
-            }
-        }
-    }
-
-    vars
 }
 
 /// Threshold for "large" file changes (lines added + removed).
@@ -3010,6 +2957,17 @@ fn prompt_yes_no_default_yes(message: &str) -> Result<bool> {
         return Ok(true);
     }
     Ok(answer == "y" || answer == "yes")
+}
+
+fn prompt_press_enter(message: &str) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        return Ok(());
+    }
+    print!("{} ", message);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(())
 }
 
 fn resolve_commit_testing_policy(repo_root: &Path) -> CommitTestingPolicy {
@@ -11607,7 +11565,7 @@ fn open_in_zed_preview(path: &Path) -> Result<()> {
         Ok(())
     };
 
-    try_open("/Applications/Zed.app").or_else(|_| try_open("/Applications/Zed Preview.app"))
+    try_open("/Applications/Zed.app")
 }
 
 fn parse_pr_edit_markdown(text: &str) -> Result<(String, String)> {
@@ -15945,7 +15903,7 @@ mod tests {
     #[test]
     fn gitlens_commit_deeplink_url_targets_cursor_with_repo_path() {
         let url = gitlens_commit_deeplink_url(
-            Path::new("/Users/nikitavoloboev/repos/gitkraken/vscode-gitlens"),
+            Path::new("/Users/example/repos/gitkraken/vscode-gitlens"),
             "a00bf8911dfde59bf027039390cf498785ee931d",
         )
         .expect("deeplink");
@@ -15960,7 +15918,7 @@ mod tests {
             url.query_pairs()
                 .find(|(key, _)| key == "path")
                 .map(|(_, value)| value.into_owned()),
-            Some("/Users/nikitavoloboev/repos/gitkraken/vscode-gitlens".to_string())
+            Some("/Users/example/repos/gitkraken/vscode-gitlens".to_string())
         );
     }
 
@@ -16029,6 +15987,21 @@ mod tests {
         assert!(message.starts_with("Update 2 files"));
         assert!(message.contains("- src/lib.rs"));
         assert!(message.contains("- src/main.rs"));
+    }
+
+    #[test]
+    fn fix_f_commit_task_is_multiline_and_mentions_ignore_guidance() {
+        let task = build_fix_f_commit_task(&[(
+            "src/secrets.ts".to_string(),
+            7,
+            "high entropy".to_string(),
+            "sk-live-123".to_string(),
+        )]);
+
+        assert!(task.contains("Fix f commit secret detection."));
+        assert!(task.contains("\n\nFindings:\n- src/secrets.ts:7"));
+        assert!(task.contains("flow:secret:ignore"));
+        assert!(task.contains("After fixing, restage changes."));
     }
 
     #[test]

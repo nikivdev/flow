@@ -435,6 +435,12 @@ command = "echo \"arg1=$1 arg2=$2 all=$@\""
 description = "Test that task args are passed correctly"
 
 [[tasks]]
+name = "free-space"
+command = "bash ./scripts/free_space.sh $@"
+description = "Mac disk cleanup helper: dry-run by default, use --apply for the real pass"
+interactive = true
+
+[[tasks]]
 name = "clone-test-repo"
 command = "git clone https://github.com/nikivdev/flow-testing testing/flow-testing"
 description = "Clone the flow-testing repo into testing/"
@@ -695,6 +701,16 @@ interactive = true
 name = "codex-fork-promote"
 command = "python3 ./scripts/codex_fork.py promote \"$@\""
 description = "Create or update a review/nikiv-* branch from a codex/* worktree branch"
+
+[[tasks]]
+name = "private-mirror-status"
+command = "python3 ./scripts/private_mirror.py status --repo-root \"$PWD\" \"$@\""
+description = "Show private mirror remote and GitHub default-branch state for the current repo"
+
+[[tasks]]
+name = "private-mirror-ensure"
+command = "python3 ./scripts/private_mirror.py ensure --repo-root \"$PWD\" \"$@\""
+description = "Create/update a private GitHub mirror repo, wire the local remote, push the branch, and set the GitHub default branch"
 
 [skills]
 sync_tasks = true

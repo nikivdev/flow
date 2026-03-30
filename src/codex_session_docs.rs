@@ -259,18 +259,45 @@ pub fn document_completed_session(
 }
 
 pub fn recent_packets(project_root: &Path, limit: usize) -> Result<Vec<SessionDocIndexEntry>> {
+    let state_root = config::ensure_global_state_dir()?;
+    recent_packets_at(project_root, &state_root, limit)
+}
+
+fn recent_packets_at(
+    project_root: &Path,
+    state_root: &Path,
+    limit: usize,
+) -> Result<Vec<SessionDocIndexEntry>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let index_path = session_changes_root(project_root).join("index.json");
-    if !index_path.exists() {
-        return Ok(Vec::new());
+    let mut merged = Vec::new();
+    let mut seen = BTreeSet::new();
+    for index_path in [
+        session_changes_root(state_root, project_root).join("index.json"),
+        legacy_session_changes_root(project_root).join("index.json"),
+    ] {
+        if !index_path.exists() {
+            continue;
+        }
+        let bytes = fs::read(&index_path)
+            .with_context(|| format!("failed to read {}", index_path.display()))?;
+        let index: SessionDocIndex = serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed to decode {}", index_path.display()))?;
+        for entry in index.recent_sessions {
+            if seen.insert(entry.session_key.clone()) {
+                merged.push(entry);
+            }
+        }
     }
-    let bytes = fs::read(&index_path)
-        .with_context(|| format!("failed to read {}", index_path.display()))?;
-    let index: SessionDocIndex = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to decode {}", index_path.display()))?;
-    Ok(index.recent_sessions.into_iter().take(limit).collect())
+    merged.sort_by(|left, right| {
+        right
+            .completed_at_unix
+            .cmp(&left.completed_at_unix)
+            .then_with(|| right.session_key.cmp(&left.session_key))
+    });
+    merged.truncate(limit);
+    Ok(merged)
 }
 
 pub fn pending_review_entries(
@@ -511,7 +538,12 @@ fn document_completed_session_at(
         short_session_id(&input.session_id),
         input.completed_at_unix
     );
-    let bundle_dir = session_bundle_dir(target_root, input.completed_at_unix, &session_key);
+    let bundle_dir = session_bundle_dir(
+        state_root,
+        target_root,
+        input.completed_at_unix,
+        &session_key,
+    );
     fs::create_dir_all(&bundle_dir)
         .with_context(|| format!("failed to create {}", bundle_dir.display()))?;
 
@@ -601,7 +633,7 @@ fn document_completed_session_at(
     )
     .with_context(|| format!("failed to write {}", promotion_path.display()))?;
 
-    update_project_index(target_root, &packet, &session_json_path)?;
+    update_project_index(state_root, target_root, &packet, &session_json_path)?;
     enqueue_review_item(
         state_root,
         target_root,
@@ -751,11 +783,12 @@ fn render_diff_text(packet: &SessionDocPacket) -> String {
 }
 
 fn update_project_index(
+    state_root: &Path,
     target_root: &Path,
     packet: &SessionDocPacket,
     session_json_path: &Path,
 ) -> Result<()> {
-    let index_path = session_changes_root(target_root).join("index.json");
+    let index_path = session_changes_root(state_root, target_root).join("index.json");
     let mut index = if index_path.exists() {
         let bytes = fs::read(&index_path)
             .with_context(|| format!("failed to read {}", index_path.display()))?;
@@ -813,6 +846,10 @@ fn update_project_index(
         }
     }
 
+    if let Some(parent) = index_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
     fs::write(
         &index_path,
         serde_json::to_vec_pretty(&index).context("failed to encode session docs index")?,
@@ -1518,20 +1555,44 @@ fn detect_project_root(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(trimmed))
 }
 
-fn session_changes_root(project_root: &Path) -> PathBuf {
+fn session_changes_root(state_root: &Path, project_root: &Path) -> PathBuf {
+    state_root
+        .join("codex")
+        .join("session-changes")
+        .join(project_storage_key(project_root))
+}
+
+fn legacy_session_changes_root(project_root: &Path) -> PathBuf {
     project_root
         .join(".ai")
         .join("docs")
         .join("session-changes")
 }
 
-fn session_bundle_dir(project_root: &Path, completed_at_unix: u64, session_key: &str) -> PathBuf {
+fn session_bundle_dir(
+    state_root: &Path,
+    project_root: &Path,
+    completed_at_unix: u64,
+    session_key: &str,
+) -> PathBuf {
     let dt: DateTime<Utc> =
         DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(completed_at_unix));
     let date_dir = dt.format("%Y-%m-%d").to_string();
-    session_changes_root(project_root)
+    session_changes_root(state_root, project_root)
         .join(date_dir)
         .join(session_key)
+}
+
+fn project_storage_key(project_root: &Path) -> String {
+    let normalized = normalize_target_root(project_root);
+    let slug = normalized
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| slugify(value, 32))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "project".to_string());
+    let hash = blake3::hash(normalized.to_string_lossy().as_bytes()).to_hex();
+    format!("{slug}-{}", &hash[..12])
 }
 
 fn doc_review_queue_path(state_root: &Path) -> PathBuf {
@@ -1713,8 +1774,10 @@ mod tests {
         assert_eq!(packet.documentation_mode, "packet_with_patch");
         assert!(Path::new(&packet.summary_path).exists());
         assert!(Path::new(&packet.diff_path).exists());
+        assert!(Path::new(&packet.summary_path).starts_with(state.path()));
+        assert!(Path::new(&packet.diff_path).starts_with(state.path()));
 
-        let recent = recent_packets(repo.path(), 5).expect("recent");
+        let recent = recent_packets_at(repo.path(), state.path(), 5).expect("recent");
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].session_id, packet.session_id);
 
@@ -1742,6 +1805,7 @@ mod tests {
 
         assert_eq!(packet.confidence, "low");
         assert_eq!(packet.documentation_mode, "metadata_only");
+        assert!(Path::new(&packet.summary_path).starts_with(state.path()));
         let summary = fs::read_to_string(&packet.summary_path).expect("summary");
         assert!(summary.contains("No authoritative patch-attributed file changes were recorded"));
     }
@@ -1794,6 +1858,10 @@ mod tests {
     #[test]
     fn allowed_commit_paths_include_promoted_note_and_metadata() {
         let repo = tempdir().expect("repo");
+        let state = tempdir().expect("state");
+        let session_root = session_changes_root(state.path(), repo.path())
+            .join("2026-03-19")
+            .join("019d");
         let entry = DocReviewQueueEntry {
             version: DOC_REVIEW_QUEUE_VERSION,
             enqueued_at_unix: 1,
@@ -1806,21 +1874,9 @@ mod tests {
             changed_files: vec!["src/main.rs".to_string()],
             trace_id: None,
             summary: "implemented the current fix".to_string(),
-            session_json_path: repo
-                .path()
-                .join(".ai/docs/session-changes/2026-03-19/019d/session.json")
-                .display()
-                .to_string(),
-            summary_path: repo
-                .path()
-                .join(".ai/docs/session-changes/2026-03-19/019d/summary.md")
-                .display()
-                .to_string(),
-            diff_path: repo
-                .path()
-                .join(".ai/docs/session-changes/2026-03-19/019d/diff.txt")
-                .display()
-                .to_string(),
+            session_json_path: session_root.join("session.json").display().to_string(),
+            summary_path: session_root.join("summary.md").display().to_string(),
+            diff_path: session_root.join("diff.txt").display().to_string(),
             promotion_eligible: Some(true),
             promotion_target: Some(".ai/docs/session-changes-promoted/demo.md".to_string()),
             promotion_reason: Some("promote".to_string()),
@@ -1846,5 +1902,50 @@ mod tests {
         );
         assert!(paths.iter().any(|path| path.ends_with("summary.md")));
         assert!(paths.iter().any(|path| path.ends_with("promotion.json")));
+    }
+
+    #[test]
+    fn recent_packets_falls_back_to_legacy_project_storage() {
+        let repo = tempdir().expect("repo");
+        let state = tempdir().expect("state");
+        let legacy_root = legacy_session_changes_root(repo.path());
+        fs::create_dir_all(&legacy_root).expect("legacy root");
+        let index_path = legacy_root.join("index.json");
+        let index = SessionDocIndex {
+            version: SESSION_DOC_INDEX_VERSION,
+            generated_at_unix: 1,
+            total_sessions: 1,
+            recent_sessions: vec![SessionDocIndexEntry {
+                session_id: "019d035d-99b3-7461-9f15-73306348aa28".to_string(),
+                session_key: "019d035d-1773776290".to_string(),
+                completed_at_unix: 1_773_776_290,
+                confidence: "high".to_string(),
+                documentation_mode: "packet_with_patch".to_string(),
+                changed_files: vec!["src/main.rs".to_string()],
+                completion_summary: "implemented the current fix".to_string(),
+                summary_path: legacy_root
+                    .join("2026-03-19/019d/summary.md")
+                    .display()
+                    .to_string(),
+                diff_path: legacy_root
+                    .join("2026-03-19/019d/diff.txt")
+                    .display()
+                    .to_string(),
+                session_json_path: legacy_root
+                    .join("2026-03-19/019d/session.json")
+                    .display()
+                    .to_string(),
+            }],
+            by_file: BTreeMap::new(),
+        };
+        fs::write(
+            &index_path,
+            serde_json::to_vec_pretty(&index).expect("encode index"),
+        )
+        .expect("write index");
+
+        let recent = recent_packets_at(repo.path(), state.path(), 5).expect("recent");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].session_key, "019d035d-1773776290");
     }
 }

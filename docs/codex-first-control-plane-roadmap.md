@@ -54,12 +54,12 @@ The result is "good pieces, weak control plane".
 
 ## Existing Flow Building Blocks
 
-- task-synced Codex skill metadata in [src/skills.rs](/Users/nikitavoloboev/code/flow/src/skills.rs#L378) and [src/skills.rs](/Users/nikitavoloboev/code/flow/src/skills.rs#L443)
-- Codex skill cache reload in [src/skills.rs](/Users/nikitavoloboev/code/flow/src/skills.rs#L1224)
-- configurable Codex wrapper transport in [src/commit.rs](/Users/nikitavoloboev/code/flow/src/commit.rs#L5414)
-- multi-provider session recovery and copy flows in [src/ai.rs](/Users/nikitavoloboev/code/flow/src/ai.rs#L1)
-- router telemetry hooks in [src/rl_signals.rs](/Users/nikitavoloboev/code/flow/src/rl_signals.rs#L307)
-- current Codex session resolver direction in [codex-openai-session-resolver.md](/Users/nikitavoloboev/code/flow/docs/codex-openai-session-resolver.md#L1)
+- task-synced Codex skill metadata in [src/skills.rs](../src/skills.rs#L378) and [src/skills.rs](../src/skills.rs#L443)
+- Codex skill cache reload in [src/skills.rs](../src/skills.rs#L1224)
+- configurable Codex wrapper transport in [src/commit.rs](../src/commit.rs#L5414)
+- multi-provider session recovery and copy flows in [src/ai.rs](../src/ai.rs#L1)
+- router telemetry hooks in [src/rl_signals.rs](../src/rl_signals.rs#L307)
+- current Codex session resolver direction in [codex-openai-session-resolver.md](codex-openai-session-resolver.md#L1)
 
 These are enough to start. The missing work is unification.
 

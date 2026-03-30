@@ -72,13 +72,14 @@ Shows recent commits and `.ai/docs` file modification times.
 
 It now also shows:
 
-- recent `.ai/docs/session-changes/...` packets generated from completed Flow-managed Codex sessions
+- recent Flow-managed Codex session packets stored under Flow state for the current project
 - doc-review queue state counts for the current project
 
 ### f docs review-pending
 
-Runs the bounded daemon-style review pass over pending session-doc packets and records
-promotion decisions into queue state plus each packet's `promotion.json`.
+Runs the bounded daemon-style review pass over pending session-doc packets stored in
+Flow state and records promotion decisions into queue state plus each packet's
+`promotion.json`.
 
 Options:
 
@@ -89,7 +90,8 @@ Options:
 Previews or applies promotion for a daemon-captured session-doc packet.
 
 By default this is a dry run. It prints the chosen target under `.ai/docs/` and the
-promoted markdown note.
+promoted markdown note. Raw packet bundles stay in Flow state; only promoted
+durable notes are written into the repo.
 
 Options:
 

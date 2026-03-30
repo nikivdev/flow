@@ -1243,6 +1243,7 @@ fn link_repo_dependency(
             full: false,
             no_upstream: false,
             upstream_url: None,
+            no_home_branch_bootstrap: true,
         };
         repos::clone_repo(opts)?;
         cloned = true;

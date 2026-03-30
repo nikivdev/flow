@@ -101,7 +101,7 @@ export default defineFlowExtension({
   flow: { ... },
   lin: { ... },
   ai: { ... },
-  hive: { ... },
+  hive: { ... }, // migration-only; Flow no longer applies ~/.hive/config.json
   zerg: { ... },
   generatedFiles: [
     {

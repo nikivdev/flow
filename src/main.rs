@@ -11,9 +11,9 @@ use flowd::{
         ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
     },
     code, commit, commits, daemon, deploy, deps, docs, doctor, domains, env, explain_commits, ext,
-    fish_install, fish_trace, fix, fixup, flow_config, git_guard, gitignore_policy, hash, health,
-    help_search, history, hive, home, hub, info, init, init_tracing, install, invariants, jj,
-    latest, lifecycle, log_server, macos, notify, otp, palette, parallel, processes, projects,
+    failure, fish_install, fish_trace, fix, fixup, flow_config, git_guard, gitignore_policy, hash,
+    health, help_search, history, hive, home, hub, info, init, init_tracing, install, invariants,
+    jj, latest, lifecycle, log_server, macos, notify, otp, palette, parallel, processes, projects,
     proxy, publish, push, recipe, registry, release, repos, reviews_todo, seq_rpc, services, setup,
     skills, ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo,
     updates, upgrade, upstream, url_inspect, usage, web,
@@ -184,6 +184,9 @@ fn main() -> Result<()> {
                 } else {
                     traces::run(cmd.events)?;
                 }
+            }
+            Some(Commands::Failure(cmd)) => {
+                failure::run_cli(cmd)?;
             }
             Some(Commands::Projects) => {
                 projects::show_projects()?;
@@ -703,6 +706,7 @@ fn startup_policy_for(command: Option<&Commands>) -> StartupPolicy {
         Some(Commands::Ps(_)) => StartupPolicy::NONE,
         Some(Commands::Logs(_)) => StartupPolicy::NONE,
         Some(Commands::Trace(_)) => StartupPolicy::NONE,
+        Some(Commands::Failure(_)) => StartupPolicy::NONE,
         Some(Commands::Branches(_)) => StartupPolicy::NONE,
         Some(Commands::Status(_)) => StartupPolicy::NONE,
         Some(Commands::Changes(_)) => StartupPolicy::NONE,
