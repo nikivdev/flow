@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -14,6 +14,20 @@ pub fn run(opts: FixOpts) -> Result<()> {
     let repo_root = git_top_level()?;
     if try_run_commit_repair(&repo_root, &message)? {
         return Ok(());
+    }
+
+    if !opts.no_agent {
+        let lines = vec![
+            format!(
+                "`f fix` no longer runs the retired Hive agent step (`{}`).",
+                opts.agent
+            ),
+            "Flow can still prepare the repo for a manual or Codex-driven fix.".to_string(),
+            "After the unroll, apply the fix yourself and finish with `f commit`.".to_string(),
+        ];
+        if !confirm_with_tui("Fix", &lines, "Continue in manual fix mode? [Y/n]: ")? {
+            bail!("Aborted.");
+        }
     }
 
     let unroll = !opts.no_unroll;
@@ -29,15 +43,17 @@ pub fn run(opts: FixOpts) -> Result<()> {
     }
 
     if !opts.no_agent {
-        run_fix_agent(&repo_root, &opts.agent, &message)?;
+        print_fix_agent_retired_notice(&opts.agent, &message);
     } else {
-        println!("Skipped fix agent (use without --no-agent to run Hive).");
+        println!("Skipped retired fix-agent step; continuing in manual fix mode.");
     }
 
     if stashed {
         println!("Restoring stashed changes...");
         let _ = git_status(&repo_root, &["stash", "pop"]);
     }
+
+    print_manual_fix_next_steps(&message);
 
     Ok(())
 }
@@ -173,31 +189,36 @@ fn confirm_default_yes(prompt: &str) -> Result<bool> {
     Ok(matches!(trimmed.to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
-fn run_fix_agent(repo_root: &std::path::Path, agent: &str, message: &str) -> Result<()> {
-    if which::which("hive").is_err() {
-        bail!("hive not found in PATH. Install it or add it to PATH to run fix agent.");
-    }
-
-    let task = format!(
+fn build_fix_task(message: &str) -> String {
+    format!(
         "Fix this repo. Task: {message}\n\n\
 If the issue involves leaked secrets, remove them from tracked files, \
 update .gitignore if needed, and ensure the repo is safe to recommit."
+    )
+}
+
+fn print_fix_agent_retired_notice(agent: &str, message: &str) {
+    println!(
+        "Retired agent step: `{}` is no longer run by `f fix` while Hive is being removed.",
+        agent
     );
+    println!();
+    println!("Suggested prompt for your model:");
+    println!("────────────────────────────────────────");
+    println!("{}", build_fix_task(message));
+    println!("────────────────────────────────────────");
+}
 
-    let status = Command::new("hive")
-        .args(["agent", agent, &task])
-        .current_dir(repo_root)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to run hive agent")?;
-
-    if !status.success() {
-        bail!("hive agent failed");
+fn print_manual_fix_next_steps(message: &str) {
+    let preview = message.lines().next().unwrap_or(message).trim();
+    println!();
+    println!("Next steps:");
+    println!("  1) Make the requested repair manually or in Codex");
+    println!("  2) Review the diff");
+    println!("  3) Run `f commit` to recreate the commit cleanly");
+    if !preview.is_empty() {
+        println!("  Context: {}", preview);
     }
-
-    Ok(())
 }
 
 fn git_top_level() -> Result<std::path::PathBuf> {
@@ -273,4 +294,17 @@ fn git_status(repo_root: &std::path::Path, args: &[&str]) -> Result<()> {
         bail!("git {} failed", args.join(" "));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_fix_task;
+
+    #[test]
+    fn build_fix_task_mentions_recommit_safety() {
+        let task = build_fix_task("last commit leaked a token");
+        assert!(task.contains("last commit leaked a token"));
+        assert!(task.contains("remove them from tracked files"));
+        assert!(task.contains(".gitignore"));
+    }
 }

@@ -3,6 +3,14 @@
 Flow can run a command automatically when a task fails. This is useful for
 opening a tailored prompt, collecting diagnostics, or launching a helper tool.
 
+Flow also records failures for later inspection:
+
+```bash
+f failure last
+f failure list
+f failure copy
+```
+
 ## Overview
 
 - The hook runs after a task exits with a non-zero status.
@@ -61,6 +69,12 @@ Flow writes a JSON failure bundle to one of these locations:
 - `~/.cache/flow/last-task-failure.json` (default)
 
 The resolved path is passed to hooks via `FLOW_FAILURE_BUNDLE_PATH`.
+
+Flow also keeps versioned history beside that latest pointer under:
+
+```text
+~/.cache/flow/task-failures/
+```
 
 ## Disabling The Hook
 

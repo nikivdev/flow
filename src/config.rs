@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -619,7 +620,7 @@ pub struct TsTaskFailureAgentsConfig {
     /// Enable auto-routing on task failure.
     #[serde(default)]
     pub enabled: Option<bool>,
-    /// Tool to use (currently "hive").
+    /// Deprecated tool selector. Hive is no longer supported here.
     #[serde(default)]
     pub tool: Option<String>,
     /// Max lines of task output to include in prompt.
@@ -2660,9 +2661,32 @@ pub fn configured_home_branch_for_repo(repo_root: &Path) -> Option<String> {
     effective_jj_config_for_repo(repo_root)
         .and_then(|cfg| cfg.home_branch)
         .and_then(|value| normalized_branch_name(&value))
+        .or_else(|| {
+            git_config_get(repo_root, "flow.homeBranch")
+                .and_then(|value| normalized_branch_name(&value))
+        })
 }
 
 fn normalized_branch_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub fn configured_public_remote_for_repo(repo_root: &Path) -> Option<String> {
+    effective_jj_config_for_repo(repo_root)
+        .and_then(|cfg| cfg.remote)
+        .and_then(|value| normalized_git_remote(&value))
+        .or_else(|| {
+            git_config_get(repo_root, "flow.publicRemote")
+                .and_then(|value| normalized_git_remote(&value))
+        })
+}
+
+fn normalized_git_remote(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None
@@ -2710,9 +2734,11 @@ pub fn resolved_home_branch_for_repo(
 /// Precedence:
 /// 1. `<repo>/flow.toml` `[git].remote`
 /// 2. `<repo>/flow.toml` `[jj].remote` (legacy fallback)
-/// 3. `~/.config/flow/flow.toml` `[git].remote`
-/// 4. `~/.config/flow/flow.toml` `[jj].remote` (legacy fallback)
-/// 5. `"origin"`
+/// 3. repo-local git `branch.<current>.pushRemote`
+/// 4. repo-local git `remote.pushDefault`
+/// 5. `~/.config/flow/flow.toml` `[git].remote`
+/// 6. `~/.config/flow/flow.toml` `[jj].remote` (legacy fallback)
+/// 7. `"origin"`
 pub fn preferred_git_remote_for_repo(repo_root: &Path) -> String {
     let local_config = repo_root.join("flow.toml");
     if local_config.exists() {
@@ -2721,6 +2747,10 @@ pub fn preferred_git_remote_for_repo(repo_root: &Path) -> String {
                 return remote;
             }
         }
+    }
+
+    if let Some(remote) = preferred_git_remote_from_git(repo_root) {
+        return remote;
     }
 
     let global_config = default_config_path();
@@ -2733,6 +2763,41 @@ pub fn preferred_git_remote_for_repo(repo_root: &Path) -> String {
     }
 
     "origin".to_string()
+}
+
+fn preferred_git_remote_from_git(repo_root: &Path) -> Option<String> {
+    let current_branch = git_capture_in(repo_root, &["branch", "--show-current"])
+        .ok()
+        .map(|branch| branch.trim().to_string())
+        .filter(|branch| !branch.is_empty() && branch != "HEAD");
+
+    if let Some(current_branch) = current_branch {
+        let branch_push_remote_key = format!("branch.{current_branch}.pushRemote");
+        if let Some(remote) = git_config_get(repo_root, &branch_push_remote_key) {
+            return Some(remote);
+        }
+    }
+
+    git_config_get(repo_root, "remote.pushDefault")
+}
+
+fn git_config_get(repo_root: &Path, key: &str) -> Option<String> {
+    git_capture_in(repo_root, &["config", "--get", key])
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn git_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        anyhow::bail!("git {} failed", args.join(" "));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// Load config from the given path, logging a warning and returning an empty
@@ -3421,11 +3486,11 @@ remote = "myflow-i"
 
     #[test]
     fn inferred_home_branch_prefers_home_dir_basename() {
-        let home = Path::new("/Users/nikitavoloboev");
+        let home = Path::new("/Users/example-user");
 
         assert_eq!(
             inferred_home_branch_from_sources(Some(home), Some("other-user"), Some("third-user")),
-            Some("nikitavoloboev".to_string())
+            Some("example-user".to_string())
         );
     }
 
@@ -3463,6 +3528,90 @@ remote = "myflow-i"
             resolved_home_branch_for_repo(repo_root, Some("main")),
             Some("nikiv".to_string())
         );
+    }
+
+    #[test]
+    fn resolved_home_branch_for_repo_falls_back_to_local_git_config() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+
+        git_ok(repo_root, &["init"]);
+        git_ok(repo_root, &["config", "flow.homeBranch", "nikiv"]);
+
+        assert_eq!(
+            resolved_home_branch_for_repo(repo_root, Some("main")),
+            Some("nikiv".to_string())
+        );
+    }
+
+    #[test]
+    fn configured_public_remote_for_repo_reads_local_git_config() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+
+        git_ok(repo_root, &["init"]);
+        git_ok(repo_root, &["config", "flow.publicRemote", "upstream"]);
+
+        assert_eq!(
+            configured_public_remote_for_repo(repo_root).as_deref(),
+            Some("upstream")
+        );
+    }
+
+    #[test]
+    fn configured_public_remote_for_repo_prefers_repo_flow_config() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+
+        fs::write(repo_root.join("flow.toml"), "[jj]\nremote = \"origin\"\n")
+            .expect("write flow.toml");
+        git_ok(repo_root, &["init"]);
+        git_ok(repo_root, &["config", "flow.publicRemote", "upstream"]);
+
+        assert_eq!(
+            configured_public_remote_for_repo(repo_root).as_deref(),
+            Some("origin")
+        );
+    }
+
+    #[test]
+    fn preferred_git_remote_from_git_uses_branch_push_remote_first() {
+        let temp_dir = tempdir().expect("tempdir");
+        let repo_root = temp_dir.path();
+
+        git_ok(repo_root, &["init"]);
+        git_ok(repo_root, &["checkout", "-b", "nikiv"]);
+        git_ok(repo_root, &["config", "remote.pushDefault", "fork"]);
+        git_ok(repo_root, &["config", "branch.nikiv.pushRemote", "private"]);
+
+        assert_eq!(
+            preferred_git_remote_from_git(repo_root).as_deref(),
+            Some("private")
+        );
+    }
+
+    #[test]
+    fn preferred_git_remote_from_git_uses_remote_push_default_when_branch_override_missing() {
+        let temp_dir = tempdir().expect("tempdir");
+        let repo_root = temp_dir.path();
+
+        git_ok(repo_root, &["init"]);
+        git_ok(repo_root, &["checkout", "-b", "nikiv"]);
+        git_ok(repo_root, &["config", "remote.pushDefault", "fork"]);
+
+        assert_eq!(
+            preferred_git_remote_from_git(repo_root).as_deref(),
+            Some("fork")
+        );
+    }
+
+    fn git_ok(repo_root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {} failed", args.join(" "));
     }
 
     #[test]

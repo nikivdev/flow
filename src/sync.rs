@@ -112,6 +112,12 @@ struct SyncCommitDisplay {
     relative_time: Option<String>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct AutoStashState {
+    stashed: bool,
+    intent_to_add_paths: Vec<String>,
+}
+
 #[derive(Debug)]
 struct SyncCommitMetadata {
     full_hash: String,
@@ -137,7 +143,8 @@ enum JjWorkingCopyUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HomeBranchSyncTarget {
     home_branch: String,
-    origin_default_branch: String,
+    public_remote: String,
+    public_default_branch: String,
 }
 
 // Use the Claude family alias so sync always targets the latest Opus model.
@@ -237,15 +244,35 @@ fn resolve_home_branch_sync_target(
         return None;
     }
 
-    let origin_default_branch = resolve_remote_default_branch_in(repo_root, "origin")?;
-    if origin_default_branch == current_branch {
+    let public_remote = resolve_home_branch_public_remote(repo_root)?;
+    let public_default_branch = resolve_remote_default_branch_in(repo_root, &public_remote)?;
+    if public_default_branch == current_branch {
         return None;
     }
 
     Some(HomeBranchSyncTarget {
         home_branch,
-        origin_default_branch,
+        public_remote,
+        public_default_branch,
     })
+}
+
+fn resolve_home_branch_public_remote(repo_root: &Path) -> Option<String> {
+    if let Some(remote) = config::configured_public_remote_for_repo(repo_root)
+        && resolve_remote_default_branch_in(repo_root, &remote).is_some()
+    {
+        return Some(remote);
+    }
+
+    if resolve_remote_default_branch_in(repo_root, "origin").is_some() {
+        return Some("origin".to_string());
+    }
+
+    if resolve_remote_default_branch_in(repo_root, "upstream").is_some() {
+        return Some("upstream".to_string());
+    }
+
+    None
 }
 
 fn origin_fetch_branches_for_jj_sync(
@@ -776,29 +803,34 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
         }
 
         // Stash if needed
-        let mut stashed = false;
+        let mut auto_stash_state = AutoStashState::default();
         if has_changes && cmd.stash {
             sync_progressln!("Stashing local changes...");
-            let stash_count_before = git_capture(&["stash", "list"])
-                .map(|s| s.lines().count())
-                .unwrap_or(0);
-
-            if let Err(err) = git_run(&["stash", "push", "-u", "-m", "f sync auto-stash"]) {
-                recorder.record("stash", format!("stash failed: {}", err));
-                bail!(
-                    "Failed to stash local changes: {}. Resolve the issue and re-run sync.",
-                    err
+            auto_stash_state =
+                auto_stash_repo(repo_root_path, "f sync auto-stash").map_err(|err| {
+                    recorder.record("stash", format!("stash failed: {}", err));
+                    anyhow::anyhow!(
+                        "Failed to stash local changes: {}. Resolve the issue and re-run sync.",
+                        err
+                    )
+                })?;
+            if !auto_stash_state.intent_to_add_paths.is_empty() {
+                sync_progressln!(
+                    "Temporarily normalized {} intent-to-add path(s) before stashing.",
+                    auto_stash_state.intent_to_add_paths.len()
+                );
+                recorder.record(
+                    "stash",
+                    format!(
+                        "temporarily normalized {} intent-to-add path(s)",
+                        auto_stash_state.intent_to_add_paths.len()
+                    ),
                 );
             }
-
-            let stash_count_after = git_capture(&["stash", "list"])
-                .map(|s| s.lines().count())
-                .unwrap_or(0);
-            stashed = stash_count_after > stash_count_before;
         }
-        recorder.set_stashed(stashed);
+        recorder.set_stashed(auto_stash_state.stashed);
         if has_changes && cmd.stash {
-            recorder.record("stash", format!("stashed={}", stashed));
+            recorder.record("stash", format!("stashed={}", auto_stash_state.stashed));
         }
 
         // Resolve remotes for sync.
@@ -818,17 +850,16 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
             remote_probe_cache.remote_reachable(repo_root_path, &push_remote);
         let origin_reachable = remote_probe_cache.remote_reachable(repo_root_path, "origin");
         let default_branch = jj_default_branch(repo_root_path);
-        let home_branch_sync_target = if has_origin && origin_reachable {
-            resolve_home_branch_sync_target(repo_root_path, current, &default_branch)
-        } else {
-            None
-        };
+        let home_branch_sync_target =
+            resolve_home_branch_sync_target(repo_root_path, current, &default_branch).filter(
+                |target| remote_probe_cache.remote_reachable(repo_root_path, &target.public_remote),
+            );
         if let Some(target) = home_branch_sync_target.as_ref() {
             recorder.record(
                 "mode",
                 format!(
-                    "home branch mode: syncing origin/{} into {}",
-                    target.origin_default_branch, target.home_branch
+                    "home branch mode: syncing {}/{} into {}",
+                    target.public_remote, target.public_default_branch, target.home_branch
                 ),
             );
         }
@@ -858,14 +889,15 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
 
         if let Some(target) = home_branch_sync_target.as_ref() {
             sync_progressln!(
-                "==> Home branch mode: skipping tracking pull; trunk is origin/{}...",
-                target.origin_default_branch
+                "==> Home branch mode: skipping tracking pull; trunk is {}/{}...",
+                target.public_remote,
+                target.public_default_branch
             );
             recorder.record(
                 "pull",
                 format!(
-                    "skipped (home branch mode; using origin/{})",
-                    target.origin_default_branch
+                    "skipped (home branch mode; using {}/{})",
+                    target.public_remote, target.public_default_branch
                 ),
             );
         } else if let Some((tracking_remote, tracking_branch)) = tracking.as_ref() {
@@ -909,7 +941,7 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
                                 .current_dir(repo_root_path)
                                 .args(["rebase", "--abort"])
                                 .output();
-                            restore_stash(repo_root_path, stashed);
+                            restore_stash(repo_root_path, &auto_stash_state);
                             recorder.record("pull", "blocked by unstaged changes");
                             bail!(
                                 "git pull --rebase refused due unstaged changes. \
@@ -924,21 +956,21 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                                     sync_progressln!("Rebase conflicts auto-resolved");
                                     recorder.record("pull", "rebase conflicts auto-resolved");
                                 } else {
-                                    restore_stash(repo_root_path, stashed);
+                                    restore_stash(repo_root_path, &auto_stash_state);
                                     recorder.record("pull", "rebase conflicts unresolved");
                                     bail!(
                                         "Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue"
                                     );
                                 }
                             } else {
-                                restore_stash(repo_root_path, stashed);
+                                restore_stash(repo_root_path, &auto_stash_state);
                                 recorder.record("pull", "rebase conflicts unresolved");
                                 bail!(
                                     "Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue"
                                 );
                             }
                         } else {
-                            restore_stash(repo_root_path, stashed);
+                            restore_stash(repo_root_path, &auto_stash_state);
                             recorder.record("pull", "git pull --rebase failed");
                             bail!("git pull --rebase failed");
                         }
@@ -967,21 +999,21 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                                     sync_progressln!("Merge conflicts auto-resolved");
                                     recorder.record("pull", "merge conflicts auto-resolved");
                                 } else {
-                                    restore_stash(repo_root_path, stashed);
+                                    restore_stash(repo_root_path, &auto_stash_state);
                                     recorder.record("pull", "merge conflicts unresolved");
                                     bail!(
                                         "Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit"
                                     );
                                 }
                             } else {
-                                restore_stash(repo_root_path, stashed);
+                                restore_stash(repo_root_path, &auto_stash_state);
                                 recorder.record("pull", "merge conflicts unresolved");
                                 bail!(
                                     "Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit"
                                 );
                             }
                         } else {
-                            restore_stash(repo_root_path, stashed);
+                            restore_stash(repo_root_path, &auto_stash_state);
                             recorder.record("pull", "git pull failed");
                             bail!("git pull failed");
                         }
@@ -1014,25 +1046,27 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
         // a feature branch, fall back to syncing from origin's default branch.
         if let Some(target) = home_branch_sync_target.as_ref() {
             sync_progressln!(
-                "Syncing origin/{} into {}...",
-                target.origin_default_branch,
+                "Syncing {}/{} into {}...",
+                target.public_remote,
+                target.public_default_branch,
                 current
             );
             recorder.record(
                 "upstream",
                 format!(
-                    "home branch mode: syncing origin/{} into {}",
-                    target.origin_default_branch, current
+                    "home branch mode: syncing {}/{} into {}",
+                    target.public_remote, target.public_default_branch, current
                 ),
             );
-            if let Err(e) = sync_origin_default_internal(
+            if let Err(e) = sync_remote_default_internal(
                 repo_root_path,
+                &target.public_remote,
                 current,
-                &target.origin_default_branch,
+                &target.public_default_branch,
                 auto_fix,
                 &mut recorder,
             ) {
-                restore_stash(repo_root_path, stashed);
+                restore_stash(repo_root_path, &auto_stash_state);
                 return Err(e);
             }
         } else if has_upstream {
@@ -1082,7 +1116,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                     sync_upstream_internal(repo_root_path, current, auto_fix, &mut recorder)
                 };
                 if let Err(e) = upstream_result {
-                    restore_stash(repo_root_path, stashed);
+                    restore_stash(repo_root_path, &auto_stash_state);
                     return Err(e);
                 }
             }
@@ -1095,14 +1129,15 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                     "upstream",
                     format!("syncing origin/{} into {}", default_branch, current),
                 );
-                if let Err(e) = sync_origin_default_internal(
+                if let Err(e) = sync_remote_default_internal(
                     repo_root_path,
+                    "origin",
                     current,
                     &default_branch,
                     auto_fix,
                     &mut recorder,
                 ) {
-                    restore_stash(repo_root_path, stashed);
+                    restore_stash(repo_root_path, &auto_stash_state);
                     return Err(e);
                 }
             } else {
@@ -1203,7 +1238,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                 let push_result =
                     push_with_autofix(current, &push_remote, auto_fix, cmd.max_fix_attempts);
                 if let Err(e) = push_result {
-                    restore_stash(repo_root_path, stashed);
+                    restore_stash(repo_root_path, &auto_stash_state);
                     recorder.record("push", "push failed");
                     return Err(e);
                 }
@@ -1218,8 +1253,8 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
         }
 
         // Restore stash
-        restore_stash(repo_root_path, stashed);
-        if stashed {
+        restore_stash(repo_root_path, &auto_stash_state);
+        if auto_stash_state.stashed {
             recorder.record("stash", "stash restored");
         }
 
@@ -1300,7 +1335,7 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
         .unwrap_or_else(|_| "HEAD".to_string())
         .trim()
         .to_string();
-    let mut stashed = false;
+    let mut auto_stash_state = AutoStashState::default();
 
     let preserve_enabled = cmd.preserve && !cmd.no_preserve;
     if preserve_enabled && current_branch != "HEAD" && current_branch != target_branch {
@@ -1336,13 +1371,22 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
             Utc::now().format("%Y%m%d-%H%M%S")
         );
         println!("==> Stashing local changes...");
-        if let Err(err) = git_run_in(&repo_root_path, &["stash", "push", "-u", "-m", &message]) {
-            eprintln!(
-                "warning: auto-stash failed, continuing without stash: {}",
-                err
-            );
-        } else {
-            stashed = true;
+        match auto_stash_repo(&repo_root_path, &message) {
+            Ok(state) => {
+                if !state.intent_to_add_paths.is_empty() {
+                    println!(
+                        "==> Temporarily normalized {} intent-to-add path(s) before stashing.",
+                        state.intent_to_add_paths.len()
+                    );
+                }
+                auto_stash_state = state;
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: auto-stash failed, continuing without stash: {}",
+                    err
+                );
+            }
         }
     }
 
@@ -1431,22 +1475,11 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
     })();
 
     if let Err(err) = switch_result {
-        if stashed {
-            eprintln!("==> Restoring stashed changes after failed switch...");
-            let _ = git_run_in(&repo_root_path, &["stash", "pop"]);
-        }
+        restore_stash(&repo_root_path, &auto_stash_state);
         return Err(err);
     }
 
-    if stashed {
-        println!("==> Restoring stashed changes...");
-        if let Err(err) = git_run_in(&repo_root_path, &["stash", "pop"]) {
-            eprintln!(
-                "warning: failed to restore stash automatically: {}\nRun `git stash list` and restore manually if needed.",
-                err
-            );
-        }
-    }
+    restore_stash(&repo_root_path, &auto_stash_state);
 
     println!("✓ Switched to {}", switched_branch);
 
@@ -1580,7 +1613,7 @@ pub fn run_checkout(cmd: CheckoutCommand) -> Result<()> {
     let has_changes = !git_capture_in(&repo_root_path, &["status", "--porcelain"])?
         .trim()
         .is_empty();
-    let mut stashed = false;
+    let mut auto_stash_state = AutoStashState::default();
 
     if stash_enabled && has_changes {
         let message = format!(
@@ -1589,13 +1622,22 @@ pub fn run_checkout(cmd: CheckoutCommand) -> Result<()> {
             Utc::now().format("%Y%m%d-%H%M%S")
         );
         println!("==> Stashing local changes...");
-        if let Err(err) = git_run_in(&repo_root_path, &["stash", "push", "-u", "-m", &message]) {
-            eprintln!(
-                "warning: auto-stash failed, continuing without stash: {}",
-                err
-            );
-        } else {
-            stashed = true;
+        match auto_stash_repo(&repo_root_path, &message) {
+            Ok(state) => {
+                if !state.intent_to_add_paths.is_empty() {
+                    println!(
+                        "==> Temporarily normalized {} intent-to-add path(s) before stashing.",
+                        state.intent_to_add_paths.len()
+                    );
+                }
+                auto_stash_state = state;
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: auto-stash failed, continuing without stash: {}",
+                    err
+                );
+            }
         }
     } else if has_changes && !stash_enabled {
         println!("==> Continuing with local changes (auto-stash disabled)...");
@@ -1621,22 +1663,11 @@ pub fn run_checkout(cmd: CheckoutCommand) -> Result<()> {
     })();
 
     if let Err(err) = checkout_result {
-        if stashed {
-            eprintln!("==> Restoring stashed changes after failed checkout...");
-            let _ = git_run_in(&repo_root_path, &["stash", "pop"]);
-        }
+        restore_stash(&repo_root_path, &auto_stash_state);
         return Err(err);
     }
 
-    if stashed {
-        println!("==> Restoring stashed changes...");
-        if let Err(err) = git_run_in(&repo_root_path, &["stash", "pop"]) {
-            eprintln!(
-                "warning: failed to restore stash automatically: {}\nRun `git stash list` and restore manually if needed.",
-                err
-            );
-        }
-    }
+    restore_stash(&repo_root_path, &auto_stash_state);
 
     let current = git_capture_in(&repo_root_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "HEAD".to_string())
@@ -2609,27 +2640,26 @@ fn run_jj_sync(
     let use_origin_for_upstream =
         origin_matches_upstream && remote_probe_cache.remote_reachable(repo_root, "origin");
     let should_push = sync_should_push(cmd);
-    let home_branch_sync_target = if has_origin && origin_reachable {
+    let home_branch_sync_target =
         resolve_home_branch_sync_target(repo_root, &current_branch, &default_branch)
-    } else {
-        None
-    };
+            .filter(|target| remote_probe_cache.remote_reachable(repo_root, &target.public_remote));
     if let Some(target) = home_branch_sync_target.as_ref() {
         sync_progressln!(
-            "Home branch mode: syncing origin/{} into {}...",
-            target.origin_default_branch,
+            "Home branch mode: syncing {}/{} into {}...",
+            target.public_remote,
+            target.public_default_branch,
             target.home_branch
         );
         recorder.record(
             "mode",
             format!(
-                "home branch mode: syncing origin/{} into {}",
-                target.origin_default_branch, target.home_branch
+                "home branch mode: syncing {}/{} into {}",
+                target.public_remote, target.public_default_branch, target.home_branch
             ),
         );
     }
     let origin_default_branch = if let Some(target) = home_branch_sync_target.as_ref() {
-        Some(target.origin_default_branch.clone())
+        Some(target.public_default_branch.clone())
     } else if !has_upstream && has_origin && origin_reachable {
         origin_default_branch_for_feature_sync(repo_root, &current_branch)
     } else {
@@ -2653,7 +2683,38 @@ fn run_jj_sync(
         let mut fetched_any = false;
         let mut failures: Vec<String> = Vec::new();
 
-        if has_origin && origin_reachable {
+        if let Some(target) = home_branch_sync_target.as_ref() {
+            for branch in origin_fetch_branches_for_jj_sync(
+                &current_branch,
+                origin_default_branch.as_deref(),
+                home_branch_sync_target.as_ref(),
+            ) {
+                track_remote_ref(&mut tracked_refs, repo_root, &target.public_remote, &branch);
+                recorder.record(
+                    "jj",
+                    format!(
+                        "jj git fetch --remote {} --branch {}",
+                        target.public_remote, branch
+                    ),
+                );
+                if let Err(err) = jj_run_in(
+                    repo_root,
+                    &[
+                        "--quiet",
+                        "git",
+                        "fetch",
+                        "--remote",
+                        &target.public_remote,
+                        "--branch",
+                        &branch,
+                    ],
+                ) {
+                    failures.push(format!("{} {}: {}", target.public_remote, branch, err));
+                } else {
+                    fetched_any = true;
+                }
+            }
+        } else if has_origin && origin_reachable {
             for branch in origin_fetch_branches_for_jj_sync(
                 &current_branch,
                 origin_default_branch.as_deref(),
@@ -2824,7 +2885,10 @@ fn run_jj_sync(
 
     let mut dest_ref: Option<String> = None;
     if let Some(target) = home_branch_sync_target.as_ref() {
-        dest_ref = Some(format!("{}@origin", target.origin_default_branch));
+        dest_ref = Some(format!(
+            "{}@{}",
+            target.public_default_branch, target.public_remote
+        ));
     } else if has_upstream {
         if let Some(branch) = upstream_branch_opt {
             let dest_remote = if use_origin_for_upstream {
@@ -3209,21 +3273,22 @@ fn sync_upstream_internal(
     )
 }
 
-fn sync_origin_default_internal(
+fn sync_remote_default_internal(
     repo_root: &Path,
+    remote: &str,
     current_branch: &str,
-    origin_default_branch: &str,
+    remote_default_branch: &str,
     auto_fix: bool,
     recorder: &mut SyncRecorder,
 ) -> Result<()> {
     sync_named_remote_branch_internal(
         repo_root,
-        "origin",
-        origin_default_branch,
+        remote,
+        remote_default_branch,
         current_branch,
         auto_fix,
         recorder,
-        "origin-default",
+        "remote-default",
         SyncRemoteFetchMode::SingleBranch,
     )
 }
@@ -3326,17 +3391,24 @@ fn merge_remote_branch_into_current(
         format!("merging {} commits from {}", behind, remote_ref),
     );
 
-    match git_run_in(repo_root, &["merge", "--ff-only", &remote_ref]) {
-        Ok(()) => {
-            recorder.record(stage, format!("fast-forwarded to {}", remote_ref));
-            return Ok(());
-        }
-        Err(err) if is_git_index_lock_error(&err.to_string()) => {
-            bail!(
-                "Git index lock detected during merge. Remove stale .git/index.lock (if no git process is running) and re-run."
-            );
-        }
-        Err(_) => {}
+    let ff_only_output = git_run_output_in(repo_root, &["merge", "--ff-only", &remote_ref])?;
+    if ff_only_output.status.success() {
+        recorder.record(stage, format!("fast-forwarded to {}", remote_ref));
+        return Ok(());
+    }
+
+    let ff_only_detail = git_output_text(&ff_only_output);
+    if is_git_index_lock_error(&ff_only_detail) {
+        bail!(
+            "Git index lock detected during merge. Remove stale .git/index.lock (if no git process is running) and re-run."
+        );
+    }
+    if !is_expected_ff_only_merge_failure(&ff_only_detail) {
+        bail!(
+            "git merge --ff-only {} failed: {}",
+            remote_ref,
+            ff_only_detail
+        );
     }
 
     match git_run_in(repo_root, &["merge", &remote_ref, "--no-edit"]) {
@@ -3433,6 +3505,12 @@ fn is_git_index_lock_error(message: &str) -> bool {
         || lower.contains("lock for resource")
         || lower.contains("another git process seems to be running")
         || lower.contains("could not write index")
+}
+
+fn is_expected_ff_only_merge_failure(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("not possible to fast-forward")
+        || lower.contains("ff-only merge is not possible")
 }
 
 fn parse_branch_merge_ref(value: &str) -> Option<String> {
@@ -3907,19 +3985,62 @@ fn jj_revset_string_literal(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("\"{}\"", value))
 }
 
+fn jj_exact_bookmark_revset(name: &str) -> String {
+    format!("bookmarks(exact:{})", jj_revset_string_literal(name))
+}
+
 fn jj_local_bookmark_revset(name: &str) -> String {
-    format!(
-        "bookmarks(exact:{}) & mutable()",
-        jj_revset_string_literal(name)
+    format!("{} & mutable()", jj_exact_bookmark_revset(name))
+}
+
+fn jj_revset_has_commits(repo_root: &Path, revset: &str) -> bool {
+    jj_capture_in(
+        repo_root,
+        &[
+            "log",
+            "-r",
+            revset,
+            "--no-graph",
+            "-n",
+            "1",
+            "-T",
+            "commit_id",
+        ],
     )
+    .map(|output| !output.trim().is_empty())
+    .unwrap_or(false)
+}
+
+fn jj_branch_sync_source_rev_with_probe<F>(
+    branch: &str,
+    bookmark_exists: bool,
+    mut revset_has_commits: F,
+) -> String
+where
+    F: FnMut(&str) -> bool,
+{
+    if !bookmark_exists {
+        return "@".to_string();
+    }
+
+    let mutable_revset = jj_local_bookmark_revset(branch);
+    if revset_has_commits(&mutable_revset) {
+        return mutable_revset;
+    }
+
+    let exact_revset = jj_exact_bookmark_revset(branch);
+    if revset_has_commits(&exact_revset) {
+        return exact_revset;
+    }
+
+    "@".to_string()
 }
 
 fn jj_branch_sync_source_rev(repo_root: &Path, branch: &str) -> String {
-    if jj_bookmark_exists(repo_root, branch) {
-        jj_local_bookmark_revset(branch)
-    } else {
-        "@".to_string()
-    }
+    let bookmark_exists = jj_bookmark_exists(repo_root, branch);
+    jj_branch_sync_source_rev_with_probe(branch, bookmark_exists, |revset| {
+        jj_revset_has_commits(repo_root, revset)
+    })
 }
 
 fn jj_has_divergence(repo_root: &Path, source_revset: &str, dest: &str) -> Result<bool> {
@@ -4292,15 +4413,135 @@ fn try_resolve_conflicts() -> Result<bool> {
     Ok(resolved_count == conflicted_files.len())
 }
 
-fn restore_stash(repo_root: &Path, stashed: bool) {
-    if stashed {
+fn auto_stash_repo(repo_root: &Path, message: &str) -> Result<AutoStashState> {
+    let stash_count_before = git_capture_in(repo_root, &["stash", "list"])
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
+    let intent_to_add_paths = collect_intent_to_add_paths(repo_root)?;
+    if !intent_to_add_paths.is_empty() {
+        update_paths_for_auto_stash(repo_root, &["restore", "--staged"], &intent_to_add_paths)?;
+    }
+
+    if let Err(err) = git_run_captured_in(repo_root, &["stash", "push", "-u", "-m", message]) {
+        if !intent_to_add_paths.is_empty() {
+            let _ = restore_intent_to_add_paths(repo_root, &intent_to_add_paths);
+        }
+        return Err(err);
+    }
+
+    let stash_count_after = git_capture_in(repo_root, &["stash", "list"])
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
+    let stashed = stash_count_after > stash_count_before;
+    if !stashed && !intent_to_add_paths.is_empty() {
+        restore_intent_to_add_paths(repo_root, &intent_to_add_paths)?;
+        return Ok(AutoStashState::default());
+    }
+
+    Ok(AutoStashState {
+        stashed,
+        intent_to_add_paths: if stashed {
+            intent_to_add_paths
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+fn collect_intent_to_add_paths(repo_root: &Path) -> Result<Vec<String>> {
+    let status = git_capture_in(repo_root, &["status", "--porcelain=v2", "-z"])?;
+    Ok(parse_intent_to_add_paths(&status))
+}
+
+fn parse_intent_to_add_paths(status: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+
+    while let Some(entry) = entries.next() {
+        if entry.starts_with("1 ") {
+            let mut fields = entry.splitn(9, ' ');
+            let kind = fields.next();
+            let xy = fields.next();
+            if kind == Some("1") && xy == Some(".A") {
+                for _ in 0..6 {
+                    let _ = fields.next();
+                }
+                if let Some(path) = fields.next() {
+                    paths.push(path.to_string());
+                }
+            }
+        } else if entry.starts_with("2 ") {
+            let _ = entries.next();
+        }
+    }
+
+    paths
+}
+
+fn restore_intent_to_add_paths(repo_root: &Path, paths: &[String]) -> Result<()> {
+    let existing_paths = paths
+        .iter()
+        .filter(|path| repo_root.join(path).exists())
+        .cloned()
+        .collect::<Vec<_>>();
+    update_paths_for_auto_stash(repo_root, &["add", "-N"], &existing_paths)
+}
+
+fn update_paths_for_auto_stash(
+    repo_root: &Path,
+    base_args: &[&str],
+    paths: &[String],
+) -> Result<()> {
+    for chunk in paths.chunks(100) {
+        let mut args = Vec::with_capacity(base_args.len() + chunk.len() + 1);
+        args.extend_from_slice(base_args);
+        args.push("--");
+        args.extend(chunk.iter().map(|path| path.as_str()));
+        git_run_captured_in(repo_root, &args)?;
+    }
+    Ok(())
+}
+
+fn git_run_captured_in(repo_root: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(args)
+        .output()
+        .context("failed to run git")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = format!("{}\n{}", stdout.trim(), stderr.trim())
+        .trim()
+        .to_string();
+    if detail.is_empty() {
+        bail!("git {} failed", args.join(" "));
+    }
+    bail!("git {} failed: {}", args.join(" "), detail);
+}
+
+fn restore_stash(repo_root: &Path, auto_stash_state: &AutoStashState) {
+    if auto_stash_state.stashed {
         sync_progressln!("Restoring stashed changes...");
         let output = Command::new("git")
             .current_dir(repo_root)
             .args(["stash", "pop"])
             .output();
         match output {
-            Ok(out) if out.status.success() => {}
+            Ok(out) if out.status.success() => {
+                if let Err(err) =
+                    restore_intent_to_add_paths(repo_root, &auto_stash_state.intent_to_add_paths)
+                {
+                    sync_stderrln!(
+                        "warning: restored stash but could not restore intent-to-add markers: {}",
+                        err
+                    );
+                }
+            }
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
@@ -4308,6 +4549,15 @@ fn restore_stash(repo_root: &Path, stashed: bool) {
                 if stash_pop_untracked_conflict(&combined) {
                     match drop_stash_if_untracked_restored(repo_root) {
                         Ok(true) => {
+                            if let Err(err) = restore_intent_to_add_paths(
+                                repo_root,
+                                &auto_stash_state.intent_to_add_paths,
+                            ) {
+                                sync_stderrln!(
+                                    "warning: restored stash but could not restore intent-to-add markers: {}",
+                                    err
+                                );
+                            }
                             sync_progressln!(
                                 "  ✓ Kept local untracked files and dropped redundant auto-stash"
                             );
@@ -4557,6 +4807,27 @@ fn git_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(out)
 }
 
+fn git_output_text(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut lines = Vec::new();
+    lines.extend(
+        stderr
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string),
+    );
+    lines.extend(
+        stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string),
+    );
+    lines.join("\n")
+}
+
 /// Run a git command with inherited stdio.
 fn git_run(args: &[&str]) -> Result<()> {
     let status = Command::new("git")
@@ -4572,6 +4843,15 @@ fn git_run(args: &[&str]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Run a git command in a specific repository and capture output without printing it.
+fn git_run_output_in(repo_root: &Path, args: &[&str]) -> Result<Output> {
+    Command::new("git")
+        .current_dir(repo_root)
+        .args(args)
+        .output()
+        .context("failed to run git")
 }
 
 /// Run a git command in a specific repository with inherited stdio.
@@ -5002,6 +5282,31 @@ mod tests {
     }
 
     #[test]
+    fn expected_ff_only_merge_failure_matches_known_git_output() {
+        assert!(is_expected_ff_only_merge_failure(
+            "fatal: Not possible to fast-forward, aborting."
+        ));
+        assert!(is_expected_ff_only_merge_failure(
+            "fatal: ff-only merge is not possible"
+        ));
+        assert!(!is_expected_ff_only_merge_failure(
+            "merge: origin/main - not something we can merge"
+        ));
+    }
+
+    #[test]
+    fn jj_exact_bookmark_revset_uses_exact_selector() {
+        assert_eq!(
+            jj_exact_bookmark_revset("main"),
+            r#"bookmarks(exact:"main")"#
+        );
+        assert_eq!(
+            jj_exact_bookmark_revset("feature/sync-fix"),
+            r#"bookmarks(exact:"feature/sync-fix")"#
+        );
+    }
+
+    #[test]
     fn jj_local_bookmark_revset_uses_exact_mutable_selector() {
         assert_eq!(
             jj_local_bookmark_revset("main"),
@@ -5011,6 +5316,31 @@ mod tests {
             jj_local_bookmark_revset("feature/sync-fix"),
             r#"bookmarks(exact:"feature/sync-fix") & mutable()"#
         );
+    }
+
+    #[test]
+    fn jj_branch_sync_source_rev_with_probe_prefers_mutable_bookmark_revset() {
+        let selected = jj_branch_sync_source_rev_with_probe("main", true, |revset| {
+            revset == r#"bookmarks(exact:"main") & mutable()"#
+        });
+
+        assert_eq!(selected, r#"bookmarks(exact:"main") & mutable()"#);
+    }
+
+    #[test]
+    fn jj_branch_sync_source_rev_with_probe_falls_back_to_exact_bookmark_when_mutable_empty() {
+        let selected = jj_branch_sync_source_rev_with_probe("main", true, |revset| {
+            revset == r#"bookmarks(exact:"main")"#
+        });
+
+        assert_eq!(selected, r#"bookmarks(exact:"main")"#);
+    }
+
+    #[test]
+    fn jj_branch_sync_source_rev_with_probe_falls_back_to_working_copy_without_bookmark() {
+        let selected = jj_branch_sync_source_rev_with_probe("main", false, |_| true);
+
+        assert_eq!(selected, "@");
     }
 
     #[test]
@@ -5040,7 +5370,8 @@ mod tests {
     fn origin_fetch_branches_for_home_branch_mode_skips_local_home_branch() {
         let home_target = HomeBranchSyncTarget {
             home_branch: "nikiv".to_string(),
-            origin_default_branch: "main".to_string(),
+            public_remote: "origin".to_string(),
+            public_default_branch: "main".to_string(),
         };
 
         assert_eq!(
@@ -5062,7 +5393,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_home_branch_sync_target_uses_origin_default_for_home_branch() {
+    fn resolve_home_branch_sync_target_uses_configured_public_remote_for_home_branch() {
         let dir = tempdir().expect("tempdir");
         let repo_root = dir.path();
         init_git_repo(repo_root);
@@ -5071,26 +5402,33 @@ mod tests {
         let main_sha = git_capture_for_test(repo_root, &["rev-parse", "refs/heads/main"]);
         git(
             repo_root,
-            &["update-ref", "refs/remotes/origin/main", &main_sha],
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://example.com/upstream.git",
+            ],
+        );
+        git(
+            repo_root,
+            &["update-ref", "refs/remotes/upstream/main", &main_sha],
         );
         git(
             repo_root,
             &[
                 "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/main",
+                "refs/remotes/upstream/HEAD",
+                "refs/remotes/upstream/main",
             ],
         );
-        fs::write(
-            repo_root.join("flow.toml"),
-            "[jj]\nhome_branch = \"nikiv\"\n",
-        )
-        .expect("write flow.toml");
+        git(repo_root, &["config", "flow.homeBranch", "nikiv"]);
+        git(repo_root, &["config", "flow.publicRemote", "upstream"]);
 
         let target = resolve_home_branch_sync_target(repo_root, "nikiv", "main")
             .expect("home branch sync target");
         assert_eq!(target.home_branch, "nikiv");
-        assert_eq!(target.origin_default_branch, "main");
+        assert_eq!(target.public_remote, "upstream");
+        assert_eq!(target.public_default_branch, "main");
     }
 
     #[test]
@@ -5278,5 +5616,50 @@ mod tests {
             None
         );
         assert_eq!(jj_git_export_retry_delay(0, "permission denied"), None);
+    }
+
+    #[test]
+    fn parse_intent_to_add_paths_filters_other_status_entries() {
+        let status = concat!(
+            "1 .A N... 000000 000000 100644 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 notes.txt\0",
+            "1 M. N... 100644 100644 100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb tracked.txt\0",
+            "? scratch.txt\0",
+            "2 R. N... 100644 100644 100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb R100 renamed.txt\0old-name.txt\0",
+        );
+
+        assert_eq!(
+            parse_intent_to_add_paths(status),
+            vec!["notes.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn auto_stash_repo_round_trips_intent_to_add_paths() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+        init_git_repo(repo_root);
+
+        fs::write(repo_root.join("notes.txt"), "draft\n").expect("write notes");
+        git(repo_root, &["add", "-N", "notes.txt"]);
+
+        let status_before = git_capture_for_test(repo_root, &["status", "--porcelain=v2"]);
+        assert!(status_before.contains("1 .A "));
+
+        let auto_stash = auto_stash_repo(repo_root, "test auto-stash").expect("auto stash");
+        assert!(auto_stash.stashed);
+        assert_eq!(
+            auto_stash.intent_to_add_paths,
+            vec!["notes.txt".to_string()]
+        );
+        assert_eq!(
+            git_capture_for_test(repo_root, &["status", "--porcelain"]),
+            ""
+        );
+
+        restore_stash(repo_root, &auto_stash);
+
+        let status_after = git_capture_for_test(repo_root, &["status", "--porcelain=v2"]);
+        assert!(status_after.contains("1 .A "));
+        assert_eq!(git_capture_for_test(repo_root, &["stash", "list"]), "");
     }
 }

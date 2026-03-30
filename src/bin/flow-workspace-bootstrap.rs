@@ -1113,6 +1113,7 @@ fn is_fingerprint_file(name: &str) -> bool {
             | "rust-toolchain"
             | "rust-toolchain.toml"
             | "package-lock.json"
+            | "packages.lock.json"
             | "pnpm-lock.yaml"
             | "bun.lock"
             | "bun.lockb"
@@ -1121,7 +1122,14 @@ fn is_fingerprint_file(name: &str) -> bool {
             | "uv.lock"
             | "poetry.lock"
             | "pyproject.toml"
-    )
+            | "global.json"
+            | "NuGet.config"
+            | "Directory.Build.props"
+            | "Directory.Packages.props"
+    ) || name.ends_with(".csproj")
+        || name.ends_with(".fsproj")
+        || name.ends_with(".vbproj")
+        || name.ends_with(".sln")
 }
 
 fn should_skip_scan_dir(name: &str) -> bool {
@@ -1601,5 +1609,120 @@ mod tests {
         assert!(source_files.contains(&"apps/studio/package.json".to_string()));
         assert!(source_files.contains(&"engine/package.json".to_string()));
         assert!(!source_files.contains(&"apps/other-tool/package.json".to_string()));
+    }
+
+    #[test]
+    fn scoped_fingerprint_understands_dotnet_roots() {
+        let source = tempdir().unwrap();
+        let target = tempdir().unwrap();
+
+        for root in [source.path(), target.path()] {
+            fs::create_dir_all(root.join("cascode/build/native/darwin-arm64")).unwrap();
+            fs::create_dir_all(root.join("cascode/editors/node/build/Release")).unwrap();
+            fs::create_dir_all(root.join("cascode/tools/native/Cascode.Native")).unwrap();
+            fs::write(root.join("cascode/Cascode.sln"), "Project").unwrap();
+            fs::write(
+                root.join("cascode/tools/native/Cascode.Native/Cascode.Native.csproj"),
+                "<Project />",
+            )
+            .unwrap();
+            fs::write(
+                root.join("cascode/editors/node/package.json"),
+                "{\"name\":\"cascode-node\"}",
+            )
+            .unwrap();
+            fs::write(root.join("cascode/editors/node/package-lock.json"), "{}").unwrap();
+        }
+
+        fs::create_dir_all(source.path().join("x/nikiv/build123d-lsp")).unwrap();
+        fs::create_dir_all(target.path().join("x/nikiv/build123d-lsp")).unwrap();
+        fs::write(
+            source.path().join("x/nikiv/build123d-lsp/Cargo.lock"),
+            "source-lock",
+        )
+        .unwrap();
+        fs::write(
+            target.path().join("x/nikiv/build123d-lsp/Cargo.lock"),
+            "target-lock",
+        )
+        .unwrap();
+
+        let rel_paths = vec![
+            PathBuf::from("cascode/build/native/darwin-arm64"),
+            PathBuf::from("cascode/editors/node/build/Release"),
+        ];
+        let verification =
+            verify_fingerprints(source.path(), target.path(), &rel_paths, false).unwrap();
+
+        assert!(verification.approved);
+        let source_files = verification
+            .source
+            .as_ref()
+            .map(|snapshot| snapshot.files.clone())
+            .unwrap();
+        assert!(source_files.contains(&"cascode/Cascode.sln".to_string()));
+        assert!(
+            source_files
+                .contains(&"cascode/tools/native/Cascode.Native/Cascode.Native.csproj".to_string())
+        );
+        assert!(source_files.contains(&"cascode/editors/node/package.json".to_string()));
+        assert!(!source_files.contains(&"x/nikiv/build123d-lsp/Cargo.lock".to_string()));
+    }
+
+    #[test]
+    fn scoped_fingerprint_ignores_generated_dotnet_obj_metadata() {
+        let source = tempdir().unwrap();
+        let target = tempdir().unwrap();
+
+        for root in [source.path(), target.path()] {
+            fs::create_dir_all(root.join("cascode/build/native/darwin-arm64")).unwrap();
+            fs::create_dir_all(root.join("cascode/editors/node/build/Release")).unwrap();
+            fs::create_dir_all(root.join("cascode/tools/native/Cascode.Native/obj")).unwrap();
+            fs::write(root.join("cascode/Cascode.sln"), "Project").unwrap();
+            fs::write(root.join("cascode/Directory.Build.props"), "<Project />").unwrap();
+            fs::write(
+                root.join("cascode/tools/native/Cascode.Native/Cascode.Native.csproj"),
+                "<Project />",
+            )
+            .unwrap();
+            fs::write(
+                root.join("cascode/editors/node/package.json"),
+                "{\"name\":\"cascode-node\"}",
+            )
+            .unwrap();
+            fs::write(root.join("cascode/editors/node/package-lock.json"), "{}").unwrap();
+        }
+
+        fs::write(
+            source.path().join(
+                "cascode/tools/native/Cascode.Native/obj/Cascode.Native.csproj.nuget.g.props",
+            ),
+            "source-generated",
+        )
+        .unwrap();
+        fs::write(
+            target.path().join(
+                "cascode/tools/native/Cascode.Native/obj/Cascode.Native.csproj.nuget.g.props",
+            ),
+            "target-generated",
+        )
+        .unwrap();
+
+        let rel_paths = vec![
+            PathBuf::from("cascode/build/native/darwin-arm64"),
+            PathBuf::from("cascode/editors/node/build/Release"),
+        ];
+        let verification =
+            verify_fingerprints(source.path(), target.path(), &rel_paths, false).unwrap();
+
+        assert!(verification.approved);
+        let source_files = verification
+            .source
+            .as_ref()
+            .map(|snapshot| snapshot.files.clone())
+            .unwrap();
+        assert!(source_files.contains(&"cascode/Cascode.sln".to_string()));
+        assert!(source_files.contains(&"cascode/Directory.Build.props".to_string()));
+        assert!(!source_files.iter().any(|path| path.contains("/obj/")));
     }
 }

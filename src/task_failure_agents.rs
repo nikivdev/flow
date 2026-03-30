@@ -1,11 +1,5 @@
-use std::collections::HashMap;
-use std::fs;
 use std::io::IsTerminal;
 use std::path::Path;
-use std::process::{Command, Stdio};
-
-use anyhow::Result;
-use serde::Deserialize;
 
 use crate::config;
 
@@ -28,17 +22,6 @@ impl Default for TaskFailureSettings {
             max_agents: 2,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct HiveConfig {
-    agents: Option<HashMap<String, HiveAgentSpec>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HiveAgentSpec {
-    #[serde(rename = "matchedOn")]
-    matched_on: Option<Vec<String>>,
 }
 
 fn load_settings() -> TaskFailureSettings {
@@ -69,52 +52,21 @@ fn load_settings() -> TaskFailureSettings {
     settings
 }
 
-fn load_hive_config() -> Option<HiveConfig> {
-    let path = dirs::home_dir()?.join(".hive/config.json");
-    let content = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-fn truncate_output(output: &str, max_lines: usize, max_chars: usize) -> String {
-    let mut lines: Vec<&str> = output.lines().collect();
-    if lines.len() > max_lines {
-        lines = lines[lines.len().saturating_sub(max_lines)..].to_vec();
+fn task_failure_tool_message(tool: &str) -> Option<String> {
+    let lowered = tool.trim().to_ascii_lowercase();
+    if lowered.is_empty() || matches!(lowered.as_str(), "off" | "false" | "none" | "disabled") {
+        return None;
     }
-    let mut joined = lines.join("\n");
-    if joined.len() > max_chars {
-        let start = joined.len().saturating_sub(max_chars);
-        joined = format!("...{}", &joined[start..]);
-    }
-    joined
-}
-
-fn matches_agent(haystack: &str, spec: &HiveAgentSpec) -> bool {
-    let Some(terms) = &spec.matched_on else {
-        return false;
-    };
-    terms.iter().any(|term| {
-        let needle = term.to_lowercase();
-        !needle.is_empty() && haystack.contains(&needle)
-    })
-}
-
-fn run_hive_agent(agent: &str, prompt: &str) -> Result<()> {
-    let status = Command::new("hive")
-        .arg("agent")
-        .arg(agent)
-        .arg(prompt)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
-    if !status.success() {
-        eprintln!(
-            "⚠ hive agent '{}' exited with status {:?}",
-            agent,
-            status.code()
+    if lowered == "hive" {
+        return Some(
+            "⚠ task-failure agents: Hive routing is retired and disabled. Use `flow.taskFailureHook` or run follow-up repair manually."
+                .to_string(),
         );
     }
-    Ok(())
+    Some(format!(
+        "⚠ task-failure agents: unsupported tool '{}'",
+        tool
+    ))
 }
 
 pub fn maybe_run_task_failure_agents(
@@ -138,56 +90,31 @@ pub fn maybe_run_task_failure_agents(
     if !settings.enabled {
         return;
     }
-    if settings.tool != "hive" {
-        eprintln!(
-            "⚠ task-failure agents: unsupported tool '{}'",
-            settings.tool
-        );
+    let _ = (task_name, command, workdir, output, status);
+    if let Some(message) = task_failure_tool_message(&settings.tool) {
+        eprintln!("{}", message);
         return;
     }
     if !std::io::stdin().is_terminal() {
         return;
     }
-    if which::which("hive").is_err() {
-        eprintln!("⚠ task-failure agents: hive not found on PATH");
-        return;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_failure_tool_message;
+
+    #[test]
+    fn task_failure_tool_message_disables_empty_and_off_tools() {
+        assert!(task_failure_tool_message("").is_none());
+        assert!(task_failure_tool_message("off").is_none());
+        assert!(task_failure_tool_message("disabled").is_none());
     }
 
-    let Some(config) = load_hive_config() else {
-        eprintln!("⚠ task-failure agents: ~/.hive/config.json not found");
-        return;
-    };
-
-    let truncated = truncate_output(output, settings.max_lines, settings.max_chars);
-    let mut haystack = String::new();
-    haystack.push_str(&format!(
-        "task: {}\ncommand: {}\nstatus: {}\nworkdir: {}\noutput:\n{}",
-        task_name,
-        command,
-        status.unwrap_or(-1),
-        workdir.display(),
-        truncated
-    ));
-    let haystack_lower = haystack.to_lowercase();
-
-    let mut matches: Vec<String> = Vec::new();
-    if let Some(agents) = config.agents {
-        for (name, spec) in agents {
-            if matches_agent(&haystack_lower, &spec) {
-                matches.push(name);
-            }
-        }
-    }
-
-    if matches.is_empty() {
-        return;
-    }
-
-    matches.truncate(settings.max_agents);
-    for agent in matches {
-        println!("Running agent '{}' for task failure...", agent);
-        if let Err(err) = run_hive_agent(&agent, &haystack) {
-            eprintln!("⚠ failed to run hive agent '{}': {}", agent, err);
-        }
+    #[test]
+    fn task_failure_tool_message_marks_hive_as_retired() {
+        let message = task_failure_tool_message("hive").expect("hive should emit warning");
+        assert!(message.contains("retired"));
+        assert!(message.contains("taskFailureHook"));
     }
 }

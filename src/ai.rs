@@ -3689,6 +3689,9 @@ struct ProviderSessionListRow {
     preview: String,
 }
 
+const PROVIDER_SESSION_LIST_PREVIEW_MAX_LINES: usize = 2;
+const PROVIDER_SESSION_LIST_PREVIEW_MAX_CHARS: usize = 90;
+
 fn display_session_id(session_id: &str) -> String {
     truncate_recover_id(session_id)
 }
@@ -3751,32 +3754,59 @@ fn display_session_ids(rows: &[ProviderSessionListRow]) -> HashMap<String, Strin
     display
 }
 
-fn clean_summary_tail(s: &str) -> String {
-    let meaningful_line = s
-        .lines()
-        .rev()
-        .map(|l| l.trim())
-        .find(|l| {
-            !l.is_empty()
-                && l.chars().any(|ch| ch.is_alphanumeric())
-                && !l.starts_with('>')
-                && !l.starts_with('❯')
-                && !l.starts_with('$')
-                && !l.starts_with('#')
-                && !l.starts_with("```")
-                && !l.starts_with("Error:")
-                && !l.starts_with("<INSTRUCTIONS>")
-                && !l.starts_with("## Skills")
-        })
-        .or_else(|| s.lines().rev().find(|l| !l.trim().is_empty()))
-        .unwrap_or(s);
+fn clean_summary_tail_lines(s: &str, max_lines: usize) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
 
-    meaningful_line
-        .trim()
-        .replace('\t', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let cleaned_lines: Vec<String> = s
+        .lines()
+        .map(|line| {
+            line.trim()
+                .replace('\t', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if cleaned_lines.is_empty() {
+        return Vec::new();
+    }
+
+    let mut preferred = Vec::new();
+    for line in cleaned_lines.iter().rev() {
+        if !line.chars().any(|ch| ch.is_alphanumeric())
+            || line.starts_with('>')
+            || line.starts_with('❯')
+            || line.starts_with('$')
+            || line.starts_with('#')
+            || line.starts_with("```")
+            || line.starts_with("Error:")
+            || line.starts_with("<INSTRUCTIONS>")
+            || line.starts_with("## Skills")
+        {
+            continue;
+        }
+        preferred.push(line.clone());
+        if preferred.len() >= max_lines {
+            break;
+        }
+    }
+
+    if preferred.is_empty() {
+        return cleaned_lines
+            .into_iter()
+            .rev()
+            .take(max_lines)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+    }
+
+    preferred.into_iter().rev().collect()
 }
 
 fn codex_tail_preview_from_snapshot(snapshot: &CodexSessionCompletionSnapshot) -> Option<String> {
@@ -3788,12 +3818,36 @@ fn codex_tail_preview_from_snapshot(snapshot: &CodexSessionCompletionSnapshot) -
             .as_deref()
             .or(snapshot.last_user_message.as_deref()),
     }?;
-    let preview = clean_summary_tail(tail_message);
-    if preview.is_empty() {
+    let sanitized = match snapshot.last_role.as_deref() {
+        Some("user") => codex_text::sanitize_codex_query_text(tail_message),
+        _ => codex_text::sanitize_codex_memory_rollout_text(tail_message)
+            .or_else(|| codex_text::sanitize_codex_query_text(tail_message)),
+    };
+    let preview_lines = clean_summary_tail_lines(
+        sanitized.as_deref().unwrap_or(tail_message),
+        PROVIDER_SESSION_LIST_PREVIEW_MAX_LINES,
+    );
+    if preview_lines.is_empty() {
         None
     } else {
-        Some(preview)
+        Some(preview_lines.join("\n"))
     }
+}
+
+fn codex_snapshot_latest_message_at_unix(snapshot: &CodexSessionCompletionSnapshot) -> Option<u64> {
+    snapshot
+        .last_user_at_unix
+        .into_iter()
+        .chain(snapshot.last_assistant_at_unix)
+        .max()
+}
+
+fn session_updated_at_unix(session: &AiSession) -> Option<u64> {
+    session
+        .last_message_at
+        .as_deref()
+        .or(session.timestamp.as_deref())
+        .and_then(parse_rfc3339_to_unix)
 }
 
 fn codex_session_listing_preview_overrides(sessions: &[AiSession]) -> HashMap<String, String> {
@@ -3813,6 +3867,14 @@ fn codex_session_listing_preview_overrides(sessions: &[AiSession]) -> HashMap<St
         let Ok(Some(snapshot)) = read_codex_session_completion_snapshot(&session_file) else {
             continue;
         };
+        if let (Some(snapshot_at), Some(session_at)) = (
+            codex_snapshot_latest_message_at_unix(&snapshot),
+            session_updated_at_unix(session),
+        ) {
+            if snapshot_at < session_at {
+                continue;
+            }
+        }
         let Some(preview) = codex_tail_preview_from_snapshot(&snapshot) else {
             continue;
         };
@@ -5114,7 +5176,10 @@ fn print_provider_session_listing(
                         .as_deref()
                         .or(session.first_message.as_deref())
                         .or(session.error_summary.as_deref())
-                        .map(clean_summary_tail)
+                        .map(|value| {
+                            clean_summary_tail_lines(value, PROVIDER_SESSION_LIST_PREVIEW_MAX_LINES)
+                                .join("\n")
+                        })
                         .filter(|value| !value.is_empty())
                 })
                 .unwrap_or_else(|| "(no message)".to_string());
@@ -5154,7 +5219,7 @@ fn print_provider_session_listing(
         .map(|row| row.updated_relative.chars().count())
         .max()
         .unwrap_or(7)
-        .max("updated".len());
+        .max("ago".len());
     let id_width = rows
         .iter()
         .map(|row| {
@@ -5171,13 +5236,22 @@ fn print_provider_session_listing(
     println!(
         "{:>index_width$}  {:<updated_width$}  {:<id_width$}  preview",
         "#",
-        "updated",
+        "ago",
         "id",
         index_width = index_width,
         updated_width = updated_width,
         id_width = id_width,
     );
     for row in &rows {
+        let preview_lines: Vec<String> = row
+            .preview
+            .lines()
+            .map(|line| truncate_str(line, PROVIDER_SESSION_LIST_PREVIEW_MAX_CHARS))
+            .collect();
+        let first_preview = preview_lines
+            .first()
+            .map(String::as_str)
+            .unwrap_or("(no message)");
         println!(
             "{:>index_width$}  {:<updated_width$}  {:<id_width$}  {}",
             row.index,
@@ -5186,11 +5260,23 @@ fn print_provider_session_listing(
                 .get(&row.id)
                 .map(String::as_str)
                 .unwrap_or(row.id.as_str()),
-            truncate_str(&row.preview, 90),
+            first_preview,
             index_width = index_width,
             updated_width = updated_width,
             id_width = id_width,
         );
+        for line in preview_lines.iter().skip(1) {
+            println!(
+                "{:>index_width$}  {:<updated_width$}  {:<id_width$}  {}",
+                "",
+                "",
+                "",
+                line,
+                index_width = index_width,
+                updated_width = updated_width,
+                id_width = id_width,
+            );
+        }
     }
 
     println!();
@@ -16328,7 +16414,22 @@ values (?1, ?2, ?3, ?4, ?5, ?6, 0)
     #[test]
     fn clean_summary_tail_prefers_last_meaningful_line() {
         let summary = "Plan:\n- check status\n}\n\nVerification: passed";
-        assert_eq!(clean_summary_tail(summary), "Verification: passed");
+        assert_eq!(
+            clean_summary_tail_lines(summary, 1),
+            vec!["Verification: passed".to_string()]
+        );
+    }
+
+    #[test]
+    fn clean_summary_tail_lines_keep_recent_context() {
+        let summary = "Plan:\n# heading\n```rust\nlet x = 1;\n```\nImplementation: landed\nVerification: passed";
+        assert_eq!(
+            clean_summary_tail_lines(summary, 2),
+            vec![
+                "Implementation: landed".to_string(),
+                "Verification: passed".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -16344,8 +16445,36 @@ values (?1, ?2, ?3, ?4, ?5, ?6, 0)
 
         assert_eq!(
             codex_tail_preview_from_snapshot(&snapshot).as_deref(),
-            Some("Done now")
+            Some("Plan:\nDone now")
         );
+    }
+
+    #[test]
+    fn codex_session_listing_preview_overrides_skip_stale_snapshot() {
+        let root = tempdir().expect("tempdir");
+        let session_file = root.path().join("codex.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T10:00:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"first prompt\"}]}}\n",
+                "{\"type\":\"response_item\",\"timestamp\":\"2026-03-17T10:01:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"older answer\"}]}}\n"
+            ),
+        )
+        .expect("write session file");
+
+        let sessions = vec![AiSession {
+            session_id: "019d3b29-d5b9-75c1-b69b-3136abc3d922".to_string(),
+            provider: Provider::Codex,
+            session_path: Some(session_file),
+            timestamp: None,
+            last_message_at: Some("2026-03-17T10:05:00Z".to_string()),
+            last_message: Some("newer cached preview".to_string()),
+            first_message: None,
+            error_summary: None,
+        }];
+
+        let overrides = codex_session_listing_preview_overrides(&sessions);
+        assert!(overrides.is_empty());
     }
 
     #[test]

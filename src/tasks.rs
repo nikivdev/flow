@@ -13,7 +13,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -33,7 +33,7 @@ use crate::{
         TasksRunAiOpts,
     },
     config::{self, Config, FloxInstallSpec, TaskConfig, TaskResolutionConfig},
-    discover,
+    discover, failure,
     flox::{self, FloxEnv},
     history::{self, InvocationRecord},
     hub, init, jazz_state,
@@ -1241,6 +1241,16 @@ pub fn run(opts: TaskRunOpts) -> Result<()> {
 
     // Helper to record a failed invocation
     let record_failure = |error_msg: &str| {
+        failure::record_task_failure(
+            &task.name,
+            &display_command,
+            workdir,
+            &config_path,
+            project_name.as_deref(),
+            error_msg,
+            Some(1),
+            fishx_enabled(),
+        );
         let mut record = InvocationRecord::new(
             workdir.display().to_string(),
             config_path.display().to_string(),
@@ -1720,7 +1730,7 @@ fn execute_task(
     if status.success() {
         Ok(())
     } else {
-        write_failure_bundle(
+        failure::record_task_failure(
             &task.name,
             command,
             workdir,
@@ -1728,6 +1738,7 @@ fn execute_task(
             project_name,
             &output,
             status.code(),
+            fishx_enabled(),
         );
         task_failure_agents::maybe_run_task_failure_agents(
             &task.name,
@@ -2082,19 +2093,7 @@ fn maybe_warn_non_fishx() {
 }
 
 fn failure_bundle_path() -> Option<PathBuf> {
-    if let Ok(path) = env::var("FISHX_FAILURE_PATH") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-    if let Ok(path) = env::var("FLOW_FAILURE_BUNDLE_PATH") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-    dirs::cache_dir().map(|dir| dir.join("flow").join("last-task-failure.json"))
+    failure::latest_failure_path()
 }
 
 fn resolve_task_failure_hook() -> Option<String> {
@@ -2226,60 +2225,6 @@ fn sanitize_rise_work_hook_no_open(hook: &str) -> String {
         rebuilt.push_str("--no-open");
     }
     rebuilt
-}
-
-fn truncate_for_bundle(output: &str, max_chars: usize) -> String {
-    if output.len() <= max_chars {
-        return output.to_string();
-    }
-    let start = output.len().saturating_sub(max_chars);
-    format!("...{}", &output[start..])
-}
-
-fn write_failure_bundle(
-    task_name: &str,
-    command: &str,
-    workdir: &Path,
-    config_path: &Path,
-    project_name: Option<&str>,
-    output: &str,
-    status: Option<i32>,
-) {
-    let Some(path) = failure_bundle_path() else {
-        return;
-    };
-
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let payload = json!({
-        "task": task_name,
-        "command": secret_redact::redact_text(command),
-        "workdir": workdir.display().to_string(),
-        "config": config_path.display().to_string(),
-        "project": project_name,
-        "status": status.unwrap_or(-1),
-        "output": secret_redact::redact_text(&truncate_for_bundle(output, 20_000)),
-        "fishx": fishx_enabled(),
-        "ts": ts,
-    });
-
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Err(err) = fs::write(&path, payload.to_string().as_bytes()) {
-        tracing::warn!(?err, path = %path.display(), "failed to write task failure bundle");
-        return;
-    }
-
-    if std::io::stdin().is_terminal() {
-        eprintln!("🧩 failure bundle: {}", path.display());
-        if which("fx-failure").is_ok() {
-            eprintln!("   Tip: run `fx-failure` or `last-error` for a quick fix prompt.");
-        }
-    }
 }
 
 fn run_host_command(

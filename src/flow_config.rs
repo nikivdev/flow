@@ -207,6 +207,9 @@ export function defineFlowExtension<T extends FlowExtensionResult>(extension: T)
 }
 "#;
 
+const HIVE_DEPRECATION_WARNING: &str =
+    "hive config is deprecated and no longer applied to ~/.hive/config.json";
+
 pub fn run(cmd: ConfigCommand) -> Result<()> {
     match cmd.action {
         ConfigAction::Build { json } => {
@@ -599,6 +602,16 @@ fn generated_toml_file(value: &Value) -> Result<String> {
     Ok(rendered)
 }
 
+fn append_hive_deprecation_warning(warnings: &mut Vec<String>, effective: &EffectiveFlowConfig) {
+    if effective.hive.is_some()
+        && !warnings
+            .iter()
+            .any(|warning| warning == HIVE_DEPRECATION_WARNING)
+    {
+        warnings.push(HIVE_DEPRECATION_WARNING.to_string());
+    }
+}
+
 fn add_artifact(
     artifacts: &mut Vec<GeneratedArtifact>,
     seen_apply_paths: &mut BTreeSet<String>,
@@ -672,20 +685,6 @@ fn build_generated_artifacts(
                 .join(".config/ai/config.json"),
             "ai",
             generated_json_file(&json!({ "ai": ai }))?,
-        )?;
-    }
-
-    if let Some(hive) = effective.hive.as_ref() {
-        add_artifact(
-            &mut artifacts,
-            &mut seen_apply_paths,
-            generated.join("hive").join("config.json"),
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".hive/config.json"),
-            "hive",
-            generated_json_file(hive)?,
         )?;
     }
 
@@ -790,8 +789,62 @@ fn write_atomic(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+fn prune_empty_generated_parents(mut current: Option<&Path>, root: &Path) -> Result<()> {
+    while let Some(path) = current {
+        if path == root || !path.starts_with(root) || !path.exists() {
+            break;
+        }
+        let is_empty = fs::read_dir(path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+            .next()
+            .is_none();
+        if !is_empty {
+            break;
+        }
+        fs::remove_dir(path).with_context(|| format!("failed to remove {}", path.display()))?;
+        current = path.parent();
+    }
+    Ok(())
+}
+
+fn prune_stale_generated_artifacts(
+    root: &Path,
+    previous: &[GeneratedArtifact],
+    current: &[GeneratedArtifact],
+) -> Result<()> {
+    let current_paths = current
+        .iter()
+        .map(|artifact| PathBuf::from(&artifact.generated_path))
+        .collect::<BTreeSet<_>>();
+
+    for artifact in previous {
+        let path = PathBuf::from(&artifact.generated_path);
+        if current_paths.contains(&path) || !path.starts_with(root) || !path.exists() {
+            continue;
+        }
+        if path.is_dir() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        } else {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            prune_empty_generated_parents(path.parent(), root)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn write_generated_snapshot(snapshot: &ConfigSnapshot) -> Result<()> {
-    ensure_dir(&generated_root())?;
+    let root = generated_root();
+    ensure_dir(&root)?;
+    if let Ok(previous) = load_snapshot() {
+        prune_stale_generated_artifacts(
+            &root,
+            &previous.generated_artifacts,
+            &snapshot.generated_artifacts,
+        )?;
+    }
     for artifact in &snapshot.generated_artifacts {
         write_atomic(Path::new(&artifact.generated_path), &artifact.content)?;
     }
@@ -803,7 +856,7 @@ fn write_generated_snapshot(snapshot: &ConfigSnapshot) -> Result<()> {
 }
 
 pub fn build_snapshot() -> Result<ConfigSnapshot> {
-    let (root, source_path, warnings) = load_root_config()?;
+    let (root, source_path, mut warnings) = load_root_config()?;
     let enabled_extensions = root.extensions.clone();
     let discovered = discover_extension_files()?;
     let mut resolved = Vec::new();
@@ -846,6 +899,7 @@ pub fn build_snapshot() -> Result<ConfigSnapshot> {
     }
 
     let effective = build_effective_config(&root, &resolved)?;
+    append_hive_deprecation_warning(&mut warnings, &effective);
     let generated_artifacts = build_generated_artifacts(
         &effective,
         &resolved,
@@ -908,6 +962,16 @@ fn doctor_report() -> DoctorReport {
     }
     if ts_runner.is_none() {
         warnings.push("no TypeScript runner found (need bun, tsx, or npx)".to_string());
+    }
+    if let Ok((root, _, _)) = load_root_config() {
+        let effective = EffectiveFlowConfig {
+            flow: root.flow,
+            lin: root.lin,
+            ai: root.ai,
+            hive: root.hive,
+            zerg: root.zerg,
+        };
+        append_hive_deprecation_warning(&mut warnings, &effective);
     }
     DoctorReport {
         root_config_path: root_path.display().to_string(),
@@ -1101,6 +1165,16 @@ mod tests {
         }
     }
 
+    fn sample_generated_artifact(path: PathBuf) -> GeneratedArtifact {
+        GeneratedArtifact {
+            id: "artifact-test".to_string(),
+            generated_path: path.display().to_string(),
+            apply_path: "/tmp/unused".to_string(),
+            source: "test".to_string(),
+            content: "content".to_string(),
+        }
+    }
+
     #[test]
     fn build_effective_config_merges_extension_overlays() {
         let root = RootTsConfig {
@@ -1214,6 +1288,37 @@ mod tests {
     }
 
     #[test]
+    fn build_generated_artifacts_does_not_emit_hive_output() {
+        let effective = EffectiveFlowConfig {
+            flow: Some(sample_flow("codex")),
+            lin: None,
+            ai: None,
+            hive: Some(json!({"agents": {"shell": {}}})),
+            zerg: None,
+        };
+        let artifacts =
+            build_generated_artifacts(&effective, &[], &["lin-compat".to_string()], false)
+                .expect("generated artifacts");
+        assert!(
+            !artifacts
+                .iter()
+                .any(|artifact| artifact.apply_path.ends_with(".hive/config.json"))
+        );
+    }
+
+    #[test]
+    fn append_hive_deprecation_warning_adds_warning_once() {
+        let effective = EffectiveFlowConfig {
+            hive: Some(json!({"agents": {"shell": {}}})),
+            ..EffectiveFlowConfig::default()
+        };
+        let mut warnings = Vec::new();
+        append_hive_deprecation_warning(&mut warnings, &effective);
+        append_hive_deprecation_warning(&mut warnings, &effective);
+        assert_eq!(warnings, vec![HIVE_DEPRECATION_WARNING.to_string()]);
+    }
+
+    #[test]
     fn generated_artifact_collisions_are_errors() {
         let resolved = vec![(
             ResolvedExtension {
@@ -1238,5 +1343,51 @@ mod tests {
         let err = build_generated_artifacts(&EffectiveFlowConfig::default(), &resolved, &[], false)
             .expect_err("collision should fail");
         assert!(err.to_string().contains("generated artifact collision"));
+    }
+
+    #[test]
+    fn prune_stale_generated_artifacts_removes_retired_outputs_under_generated_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("generated");
+        let stale = root.join("hive").join("config.json");
+        let keep = root.join("flow").join("config.ts");
+
+        fs::create_dir_all(stale.parent().expect("stale parent")).expect("create stale parent");
+        fs::create_dir_all(keep.parent().expect("keep parent")).expect("create keep parent");
+        fs::write(&stale, "{}\n").expect("write stale file");
+        fs::write(&keep, "export default {}\n").expect("write keep file");
+
+        let previous = vec![
+            sample_generated_artifact(stale.clone()),
+            sample_generated_artifact(keep.clone()),
+        ];
+        let current = vec![sample_generated_artifact(keep.clone())];
+
+        prune_stale_generated_artifacts(&root, &previous, &current).expect("prune stale outputs");
+
+        assert!(!stale.exists(), "stale generated file should be removed");
+        assert!(
+            !root.join("hive").exists(),
+            "empty generated directory should be removed"
+        );
+        assert!(keep.exists(), "current generated file should remain");
+    }
+
+    #[test]
+    fn prune_stale_generated_artifacts_does_not_remove_paths_outside_generated_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("generated");
+        let outside = temp.path().join("outside").join("config.json");
+
+        fs::create_dir_all(outside.parent().expect("outside parent")).expect("create outside");
+        fs::write(&outside, "{}\n").expect("write outside file");
+
+        let previous = vec![sample_generated_artifact(outside.clone())];
+        prune_stale_generated_artifacts(&root, &previous, &[]).expect("skip outside file");
+
+        assert!(
+            outside.exists(),
+            "non-generated files must not be removed during cleanup"
+        );
     }
 }

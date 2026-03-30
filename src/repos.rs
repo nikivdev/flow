@@ -8,23 +8,45 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::cli::{CloneOpts, ReposAction, ReposCloneOpts, ReposCommand};
+use crate::cli::{
+    CloneOpts, ReposAction, ReposBootstrapHomeBranchOpts, ReposCloneOpts, ReposCommand,
+    ReposHomeBranchStatusOpts, ReposMigrateHomeBranchOpts,
+};
 use crate::{config, publish, repo_capsule, ssh, ssh_keys, upstream, vcs};
 
+const DEFAULT_HOME_BRANCH: &str = "nikiv";
+const DEFAULT_FORK_REMOTE: &str = "fork";
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
+const DEFAULT_CODE_ROOT: &str = "~/code";
 const REPOS_ROOT_OVERRIDE_ENV: &str = "FLOW_REPOS_ALLOW_ROOT_OVERRIDE";
 
 /// Run the repos subcommand.
 pub fn run(cmd: ReposCommand) -> Result<()> {
     match cmd.action {
         Some(ReposAction::Clone(opts)) => {
+            let no_home_branch_bootstrap = opts.no_home_branch_bootstrap;
             let path = clone_repo(opts)?;
+            if !no_home_branch_bootstrap {
+                bootstrap_home_branch(
+                    &path,
+                    &HomeBranchBootstrapOptions {
+                        dry_run: false,
+                        allow_switch: true,
+                        fail_on_dirty: true,
+                        home_branch: DEFAULT_HOME_BRANCH.to_string(),
+                        quiet: false,
+                    },
+                )?;
+            }
             open_in_zed(&path)?;
             Ok(())
         }
+        Some(ReposAction::HomeBranchStatus(opts)) => run_home_branch_status(opts),
+        Some(ReposAction::BootstrapHomeBranch(opts)) => run_bootstrap_home_branch(opts),
+        Some(ReposAction::MigrateHomeBranch(opts)) => run_migrate_home_branch(opts),
         Some(ReposAction::Create(opts)) => publish::run_github(opts),
         Some(ReposAction::Capsule(opts)) => repo_capsule::run_capsule(opts),
         Some(ReposAction::Alias(cmd)) => repo_capsule::run_alias(cmd),
@@ -122,32 +144,133 @@ struct RepoEntry {
     path: PathBuf,
 }
 
-/// Discover all repos in the root directory (owner/repo structure).
+#[derive(Debug, Clone)]
+struct HomeBranchBootstrapOptions {
+    dry_run: bool,
+    allow_switch: bool,
+    fail_on_dirty: bool,
+    home_branch: String,
+    quiet: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HomeBranchBootstrapResult {
+    repo_root: String,
+    changed: bool,
+    switched_to_home_branch: bool,
+    status: HomeBranchRepoStatus,
+    steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HomeBranchMigrationResult {
+    repo_root: String,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bootstrap: Option<HomeBranchBootstrapResult>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum HomeBranchWorkflowMode {
+    PrivateMirror,
+    DirectPush,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HomeBranchRepoStatus {
+    repo_root: String,
+    repo_display: String,
+    category: HomeBranchRepoCategory,
+    workflow_mode: HomeBranchWorkflowMode,
+    eligible: bool,
+    current_branch: String,
+    home_branch: String,
+    configured_home_branch: Option<String>,
+    configured_public_remote: Option<String>,
+    working_tree_dirty: bool,
+    public_remote: Option<String>,
+    public_default_branch: Option<String>,
+    home_branch_exists: bool,
+    current_is_home_branch: bool,
+    fork_remote_exists: bool,
+    fork_remote_url: Option<String>,
+    expected_fork_remote_url: Option<String>,
+    fork_remote_matches_expected: Option<bool>,
+    remote_push_default: Option<String>,
+    home_branch_push_remote: Option<String>,
+    default_branch_push_remote: Option<String>,
+    tracking_remote: Option<String>,
+    tracking_merge_ref: Option<String>,
+    github_repo_exists: Option<bool>,
+    github_default_branch: Option<String>,
+    github_private: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HomeBranchRepoCategory {
+    StandardGithub,
+    PersonalGithub,
+    PartiallyMigratedGithub,
+    NonGithub,
+}
+
+#[derive(Debug, Clone)]
+struct GithubRemoteRef {
+    owner: String,
+    repo: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PrivateMirrorStatusResponse {
+    #[serde(default)]
+    github_default_branch: Option<String>,
+    #[serde(default)]
+    github_private: Option<bool>,
+    github_repo_exists: bool,
+    #[serde(default)]
+    remote_push_default: Option<String>,
+    #[serde(default)]
+    remote_url: Option<String>,
+}
+
+/// Discover repos in either a flat root (`~/code/*`) or owner/repo root (`~/repos/*/*`).
 fn discover_repos(root: &Path) -> Result<Vec<RepoEntry>> {
     let mut repos = Vec::new();
+    let mut nested_repos = Vec::new();
 
-    let owners = match fs::read_dir(root) {
+    let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(_) => return Ok(repos),
     };
 
-    for owner_entry in owners.flatten() {
-        let owner_path = owner_entry.path();
-        if !owner_path.is_dir() {
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if !entry_path.is_dir() {
             continue;
         }
 
-        let owner_name = match owner_path.file_name() {
+        let entry_name = match entry_path.file_name() {
             Some(name) => name.to_string_lossy().to_string(),
             None => continue,
         };
 
-        // Skip hidden directories
-        if owner_name.starts_with('.') {
+        if entry_name.starts_with('.') {
             continue;
         }
 
-        let repo_entries = match fs::read_dir(&owner_path) {
+        if entry_path.join(".git").exists() {
+            repos.push(RepoEntry {
+                display: entry_name,
+                path: entry_path,
+            });
+            continue;
+        }
+
+        let repo_entries = match fs::read_dir(&entry_path) {
             Ok(entries) => entries,
             Err(_) => continue,
         };
@@ -170,12 +293,18 @@ fn discover_repos(root: &Path) -> Result<Vec<RepoEntry>> {
 
             // Check if it's a git repo
             if repo_path.join(".git").exists() {
-                repos.push(RepoEntry {
-                    display: format!("{}/{}", owner_name, repo_name),
+                nested_repos.push(RepoEntry {
+                    display: format!("{}/{}", entry_name, repo_name),
                     path: repo_path,
                 });
             }
         }
+    }
+
+    if repos.is_empty() {
+        repos = nested_repos;
+    } else {
+        repos.extend(nested_repos);
     }
 
     repos.sort_by(|a, b| a.display.cmp(&b.display));
@@ -309,6 +438,12 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     }
 
     let shallow = !opts.full;
+    let complete_history_before_bootstrap = shallow
+        && should_complete_history_before_clone_bootstrap(
+            &opts,
+            is_github,
+            home_branch_workflow_mode(&target_dir),
+        );
     let fetch_depth = if shallow { Some(1) } else { None };
     run_git_clone(&clone_url, &target_dir, shallow)?;
 
@@ -316,7 +451,11 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
 
     if opts.no_upstream {
         if shallow {
-            spawn_background_history_fetch(&target_dir, false)?;
+            if complete_history_before_bootstrap {
+                fetch_complete_history_for_clone(&target_dir, false)?;
+            } else {
+                spawn_background_history_fetch(&target_dir, false)?;
+            }
         }
         init_jj_repo(&target_dir)?;
         return Ok(target_dir);
@@ -333,7 +472,11 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
         }
         configure_upstream(&target_dir, &upstream_url, fetch_depth)?;
         if shallow {
-            spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
+            if complete_history_before_bootstrap {
+                fetch_complete_history_for_clone(&target_dir, !upstream_is_origin)?;
+            } else {
+                spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
+            }
         }
         init_jj_repo(&target_dir)?;
         return Ok(target_dir);
@@ -361,11 +504,26 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
 
     configure_upstream(&target_dir, &upstream_url, fetch_depth)?;
     if shallow {
-        spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
+        if complete_history_before_bootstrap {
+            fetch_complete_history_for_clone(&target_dir, !upstream_is_origin)?;
+        } else {
+            spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
+        }
     }
 
     init_jj_repo(&target_dir)?;
     Ok(target_dir)
+}
+
+fn should_complete_history_before_clone_bootstrap(
+    opts: &ReposCloneOpts,
+    is_github: bool,
+    workflow_mode: HomeBranchWorkflowMode,
+) -> bool {
+    is_github
+        && !opts.full
+        && !opts.no_home_branch_bootstrap
+        && workflow_mode == HomeBranchWorkflowMode::PrivateMirror
 }
 
 fn preflight_clone_target(target_dir: &Path) -> Result<bool> {
@@ -514,6 +672,926 @@ fn load_jj_config(repo_dir: &Path) -> Option<config::JjConfig> {
     }
 
     None
+}
+
+fn run_home_branch_status(opts: ReposHomeBranchStatusOpts) -> Result<()> {
+    if let Some(root) = opts.root.as_deref() {
+        let root = normalize_root(root)?;
+        let statuses = discover_repos(&root)?
+            .into_iter()
+            .map(|entry| repo_home_branch_status(&entry.path, DEFAULT_HOME_BRANCH))
+            .collect::<Result<Vec<_>>>()?;
+        if opts.json {
+            println!("{}", serde_json::to_string_pretty(&statuses)?);
+        } else {
+            for status in statuses {
+                print_home_branch_status(&status);
+            }
+        }
+        return Ok(());
+    }
+
+    let repo_root = resolve_repo_root(opts.path.as_deref())?;
+    let status = repo_home_branch_status(&repo_root, DEFAULT_HOME_BRANCH)?;
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        print_home_branch_status(&status);
+    }
+    Ok(())
+}
+
+fn run_bootstrap_home_branch(opts: ReposBootstrapHomeBranchOpts) -> Result<()> {
+    let repo_root = resolve_repo_root(opts.path.as_deref())?;
+    let result = bootstrap_home_branch(
+        &repo_root,
+        &HomeBranchBootstrapOptions {
+            dry_run: opts.dry_run,
+            allow_switch: !opts.no_switch,
+            fail_on_dirty: false,
+            home_branch: DEFAULT_HOME_BRANCH.to_string(),
+            quiet: opts.json,
+        },
+    )?;
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_home_branch_bootstrap_result(&result);
+    }
+    Ok(())
+}
+
+fn run_migrate_home_branch(opts: ReposMigrateHomeBranchOpts) -> Result<()> {
+    let root = normalize_root(&opts.root)?;
+    let only = opts.only.as_deref().map(str::to_string);
+    let skip = opts.skip.as_deref().map(str::to_string);
+    let mut results = Vec::new();
+
+    for entry in discover_repos(&root)? {
+        if let Some(pattern) = only.as_deref()
+            && !entry.display.contains(pattern)
+        {
+            continue;
+        }
+        if let Some(pattern) = skip.as_deref()
+            && entry.display.contains(pattern)
+        {
+            continue;
+        }
+
+        let result = match bootstrap_home_branch(
+            &entry.path,
+            &HomeBranchBootstrapOptions {
+                dry_run: opts.dry_run,
+                allow_switch: true,
+                fail_on_dirty: false,
+                home_branch: DEFAULT_HOME_BRANCH.to_string(),
+                quiet: opts.json,
+            },
+        ) {
+            Ok(bootstrap) => HomeBranchMigrationResult {
+                repo_root: entry.path.display().to_string(),
+                ok: true,
+                error: None,
+                bootstrap: Some(bootstrap),
+            },
+            Err(err) => HomeBranchMigrationResult {
+                repo_root: entry.path.display().to_string(),
+                ok: false,
+                error: Some(err.to_string()),
+                bootstrap: None,
+            },
+        };
+
+        if !result.ok && !opts.continue_on_error {
+            if opts.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            if let Some(error) = result.error {
+                bail!("{}", error);
+            }
+        }
+
+        results.push(result);
+    }
+
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        for result in &results {
+            if result.ok {
+                if let Some(bootstrap) = result.bootstrap.as_ref() {
+                    print_home_branch_bootstrap_result(bootstrap);
+                }
+            } else if let Some(error) = result.error.as_deref() {
+                eprintln!("{}: {}", result.repo_root, error);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn bootstrap_home_branch(
+    repo_root: &Path,
+    options: &HomeBranchBootstrapOptions,
+) -> Result<HomeBranchBootstrapResult> {
+    let mut steps = Vec::new();
+    let mut changed = false;
+    let mut switched_to_home_branch = false;
+    let mut status = repo_home_branch_status(repo_root, &options.home_branch)?;
+
+    if !status.eligible {
+        let result = HomeBranchBootstrapResult {
+            repo_root: repo_root.display().to_string(),
+            changed: false,
+            switched_to_home_branch: false,
+            status,
+            steps: vec!["skipped: repo is not a supported GitHub checkout".to_string()],
+        };
+        return Ok(result);
+    }
+
+    if options.fail_on_dirty && status.working_tree_dirty {
+        bail!(
+            "refusing to bootstrap dirty repo {} during clone bootstrap",
+            repo_root.display()
+        );
+    }
+
+    let public_remote = status
+        .public_remote
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing public remote for {}", repo_root.display()))?;
+    let public_default_branch = status.public_default_branch.clone().ok_or_else(|| {
+        anyhow::anyhow!("missing public default branch for {}", repo_root.display())
+    })?;
+    let home_branch = status.home_branch.clone();
+
+    if status.configured_home_branch.as_deref() != Some(home_branch.as_str()) {
+        steps.push(format!("set git config flow.homeBranch={home_branch}"));
+        if !options.dry_run {
+            git_run_in(
+                repo_root,
+                &["config", "--local", "flow.homeBranch", &home_branch],
+                options.quiet,
+            )?;
+        }
+        changed = true;
+    }
+
+    if status.configured_public_remote.as_deref() != Some(public_remote.as_str()) {
+        steps.push(format!("set git config flow.publicRemote={public_remote}"));
+        if !options.dry_run {
+            git_run_in(
+                repo_root,
+                &["config", "--local", "flow.publicRemote", &public_remote],
+                options.quiet,
+            )?;
+        }
+        changed = true;
+    }
+
+    if !status.home_branch_exists {
+        steps.push(format!(
+            "create branch {home_branch} from {public_remote}/{public_default_branch}"
+        ));
+        if !options.dry_run {
+            git_run_in(
+                repo_root,
+                &[
+                    "branch",
+                    &home_branch,
+                    &format!("{public_remote}/{public_default_branch}"),
+                ],
+                options.quiet,
+            )?;
+        }
+        changed = true;
+    }
+
+    if !git_ref_exists_in(repo_root, &format!("refs/heads/{public_default_branch}")) {
+        steps.push(format!(
+            "create branch {public_default_branch} from {public_remote}/{public_default_branch}"
+        ));
+        if !options.dry_run {
+            git_run_in(
+                repo_root,
+                &[
+                    "branch",
+                    &public_default_branch,
+                    &format!("{public_remote}/{public_default_branch}"),
+                ],
+                options.quiet,
+            )?;
+        }
+        changed = true;
+    }
+
+    let default_branch_remote_key = format!("branch.{public_default_branch}.remote");
+    let default_branch_merge_key = format!("branch.{public_default_branch}.merge");
+    let default_branch_merge_ref = format!("refs/heads/{public_default_branch}");
+    if git_config_get(repo_root, &default_branch_remote_key).as_deref()
+        != Some(public_remote.as_str())
+        || git_config_get(repo_root, &default_branch_merge_key).as_deref()
+            != Some(default_branch_merge_ref.as_str())
+    {
+        steps.push(format!(
+            "set {public_default_branch} tracking to {public_remote}/{public_default_branch}"
+        ));
+        if !options.dry_run {
+            git_run_in(
+                repo_root,
+                &[
+                    "config",
+                    "--local",
+                    &default_branch_remote_key,
+                    &public_remote,
+                ],
+                options.quiet,
+            )?;
+            git_run_in(
+                repo_root,
+                &[
+                    "config",
+                    "--local",
+                    &default_branch_merge_key,
+                    &default_branch_merge_ref,
+                ],
+                options.quiet,
+            )?;
+        }
+        changed = true;
+    }
+
+    if status.tracking_remote.as_deref() != Some(public_remote.as_str())
+        || status.tracking_merge_ref.as_deref() != Some(public_default_branch.as_str())
+    {
+        steps.push(format!(
+            "set {home_branch} tracking to {public_remote}/{public_default_branch}"
+        ));
+        if !options.dry_run {
+            git_run_in(
+                repo_root,
+                &[
+                    "config",
+                    "--local",
+                    &format!("branch.{home_branch}.remote"),
+                    &public_remote,
+                ],
+                options.quiet,
+            )?;
+            git_run_in(
+                repo_root,
+                &[
+                    "config",
+                    "--local",
+                    &format!("branch.{home_branch}.merge"),
+                    &format!("refs/heads/{public_default_branch}"),
+                ],
+                options.quiet,
+            )?;
+        }
+        changed = true;
+    }
+
+    if should_switch_to_home_branch(&status, options.allow_switch) {
+        steps.push(format!("switch working tree to {home_branch}"));
+        if !options.dry_run {
+            git_run_in(repo_root, &["switch", &home_branch], options.quiet)?;
+        }
+        changed = true;
+        switched_to_home_branch = true;
+    }
+
+    match status.workflow_mode {
+        HomeBranchWorkflowMode::PrivateMirror => {
+            let mirror_status_before =
+                private_mirror_status(repo_root, &public_default_branch).ok();
+            let needs_mirror_ensure = mirror_status_before
+                .as_ref()
+                .map(|mirror_status| {
+                    mirror_status.remote_push_default.as_deref() != Some(DEFAULT_FORK_REMOTE)
+                        || !mirror_status.github_repo_exists
+                        || mirror_status.github_default_branch.as_deref()
+                            != Some(public_default_branch.as_str())
+                        || mirror_status.remote_url.as_deref()
+                            != status.expected_fork_remote_url.as_deref()
+                })
+                .unwrap_or(true)
+                || status.remote_push_default.as_deref() != Some(DEFAULT_FORK_REMOTE)
+                || status.home_branch_push_remote.as_deref() != Some(DEFAULT_FORK_REMOTE)
+                || status.default_branch_push_remote.as_deref() != Some(DEFAULT_FORK_REMOTE);
+
+            if needs_mirror_ensure {
+                steps.push(format!(
+                    "ensure private mirror trunk {public_default_branch} and push {home_branch} to {}",
+                    DEFAULT_FORK_REMOTE
+                ));
+                if !options.dry_run {
+                    ensure_private_mirror(
+                        repo_root,
+                        &home_branch,
+                        &public_default_branch,
+                        options.quiet,
+                    )?;
+                }
+                changed = true;
+            }
+        }
+        HomeBranchWorkflowMode::DirectPush => {
+            let push_remote = resolve_push_remote_name(repo_root, status.public_remote.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("missing push remote for {}", repo_root.display())
+                })?;
+            let needs_push_config = status.remote_push_default.as_deref()
+                != Some(push_remote.as_str())
+                || status.home_branch_push_remote.as_deref() != Some(push_remote.as_str())
+                || status.default_branch_push_remote.as_deref() != Some(push_remote.as_str());
+
+            if needs_push_config {
+                steps.push(format!(
+                    "set {home_branch} and {public_default_branch} push remote to {push_remote}"
+                ));
+                if !options.dry_run {
+                    ensure_direct_push_remote(
+                        repo_root,
+                        &home_branch,
+                        &public_default_branch,
+                        &push_remote,
+                        options.quiet,
+                    )?;
+                }
+                changed = true;
+            }
+        }
+    }
+
+    status = repo_home_branch_status(repo_root, &options.home_branch)?;
+    Ok(HomeBranchBootstrapResult {
+        repo_root: repo_root.display().to_string(),
+        changed,
+        switched_to_home_branch,
+        status,
+        steps,
+    })
+}
+
+fn repo_home_branch_status(
+    repo_root: &Path,
+    requested_home_branch: &str,
+) -> Result<HomeBranchRepoStatus> {
+    let repo_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    if !repo_root.join(".git").exists() {
+        bail!("not a git repository: {}", repo_root.display());
+    }
+
+    let current_branch = git_capture_in(&repo_root, &["branch", "--show-current"])
+        .unwrap_or_else(|_| "HEAD".to_string());
+    let configured_home_branch = config::configured_home_branch_for_repo(&repo_root);
+    let home_branch = configured_home_branch
+        .clone()
+        .unwrap_or_else(|| requested_home_branch.to_string());
+    let configured_public_remote = config::configured_public_remote_for_repo(&repo_root);
+    let origin_url = git_config_get(&repo_root, "remote.origin.url");
+    let upstream_url = git_config_get(&repo_root, "remote.upstream.url");
+    let fork_remote_url = git_config_get(&repo_root, "remote.fork.url");
+    let public_remote = resolve_public_remote_name(
+        configured_public_remote.as_deref(),
+        origin_url.as_deref(),
+        upstream_url.as_deref(),
+    );
+    let public_default_branch = public_remote
+        .as_deref()
+        .and_then(|remote| resolve_remote_default_branch_in(&repo_root, remote));
+    let home_branch_exists = git_ref_exists_in(&repo_root, &format!("refs/heads/{home_branch}"));
+    let tracking_remote = git_config_get(&repo_root, &format!("branch.{home_branch}.remote"));
+    let tracking_merge_ref = git_config_get(&repo_root, &format!("branch.{home_branch}.merge"))
+        .map(|value| value.trim_start_matches("refs/heads/").to_string());
+    let home_branch_push_remote =
+        git_config_get(&repo_root, &format!("branch.{home_branch}.pushRemote"));
+    let default_branch_push_remote = public_default_branch
+        .as_deref()
+        .and_then(|branch| git_config_get(&repo_root, &format!("branch.{branch}.pushRemote")));
+    let gh_login = github_login().ok();
+    let public_github_ref = public_remote
+        .as_deref()
+        .and_then(|remote| git_config_get(&repo_root, &format!("remote.{remote}.url")))
+        .as_deref()
+        .and_then(parse_github_remote_url);
+    let workflow_mode = home_branch_workflow_mode(&repo_root);
+    let mirror_repo_name = public_github_ref
+        .as_ref()
+        .map(|github_ref| format!("{}-i", github_ref.repo));
+    let expected_fork_remote_url = match (gh_login.as_deref(), mirror_repo_name.as_deref()) {
+        (Some(owner), Some(repo)) => Some(format!("git@github.com:{owner}/{repo}.git")),
+        _ => None,
+    };
+    let private_mirror_status =
+        if workflow_mode == HomeBranchWorkflowMode::PrivateMirror && public_github_ref.is_some() {
+            private_mirror_status(
+                &repo_root,
+                public_default_branch
+                    .as_deref()
+                    .unwrap_or(home_branch.as_str()),
+            )
+            .ok()
+        } else {
+            None
+        };
+    let category = classify_repo_category(
+        public_github_ref.as_ref(),
+        gh_login.as_deref(),
+        origin_url.as_deref(),
+        upstream_url.as_deref(),
+        fork_remote_url.is_some(),
+    );
+    Ok(HomeBranchRepoStatus {
+        repo_root: repo_root.display().to_string(),
+        repo_display: repo_display(&repo_root),
+        category,
+        workflow_mode,
+        eligible: public_github_ref.is_some(),
+        current_branch: current_branch.trim().to_string(),
+        home_branch: home_branch.clone(),
+        configured_home_branch,
+        configured_public_remote,
+        working_tree_dirty: working_tree_dirty(&repo_root)?,
+        public_remote,
+        public_default_branch,
+        home_branch_exists,
+        current_is_home_branch: current_branch.trim() == home_branch,
+        fork_remote_exists: fork_remote_url.is_some(),
+        fork_remote_url,
+        expected_fork_remote_url: expected_fork_remote_url.clone(),
+        fork_remote_matches_expected: match (
+            git_config_get(&repo_root, "remote.fork.url"),
+            expected_fork_remote_url,
+        ) {
+            (Some(actual), Some(expected)) => {
+                Some(normalize_git_url(&actual) == normalize_git_url(&expected))
+            }
+            (Some(_), None) => None,
+            (None, Some(_)) => Some(false),
+            (None, None) => None,
+        },
+        remote_push_default: private_mirror_status
+            .as_ref()
+            .and_then(|status| status.remote_push_default.clone())
+            .or_else(|| git_config_get(&repo_root, "remote.pushDefault")),
+        home_branch_push_remote,
+        default_branch_push_remote,
+        tracking_remote,
+        tracking_merge_ref,
+        github_repo_exists: private_mirror_status
+            .as_ref()
+            .map(|status| status.github_repo_exists),
+        github_default_branch: private_mirror_status
+            .as_ref()
+            .and_then(|status| status.github_default_branch.clone()),
+        github_private: private_mirror_status
+            .as_ref()
+            .and_then(|status| status.github_private),
+    })
+}
+
+fn resolve_repo_root(path: Option<&str>) -> Result<PathBuf> {
+    if let Some(path) = path {
+        let expanded = config::expand_path(path);
+        return expanded
+            .canonicalize()
+            .with_context(|| format!("failed to resolve {}", expanded.display()));
+    }
+
+    let cwd = std::env::current_dir().context("failed to resolve current directory")?;
+    cwd.canonicalize()
+        .with_context(|| format!("failed to resolve {}", cwd.display()))
+}
+
+fn should_switch_to_home_branch(status: &HomeBranchRepoStatus, allow_switch: bool) -> bool {
+    if !allow_switch || status.current_is_home_branch || status.working_tree_dirty {
+        return false;
+    }
+
+    if status.current_branch == "HEAD" {
+        return false;
+    }
+
+    match status.public_default_branch.as_deref() {
+        Some(default_branch) => status.current_branch == default_branch,
+        None => false,
+    }
+}
+
+fn classify_repo_category(
+    public_github_ref: Option<&GithubRemoteRef>,
+    gh_login: Option<&str>,
+    origin_url: Option<&str>,
+    upstream_url: Option<&str>,
+    has_fork_remote: bool,
+) -> HomeBranchRepoCategory {
+    let Some(public_github_ref) = public_github_ref else {
+        return HomeBranchRepoCategory::NonGithub;
+    };
+
+    if has_fork_remote {
+        return HomeBranchRepoCategory::PartiallyMigratedGithub;
+    }
+
+    if Some(public_github_ref.owner.as_str()) == gh_login
+        && upstream_url.is_none()
+        && origin_url.is_some()
+    {
+        return HomeBranchRepoCategory::PersonalGithub;
+    }
+
+    HomeBranchRepoCategory::StandardGithub
+}
+
+fn resolve_public_remote_name(
+    configured_public_remote: Option<&str>,
+    origin_url: Option<&str>,
+    upstream_url: Option<&str>,
+) -> Option<String> {
+    if let Some(remote) = configured_public_remote {
+        return Some(remote.to_string());
+    }
+
+    match (origin_url, upstream_url) {
+        (Some(origin_url), Some(upstream_url)) => {
+            if normalize_git_url(origin_url) == normalize_git_url(upstream_url) {
+                Some("origin".to_string())
+            } else {
+                Some("upstream".to_string())
+            }
+        }
+        (Some(_), None) => Some("origin".to_string()),
+        (None, Some(_)) => Some("upstream".to_string()),
+        (None, None) => None,
+    }
+}
+
+fn resolve_push_remote_name(repo_root: &Path, public_remote: Option<&str>) -> Option<String> {
+    let preferred = config::preferred_git_remote_for_repo(repo_root);
+    if git_config_get(repo_root, &format!("remote.{preferred}.url")).is_some() {
+        return Some(preferred);
+    }
+
+    public_remote.map(ToString::to_string)
+}
+
+fn home_branch_workflow_mode(repo_root: &Path) -> HomeBranchWorkflowMode {
+    let repos_root = config::expand_path(DEFAULT_REPOS_ROOT);
+    if repo_root.starts_with(&repos_root) {
+        HomeBranchWorkflowMode::PrivateMirror
+    } else {
+        HomeBranchWorkflowMode::DirectPush
+    }
+}
+
+fn repo_display(repo_root: &Path) -> String {
+    let repos_root = config::expand_path(DEFAULT_REPOS_ROOT);
+    if let Ok(relative) = repo_root.strip_prefix(&repos_root) {
+        return relative.display().to_string();
+    }
+    let code_root = config::expand_path(DEFAULT_CODE_ROOT);
+    if let Ok(relative) = repo_root.strip_prefix(&code_root) {
+        return relative.display().to_string();
+    }
+    repo_root.display().to_string()
+}
+
+fn working_tree_dirty(repo_root: &Path) -> Result<bool> {
+    Ok(!git_capture_in(repo_root, &["status", "--porcelain"])?
+        .trim()
+        .is_empty())
+}
+
+fn ensure_private_mirror(
+    repo_root: &Path,
+    home_branch: &str,
+    default_branch: &str,
+    quiet: bool,
+) -> Result<()> {
+    ensure_complete_history_before_private_mirror(repo_root, quiet)?;
+    run_private_mirror_script(
+        repo_root,
+        &[
+            "ensure",
+            "--repo-root",
+            &repo_root.display().to_string(),
+            "--branch",
+            default_branch,
+            "--default-branch",
+            default_branch,
+        ],
+    )?;
+    git_run_in(
+        repo_root,
+        &[
+            "config",
+            "--local",
+            "remote.pushDefault",
+            DEFAULT_FORK_REMOTE,
+        ],
+        quiet,
+    )?;
+    git_run_in(
+        repo_root,
+        &[
+            "config",
+            "--local",
+            &format!("branch.{default_branch}.pushRemote"),
+            DEFAULT_FORK_REMOTE,
+        ],
+        quiet,
+    )?;
+    git_run_in(
+        repo_root,
+        &[
+            "config",
+            "--local",
+            &format!("branch.{home_branch}.pushRemote"),
+            DEFAULT_FORK_REMOTE,
+        ],
+        quiet,
+    )?;
+    if home_branch != default_branch {
+        git_run_in(
+            repo_root,
+            &[
+                "push",
+                DEFAULT_FORK_REMOTE,
+                &format!("{home_branch}:{home_branch}"),
+            ],
+            quiet,
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_complete_history_before_private_mirror(repo_root: &Path, quiet: bool) -> Result<()> {
+    if !git_repo_is_shallow(repo_root)? {
+        return Ok(());
+    }
+
+    let has_distinct_upstream = repo_has_distinct_upstream_remote(repo_root);
+    if !quiet {
+        println!("Completing git history before private mirror bootstrap...");
+    }
+    fetch_complete_history(repo_root, has_distinct_upstream, quiet)
+}
+
+fn ensure_direct_push_remote(
+    repo_root: &Path,
+    home_branch: &str,
+    default_branch: &str,
+    push_remote: &str,
+    quiet: bool,
+) -> Result<()> {
+    git_run_in(
+        repo_root,
+        &["config", "--local", "remote.pushDefault", push_remote],
+        quiet,
+    )?;
+    git_run_in(
+        repo_root,
+        &[
+            "config",
+            "--local",
+            &format!("branch.{default_branch}.pushRemote"),
+            push_remote,
+        ],
+        quiet,
+    )?;
+    git_run_in(
+        repo_root,
+        &[
+            "config",
+            "--local",
+            &format!("branch.{home_branch}.pushRemote"),
+            push_remote,
+        ],
+        quiet,
+    )?;
+    Ok(())
+}
+
+fn private_mirror_status(repo_root: &Path, branch: &str) -> Result<PrivateMirrorStatusResponse> {
+    let output = run_private_mirror_script(
+        repo_root,
+        &[
+            "status",
+            "--repo-root",
+            &repo_root.display().to_string(),
+            "--branch",
+            branch,
+        ],
+    )?;
+    serde_json::from_str(output.trim()).context("failed to parse private mirror status JSON")
+}
+
+fn run_private_mirror_script(repo_root: &Path, args: &[&str]) -> Result<String> {
+    let script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("private_mirror.py");
+    let output = Command::new("python3")
+        .arg(&script_path)
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| format!("failed to run {}", script_path.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let message = stderr.trim();
+        if !message.is_empty() {
+            bail!("{}", message);
+        }
+        let message = stdout.trim();
+        if !message.is_empty() {
+            bail!("{}", message);
+        }
+        bail!("{} failed", script_path.display());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn parse_github_remote_url(url: &str) -> Option<GithubRemoteRef> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let path = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest.trim_end_matches(".git")
+    } else if let Some(rest) = trimmed.strip_prefix("https://") {
+        let rest = rest.strip_prefix("github.com/").or_else(|| {
+            let (_userinfo, host_and_path) = rest.split_once('@')?;
+            host_and_path.strip_prefix("github.com/")
+        })?;
+        rest.trim_end_matches(".git")
+    } else if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest.trim_end_matches(".git")
+    } else {
+        return None;
+    };
+    let (owner, repo) = path.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(GithubRemoteRef {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+    })
+}
+
+fn normalize_git_url(url: &str) -> String {
+    url.trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_string()
+}
+
+fn github_login() -> Result<String> {
+    let output = Command::new("gh")
+        .args(["api", "user", "-q", ".login"])
+        .output()
+        .context("failed to run gh api user")?;
+    if !output.status.success() {
+        bail!("gh api user failed");
+    }
+    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if login.is_empty() {
+        bail!("gh login was empty");
+    }
+    Ok(login)
+}
+
+fn resolve_remote_default_branch_in(repo_root: &Path, remote: &str) -> Option<String> {
+    let head_ref = format!("refs/remotes/{remote}/HEAD");
+    if let Ok(symbolic) = git_capture_in(repo_root, &["symbolic-ref", &head_ref]) {
+        let prefix = format!("refs/remotes/{remote}/");
+        if let Some(branch) = symbolic.trim().strip_prefix(&prefix)
+            && !branch.is_empty()
+        {
+            return Some(branch.to_string());
+        }
+    }
+
+    for candidate in ["main", "master", "dev", "trunk"] {
+        if git_ref_exists_in(repo_root, &format!("refs/remotes/{remote}/{candidate}")) {
+            return Some(candidate.to_string());
+        }
+    }
+
+    None
+}
+
+fn git_ref_exists_in(repo_root: &Path, reference: &str) -> bool {
+    Command::new("git")
+        .current_dir(repo_root)
+        .args(["rev-parse", "--verify", reference])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn git_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!("git {} failed", args.join(" "));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_config_get(repo_root: &Path, key: &str) -> Option<String> {
+    git_capture_in(repo_root, &["config", "--get", key])
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn git_run_in(repo_root: &Path, args: &[&str], quiet: bool) -> Result<()> {
+    let mut command = Command::new("git");
+    command
+        .current_dir(repo_root)
+        .args(args)
+        .stdin(Stdio::inherit());
+    if quiet {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    } else {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+    if !status.success() {
+        bail!("git {} failed", args.join(" "));
+    }
+    Ok(())
+}
+
+fn print_home_branch_status(status: &HomeBranchRepoStatus) {
+    println!("{}", status.repo_display);
+    println!("  category: {:?}", status.category);
+    println!(
+        "  workflow mode: {}",
+        match status.workflow_mode {
+            HomeBranchWorkflowMode::PrivateMirror => "private_mirror",
+            HomeBranchWorkflowMode::DirectPush => "direct_push",
+        }
+    );
+    println!("  current branch: {}", status.current_branch);
+    println!("  home branch: {}", status.home_branch);
+    if let Some(public_remote) = status.public_remote.as_deref() {
+        println!("  public remote: {}", public_remote);
+    }
+    if let Some(public_default_branch) = status.public_default_branch.as_deref() {
+        println!("  public default branch: {}", public_default_branch);
+    }
+    println!(
+        "  fork remote: {}",
+        if status.fork_remote_exists {
+            "present"
+        } else {
+            "missing"
+        }
+    );
+    println!(
+        "  push default: {}",
+        status.remote_push_default.as_deref().unwrap_or("<unset>")
+    );
+    println!(
+        "  home branch push remote: {}",
+        status
+            .home_branch_push_remote
+            .as_deref()
+            .unwrap_or("<unset>")
+    );
+    println!(
+        "  trunk push remote: {}",
+        status
+            .default_branch_push_remote
+            .as_deref()
+            .unwrap_or("<unset>")
+    );
+}
+
+fn print_home_branch_bootstrap_result(result: &HomeBranchBootstrapResult) {
+    println!("{}", result.repo_root);
+    for step in &result.steps {
+        println!("  - {}", step);
+    }
+    println!("  changed: {}", result.changed);
+    println!(
+        "  switched_to_home_branch: {}",
+        result.switched_to_home_branch
+    );
 }
 
 fn parse_repo_target(input: &str) -> Result<RepoTarget> {
@@ -676,11 +1754,13 @@ pub(crate) fn normalize_root(raw: &str) -> Result<PathBuf> {
         cwd.join(expanded)
     };
 
-    let default_root = config::expand_path(DEFAULT_REPOS_ROOT);
-    if root != default_root && !repos_root_override_enabled() {
+    let default_repos_root = config::expand_path(DEFAULT_REPOS_ROOT);
+    let default_code_root = config::expand_path(DEFAULT_CODE_ROOT);
+    if root != default_repos_root && root != default_code_root && !repos_root_override_enabled() {
         bail!(
-            "repos root is immutable; use {} or set {}=1 to override",
-            default_root.display(),
+            "repos root is immutable; use {} or {} or set {}=1 to override",
+            default_repos_root.display(),
+            default_code_root.display(),
             REPOS_ROOT_OVERRIDE_ENV
         );
     }
@@ -782,10 +1862,22 @@ fn configure_upstream(repo_dir: &Path, upstream_url: &str, depth: Option<u32>) -
 }
 
 fn spawn_background_history_fetch(repo_dir: &Path, has_upstream: bool) -> Result<()> {
-    let mut command = String::from("git fetch --unshallow --tags origin");
-    if has_upstream {
-        command.push_str(" && git fetch --tags upstream");
+    let mut remotes = history_fetch_remotes(repo_dir);
+    if remotes.is_empty() {
+        remotes.push("origin".to_string());
     }
+    if !has_upstream {
+        remotes.truncate(1);
+    }
+
+    let mut commands = Vec::new();
+    if let Some(primary_remote) = remotes.first() {
+        commands.push(format!("git fetch --unshallow --tags {primary_remote}"));
+        for remote in remotes.iter().skip(1) {
+            commands.push(format!("git fetch --tags {remote}"));
+        }
+    }
+    let command = commands.join(" && ");
 
     let _child = Command::new("sh")
         .arg("-c")
@@ -802,10 +1894,88 @@ fn spawn_background_history_fetch(repo_dir: &Path, has_upstream: bool) -> Result
     Ok(())
 }
 
+fn fetch_complete_history_for_clone(repo_dir: &Path, has_upstream: bool) -> Result<()> {
+    println!("Completing git history before private mirror bootstrap...");
+    fetch_complete_history(repo_dir, has_upstream, false)
+}
+
+fn fetch_complete_history(repo_dir: &Path, has_upstream: bool, quiet: bool) -> Result<()> {
+    let mut remotes = history_fetch_remotes(repo_dir);
+    if remotes.is_empty() {
+        remotes.push("origin".to_string());
+    }
+    if !has_upstream {
+        remotes.truncate(1);
+    }
+
+    if git_repo_is_shallow(repo_dir)? {
+        if let Some(primary_remote) = remotes.first() {
+            git_run_in(
+                repo_dir,
+                &["fetch", "--unshallow", "--tags", primary_remote],
+                quiet,
+            )?;
+        }
+    }
+    for remote in remotes.iter().skip(1) {
+        git_run_in(repo_dir, &["fetch", "--tags", remote], quiet)?;
+    }
+    Ok(())
+}
+
+fn git_repo_is_shallow(repo_dir: &Path) -> Result<bool> {
+    Ok(git_capture_in(repo_dir, &["rev-parse", "--is-shallow-repository"])?.trim() == "true")
+}
+
+fn repo_has_distinct_upstream_remote(repo_dir: &Path) -> bool {
+    let Some(upstream_url) = git_config_get(repo_dir, "remote.upstream.url") else {
+        return false;
+    };
+    let origin_url = git_config_get(repo_dir, "remote.origin.url");
+    origin_url
+        .as_deref()
+        .map(|origin| normalize_git_url(origin) != normalize_git_url(&upstream_url))
+        .unwrap_or(true)
+}
+
+fn history_fetch_remotes(repo_dir: &Path) -> Vec<String> {
+    let origin_url = git_config_get(repo_dir, "remote.origin.url");
+    let upstream_url = git_config_get(repo_dir, "remote.upstream.url");
+    let configured_public_remote = config::configured_public_remote_for_repo(repo_dir);
+    let public_remote = resolve_public_remote_name(
+        configured_public_remote.as_deref(),
+        origin_url.as_deref(),
+        upstream_url.as_deref(),
+    )
+    .unwrap_or_else(|| "origin".to_string());
+
+    let mut remotes = vec![public_remote.clone()];
+    if repo_has_distinct_upstream_remote(repo_dir) {
+        let secondary = if public_remote == "origin" {
+            "upstream"
+        } else {
+            "origin"
+        };
+        if git_config_get(repo_dir, &format!("remote.{secondary}.url")).is_some() {
+            remotes.push(secondary.to_string());
+        }
+    }
+    remotes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn git_ok(repo_root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
 
     #[test]
     fn preflight_clone_target_detects_git_checkout() {
@@ -837,5 +2007,160 @@ mod tests {
             err.to_string()
                 .contains("target path exists but is not a git checkout")
         );
+    }
+
+    #[test]
+    fn discover_repos_supports_flat_roots() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("flow").join(".git")).expect("git dir");
+        fs::create_dir_all(root.join("seq").join(".git")).expect("git dir");
+
+        let repos = discover_repos(root).expect("discover repos");
+        let displays = repos
+            .into_iter()
+            .map(|repo| repo.display)
+            .collect::<Vec<_>>();
+
+        assert_eq!(displays, vec!["flow".to_string(), "seq".to_string()]);
+    }
+
+    #[test]
+    fn discover_repos_supports_owner_repo_roots() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("foo").join("bar").join(".git")).expect("git dir");
+        fs::create_dir_all(root.join("zed-industries").join("zed").join(".git")).expect("git dir");
+
+        let repos = discover_repos(root).expect("discover repos");
+        let displays = repos
+            .into_iter()
+            .map(|repo| repo.display)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            displays,
+            vec!["foo/bar".to_string(), "zed-industries/zed".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_github_remote_url_supports_https_with_username() {
+        let parsed =
+            parse_github_remote_url("https://nikivdev@github.com/example-org/example-repo.git")
+                .expect("parse github remote");
+
+        assert_eq!(parsed.owner, "example-org");
+        assert_eq!(parsed.repo, "example-repo");
+    }
+
+    #[test]
+    fn history_fetch_remotes_supports_upstream_only_repos() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+        git_ok(repo_root, &["init"]);
+        git_ok(
+            repo_root,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/astral-sh/ruff.git",
+            ],
+        );
+
+        assert_eq!(
+            history_fetch_remotes(repo_root),
+            vec!["upstream".to_string()]
+        );
+    }
+
+    #[test]
+    fn private_mirror_clone_bootstrap_requires_complete_history() {
+        let opts = ReposCloneOpts {
+            url: "astral-sh/ruff".to_string(),
+            root: "~/repos".to_string(),
+            full: false,
+            no_upstream: false,
+            upstream_url: None,
+            no_home_branch_bootstrap: false,
+        };
+
+        assert!(should_complete_history_before_clone_bootstrap(
+            &opts,
+            true,
+            HomeBranchWorkflowMode::PrivateMirror
+        ));
+        assert!(!should_complete_history_before_clone_bootstrap(
+            &opts,
+            true,
+            HomeBranchWorkflowMode::DirectPush
+        ));
+        assert!(!should_complete_history_before_clone_bootstrap(
+            &opts,
+            false,
+            HomeBranchWorkflowMode::PrivateMirror
+        ));
+    }
+
+    #[test]
+    fn skipping_home_branch_bootstrap_keeps_fast_background_fetch() {
+        let opts = ReposCloneOpts {
+            url: "astral-sh/ruff".to_string(),
+            root: "~/repos".to_string(),
+            full: false,
+            no_upstream: false,
+            upstream_url: None,
+            no_home_branch_bootstrap: true,
+        };
+
+        assert!(!should_complete_history_before_clone_bootstrap(
+            &opts,
+            true,
+            HomeBranchWorkflowMode::PrivateMirror
+        ));
+    }
+
+    #[test]
+    fn repo_has_distinct_upstream_remote_detects_same_and_different_urls() {
+        let dir = tempdir().expect("tempdir");
+        git_run_in(dir.path(), &["init", "-q"], true).expect("git init");
+
+        git_run_in(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:astral-sh/ruff.git",
+            ],
+            true,
+        )
+        .expect("add origin");
+        git_run_in(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "git@github.com:astral-sh/ruff.git",
+            ],
+            true,
+        )
+        .expect("add upstream");
+        assert!(!repo_has_distinct_upstream_remote(dir.path()));
+
+        git_run_in(
+            dir.path(),
+            &[
+                "remote",
+                "set-url",
+                "upstream",
+                "git@github.com:python/cpython.git",
+            ],
+            true,
+        )
+        .expect("set upstream url");
+        assert!(repo_has_distinct_upstream_remote(dir.path()));
     }
 }

@@ -193,6 +193,11 @@ pub enum Commands {
     )]
     Trace(TraceCommand),
     #[command(
+        about = "Inspect and copy recent task failures.",
+        long_about = "Shows the latest recorded task failure, lists recent failures, or copies a formatted repair payload to the clipboard without manual terminal selection."
+    )]
+    Failure(FailureCommand),
+    #[command(
         about = "Manage anonymous usage analytics preferences and local queue.",
         long_about = "Inspect, enable/disable, export, or purge local anonymous usage analytics events."
     )]
@@ -303,8 +308,8 @@ pub enum Commands {
     )]
     Undo(UndoCommand),
     #[command(
-        about = "Fix issues in the repo with help from Hive.",
-        long_about = "Optionally unroll the last commit, then run a Hive agent to fix the issue (e.g., leaked secrets)."
+        about = "Unroll a commit and hand off to a manual or Codex-driven fix flow.",
+        long_about = "Optionally unroll the last commit, then stop with a concrete follow-up prompt for manual or Codex repair. The old Hive agent path is retired."
     )]
     Fix(FixOpts),
     #[command(
@@ -403,7 +408,7 @@ pub enum Commands {
     Ext(ExtCommand),
     #[command(
         about = "Compile personal Flow config and generated compatibility outputs.",
-        long_about = "Loads ~/.flow/config.ts plus named extensions, writes a merged snapshot under ~/.config/flow/generated, and can apply generated compatibility files into consumer locations like ~/.config/flow, ~/.config/lin, ~/.hive, and ~/.config/zerg."
+        long_about = "Loads ~/.flow/config.ts plus named extensions, writes a merged snapshot under ~/.config/flow/generated, and can apply generated compatibility files into consumer locations like ~/.config/flow, ~/.config/lin, and ~/.config/zerg. Hive config is parsed for migration compatibility but no longer applied to ~/.hive."
     )]
     Config(ConfigCommand),
     #[command(
@@ -472,8 +477,8 @@ pub enum Commands {
     )]
     Agents(AgentsCommand),
     #[command(
-        about = "Manage and run hive agents.",
-        long_about = "Hive agents are MoonBit-powered AI agents with tool use. Agents can be project-local (.flow/agents/) or global (~/.hive/agents/).",
+        about = "Deprecated Hive compatibility shim.",
+        long_about = "Deprecated. Hive is being retired. Use run-owned agents, `do shell`, and `f env` instead of the old `f hive` surface.",
         alias = "h"
     )]
     Hive(HiveCommand),
@@ -914,6 +919,56 @@ pub struct ServersOpts {
     /// TCP port of the daemon's HTTP interface.
     #[arg(long, default_value_t = 9050)]
     pub port: u16,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct FailureCommand {
+    #[command(subcommand)]
+    pub action: Option<FailureAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum FailureAction {
+    /// Show the latest recorded task failure.
+    Last(FailureLastOpts),
+    /// List recent recorded task failures.
+    List(FailureListOpts),
+    /// Copy a formatted task failure payload to the clipboard.
+    Copy(FailureCopyOpts),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct FailureLastOpts {
+    /// Emit the latest failure as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct FailureListOpts {
+    /// Maximum number of recent failures to return.
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
+    /// Emit the recent failures as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct FailureCopyOpts {
+    /// Recent failure id to copy (from `f failure list`). Defaults to the latest failure.
+    #[arg(long)]
+    pub id: Option<String>,
+    /// Clipboard payload format.
+    #[arg(long, value_enum, default_value_t = FailureCopyFormat::Prompt)]
+    pub format: FailureCopyFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FailureCopyFormat {
+    Prompt,
+    Excerpt,
+    Json,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2317,10 +2372,10 @@ pub struct FixOpts {
     /// Stash local changes before unrolling, then restore after.
     #[arg(long)]
     pub stash: bool,
-    /// Hive agent name to run (default: shell).
+    /// Retired compatibility flag; the old Hive agent step is no longer run.
     #[arg(long, default_value = "shell")]
     pub agent: String,
-    /// Skip running Hive agent (only unroll).
+    /// Skip the retired agent step and only prepare the repo for manual repair.
     #[arg(long)]
     pub no_agent: bool,
 }
@@ -4287,6 +4342,15 @@ pub struct MigrateCodeOpts {
 pub enum ReposAction {
     /// Clone a repository into ~/repos/<owner>/<repo>.
     Clone(ReposCloneOpts),
+    /// Show nikiv home-branch workflow status for one repo or a repos root scan.
+    #[command(name = "home-branch-status")]
+    HomeBranchStatus(ReposHomeBranchStatusOpts),
+    /// Create or repair the nikiv home-branch workflow for a repo.
+    #[command(name = "bootstrap-home-branch")]
+    BootstrapHomeBranch(ReposBootstrapHomeBranchOpts),
+    /// Migrate repos under a root into the nikiv home-branch workflow.
+    #[command(name = "migrate-home-branch")]
+    MigrateHomeBranch(ReposMigrateHomeBranchOpts),
     /// Create a GitHub repository from the current folder and push it.
     Create(PublishOpts),
     /// Build or inspect a compact repo capsule for path-based Codex context.
@@ -4311,6 +4375,60 @@ pub struct ReposCloneOpts {
     /// Upstream URL override (defaults to fork parent via gh).
     #[arg(short = 'u', long)]
     pub upstream_url: Option<String>,
+    /// Skip the nikiv home-branch bootstrap after clone.
+    #[arg(long)]
+    pub no_home_branch_bootstrap: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReposHomeBranchStatusOpts {
+    /// Repo path to inspect (defaults to current directory).
+    #[arg(long, conflicts_with = "root")]
+    pub path: Option<String>,
+    /// Repos root to scan (for example: ~/repos).
+    #[arg(long, conflicts_with = "path")]
+    pub root: Option<String>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReposBootstrapHomeBranchOpts {
+    /// Repo path to bootstrap (defaults to current directory).
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Show what would change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Do not switch the working tree to the home branch.
+    #[arg(long)]
+    pub no_switch: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReposMigrateHomeBranchOpts {
+    /// Repos root to scan (default: ~/repos).
+    #[arg(long, default_value = "~/repos")]
+    pub root: String,
+    /// Only include repos whose display path contains this substring.
+    #[arg(long)]
+    pub only: Option<String>,
+    /// Skip repos whose display path contains this substring.
+    #[arg(long)]
+    pub skip: Option<String>,
+    /// Show what would change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Keep going after an individual repo fails.
+    #[arg(long)]
+    pub continue_on_error: bool,
 }
 
 #[derive(Args, Debug, Clone)]

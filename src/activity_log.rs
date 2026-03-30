@@ -640,7 +640,7 @@ mod tests {
             .expect("local datetime");
         let mut event = ActivityEvent::done("codex.resolve", "summarize codex memory work");
         event.route = Some("new-with-context".to_string());
-        event.target_path = Some("/Users/nikitavoloboev/docs".to_string());
+        event.target_path = Some("/tmp/docs".to_string());
         event.session_id = Some("019cd046-8b33-73c2-abfd-88f49d26eba0".to_string());
         event.dedupe_key = Some("dedupe-1".to_string());
 
@@ -673,12 +673,12 @@ mod tests {
         let mut first = ActivityEvent::done("codex.done", "implement activity logging");
         first.dedupe_key = Some("codex:done:1".to_string());
         first.session_id = Some("019cd046-8b33-73c2-abfd-88f49d26eba0".to_string());
-        first.target_path = Some("/Users/nikitavoloboev/code/flow".to_string());
+        first.target_path = Some("/tmp/code/flow".to_string());
 
         let mut second = ActivityEvent::done("codex.done", "implement activity logging");
         second.dedupe_key = Some("codex:done:1".to_string());
         second.session_id = Some("019cd046-8b33-73c2-abfd-88f49d26eba0".to_string());
-        second.target_path = Some("/Users/nikitavoloboev/code/flow".to_string());
+        second.target_path = Some("/tmp/code/flow".to_string());
         second.recorded_at_unix += 10;
 
         append_daily_event_at(temp.path(), now, first).expect("first append");
