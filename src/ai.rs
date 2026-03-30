@@ -3693,6 +3693,24 @@ fn display_session_id(session_id: &str) -> String {
     truncate_recover_id(session_id)
 }
 
+fn display_session_id_two_segments(session_id: &str) -> String {
+    let mut segments = session_id.split('-');
+    let Some(first) = segments.next() else {
+        return display_session_id(session_id);
+    };
+    let Some(second) = segments.next() else {
+        return display_session_id(session_id);
+    };
+    if first.len() == 8
+        && second.len() == 4
+        && first.chars().all(|ch| ch.is_ascii_hexdigit())
+        && second.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return format!("{first}-{second}");
+    }
+    display_session_id(session_id)
+}
+
 fn display_session_ids(rows: &[ProviderSessionListRow]) -> HashMap<String, String> {
     let mut prefix_counts: HashMap<String, usize> = HashMap::new();
     for row in rows {
@@ -3707,16 +3725,18 @@ fn display_session_ids(rows: &[ProviderSessionListRow]) -> HashMap<String, Strin
 
     let mut display = HashMap::with_capacity(rows.len());
     for row in rows {
-        if row.id.chars().count() <= 8 {
+        let base = display_session_id_two_segments(&row.id);
+        let base_len = base.chars().count();
+        if row.id.chars().count() <= base_len {
             display.insert(row.id.clone(), row.id.clone());
             continue;
         }
 
         let mut prefix = String::new();
-        let mut candidate = row.id.clone();
+        let mut candidate = base.clone();
         for (index, ch) in row.id.chars().enumerate() {
             prefix.push(ch);
-            if index + 1 < 8 {
+            if index + 1 < base_len {
                 continue;
             }
             candidate = prefix.clone();
@@ -16254,7 +16274,7 @@ values (?1, ?2, ?3, ?4, ?5, ?6, 0)
     }
 
     #[test]
-    fn display_session_ids_extend_prefixes_only_when_needed() {
+    fn display_session_ids_prefer_two_segments_and_extend_when_needed() {
         let rows = vec![
             ProviderSessionListRow {
                 index: 1,
@@ -16267,7 +16287,7 @@ values (?1, ?2, ?3, ?4, ?5, ?6, 0)
                 index: 2,
                 updated_relative: "1h".to_string(),
                 updated_at: None,
-                id: "019d3a66-f3ae-7801-a8d2-7d505d8c8627".to_string(),
+                id: "019d3a66-219d-7801-a8d2-7d505d8c8627".to_string(),
                 preview: "second".to_string(),
             },
             ProviderSessionListRow {
@@ -16277,20 +16297,31 @@ values (?1, ?2, ?3, ?4, ?5, ?6, 0)
                 id: "019d3b29-d5b9-75c1-b69b-3136abc3d922".to_string(),
                 preview: "third".to_string(),
             },
+            ProviderSessionListRow {
+                index: 4,
+                updated_relative: "3h".to_string(),
+                updated_at: None,
+                id: "019d3c00-abcd-75c1-b69b-3136abc3d922".to_string(),
+                preview: "fourth".to_string(),
+            },
         ];
 
         let display = display_session_ids(&rows);
         assert_eq!(
             display.get("019d3b29-d5b9-75c1-b69b-3136abc3d922"),
-            Some(&"019d3b29".to_string())
+            Some(&"019d3b29-d5b9".to_string())
         );
         assert_eq!(
             display.get("019d3a66-219d-7a03-a91e-cd3de17ffeca"),
-            Some(&"019d3a66-2".to_string())
+            Some(&"019d3a66-219d-7a".to_string())
         );
         assert_eq!(
-            display.get("019d3a66-f3ae-7801-a8d2-7d505d8c8627"),
-            Some(&"019d3a66-f".to_string())
+            display.get("019d3a66-219d-7801-a8d2-7d505d8c8627"),
+            Some(&"019d3a66-219d-78".to_string())
+        );
+        assert_eq!(
+            display.get("019d3c00-abcd-75c1-b69b-3136abc3d922"),
+            Some(&"019d3c00-abcd".to_string())
         );
     }
 
