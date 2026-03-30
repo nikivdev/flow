@@ -152,6 +152,8 @@ struct AiSession {
     session_id: String,
     /// Which provider (claude, codex, cursor)
     provider: Provider,
+    /// Backing transcript path when known.
+    session_path: Option<PathBuf>,
     /// First message timestamp
     timestamp: Option<String>,
     /// Last message timestamp
@@ -3140,6 +3142,7 @@ fn parse_session_file(path: &PathBuf, session_id: &str, provider: Provider) -> O
     Some(AiSession {
         session_id: session_id.to_string(),
         provider,
+        session_path: Some(path.clone()),
         timestamp,
         last_message_at,
         last_message,
@@ -3219,6 +3222,7 @@ fn parse_codex_session_file(
     let session = AiSession {
         session_id: session_id.unwrap_or_else(|| fallback_id.to_string()),
         provider: Provider::Codex,
+        session_path: Some(path.clone()),
         timestamp,
         last_message_at,
         last_message,
@@ -3253,6 +3257,7 @@ fn parse_cursor_session_file(path: &PathBuf, fallback_id: &str) -> Option<AiSess
     Some(AiSession {
         session_id: fallback_id.to_string(),
         provider: Provider::Cursor,
+        session_path: Some(path.clone()),
         timestamp: timestamp.clone(),
         last_message_at: timestamp,
         last_message,
@@ -3265,6 +3270,7 @@ fn ai_session_from_codex_recover_row(row: CodexRecoverRow) -> AiSession {
     let updated_at = DateTime::<Utc>::from_timestamp(row.updated_at, 0)
         .map(|value| value.to_rfc3339())
         .unwrap_or_else(|| row.updated_at.to_string());
+    let session_path = row.rollout_path.as_ref().map(PathBuf::from);
     let title = row.title.filter(|value| !value.trim().is_empty());
     let first_user_message = row
         .first_user_message
@@ -3274,6 +3280,7 @@ fn ai_session_from_codex_recover_row(row: CodexRecoverRow) -> AiSession {
     AiSession {
         session_id: row.id,
         provider: Provider::Codex,
+        session_path,
         timestamp: Some(updated_at.clone()),
         last_message_at: Some(updated_at),
         last_message,
@@ -3483,7 +3490,11 @@ where
 }
 
 fn resolve_codex_session_identity(query: &str) -> Result<Option<(String, Option<PathBuf>)>> {
-    resolve_codex_session_identity_with(query, read_codex_threads_by_session_hint, "codexd")
+    resolve_codex_session_identity_with(
+        query,
+        read_codex_threads_by_session_hint_prefer_local,
+        "local-first",
+    )
 }
 
 fn resolve_codex_session_identity_local(query: &str) -> Result<Option<(String, Option<PathBuf>)>> {
@@ -3676,6 +3687,81 @@ struct ProviderSessionListRow {
     updated_at: Option<String>,
     updated_relative: String,
     preview: String,
+}
+
+fn display_session_id(session_id: &str) -> String {
+    truncate_recover_id(session_id)
+}
+
+fn clean_summary_tail(s: &str) -> String {
+    let meaningful_line = s
+        .lines()
+        .rev()
+        .map(|l| l.trim())
+        .find(|l| {
+            !l.is_empty()
+                && l.chars().any(|ch| ch.is_alphanumeric())
+                && !l.starts_with('>')
+                && !l.starts_with('❯')
+                && !l.starts_with('$')
+                && !l.starts_with('#')
+                && !l.starts_with("```")
+                && !l.starts_with("Error:")
+                && !l.starts_with("<INSTRUCTIONS>")
+                && !l.starts_with("## Skills")
+        })
+        .or_else(|| s.lines().rev().find(|l| !l.trim().is_empty()))
+        .unwrap_or(s);
+
+    meaningful_line
+        .trim()
+        .replace('\t', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn codex_tail_preview_from_snapshot(snapshot: &CodexSessionCompletionSnapshot) -> Option<String> {
+    let tail_message = match snapshot.last_role.as_deref() {
+        Some("assistant") => snapshot.last_assistant_message.as_deref(),
+        Some("user") => snapshot.last_user_message.as_deref(),
+        _ => snapshot
+            .last_assistant_message
+            .as_deref()
+            .or(snapshot.last_user_message.as_deref()),
+    }?;
+    let preview = clean_summary_tail(tail_message);
+    if preview.is_empty() {
+        None
+    } else {
+        Some(preview)
+    }
+}
+
+fn codex_session_listing_preview_overrides(sessions: &[AiSession]) -> HashMap<String, String> {
+    if sessions.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut previews = HashMap::with_capacity(sessions.len());
+    for session in sessions {
+        let session_file = session
+            .session_path
+            .clone()
+            .or_else(|| find_codex_session_file(&session.session_id));
+        let Some(session_file) = session_file else {
+            continue;
+        };
+        let Ok(Some(snapshot)) = read_codex_session_completion_snapshot(&session_file) else {
+            continue;
+        };
+        let Some(preview) = codex_tail_preview_from_snapshot(&snapshot) else {
+            continue;
+        };
+        previews.insert(session.session_id.clone(), preview);
+    }
+
+    previews
 }
 
 /// List all sessions and let user fuzzy-select one to resume.
@@ -4943,6 +5029,12 @@ fn print_provider_session_listing(
         bail!("No {provider_name} sessions found for {}", target.display());
     }
 
+    let codex_preview_overrides = if provider == Provider::Codex {
+        codex_session_listing_preview_overrides(sessions)
+    } else {
+        HashMap::new()
+    };
+
     let rows: Vec<ProviderSessionListRow> = sessions
         .iter()
         .enumerate()
@@ -4955,13 +5047,18 @@ fn print_provider_session_listing(
                 .as_deref()
                 .map(format_relative_time)
                 .unwrap_or_else(|| "-".to_string());
-            let preview = session
-                .last_message
-                .as_deref()
-                .or(session.first_message.as_deref())
-                .or(session.error_summary.as_deref())
-                .map(clean_summary)
-                .filter(|value| !value.is_empty())
+            let preview = codex_preview_overrides
+                .get(&session.session_id)
+                .cloned()
+                .or_else(|| {
+                    session
+                        .last_message
+                        .as_deref()
+                        .or(session.first_message.as_deref())
+                        .or(session.error_summary.as_deref())
+                        .map(clean_summary_tail)
+                        .filter(|value| !value.is_empty())
+                })
                 .unwrap_or_else(|| "(no message)".to_string());
             ProviderSessionListRow {
                 index: index + 1,
@@ -5001,10 +5098,10 @@ fn print_provider_session_listing(
         .max("updated".len());
     let id_width = rows
         .iter()
-        .map(|row| row.id.chars().count())
+        .map(|row| display_session_id(&row.id).chars().count())
         .max()
         .unwrap_or(10)
-        .min(36)
+        .min(8)
         .max(2);
 
     println!(
@@ -5021,7 +5118,7 @@ fn print_provider_session_listing(
             "{:>index_width$}  {:<updated_width$}  {:<id_width$}  {}",
             row.index,
             row.updated_relative,
-            row.id,
+            display_session_id(&row.id),
             truncate_str(&row.preview, 90),
             index_width = index_width,
             updated_width = updated_width,
@@ -6389,6 +6486,23 @@ fn read_codex_threads_by_session_hint(
                 "codexd session hint query failed; falling back to local query"
             );
             read_codex_threads_by_session_hint_local(session_hint, limit)
+        }
+    }
+}
+
+fn read_codex_threads_by_session_hint_prefer_local(
+    session_hint: &str,
+    limit: usize,
+) -> Result<Vec<CodexRecoverRow>> {
+    match read_codex_threads_by_session_hint_local(session_hint, limit) {
+        Ok(rows) if !rows.is_empty() => Ok(rows),
+        Ok(_) => read_codex_threads_by_session_hint(session_hint, limit),
+        Err(err) => {
+            debug!(
+                error = %err,
+                "local explicit session hint query failed; retrying through codexd"
+            );
+            read_codex_threads_by_session_hint(session_hint, limit)
         }
     }
 }
@@ -11598,7 +11712,7 @@ fn resolve_codex_session_lookup(
     scope: CodexFindScope,
 ) -> Result<Option<(CodexRecoverRow, String)>> {
     if let Some(session_hint) = extract_codex_session_hint(normalized_query) {
-        let rows = read_codex_threads_by_session_hint(&session_hint, 1)?;
+        let rows = read_codex_threads_by_session_hint_prefer_local(&session_hint, 1)?;
         if let Some(row) = rows.into_iter().next() {
             return Ok(Some((
                 row,
@@ -11660,7 +11774,7 @@ fn resolve_directional_session_lookup(
     } else if anchor_text.is_empty() || looks_like_latest_query(&anchor_text) {
         recent_rows.first().cloned()
     } else if let Some(session_hint) = extract_codex_session_hint(&anchor_text) {
-        read_codex_threads_by_session_hint(&session_hint, 1)?
+        read_codex_threads_by_session_hint_prefer_local(&session_hint, 1)?
             .into_iter()
             .next()
     } else {
@@ -13689,7 +13803,7 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
-/// Format timestamp as relative time (e.g., "3 days ago", "2 hours ago").
+/// Format timestamp as compact relative time (e.g., "3d", "2h").
 fn format_relative_time(ts: &str) -> String {
     // Parse ISO 8601 timestamp: "2025-12-09T19:21:15.562Z"
     let parsed = chrono::DateTime::parse_from_rfc3339(ts).or_else(|_| {
@@ -13716,17 +13830,15 @@ fn format_relative_time(ts: &str) -> String {
     let weeks = days / 7;
 
     if seconds < 60 {
-        "just now".to_string()
+        "now".to_string()
     } else if minutes < 60 {
-        format!("{}m ago", minutes)
+        format!("{}m", minutes)
     } else if hours < 24 {
-        format!("{}h ago", hours)
-    } else if days == 1 {
-        "yesterday".to_string()
+        format!("{}h", hours)
     } else if days < 7 {
-        format!("{}d ago", days)
+        format!("{}d", days)
     } else if weeks < 4 {
-        format!("{}w ago", weeks)
+        format!("{}w", weeks)
     } else {
         // Show date for older sessions
         dt.format("%b %d").to_string()
@@ -16086,6 +16198,59 @@ values (?1, ?2, ?3, ?4, ?5, ?6, 0)
     }
 
     #[test]
+    fn display_session_id_truncates_to_uuid_prefix() {
+        assert_eq!(
+            display_session_id("019d3b29-d5b9-75c1-b69b-3136abc3d922"),
+            "019d3b29"
+        );
+        assert_eq!(display_session_id("short"), "short");
+    }
+
+    #[test]
+    fn clean_summary_tail_prefers_last_meaningful_line() {
+        let summary = "Plan:\n- check status\n}\n\nVerification: passed";
+        assert_eq!(clean_summary_tail(summary), "Verification: passed");
+    }
+
+    #[test]
+    fn codex_tail_preview_from_snapshot_uses_last_role_message() {
+        let snapshot = CodexSessionCompletionSnapshot {
+            last_role: Some("assistant".to_string()),
+            last_user_message: Some("first".to_string()),
+            last_user_at_unix: Some(1),
+            last_assistant_message: Some("Plan:\nDone now".to_string()),
+            last_assistant_at_unix: Some(2),
+            file_modified_unix: 2,
+        };
+
+        assert_eq!(
+            codex_tail_preview_from_snapshot(&snapshot).as_deref(),
+            Some("Done now")
+        );
+    }
+
+    #[test]
+    fn format_relative_time_uses_compact_labels() {
+        let now = Utc::now();
+        assert_eq!(
+            format_relative_time(&(now - chrono::Duration::seconds(10)).to_rfc3339()),
+            "now"
+        );
+        assert_eq!(
+            format_relative_time(&(now - chrono::Duration::minutes(12)).to_rfc3339()),
+            "12m"
+        );
+        assert_eq!(
+            format_relative_time(&(now - chrono::Duration::hours(5)).to_rfc3339()),
+            "5h"
+        );
+        assert_eq!(
+            format_relative_time(&(now - chrono::Duration::days(3)).to_rfc3339()),
+            "3d"
+        );
+    }
+
+    #[test]
     fn session_query_matches_saved_name_respects_exact_saved_aliases() {
         let mut index = SessionIndex::default();
         index.sessions.insert(
@@ -17338,6 +17503,7 @@ l is now Kit. L now delegates to j. old k moved to cl. old l moved to cf. old L 
         let session = AiSession {
             session_id: "019ce791-7e05-7e51-b2b7-610dc7172e5c".to_string(),
             provider: Provider::Codex,
+            session_path: None,
             timestamp: None,
             last_message_at: None,
             last_message: None,
@@ -17361,6 +17527,7 @@ l is now Kit. L now delegates to j. old k moved to cl. old l moved to cf. old L 
             AiSession {
                 session_id: "session-one".to_string(),
                 provider: Provider::Codex,
+                session_path: None,
                 timestamp: None,
                 last_message_at: None,
                 last_message: None,
@@ -17370,6 +17537,7 @@ l is now Kit. L now delegates to j. old k moved to cl. old l moved to cf. old L 
             AiSession {
                 session_id: "session-two".to_string(),
                 provider: Provider::Claude,
+                session_path: None,
                 timestamp: None,
                 last_message_at: None,
                 last_message: None,
@@ -17391,6 +17559,7 @@ l is now Kit. L now delegates to j. old k moved to cl. old l moved to cf. old L 
         let sessions = vec![AiSession {
             session_id: "session-one".to_string(),
             provider: Provider::Codex,
+            session_path: None,
             timestamp: None,
             last_message_at: None,
             last_message: None,
