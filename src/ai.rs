@@ -3693,6 +3693,44 @@ fn display_session_id(session_id: &str) -> String {
     truncate_recover_id(session_id)
 }
 
+fn display_session_ids(rows: &[ProviderSessionListRow]) -> HashMap<String, String> {
+    let mut prefix_counts: HashMap<String, usize> = HashMap::new();
+    for row in rows {
+        let mut prefix = String::new();
+        for (index, ch) in row.id.chars().enumerate() {
+            prefix.push(ch);
+            if index + 1 >= 8 {
+                *prefix_counts.entry(prefix.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut display = HashMap::with_capacity(rows.len());
+    for row in rows {
+        if row.id.chars().count() <= 8 {
+            display.insert(row.id.clone(), row.id.clone());
+            continue;
+        }
+
+        let mut prefix = String::new();
+        let mut candidate = row.id.clone();
+        for (index, ch) in row.id.chars().enumerate() {
+            prefix.push(ch);
+            if index + 1 < 8 {
+                continue;
+            }
+            candidate = prefix.clone();
+            if prefix_counts.get(&candidate).copied().unwrap_or(0) <= 1 {
+                break;
+            }
+        }
+
+        display.insert(row.id.clone(), candidate);
+    }
+
+    display
+}
+
 fn clean_summary_tail(s: &str) -> String {
     let meaningful_line = s
         .lines()
@@ -5069,6 +5107,7 @@ fn print_provider_session_listing(
             }
         })
         .collect();
+    let display_ids = display_session_ids(&rows);
 
     if json {
         println!(
@@ -5098,10 +5137,15 @@ fn print_provider_session_listing(
         .max("updated".len());
     let id_width = rows
         .iter()
-        .map(|row| display_session_id(&row.id).chars().count())
+        .map(|row| {
+            display_ids
+                .get(&row.id)
+                .map(|value| value.chars().count())
+                .unwrap_or_else(|| display_session_id(&row.id).chars().count())
+        })
         .max()
         .unwrap_or(10)
-        .min(8)
+        .min(36)
         .max(2);
 
     println!(
@@ -5118,7 +5162,10 @@ fn print_provider_session_listing(
             "{:>index_width$}  {:<updated_width$}  {:<id_width$}  {}",
             row.index,
             row.updated_relative,
-            display_session_id(&row.id),
+            display_ids
+                .get(&row.id)
+                .map(String::as_str)
+                .unwrap_or(row.id.as_str()),
             truncate_str(&row.preview, 90),
             index_width = index_width,
             updated_width = updated_width,
@@ -16204,6 +16251,47 @@ values (?1, ?2, ?3, ?4, ?5, ?6, 0)
             "019d3b29"
         );
         assert_eq!(display_session_id("short"), "short");
+    }
+
+    #[test]
+    fn display_session_ids_extend_prefixes_only_when_needed() {
+        let rows = vec![
+            ProviderSessionListRow {
+                index: 1,
+                updated_relative: "now".to_string(),
+                updated_at: None,
+                id: "019d3a66-219d-7a03-a91e-cd3de17ffeca".to_string(),
+                preview: "first".to_string(),
+            },
+            ProviderSessionListRow {
+                index: 2,
+                updated_relative: "1h".to_string(),
+                updated_at: None,
+                id: "019d3a66-f3ae-7801-a8d2-7d505d8c8627".to_string(),
+                preview: "second".to_string(),
+            },
+            ProviderSessionListRow {
+                index: 3,
+                updated_relative: "2h".to_string(),
+                updated_at: None,
+                id: "019d3b29-d5b9-75c1-b69b-3136abc3d922".to_string(),
+                preview: "third".to_string(),
+            },
+        ];
+
+        let display = display_session_ids(&rows);
+        assert_eq!(
+            display.get("019d3b29-d5b9-75c1-b69b-3136abc3d922"),
+            Some(&"019d3b29".to_string())
+        );
+        assert_eq!(
+            display.get("019d3a66-219d-7a03-a91e-cd3de17ffeca"),
+            Some(&"019d3a66-2".to_string())
+        );
+        assert_eq!(
+            display.get("019d3a66-f3ae-7801-a8d2-7d505d8c8627"),
+            Some(&"019d3a66-f".to_string())
+        );
     }
 
     #[test]
