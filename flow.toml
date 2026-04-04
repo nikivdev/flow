@@ -602,8 +602,8 @@ description = "Build Pond (Ghostty fork) in debug mode"
 
 [[tasks]]
 name = "Zed"
-command = "bash ./scripts/build-zed-app.sh"
-description = "Build the local Zed fork as optimized stable-channel Zed.app and install it to /Applications/Zed.app"
+command = "bash ./scripts/install-staged-zed-app.sh"
+description = "Install the latest staged local Zed.app into /Applications after you have closed Zed manually"
 
 [[tasks]]
 name = "linsa-assistant-serve"
