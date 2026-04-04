@@ -631,45 +631,22 @@ fn run_sync(cmd: SyncRunOptions) -> Result<()> {
         let repo_root_path = Path::new(&repo_root);
         let mut remote_probe_cache = SyncRemoteProbeCache::default();
         let preferred_remote = config::preferred_git_remote_for_repo(repo_root_path);
+        let current_branch = git_capture_in(repo_root_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .ok()
+            .map(|branch| branch.trim().to_string())
+            .filter(|branch| !branch.is_empty() && branch != "HEAD");
+        let tracking_remote = current_branch
+            .as_deref()
+            .and_then(|branch| resolve_tracking_remote_branch_in(repo_root_path, Some(branch)))
+            .map(|(remote, _)| remote);
+        let jj_bypass_reason = jj_sync_bypass_reason(&preferred_remote, tracking_remote.as_deref());
         let mut use_jj = should_use_jj(repo_root_path);
-        let mut jj_disabled_by_custom_tracking = false;
-        if use_jj && preferred_remote != "origin" && preferred_remote != "upstream" {
-            sync_progressln!(
-                "⚠️  Configured git.remote '{}' detected; using git sync flow.",
-                preferred_remote
-            );
-            recorder.record(
-                "mode",
-                format!("jj bypassed (configured git.remote {})", preferred_remote),
-            );
+        if let Some(reason) = jj_bypass_reason.as_ref() {
+            sync_progressln!("{}", reason.message());
+            recorder.record("mode", reason.recorder_mode());
             use_jj = false;
         }
-        if use_jj {
-            if let Ok(branch) =
-                git_capture_in(repo_root_path, &["rev-parse", "--abbrev-ref", "HEAD"])
-            {
-                let branch = branch.trim();
-                if branch != "HEAD" {
-                    if let Some((remote, _)) =
-                        resolve_tracking_remote_branch_in(repo_root_path, Some(branch))
-                    {
-                        if remote != "origin" && remote != "upstream" {
-                            sync_progressln!(
-                                "⚠️  Tracking remote '{}' detected; using git sync flow for reliable branch + upstream sync.",
-                                remote
-                            );
-                            recorder.record(
-                                "mode",
-                                format!("jj bypassed (custom tracking remote {})", remote),
-                            );
-                            use_jj = false;
-                            jj_disabled_by_custom_tracking = true;
-                        }
-                    }
-                }
-            }
-        }
-        if repo_root_path.join(".jj").exists() && !use_jj && !jj_disabled_by_custom_tracking {
+        if repo_root_path.join(".jj").exists() && !use_jj && jj_bypass_reason.is_none() {
             sync_progressln!("⚠️  jj workspace appears unhealthy; falling back to git sync flow.");
             sync_progressln!(
                 "   Fix: `jj git import` (or if still broken: `rm -rf .jj && jj git init --colocate`)"
@@ -3704,6 +3681,67 @@ fn resolve_branch_containing_head(repo_root: &Path) -> Option<String> {
         .map(|value| value.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JjSyncBypassReason {
+    ConfiguredGitRemote(String),
+    TrackingRemote(String),
+}
+
+impl JjSyncBypassReason {
+    fn message(&self) -> String {
+        match self {
+            Self::ConfiguredGitRemote(remote) => {
+                format!(
+                    "⚠️  Configured git.remote '{}' detected; using git sync flow.",
+                    remote
+                )
+            }
+            Self::TrackingRemote(remote) => format!(
+                "⚠️  Tracking remote '{}' detected; using git sync flow for reliable branch + upstream sync.",
+                remote
+            ),
+        }
+    }
+
+    fn recorder_mode(&self) -> String {
+        match self {
+            Self::ConfiguredGitRemote(remote) => {
+                format!("jj bypassed (configured git.remote {})", remote)
+            }
+            Self::TrackingRemote(remote) => {
+                format!("jj bypassed (custom tracking remote {})", remote)
+            }
+        }
+    }
+}
+
+fn is_standard_sync_remote(remote: &str) -> bool {
+    matches!(remote.trim(), "origin" | "upstream")
+}
+
+fn jj_sync_bypass_reason(
+    preferred_remote: &str,
+    tracking_remote: Option<&str>,
+) -> Option<JjSyncBypassReason> {
+    let preferred_remote = preferred_remote.trim();
+    if !preferred_remote.is_empty() && !is_standard_sync_remote(preferred_remote) {
+        return Some(JjSyncBypassReason::ConfiguredGitRemote(
+            preferred_remote.to_string(),
+        ));
+    }
+
+    let tracking_remote = tracking_remote
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())?;
+    if !is_standard_sync_remote(tracking_remote) {
+        return Some(JjSyncBypassReason::TrackingRemote(
+            tracking_remote.to_string(),
+        ));
+    }
+
+    None
+}
+
 fn should_use_jj(repo_root: &Path) -> bool {
     has_jj_workspace(repo_root) && jj_cli_available() && jj_workspace_healthy(repo_root)
 }
@@ -5279,6 +5317,28 @@ mod tests {
         assert_eq!(parse_tracking_ref("origin"), None);
         assert_eq!(parse_tracking_ref("/main"), None);
         assert_eq!(parse_tracking_ref("origin/"), None);
+    }
+
+    #[test]
+    fn jj_sync_bypass_reason_uses_configured_git_remote_first() {
+        assert_eq!(
+            jj_sync_bypass_reason("fork", Some("origin")),
+            Some(JjSyncBypassReason::ConfiguredGitRemote("fork".to_string()))
+        );
+    }
+
+    #[test]
+    fn jj_sync_bypass_reason_uses_custom_tracking_remote_when_needed() {
+        assert_eq!(
+            jj_sync_bypass_reason("origin", Some("fork")),
+            Some(JjSyncBypassReason::TrackingRemote("fork".to_string()))
+        );
+    }
+
+    #[test]
+    fn jj_sync_bypass_reason_ignores_standard_sync_remotes() {
+        assert_eq!(jj_sync_bypass_reason("origin", Some("upstream")), None);
+        assert_eq!(jj_sync_bypass_reason("upstream", Some("origin")), None);
     }
 
     #[test]
