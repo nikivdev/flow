@@ -15,8 +15,8 @@ use tempfile::NamedTempFile;
 
 use crate::ai_project_manifest;
 use crate::cli::{SyncPlanAction, SyncPlanCommand};
-use crate::codexd;
 use crate::commit::configured_codex_bin_for_workdir;
+use crate::jd;
 use crate::{config, projects, push};
 
 const INDEX_VERSION: u32 = 1;
@@ -243,7 +243,7 @@ pub fn run_cli(cmd: SyncPlanCommand) -> Result<()> {
     let repo_root = resolve_repo_root_from_cwd()?;
     match cmd.action.unwrap_or(SyncPlanAction::Last) {
         SyncPlanAction::Last => {
-            let runs = codexd::recent_sync_plans(&repo_root, 1)?;
+            let runs = jd::recent_sync_plans(&repo_root, 1)?;
             let Some(run) = runs.into_iter().next() else {
                 println!(
                     "No stored sync improvement plan for {}.",
@@ -263,7 +263,7 @@ pub fn run_cli(cmd: SyncPlanCommand) -> Result<()> {
             Ok(())
         }
         SyncPlanAction::List { limit } => {
-            let runs = codexd::recent_sync_plans(&repo_root, limit)?;
+            let runs = jd::recent_sync_plans(&repo_root, limit)?;
             if runs.is_empty() {
                 println!(
                     "No stored sync improvement plans for {}.",
@@ -1538,7 +1538,7 @@ fn enqueue_sync_plan_request(request: SyncPlanRequest) -> Result<()> {
     };
     let path = sync_plan_queue_path(&queued.request)?;
     write_queue_request(&path, &queued)?;
-    wake_codexd_for_queued_sync_plans();
+    wake_jd_for_queued_sync_plans();
     Ok(())
 }
 
@@ -1569,8 +1569,8 @@ fn sync_plan_queue_path(request: &SyncPlanRequest) -> Result<PathBuf> {
     Ok(sync_plan_queue_dir()?.join(format!("{}-{}-{}.json", slug, std::process::id(), nonce)))
 }
 
-fn wake_codexd_for_queued_sync_plans() {
-    if codexd::is_running() {
+fn wake_jd_for_queued_sync_plans() {
+    if jd::is_running() {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {

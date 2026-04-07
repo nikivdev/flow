@@ -43,6 +43,16 @@ remote = "origin"
 auto_track = true
 review_prefix = "review"
 
+[push_policy]
+enabled = true
+
+[[push_policy.repo]]
+match = "."
+mode = "validate_only"
+home_branch = "nikiv"
+run_prek = false
+remote_name = "origin"
+
 [release]
 # Default release provider for `f release`.
 default = "registry"
@@ -164,6 +174,58 @@ description = "Tail background Claude/Codex Q/A ingest daemon logs from seq."
 name = "deploy-with-hub-reload"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh && f hub stop && FLOW_DOCS_FOCUS=1 f hub"
 description = "Deploy and restart hub daemons (lin + docs)"
+
+[[tasks]]
+name = "deploy-with-jd-reload"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh && f codex daemon stop && f codex daemon start && f codex daemon status"
+description = "Deploy CLI and restart the built-in jd daemon"
+
+[[tasks]]
+name = "deploy-with-codexd-reload"
+command = "FLOW_PROFILE=release ./scripts/deploy.sh && f codex daemon stop && f codex daemon start && f codex daemon status"
+description = "Legacy alias for deploy-with-jd-reload"
+
+[[tasks]]
+name = "designer-memwatch-start"
+command = "f daemon start designer-memwatch"
+description = "Start the Designer memory watcher daemon through the Flow supervisor"
+
+[[tasks]]
+name = "designer-memwatch-stop"
+command = "f daemon stop designer-memwatch"
+description = "Stop the Designer memory watcher daemon"
+
+[[tasks]]
+name = "designer-memwatch-status"
+command = "f daemon status designer-memwatch"
+description = "Show the Designer memory watcher daemon status"
+
+[[tasks]]
+name = "designer-memwatch-tail"
+command = "tail -f ~/.config/flow-state/daemons/designer-memwatch/stdout.log"
+description = "Tail the Designer memory watcher daemon log"
+interactive = true
+
+[[tasks]]
+name = "designer-memwatch-capture"
+command = "python3 ./scripts/designer_memwatch.py capture-now \"$@\""
+description = "Capture one Designer memory watcher sample immediately"
+
+[[tasks]]
+name = "designer-memwatch-latest-incident"
+command = "python3 ./scripts/designer_memwatch.py latest-incident"
+description = "Print the latest Designer memory watcher incident bundle"
+
+[[daemon]]
+name = "designer-memwatch"
+binary = "python3"
+args = ["./scripts/designer_memwatch.py", "serve"]
+working_dir = "~/code/flow"
+autostart = false
+restart = "on-failure"
+retry = 3
+ready_output = "memwatch-ready"
+description = "Monitor the selected Designer tip for memory pressure and capture incident bundles"
 
 [[tasks]]
 name = "release-build"
@@ -380,6 +442,11 @@ command = "mkdir -p \"$HOME/.local/bin\" && cargo build --release -p ai-taskd-cl
 description = "Install low-latency ai-taskd client as ~/.local/bin/fai"
 
 [[tasks]]
+name = "install-codedb-w"
+command = "bash ./scripts/install-codedb-w.sh $@"
+description = "Install codedb and write ~/bin/w so it shadows the system w command"
+
+[[tasks]]
 name = "ai-taskd-launchd-install"
 command = "python3 ./scripts/ai-taskd-launchd.py install"
 description = "Install always-on ai-taskd launch agent (launchd)"
@@ -433,12 +500,6 @@ description = "Flush unseen redacted Codex telemetry to configured Maple endpoin
 name = "test-args"
 command = "echo \"arg1=$1 arg2=$2 all=$@\""
 description = "Test that task args are passed correctly"
-
-[[tasks]]
-name = "free-space"
-command = "bash ./scripts/free_space.sh $@"
-description = "Mac disk cleanup helper: dry-run by default, use --apply for the real pass"
-interactive = true
 
 [[tasks]]
 name = "clone-test-repo"
@@ -603,7 +664,7 @@ description = "Build Pond (Ghostty fork) in debug mode"
 [[tasks]]
 name = "Zed"
 command = "bash ./scripts/install-staged-zed-app.sh"
-description = "Install the latest staged local Zed.app into /Applications after you have closed Zed manually"
+description = "Install the latest staged local Zed.app into /Applications and reopen it into the restored last session"
 
 [[tasks]]
 name = "linsa-assistant-serve"
@@ -686,6 +747,26 @@ command = "python3 ./scripts/codex_fork.py sync \"$@\""
 description = "Fast-forward nikiv in ~/repos/nikivdev/codex to upstream/main and optionally push private"
 
 [[tasks]]
+name = "codex-j-status"
+command = "python3 ./scripts/codex_j.py status \"$@\""
+description = "Show Flow status for the personal `j` home branch in ~/repos/openai/codex"
+
+[[tasks]]
+name = "codex-j-sync"
+command = "python3 ./scripts/codex_j.py sync \"$@\""
+description = "Sync origin/main into `j`, then normalize the JJ/Git checkout back onto `j`"
+
+[[tasks]]
+name = "codex-j-build"
+command = "python3 ./scripts/codex_j.py build \"$@\""
+description = "Build Codex on the configured remote Darwin builder, sign it locally, and promote it for `j`"
+
+[[tasks]]
+name = "codex-j-build-dev"
+command = "python3 ./scripts/codex_j.py build --dev \"$@\""
+description = "Build Codex dev/debug on the configured remote Darwin builder and promote it for `jdev`"
+
+[[tasks]]
 name = "codex-fork-task"
 command = "python3 ./scripts/codex_fork.py task \"$@\""
 description = "Create or reuse a scoped Codex fork worktree and open the matching Codex session"
@@ -711,6 +792,16 @@ description = "Show private mirror remote and GitHub default-branch state for th
 name = "private-mirror-ensure"
 command = "python3 ./scripts/private_mirror.py ensure --repo-root \"$PWD\" \"$@\""
 description = "Create/update a private GitHub mirror repo, wire the local remote, push the branch, and set the GitHub default branch"
+
+[[daemon]]
+name = "nullclaw-gateway"
+binary = "~/repos/nullclaw/nullclaw/zig-out/bin/nullclaw"
+command = "gateway"
+health_url = "http://127.0.0.1:3000/health"
+working_dir = "~/repos/nullclaw/nullclaw"
+ready_delay = 1000
+restart = "on-failure"
+description = "NullClaw HTTP gateway for Flow review and Codex bridge paths"
 
 [skills]
 sync_tasks = true

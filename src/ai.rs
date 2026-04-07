@@ -32,15 +32,16 @@ use uuid::Uuid;
 
 use crate::activity_log;
 use crate::cli::{
-    AiAction, CodexAgentAction, CodexDaemonAction, CodexMemoryAction, CodexProjectAiAction,
-    CodexRuntimeAction, CodexSkillEvalAction, CodexSkillSourceAction, CodexTelemetryAction,
-    CodexTraceAction, ProviderAiAction,
+    AiAction, CodexAgentAction, CodexDaemonAction, CodexLogAction, CodexMemoryAction,
+    CodexProjectAiAction, CodexRuntimeAction, CodexSkillEvalAction, CodexSkillSourceAction,
+    CodexTelemetryAction, CodexTraceAction, ProviderAiAction,
 };
 use crate::commit::configured_codex_bin_for_workdir;
 use crate::env as flow_env;
+use crate::external_cli;
 use crate::{
     ai_project_manifest, codex_memory, codex_session_docs, codex_session_index, codex_telemetry,
-    codex_text, codexd, config, project_snapshot, repo_capsule, url_inspect,
+    codex_text, config, jd, project_snapshot, repo_capsule, runtime_assets, url_inspect,
 };
 use crate::{codex_runtime, codex_skill_eval};
 
@@ -613,7 +614,11 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
             Some(ProviderAiAction::Agent { .. }) => {
                 bail!("agent is only supported for Codex sessions; use `f codex agent ...`");
             }
+            Some(ProviderAiAction::Log { .. }) => {
+                bail!("log is only supported for Codex sessions; use `f codex log ...`");
+            }
             Some(ProviderAiAction::Sessions { .. })
+            | Some(ProviderAiAction::Browse { .. })
             | Some(ProviderAiAction::Continue { .. })
             | Some(ProviderAiAction::New)
             | Some(ProviderAiAction::Open { .. })
@@ -637,6 +642,9 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
         Some(ProviderAiAction::List) => list_sessions(provider)?,
         Some(ProviderAiAction::LatestId { path }) => print_latest_session_id(provider, path)?,
         Some(ProviderAiAction::Sessions { path, json }) => provider_sessions(provider, path, json)?,
+        Some(ProviderAiAction::Browse { path, query }) => {
+            browse_codex_sessions(path, query, provider)?
+        }
         Some(ProviderAiAction::Continue { session, path }) => {
             continue_session(session, path, provider)?
         }
@@ -671,6 +679,7 @@ pub fn run_provider(provider: Provider, action: Option<ProviderAiAction>) -> Res
             codex_skill_source_command(action, provider)?
         }
         Some(ProviderAiAction::Agent { action }) => codex_agent_command(action, provider)?,
+        Some(ProviderAiAction::Log { action }) => codex_log_command(action, provider)?,
         Some(ProviderAiAction::Doctor {
             path,
             assert_runtime,
@@ -787,6 +796,9 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::Sessions { path, json }) => {
                 provider_sessions(Provider::Claude, path, json)?
             }
+            Some(ProviderAiAction::Browse { .. }) => {
+                bail!("browse is only supported for Codex sessions; use `f ai codex browse ...`");
+            }
             Some(ProviderAiAction::Continue { session, path }) => {
                 continue_session(session, path, Provider::Claude)?
             }
@@ -849,6 +861,9 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             }
             Some(ProviderAiAction::Agent { .. }) => {
                 bail!("agent is only supported for Codex sessions; use `f codex agent ...`");
+            }
+            Some(ProviderAiAction::Log { .. }) => {
+                bail!("log is only supported for Codex sessions; use `f codex log ...`");
             }
             Some(ProviderAiAction::Resume { session, path }) => {
                 resume_session(session, path, Provider::Claude)?
@@ -913,6 +928,9 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::Sessions { path, json }) => {
                 provider_sessions(Provider::Codex, path, json)?
             }
+            Some(ProviderAiAction::Browse { path, query }) => {
+                browse_codex_sessions(path, query, Provider::Codex)?
+            }
             Some(ProviderAiAction::Continue { session, path }) => {
                 continue_session(session, path, Provider::Codex)?
             }
@@ -961,6 +979,7 @@ pub fn run(action: Option<AiAction>) -> Result<()> {
             Some(ProviderAiAction::Agent { action }) => {
                 codex_agent_command(action, Provider::Codex)?
             }
+            Some(ProviderAiAction::Log { action }) => codex_log_command(action, Provider::Codex)?,
             Some(ProviderAiAction::Doctor {
                 path,
                 assert_runtime,
@@ -3754,6 +3773,41 @@ fn display_session_ids(rows: &[ProviderSessionListRow]) -> HashMap<String, Strin
     display
 }
 
+fn provider_session_listing_hints(
+    provider: Provider,
+    target: &Path,
+    rows: &[ProviderSessionListRow],
+    display_ids: &HashMap<String, String>,
+) -> Vec<String> {
+    if provider == Provider::Codex {
+        let mut hints = vec![format!(
+            "Read latest in Codex: `see codex in {}`",
+            target.display()
+        )];
+        if let Some(row) = rows.first() {
+            let display_id = display_ids
+                .get(&row.id)
+                .map(String::as_str)
+                .unwrap_or(row.id.as_str());
+            hints.push(format!(
+                "Read a listed session: `see {} codex session`",
+                display_id
+            ));
+            hints.push(format!(
+                "Wider excerpt: `read {} codex session deeply`",
+                display_id
+            ));
+        }
+        return hints;
+    }
+
+    vec![format!(
+        "Continue with `f ai {} continue <index|id-prefix> --path {}`",
+        provider_name(provider),
+        shell_words::quote(&target.display().to_string())
+    )]
+}
+
 fn clean_summary_tail_lines(s: &str, max_lines: usize) -> Vec<String> {
     if max_lines == 0 {
         return Vec::new();
@@ -5280,11 +5334,9 @@ fn print_provider_session_listing(
     }
 
     println!();
-    println!(
-        "Continue with `f ai {} continue <index|id-prefix> --path {}`",
-        provider_name(provider),
-        shell_words::quote(&target.display().to_string())
-    );
+    for hint in provider_session_listing_hints(provider, target, &rows, &display_ids) {
+        println!("{hint}");
+    }
     Ok(())
 }
 
@@ -5312,6 +5364,75 @@ fn provider_sessions(provider: Provider, path: Option<String>, json: bool) -> Re
     } else {
         bail!("failed to open {} session picker", provider_name(provider))
     }
+}
+
+fn browse_codex_sessions(
+    path: Option<String>,
+    query: Vec<String>,
+    provider: Provider,
+) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("browse is only supported for Codex sessions; use `f ai codex browse ...`");
+    }
+
+    ensure_provider_tty(provider, "browse")?;
+
+    let target = resolve_session_target_path(path.as_deref())?;
+    let query_text = query.join(" ").trim().to_string();
+    let selection_file = tempfile::NamedTempFile::new()
+        .context("failed to create temporary selection file for codex-session-browser")?;
+
+    let mut argv = vec![
+        "browse".to_string(),
+        "--repo".to_string(),
+        target.display().to_string(),
+        "--selection-file".to_string(),
+        selection_file.path().display().to_string(),
+    ];
+    if !query_text.is_empty() {
+        argv.push("--query".to_string());
+        argv.push(query_text);
+    }
+
+    let (tool, mut command) = external_cli::command_for_external_cli(
+        "codex-session-browser",
+        argv.iter().map(String::as_str),
+    )?;
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .env(
+            "CODEX_SESSION_BROWSER_CODEX_BIN",
+            configured_codex_bin_for_workdir(&target),
+        );
+
+    let status = command.status().with_context(|| {
+        format!(
+            "failed to launch external codex browser from {}",
+            tool.manifest_path.display()
+        )
+    })?;
+
+    if !status.success() {
+        bail!(
+            "external codex browser exited unsuccessfully with status {}",
+            status
+        );
+    }
+
+    let selected_id = fs::read_to_string(selection_file.path())
+        .with_context(|| "failed to read codex browser selection file")?;
+    let selected_id = selected_id.trim();
+    if selected_id.is_empty() {
+        return Ok(());
+    }
+
+    resume_session(
+        Some(selected_id.to_string()),
+        Some(target.display().to_string()),
+        Provider::Codex,
+    )
 }
 
 fn continue_session(
@@ -6504,10 +6625,10 @@ fn read_recent_codex_threads(
     limit: usize,
     query: Option<&str>,
 ) -> Result<Vec<CodexRecoverRow>> {
-    match codexd::query_recent(target_path, exact_cwd, limit, query) {
+    match jd::query_recent(target_path, exact_cwd, limit, query) {
         Ok(rows) => Ok(rows),
         Err(err) => {
-            debug!(error = %err, "codexd recent query failed; falling back to local query");
+            debug!(error = %err, "jd recent query failed; falling back to local query");
             read_recent_codex_threads_local(target_path, exact_cwd, limit, query)
         }
     }
@@ -6631,12 +6752,12 @@ fn read_codex_threads_by_session_hint(
     session_hint: &str,
     limit: usize,
 ) -> Result<Vec<CodexRecoverRow>> {
-    match codexd::query_session_hint(session_hint, limit) {
+    match jd::query_session_hint(session_hint, limit) {
         Ok(rows) => Ok(rows),
         Err(err) => {
             debug!(
                 error = %err,
-                "codexd session hint query failed; falling back to local query"
+                "jd session hint query failed; falling back to local query"
             );
             read_codex_threads_by_session_hint_local(session_hint, limit)
         }
@@ -6653,7 +6774,7 @@ fn read_codex_threads_by_session_hint_prefer_local(
         Err(err) => {
             debug!(
                 error = %err,
-                "local explicit session hint query failed; retrying through codexd"
+                "local explicit session hint query failed; retrying through jd"
             );
             read_codex_threads_by_session_hint(session_hint, limit)
         }
@@ -6722,14 +6843,14 @@ fn search_codex_threads_for_find(
     limit: usize,
     scope: CodexFindScope,
 ) -> Result<Vec<CodexRecoverRow>> {
-    match codexd::query_find(target_path, exact_cwd, query, limit, scope) {
+    match jd::query_find(target_path, exact_cwd, query, limit, scope) {
         Ok(rows) if !rows.is_empty() => Ok(rows),
         Ok(_) => {
-            debug!("codexd find query returned no rows; falling back to local query");
+            debug!("jd find query returned no rows; falling back to local query");
             search_codex_threads_for_find_local(target_path, exact_cwd, query, limit, scope)
         }
         Err(err) => {
-            debug!(error = %err, "codexd find query failed; falling back to local query");
+            debug!(error = %err, "jd find query failed; falling back to local query");
             search_codex_threads_for_find_local(target_path, exact_cwd, query, limit, scope)
         }
     }
@@ -8303,8 +8424,8 @@ impl CodexSkillEvalScheduleStatus {
 pub struct CodexDoctorSnapshot {
     target: String,
     codex_bin: String,
-    codexd: String,
-    codexd_socket: String,
+    jd: String,
+    jd_socket: String,
     run_agent_bridge: String,
     run_agent_router: String,
     run_agent_count: usize,
@@ -8451,8 +8572,8 @@ fn collect_codex_doctor_snapshot(target_path: &Path) -> Result<CodexDoctorSnapsh
         .filter(|state| state.target_path == target_path.display().to_string())
         .count();
     let codex_bin = configured_codex_bin_for_workdir(target_path);
-    let codexd_socket = codexd::socket_path()?;
-    let codexd_running = codexd::is_running();
+    let jd_socket = jd::socket_path()?;
+    let jd_running = jd::is_running();
     let memory_stats = codex_memory::stats().ok();
     let skill_eval_events = codex_skill_eval::event_count();
     let skill_eval_outcomes = codex_skill_eval::outcome_count();
@@ -8561,12 +8682,12 @@ fn collect_codex_doctor_snapshot(target_path: &Path) -> Result<CodexDoctorSnapsh
     Ok(CodexDoctorSnapshot {
         target: target_path.display().to_string(),
         codex_bin,
-        codexd: if codexd_running {
+        jd: if jd_running {
             "running".to_string()
         } else {
             "stopped".to_string()
         },
-        codexd_socket: codexd_socket.display().to_string(),
+        jd_socket: jd_socket.display().to_string(),
         run_agent_bridge: run_agent_bridge.status,
         run_agent_router: run_agent_bridge.router_path,
         run_agent_count: run_agent_bridge.agent_count,
@@ -8654,8 +8775,8 @@ fn print_codex_doctor(snapshot: &CodexDoctorSnapshot) {
     println!("# codex doctor");
     println!("target: {}", snapshot.target);
     println!("codex_bin: {}", snapshot.codex_bin);
-    println!("codexd: {}", snapshot.codexd);
-    println!("codexd_socket: {}", snapshot.codexd_socket);
+    println!("jd: {}", snapshot.jd);
+    println!("jd_socket: {}", snapshot.jd_socket);
     println!("run_agent_bridge: {}", snapshot.run_agent_bridge);
     println!("run_agent_router: {}", snapshot.run_agent_router);
     println!("run_agent_count: {}", snapshot.run_agent_count);
@@ -8791,26 +8912,77 @@ fn assert_codex_doctor(
     )
 }
 
-fn codexd_learning_refresh_interval_secs() -> u64 {
-    std::env::var("FLOW_CODEXD_LEARNING_REFRESH_SECS")
+fn codex_daemon_env_usize(primary: &str, legacy: &str) -> Option<usize> {
+    std::env::var(primary)
         .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|value| value.clamp(60, 3600))
-        .unwrap_or(900)
+        .or_else(|| std::env::var(legacy).ok())
+        .and_then(|value| value.parse::<usize>().ok())
 }
 
-fn codexd_learning_refresh_state() -> &'static Mutex<u64> {
+fn codex_daemon_env_u64(primary: &str, legacy: &str) -> Option<u64> {
+    std::env::var(primary)
+        .ok()
+        .or_else(|| std::env::var(legacy).ok())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn jd_learning_refresh_interval_secs() -> u64 {
+    codex_daemon_env_u64(
+        "FLOW_JD_LEARNING_REFRESH_SECS",
+        "FLOW_CODEXD_LEARNING_REFRESH_SECS",
+    )
+    .map(|value| value.clamp(60, 3600))
+    .unwrap_or(900)
+}
+
+fn jd_session_bridge_warm_limit() -> usize {
+    codex_daemon_env_usize(
+        "FLOW_JD_SESSION_BRIDGE_WARM_LIMIT",
+        "FLOW_CODEXD_SESSION_BRIDGE_WARM_LIMIT",
+    )
+    .map(|value| value.clamp(1, 64))
+    .unwrap_or(24)
+}
+
+fn jd_session_bridge_warm_count() -> usize {
+    codex_daemon_env_usize(
+        "FLOW_JD_SESSION_BRIDGE_WARM_COUNT",
+        "FLOW_CODEXD_SESSION_BRIDGE_WARM_COUNT",
+    )
+    .map(|value| value.clamp(1, 50))
+    .unwrap_or(20)
+}
+
+fn jd_learning_refresh_state() -> &'static Mutex<u64> {
     static STATE: OnceLock<Mutex<u64>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(0))
 }
 
+fn jd_session_bridge_warm_state() -> &'static Mutex<Option<CodexStateDbStamp>> {
+    static STATE: OnceLock<Mutex<Option<CodexStateDbStamp>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn native_session_bridge_tool_path() -> Result<Option<PathBuf>> {
+    let path = codex_sqlite_home()?
+        .join("skills")
+        .join("native-codex-session-bridge")
+        .join("scripts")
+        .join("codex-session-tool");
+    if path.is_file() {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) fn maybe_run_codex_learning_refresh() -> Result<usize> {
-    let interval_secs = codexd_learning_refresh_interval_secs();
+    let interval_secs = jd_learning_refresh_interval_secs();
     let now = unix_now_secs();
     {
-        let mut guard = codexd_learning_refresh_state()
+        let mut guard = jd_learning_refresh_state()
             .lock()
-            .expect("codexd learning refresh mutex poisoned");
+            .expect("jd learning refresh mutex poisoned");
         if now.saturating_sub(*guard) < interval_secs {
             return Ok(0);
         }
@@ -8828,6 +9000,51 @@ pub(crate) fn maybe_run_codex_learning_refresh() -> Result<usize> {
         refreshed += 1;
     }
     Ok(refreshed)
+}
+
+pub(crate) fn maybe_run_codex_session_bridge_warm() -> Result<usize> {
+    let Some(tool_path) = native_session_bridge_tool_path()? else {
+        return Ok(0);
+    };
+    let db_path = match codex_state_db_path() {
+        Ok(path) => path,
+        Err(_) => return Ok(0),
+    };
+    let stamp = codex_state_db_stamp(&db_path)?;
+    let previous_stamp = {
+        let mut guard = jd_session_bridge_warm_state()
+            .lock()
+            .expect("jd session bridge warm mutex poisoned");
+        if guard.as_ref() == Some(&stamp) {
+            return Ok(0);
+        }
+        guard.replace(stamp.clone())
+    };
+
+    let status = Command::new(&tool_path)
+        .arg("warm-recent")
+        .arg("--limit")
+        .arg(jd_session_bridge_warm_limit().to_string())
+        .arg("--count")
+        .arg(jd_session_bridge_warm_count().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to run {}", tool_path.display()))?;
+
+    if status.success() {
+        Ok(1)
+    } else {
+        let mut guard = jd_session_bridge_warm_state()
+            .lock()
+            .expect("jd session bridge warm mutex poisoned");
+        *guard = previous_stamp;
+        bail!(
+            "native session bridge warm command failed with status {}",
+            status
+        );
+    }
 }
 
 fn codex_eval_commands(target_path: &Path) -> Vec<CodexEvalCommand> {
@@ -8954,11 +9171,11 @@ fn build_codex_eval_opportunities(
         });
     }
 
-    if doctor.codexd != "running" {
+    if doctor.jd != "running" {
         opportunities.push(CodexEvalOpportunity {
             severity: "medium".to_string(),
-            title: "codexd is not running".to_string(),
-            detail: "Recent-session hydration and background completion reconciliation stay cold when the Flow Codex daemon is stopped.".to_string(),
+            title: "jd is not running".to_string(),
+            detail: "Recent-session hydration and background completion reconciliation stay cold when the Flow j daemon is stopped.".to_string(),
             next_step: "Run `f codex daemon start` to keep session recovery and eval maintenance warm.".to_string(),
         });
     }
@@ -8975,7 +9192,7 @@ fn build_codex_eval_opportunities(
             severity: "medium".to_string(),
             title: "Scorecard has not been built yet".to_string(),
             detail: "Outcome data exists, but there is no repo-scoped scorecard summarizing which runtime skills are helping.".to_string(),
-            next_step: "Run `f codex skill-eval run --path ...` once, or let codexd refresh it in the background.".to_string(),
+            next_step: "Run `f codex skill-eval run --path ...` once, or let jd refresh it in the background.".to_string(),
         });
     }
 
@@ -9032,12 +9249,12 @@ fn build_codex_eval_opportunities(
         });
     }
 
-    if !doctor.schedule_ready && doctor.codexd != "running" {
+    if !doctor.schedule_ready && doctor.jd != "running" {
         opportunities.push(CodexEvalOpportunity {
             severity: "low".to_string(),
             title: "No background refresh is active".to_string(),
-            detail: "Scorecards only refresh when you run commands manually if neither launchd nor codexd is keeping the learning data warm.".to_string(),
-            next_step: "Install the launchd refresher with `f codex enable-global --full` or keep `codexd` running.".to_string(),
+            detail: "Scorecards only refresh when you run commands manually if neither launchd nor jd is keeping the learning data warm.".to_string(),
+            next_step: "Install the launchd refresher with `f codex enable-global --full` or keep `jd` running.".to_string(),
         });
     }
 
@@ -9166,7 +9383,7 @@ fn print_codex_eval(snapshot: &CodexEvalSnapshot) {
     println!("recent_outcomes: {}", snapshot.recent_outcomes);
     println!("runtime_ready: {}", snapshot.doctor.runtime_ready);
     println!("learning_ready: {}", snapshot.doctor.learning_ready);
-    println!("codexd: {}", snapshot.doctor.codexd);
+    println!("jd: {}", snapshot.doctor.jd);
     if !snapshot.quality.failure_modes.is_empty() {
         println!("failure_modes:");
         for mode in &snapshot.quality.failure_modes {
@@ -9380,9 +9597,7 @@ fn install_codex_skill_eval_launchd(
     within_hours: u64,
     dry_run: bool,
 ) -> Result<String> {
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts")
-        .join("codex-skill-eval-launchd.py");
+    let script = runtime_assets::require_asset_path("scripts/codex-skill-eval-launchd.py")?;
     let mut command = Command::new("python3");
     command
         .arg(script)
@@ -9496,7 +9711,7 @@ fn codex_enable_global(
     }
 
     if start_daemon {
-        codexd::start()?;
+        jd::start()?;
     }
 
     if sync_skills {
@@ -10353,6 +10568,9 @@ pub(crate) fn reconcile_codex_session_completions(limit: usize) -> Result<usize>
 pub(crate) fn run_codex_background_maintenance() -> Result<(usize, usize)> {
     let hydrated = reconcile_pending_codex_quick_launches(48)?;
     let completed = reconcile_codex_session_completions(codex_session_completion_scan_limit())?;
+    if let Err(err) = maybe_run_codex_session_bridge_warm() {
+        eprintln!("WARN jd session bridge warm failed: {err:#}");
+    }
     Ok((hydrated, completed))
 }
 
@@ -10366,7 +10584,7 @@ fn codex_touch_launch(mode: String, cwd: Option<String>, provider: Provider) -> 
     }
 
     let cwd_path = resolve_session_target_path(cwd.as_deref())?;
-    let daemon = if codexd::ensure_running().is_ok() {
+    let daemon = if jd::ensure_running().is_ok() {
         "running"
     } else {
         "unavailable"
@@ -10402,16 +10620,83 @@ fn codex_daemon_command(action: Option<CodexDaemonAction>, provider: Provider) -
     }
 
     match action.unwrap_or(CodexDaemonAction::Status) {
-        CodexDaemonAction::Start => codexd::start(),
-        CodexDaemonAction::Stop => codexd::stop(),
+        CodexDaemonAction::Start => jd::start(),
+        CodexDaemonAction::Stop => jd::stop(),
         CodexDaemonAction::Restart => {
-            codexd::stop().ok();
+            jd::stop().ok();
             std::thread::sleep(Duration::from_millis(300));
-            codexd::start()
+            jd::start()
         }
-        CodexDaemonAction::Status => codexd::status(),
-        CodexDaemonAction::Serve { socket } => codexd::serve(socket.as_deref()),
-        CodexDaemonAction::Ping => codexd::ping(),
+        CodexDaemonAction::Status => jd::status(),
+        CodexDaemonAction::Serve { socket } => jd::serve(socket.as_deref()),
+        CodexDaemonAction::Ping => jd::ping(),
+    }
+}
+
+fn codex_log_command(action: Option<CodexLogAction>, provider: Provider) -> Result<()> {
+    if provider != Provider::Codex {
+        bail!("log is only supported for Codex sessions; use `f codex log ...`");
+    }
+
+    match action.unwrap_or(CodexLogAction::Status { json: false }) {
+        CodexLogAction::Status { json } => {
+            let status = codex_session_docs::home_log_status()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&status)
+                        .context("failed to encode codex log status JSON")?
+                );
+            } else {
+                print_codex_log_status(&status);
+            }
+            Ok(())
+        }
+        CodexLogAction::Sync { limit, json } => {
+            let synced = codex_session_docs::sync_home_log_entries(limit)?;
+            let status = codex_session_docs::home_log_status()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "synced": synced,
+                        "status": status,
+                    }))
+                    .context("failed to encode codex log sync JSON")?
+                );
+            } else {
+                println!("# codex log sync");
+                println!("synced: {}", synced);
+                print_codex_log_status(&status);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_codex_log_status(status: &codex_session_docs::HomeLogStatus) {
+    println!("# codex log");
+    println!("root: {}", status.root_dir);
+    println!("captured_sessions: {}", status.captured_sessions);
+    println!("logged_sessions: {}", status.logged_sessions);
+    println!("missing_sessions: {}", status.missing_sessions);
+    if let Some(session_key) = status.latest_logged_session_key.as_deref() {
+        println!("latest_logged_session_key: {}", session_key);
+    }
+    if let Some(session_id) = status.latest_logged_session_id.as_deref() {
+        println!("latest_logged_session_id: {}", session_id);
+    }
+    if let Some(summary_path) = status.latest_logged_summary_path.as_deref() {
+        println!("latest_logged_summary_path: {}", summary_path);
+    }
+    if let Some(completed_at) = status.latest_logged_completed_at_unix {
+        println!("latest_logged_completed_at_unix: {}", completed_at);
+    }
+    if !status.latest_missing_session_keys.is_empty() {
+        println!("latest_missing_session_keys:");
+        for session_key in &status.latest_missing_session_keys {
+            println!("- {}", session_key);
+        }
     }
 }
 
@@ -10703,8 +10988,8 @@ fn codex_project_ai_command(
             json,
         } => {
             let target_path = resolve_session_target_path(path.as_deref())?;
-            let manifest = if codexd::is_running() {
-                codexd::query_project_ai_manifest(&target_path, refresh)
+            let manifest = if jd::is_running() {
+                jd::query_project_ai_manifest(&target_path, refresh)
                     .or_else(|_| ai_project_manifest::load_for_target(&target_path, refresh))?
             } else {
                 ai_project_manifest::load_for_target(&target_path, refresh)?
@@ -10767,8 +11052,8 @@ fn codex_project_ai_command(
             Ok(())
         }
         CodexProjectAiAction::Recent { limit, json } => {
-            let manifests = if codexd::is_running() {
-                codexd::query_recent_project_ai(limit)
+            let manifests = if jd::is_running() {
+                jd::query_recent_project_ai(limit)
                     .or_else(|_| ai_project_manifest::recent(limit))?
             } else {
                 ai_project_manifest::recent(limit)?
@@ -16412,6 +16697,52 @@ values (?1, ?2, ?3, ?4, ?5, ?6, 0)
     }
 
     #[test]
+    fn provider_session_listing_hints_for_codex_use_session_bridge_examples() {
+        let rows = vec![ProviderSessionListRow {
+            index: 1,
+            updated_relative: "49m".to_string(),
+            updated_at: None,
+            id: "019d4434-96ee-73d2-bde8-4bc197a3cb4d".to_string(),
+            preview: "preview".to_string(),
+        }];
+        let display_ids = display_session_ids(&rows);
+        let hints = provider_session_listing_hints(
+            Provider::Codex,
+            Path::new("/tmp/langgraph"),
+            &rows,
+            &display_ids,
+        );
+
+        assert_eq!(
+            hints[0],
+            "Read latest in Codex: `see codex in /tmp/langgraph`"
+        );
+        assert_eq!(
+            hints[1],
+            "Read a listed session: `see 019d4434-96ee codex session`"
+        );
+        assert_eq!(
+            hints[2],
+            "Wider excerpt: `read 019d4434-96ee codex session deeply`"
+        );
+    }
+
+    #[test]
+    fn provider_session_listing_hints_for_non_codex_keep_continue_hint() {
+        let hints = provider_session_listing_hints(
+            Provider::Claude,
+            Path::new("/tmp/langgraph"),
+            &[],
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            hints,
+            vec!["Continue with `f ai claude continue <index|id-prefix> --path /tmp/langgraph`"]
+        );
+    }
+
+    #[test]
     fn clean_summary_tail_prefers_last_meaningful_line() {
         let summary = "Plan:\n- check status\n}\n\nVerification: passed";
         assert_eq!(
@@ -17074,8 +17405,8 @@ alter table threads add column reasoning_effort text;
         CodexDoctorSnapshot {
             target: "/tmp/repo".to_string(),
             codex_bin: "codex-flow-wrapper".to_string(),
-            codexd: "running".to_string(),
-            codexd_socket: "/tmp/codexd.sock".to_string(),
+            jd: "running".to_string(),
+            jd_socket: "/tmp/jd.sock".to_string(),
             run_agent_bridge: "ready".to_string(),
             run_agent_router: "/tmp/run/scripts/agent-router.sh".to_string(),
             run_agent_count: 14,
@@ -17136,7 +17467,7 @@ alter table threads add column reasoning_effort text;
         snapshot.runtime_transport = "disabled".to_string();
         snapshot.runtime_skills = "disabled".to_string();
         snapshot.runtime_ready = false;
-        snapshot.codexd = "stopped".to_string();
+        snapshot.jd = "stopped".to_string();
         snapshot.skill_eval_outcomes_on_disk = 0;
         snapshot.learning_ready = false;
 
@@ -17149,7 +17480,7 @@ alter table threads add column reasoning_effort text;
         assert!(
             opportunities
                 .iter()
-                .any(|item| item.title.contains("codexd is not running"))
+                .any(|item| item.title.contains("jd is not running"))
         );
         assert!(opportunities.iter().any(|item| {
             item.title

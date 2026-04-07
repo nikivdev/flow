@@ -87,6 +87,10 @@ fn ensure_fish_shell() -> Result<()> {
 }
 
 fn ensure_fish_flow_init() -> Result<()> {
+    if which::which("f").is_ok() {
+        return Ok(());
+    }
+
     let config_path = fish_config_path()?;
     let content = fs::read_to_string(&config_path).unwrap_or_default();
     if content.contains("# flow:start") {
@@ -94,7 +98,7 @@ fn ensure_fish_flow_init() -> Result<()> {
     }
 
     println!(
-        "⚠ flow fish integration missing in {}. Run: f shell-init fish",
+        "⚠ flow fish integration missing in {}. Ensure the `f` binary is on PATH, then run: f shell-init fish",
         config_path.display()
     );
     Ok(())

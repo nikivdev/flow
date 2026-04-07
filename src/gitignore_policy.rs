@@ -14,7 +14,7 @@ use crate::config;
 const POLICY_OVERRIDE_ENV: &str = "FLOW_ALLOW_GITIGNORE_POLICY";
 const POLICY_FILE_NAME: &str = "gitignore-policy.toml";
 const DEFAULT_REPOS_ROOT: &str = "~/repos";
-const DEFAULT_BLOCKED_PATTERNS: &[&str] = &[".ai/todos/*.bike", ".beads/", ".rise/"];
+const DEFAULT_BLOCKED_PATTERNS: &[&str] = &[".ai/todos/*.bike", ".beads/"];
 const DEFAULT_ALLOWED_OWNERS: &[&str] = &["nikivdev"];
 
 #[derive(Debug, Clone)]
@@ -734,13 +734,14 @@ fn home_dir_or_default() -> PathBuf {
 }
 
 fn default_policy_template() -> String {
+    let blocked_patterns = DEFAULT_BLOCKED_PATTERNS
+        .iter()
+        .map(|pattern| format!("  \"{}\"", pattern))
+        .collect::<Vec<_>>()
+        .join(",\n");
     format!(
-        "# Flow gitignore policy\n#\n# These patterns are local developer tooling noise and should stay out of\n# external/public repositories.\n\nblocked_patterns = [\n  \"{}\",\n  \"{}\",\n  \"{}\",\n]\n\n# Repositories owned by these GitHub users are treated as internal and exempt.\nallowed_owners = [\n  \"{}\",\n]\n\n# Roots scanned by `f gitignore audit` and `f gitignore fix` when --root is omitted.\nrepos_roots = [\n  \"{}\",\n]\n",
-        DEFAULT_BLOCKED_PATTERNS[0],
-        DEFAULT_BLOCKED_PATTERNS[1],
-        DEFAULT_BLOCKED_PATTERNS[2],
-        DEFAULT_ALLOWED_OWNERS[0],
-        DEFAULT_REPOS_ROOT,
+        "# Flow gitignore policy\n#\n# These patterns are local developer tooling noise and should stay out of\n# external/public repositories.\n\nblocked_patterns = [\n{}\n]\n\n# Repositories owned by these GitHub users are treated as internal and exempt.\nallowed_owners = [\n  \"{}\",\n]\n\n# Roots scanned by `f gitignore audit` and `f gitignore fix` when --root is omitted.\nrepos_roots = [\n  \"{}\",\n]\n",
+        blocked_patterns, DEFAULT_ALLOWED_OWNERS[0], DEFAULT_REPOS_ROOT,
     )
 }
 
@@ -752,8 +753,8 @@ mod tests {
     fn normalize_entry_ignores_comments_and_slashes() {
         assert_eq!(normalize_entry("/.beads/"), Some(".beads/".to_string()));
         assert_eq!(
-            normalize_entry(".rise/ # local"),
-            Some(".rise/".to_string())
+            normalize_entry(".ai/todos/*.bike # local"),
+            Some(".ai/todos/*.bike".to_string())
         );
         assert_eq!(normalize_entry("# note"), None);
     }

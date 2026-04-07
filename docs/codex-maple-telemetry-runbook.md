@@ -98,7 +98,7 @@ f codex-telemetry-flush
 
 ## Background Export
 
-If `codexd` is running, it also performs a bounded background flush pass during
+If `jd` is running, it also performs a bounded background flush pass during
 its normal maintenance loop. This keeps export cheap and avoids a separate
 always-on process.
 

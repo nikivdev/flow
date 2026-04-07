@@ -382,12 +382,14 @@ fn run_server(socket_path: &Path, boot: bool) -> Result<()> {
     }
 
     let state = Arc::new(Mutex::new(SupervisorState::default()));
-    let active_path = resolve_active_project_config_path();
-    bootstrap_daemons(&state, active_path.as_deref(), boot)?;
-
-    let monitor_state = Arc::clone(&state);
+    let bootstrap_state = Arc::clone(&state);
+    let initial_active_path = resolve_active_project_config_path();
     std::thread::spawn(move || {
-        if let Err(err) = monitor_daemons(monitor_state) {
+        if let Err(err) = bootstrap_daemons(&bootstrap_state, initial_active_path.as_deref(), boot)
+        {
+            eprintln!("WARN supervisor bootstrap failed: {err}");
+        }
+        if let Err(err) = monitor_daemons(bootstrap_state) {
             eprintln!("WARN supervisor monitor failed: {err}");
         }
     });

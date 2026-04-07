@@ -151,12 +151,12 @@ fn collect_logs(lines: usize) -> Result<Vec<FlowOpsLogSnapshot>> {
         ("server.stderr", base.join("server.stderr.log")),
         ("supervisor", base.join("supervisor.log")),
         (
-            "codexd.stdout",
-            base.join("daemons").join("codexd").join("stdout.log"),
+            "jd.stdout",
+            base.join("daemons").join("jd").join("stdout.log"),
         ),
         (
-            "codexd.stderr",
-            base.join("daemons").join("codexd").join("stderr.log"),
+            "jd.stderr",
+            base.join("daemons").join("jd").join("stderr.log"),
         ),
     ];
 

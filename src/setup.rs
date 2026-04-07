@@ -3,13 +3,12 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event as CEvent, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ignore::WalkBuilder;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::{
     agents,
@@ -109,11 +108,6 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         if let Err(err) = refresh_skills_after_setup_task(&project_root, &config_path) {
             eprintln!("⚠ failed to refresh project skills after setup task: {err}");
         }
-        if result.is_ok() {
-            if let Err(err) = write_setup_checkpoint(&project_root, &config_path) {
-                eprintln!("⚠ failed to write setup checkpoint: {err}");
-            }
-        }
         return result;
     }
 
@@ -125,9 +119,6 @@ pub fn run(opts: SetupOpts) -> Result<()> {
         println!("# Add a setup task or an alias table like:");
         println!("#   [[alias]]");
         println!("#   fr = \"f run\"");
-        if let Err(err) = write_setup_checkpoint(&project_root, &config_path) {
-            eprintln!("⚠ failed to write setup checkpoint: {err}");
-        }
         return Ok(());
     }
 
@@ -139,10 +130,6 @@ pub fn run(opts: SetupOpts) -> Result<()> {
 
     for line in format_alias_lines(&cfg.aliases) {
         println!("{line}");
-    }
-
-    if let Err(err) = write_setup_checkpoint(&project_root, &config_path) {
-        eprintln!("⚠ failed to write setup checkpoint: {err}");
     }
 
     Ok(())
@@ -192,55 +179,6 @@ fn refresh_skills_after_setup_task(project_root: &Path, config_path: &Path) -> R
             "setup post-task skill sync",
         );
     }
-    Ok(())
-}
-
-#[derive(Serialize)]
-struct SetupCheckpoint {
-    version: u32,
-    commit: String,
-    timestamp_ms: u64,
-    config_path: String,
-    source: String,
-}
-
-fn current_git_commit(project_root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(project_root)
-        .arg("rev-parse")
-        .arg("HEAD")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if commit.is_empty() {
-        None
-    } else {
-        Some(commit)
-    }
-}
-
-fn write_setup_checkpoint(project_root: &Path, config_path: &Path) -> Result<()> {
-    let rise_dir = project_root.join(".rise");
-    fs::create_dir_all(&rise_dir)?;
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let checkpoint = SetupCheckpoint {
-        version: 1,
-        commit: current_git_commit(project_root).unwrap_or_default(),
-        timestamp_ms,
-        config_path: config_path.display().to_string(),
-        source: "flow".to_string(),
-    };
-    let payload = serde_json::to_string_pretty(&checkpoint)?;
-    fs::write(rise_dir.join("setup.json"), payload)?;
     Ok(())
 }
 

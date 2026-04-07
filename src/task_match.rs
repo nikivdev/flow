@@ -85,6 +85,10 @@ fn is_cli_subcommand(args: &[String]) -> bool {
         .any(|cmd| cmd.eq_ignore_ascii_case(&first_lower))
 }
 
+pub fn looks_like_cli_subcommand(args: &[String]) -> bool {
+    is_cli_subcommand(args)
+}
+
 fn should_passthrough_cli(args: &[String]) -> bool {
     if args.is_empty() {
         return false;
@@ -121,6 +125,21 @@ pub fn run(opts: MatchOpts) -> Result<()> {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let snapshot = ProjectSnapshot::from_root_tasks_only(&root)?;
     run_with_tasks(opts, snapshot.discovery.tasks, true)
+}
+
+pub fn run_implicit(args: Vec<String>) -> Result<()> {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let snapshot = ProjectSnapshot::from_root_tasks_only(&root)?;
+    run_with_tasks(
+        MatchOpts {
+            args,
+            model: None,
+            port: None,
+            execute: true,
+        },
+        snapshot.discovery.tasks,
+        false,
+    )
 }
 
 /// Match a user query to a global task and optionally execute it.
@@ -505,5 +524,12 @@ mod tests {
             extract_task_name("deploy-prod.", &tasks).unwrap(),
             "deploy-prod"
         );
+    }
+
+    #[test]
+    fn public_cli_subcommand_detection_matches_known_commands() {
+        assert!(looks_like_cli_subcommand(&["tasks".to_string()]));
+        assert!(looks_like_cli_subcommand(&["match".to_string()]));
+        assert!(!looks_like_cli_subcommand(&["ship-it".to_string()]));
     }
 }

@@ -63,6 +63,13 @@ OS_NAME=""
 ARCH_NAME=""
 OWNER=""
 REPO_NAME=""
+RUNTIME_ASSETS=(
+    "scripts/private_mirror.py"
+    "scripts/codex-skill-eval-launchd.py"
+    "tools/domainsd-cpp/domainsd.cpp"
+    "tools/domainsd-cpp/install-macos-launchd.sh"
+    "tools/domainsd-cpp/uninstall-macos-launchd.sh"
+)
 
 # Dev install paths
 DEV_BASE="$HOME/code/org/1f"
@@ -239,6 +246,42 @@ resolve_paths() {
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+install_runtime_assets_from_checkout() {
+    local source_root="$1"
+    local assets_root="${INSTALL_ROOT}/share/flow"
+    local rel=""
+    mkdir -p "${assets_root}"
+    for rel in "${RUNTIME_ASSETS[@]}"; do
+        local src="${source_root}/${rel}"
+        local dest="${assets_root}/${rel}"
+        [[ -f "${src}" ]] || fail "missing runtime asset: ${src}"
+        mkdir -p "$(dirname "${dest}")"
+        cp -f "${src}" "${dest}"
+        if [[ -x "${src}" ]]; then
+            chmod +x "${dest}" 2>/dev/null || true
+        fi
+    done
+}
+
+install_runtime_assets_from_bundle() {
+    local source_root="$1"
+    local bundled_root="${source_root}/share/flow"
+    local assets_root="${INSTALL_ROOT}/share/flow"
+
+    if [[ -d "${bundled_root}" ]]; then
+        mkdir -p "${assets_root}"
+        cp -R "${bundled_root}/." "${assets_root}/"
+        return 0
+    fi
+
+    if [[ -d "${source_root}/scripts" ]]; then
+        install_runtime_assets_from_checkout "${source_root}"
+        return 0
+    fi
+
+    info "WARN no runtime asset bundle found in ${source_root}; keeping binary-only install"
 }
 
 detect_platform() {
@@ -431,6 +474,8 @@ install_from_release() {
         fi
     done
 
+    install_runtime_assets_from_bundle "${extracted}"
+
     rm -rf "${tmp_dir}" "${tmp_tar}"
 
     if [[ "${copied}" -eq 0 ]]; then
@@ -471,6 +516,7 @@ install_from_source() {
     fi
 
     cargo "${args[@]}"
+    install_runtime_assets_from_checkout "${tmp}"
     if [[ -x "${BIN_DIR}/flow" ]]; then
         FLOW_INSTALLED=1
     fi
@@ -678,14 +724,9 @@ print_shell_setup() {
         info 'set -gx BUN_INSTALL $HOME/.bun'
         info 'set -gx PATH $BUN_INSTALL/bin $PATH'
         info ''
-        info '# Flow function'
-        info 'function f'
-        info '    if test -z "$argv[1]"'
-        info '        ~/bin/f'
-        info '    else'
-        info '        ~/bin/f match $argv'
-        info '    end'
-        info 'end'
+        info '# Flow'
+        info 'set -gx PATH $HOME/.flow/bin $PATH'
+        info '# No shell wrapper needed: run `f` directly.'
     else
         info "# Bash/Zsh (~/.bashrc or ~/.zshrc):"
         info 'export PATH="$HOME/.local/bin:$PATH"'
@@ -697,14 +738,9 @@ print_shell_setup() {
         info 'export BUN_INSTALL="$HOME/.bun"'
         info 'export PATH="$BUN_INSTALL/bin:$PATH"'
         info ''
-        info '# Flow function'
-        info 'f() {'
-        info '    if [ -z "$1" ]; then'
-        info '        ~/bin/f'
-        info '    else'
-        info '        ~/bin/f match "$@"'
-        info '    fi'
-        info '}'
+        info '# Flow'
+        info 'export PATH="$HOME/.flow/bin:$PATH"'
+        info '# No shell wrapper needed: run `f` directly.'
     fi
 }
 

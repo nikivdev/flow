@@ -56,11 +56,11 @@ Important point:
 - most of this layer is orchestration and context shaping
 - it does not imply app-server by itself
 
-### 3. Flow codexd daemon
+### 3. Flow jd daemon
 
 Primary file:
 
-- `src/codexd.rs`
+- `src/jd.rs`
 
 Role:
 
@@ -70,7 +70,7 @@ Role:
 
 Important point:
 
-- `codexd` is a Flow daemon
+ - `jd` is a Flow daemon
 - it is **not** the Codex app-server
 
 ### 4. Run-owned agent runtime
@@ -282,4 +282,4 @@ The stable split today is:
 - default session UX: wrapped Codex CLI
 - structured agent execution: `codex app-server`
 - native review: `codex app-server`
-- repo intelligence and readiness checks: Flow-local logic plus `codexd`
+- repo intelligence and readiness checks: Flow-local logic plus `jd`

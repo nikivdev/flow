@@ -45,7 +45,7 @@ async fn main raise {
   run_step(
     "gitignore hygiene gate",
     "set -euo pipefail; " +
-    "if git diff -- .gitignore | grep -E '\\.beads/|\\.rise/|\\.ai/todos/\\*\\.bike' >/dev/null; then " +
+    "if git diff -- .gitignore | grep -E '\\.beads/|\\.ai/todos/\\*\\.bike' >/dev/null; then " +
     "echo 'blocked personal tooling pattern detected in .gitignore diff' >&2; exit 1; " +
     "fi; " +
     "echo 'gitignore hygiene: ok'",

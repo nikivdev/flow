@@ -945,6 +945,17 @@ pub fn run_with_discovery(task_name: &str, args: Vec<String>) -> Result<()> {
         });
     }
 
+    if let Some(discovered) = select_task_from_ancestor_roots(&snapshot.root, task_name)? {
+        return run(TaskRunOpts {
+            config: discovered.config_path.clone(),
+            delegate_to_hub: false,
+            hub_host: std::net::IpAddr::from([127, 0, 0, 1]),
+            hub_port: 9050,
+            name: discovered.task.name.clone(),
+            args,
+        });
+    }
+
     let ai_policy = AiTaskExecutionPolicy::from_env();
     if execute_ai_task_by_selector(&snapshot.root, task_name, &args, &ai_policy)? {
         return Ok(());
@@ -1073,6 +1084,38 @@ fn select_discovered_task<'a>(
     }
 
     Ok(None)
+}
+
+fn select_task_from_ancestor_roots(
+    start_root: &Path,
+    task_name: &str,
+) -> Result<Option<discover::DiscoveredTask>> {
+    for root in ancestor_flow_roots(start_root) {
+        let snapshot = match ProjectSnapshot::from_task_config(&root.join("flow.toml"), false) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                tracing::debug!(root = %root.display(), ?err, "failed to load ancestor flow.toml");
+                continue;
+            }
+        };
+        if let Some(discovered) = select_discovered_task(&snapshot.discovery, task_name)? {
+            return Ok(Some(discovered.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn ancestor_flow_roots(start_root: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut current = start_root.parent();
+    while let Some(dir) = current {
+        let candidate = dir.join("flow.toml");
+        if candidate.exists() {
+            roots.push(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    roots
 }
 
 fn parse_scoped_selector(selector: &str) -> Option<(String, String)> {
@@ -2120,11 +2163,19 @@ fn truncate_output_for_hook(output: &str, max_lines: usize, max_chars: usize) ->
         lines = lines[lines.len().saturating_sub(max_lines)..].to_vec();
     }
     let mut joined = lines.join("\n");
-    if joined.len() > max_chars {
-        let start = joined.len().saturating_sub(max_chars);
-        joined = format!("...{}", &joined[start..]);
+    let joined_char_count = joined.chars().count();
+    if joined_char_count > max_chars {
+        let truncated = joined
+            .chars()
+            .skip(joined_char_count.saturating_sub(max_chars))
+            .collect::<String>();
+        joined = format!("...{truncated}");
     }
     joined
+}
+
+fn is_legacy_rise_work_hook(hook: &str) -> bool {
+    hook.to_ascii_lowercase().contains("rise work")
 }
 
 fn maybe_run_task_failure_hook(
@@ -2143,12 +2194,11 @@ fn maybe_run_task_failure_hook(
     if !std::io::stdin().is_terminal() {
         return;
     }
-    let mut hook = hook;
-    if env::var_os("FLOW_TASK_FAILURE_HOOK_ALLOW_OPEN").is_none() {
-        let hook_lower = hook.to_ascii_lowercase();
-        if hook_lower.contains("rise work") {
-            hook = sanitize_rise_work_hook_no_open(&hook);
-        }
+    if is_legacy_rise_work_hook(&hook) {
+        eprintln!(
+            "⚠ task failure hook uses retired `rise work` flow. Use `f failure copy --format codex --write-repo` or `f failure copy --format claude --write-repo` instead."
+        );
+        return;
     }
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
@@ -2177,54 +2227,6 @@ fn maybe_run_task_failure_hook(
             eprintln!("⚠ failed to run task failure hook: {}", err);
         }
     }
-}
-
-fn sanitize_rise_work_hook_no_open(hook: &str) -> String {
-    let tokens = match shell_words::split(hook) {
-        Ok(tokens) => tokens,
-        Err(_) => {
-            let mut fallback = hook.to_string();
-            let lower = fallback.to_ascii_lowercase();
-            if !lower.contains("--no-open") {
-                fallback.push_str(" --no-open");
-            }
-            return fallback;
-        }
-    };
-
-    let mut cleaned: Vec<String> = Vec::new();
-    let mut skip_next = false;
-    for token in tokens {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        let lower = token.to_ascii_lowercase();
-        if lower == "--focus" {
-            continue;
-        }
-        if lower == "--focus-app" || lower == "--app" || lower == "--target" {
-            skip_next = true;
-            continue;
-        }
-        if lower.starts_with("--focus-app=")
-            || lower.starts_with("--app=")
-            || lower.starts_with("--target=")
-        {
-            continue;
-        }
-        cleaned.push(token);
-    }
-
-    let mut rebuilt = shell_words::join(cleaned);
-    let lower = rebuilt.to_ascii_lowercase();
-    if !lower.contains("--no-open") {
-        if !rebuilt.is_empty() {
-            rebuilt.push(' ');
-        }
-        rebuilt.push_str("--no-open");
-    }
-    rebuilt
 }
 
 fn run_host_command(
@@ -2394,6 +2396,7 @@ fn run_command_with_tee(
     ctx: Option<TaskContext>,
 ) -> Result<(ExitStatus, String)> {
     inject_global_env(&mut cmd);
+    inject_task_env(&mut cmd, ctx.as_ref());
     // Interactive commands are now caught upstream by run_host_command /
     // run_flox_command and routed through run_command_with_pty, so this
     // always delegates to the pipe-based path.
@@ -2448,6 +2451,30 @@ fn inject_global_env(cmd: &mut Command) {
     }
 }
 
+fn inject_task_env(cmd: &mut Command, ctx: Option<&TaskContext>) {
+    let Some(task_ctx) = ctx else {
+        return;
+    };
+
+    cmd.env("FLOW_TASK_NAME", &task_ctx.task_name);
+    cmd.env(
+        "FLOW_TASK_COMMAND",
+        secret_redact::redact_text(&task_ctx.command),
+    );
+    cmd.env(
+        "FLOW_TASK_WORKDIR",
+        task_ctx.project_root.display().to_string(),
+    );
+    cmd.env(
+        "FLOW_TASK_CONFIG_PATH",
+        task_ctx.config_path.display().to_string(),
+    );
+    cmd.env(
+        "FLOW_TASK_PROJECT_ROOT",
+        task_ctx.project_root.display().to_string(),
+    );
+}
+
 /// Inject global env vars into a `portable_pty::CommandBuilder`.
 fn inject_global_env_pty(cmd: &mut CommandBuilder) {
     let keys = config::global_env_keys();
@@ -2492,6 +2519,30 @@ fn inject_global_env_pty(cmd: &mut CommandBuilder) {
             tracing::debug!(?err, "failed to fetch global env vars");
         }
     }
+}
+
+fn inject_task_env_pty(cmd: &mut CommandBuilder, ctx: Option<&TaskContext>) {
+    let Some(task_ctx) = ctx else {
+        return;
+    };
+
+    cmd.env("FLOW_TASK_NAME", &task_ctx.task_name);
+    cmd.env(
+        "FLOW_TASK_COMMAND",
+        secret_redact::redact_text(&task_ctx.command),
+    );
+    cmd.env(
+        "FLOW_TASK_WORKDIR",
+        task_ctx.project_root.display().to_string(),
+    );
+    cmd.env(
+        "FLOW_TASK_CONFIG_PATH",
+        task_ctx.config_path.display().to_string(),
+    );
+    cmd.env(
+        "FLOW_TASK_PROJECT_ROOT",
+        task_ctx.project_root.display().to_string(),
+    );
 }
 
 /// Run a command inside a PTY with full interactivity, color support, and output
@@ -2548,6 +2599,7 @@ fn run_command_with_pty(
     pty_cmd.env("COLORTERM", "truecolor");
 
     inject_global_env_pty(&mut pty_cmd);
+    inject_task_env_pty(&mut pty_cmd, ctx.as_ref());
 
     let mut child = pair
         .slave
@@ -3321,6 +3373,26 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn detects_legacy_rise_work_failure_hook() {
+        assert!(is_legacy_rise_work_hook(
+            "rise work --errors --target codex \"fix $FLOW_TASK_NAME failure\""
+        ));
+        assert!(!is_legacy_rise_work_hook(
+            "f failure copy --format codex --write-repo >/dev/null"
+        ));
+    }
+
+    #[test]
+    fn truncates_failure_hook_output_on_char_boundaries() {
+        let output = format!("prefix\n{}", "░".repeat(20));
+        let truncated = truncate_output_for_hook(&output, 120, 12);
+
+        assert!(truncated.starts_with("..."));
+        assert_eq!(truncated.chars().count(), 15);
+        assert!(truncated.chars().skip(3).all(|ch| ch == '░'));
+    }
+
+    #[test]
     fn formats_task_lines_with_descriptions() {
         let tasks = vec![
             TaskConfig {
@@ -3440,6 +3512,65 @@ mod tests {
             .expect("exact task should resolve");
         assert_eq!(selected.scope, "root");
         assert_eq!(selected.task.name, "mobile:dev");
+    }
+
+    #[test]
+    fn ancestor_flow_roots_lists_parent_configs_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        let app = root.join("ide/designer");
+        let nested = app.join("src");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("flow.toml"), "version = 1\n").unwrap();
+        fs::write(app.join("flow.toml"), "version = 1\n").unwrap();
+
+        let roots = ancestor_flow_roots(&app);
+        assert_eq!(roots, vec![root]);
+    }
+
+    #[test]
+    fn select_task_from_ancestor_roots_falls_back_to_parent_wrapper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        let app = root.join("ide/designer");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            root.join("flow.toml"),
+            r#"version = 1
+
+[task_resolution]
+preferred_scopes = ["root", "designer"]
+
+[task_resolution.routes]
+hot = "root"
+
+[[tasks]]
+name = "hot"
+command = "echo hot"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("flow.toml"),
+            r#"version = 1
+name = "designer"
+
+[[tasks]]
+name = "setup"
+command = "echo setup"
+"#,
+        )
+        .unwrap();
+
+        let discovered = select_task_from_ancestor_roots(&app, "hot")
+            .unwrap()
+            .expect("ancestor root should provide hot");
+        assert_eq!(discovered.task.name, "hot");
+        assert_eq!(discovered.scope, "root");
+        assert_eq!(
+            discovered.config_path.canonicalize().unwrap(),
+            root.join("flow.toml").canonicalize().unwrap()
+        );
     }
 
     #[test]

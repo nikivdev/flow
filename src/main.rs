@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
-use clap::{Parser, error::ErrorKind};
+use clap::{CommandFactory, Parser, error::ErrorKind};
 use flowd::{
     agents, ai, ai_test, analytics, archive, auth, branches, changes,
     cli::{
@@ -11,12 +11,13 @@ use flowd::{
         ShellAction, ShellCommand, TaskRunOpts, TasksOpts, TraceAction,
     },
     code, commit, commits, daemon, deploy, deps, docs, doctor, domains, env, explain_commits, ext,
-    failure, fish_install, fish_trace, fix, fixup, flow_config, git_guard, gitignore_policy, hash,
-    health, help_search, history, hive, home, hub, info, init, init_tracing, install, invariants,
-    jj, latest, lifecycle, log_server, macos, notify, otp, palette, parallel, processes, projects,
-    proxy, publish, push, recipe, registry, release, repos, reviews_todo, seq_rpc, services, setup,
-    skills, ssh_keys, storage, supervisor, sync, task_match, tasks, todo, tools, traces, undo,
-    updates, upgrade, upstream, url_inspect, usage, web,
+    external_cli, failure, fish_install, fish_trace, fix, fixup, flow_config, git_guard,
+    gitignore_policy, hash, health, help_search, history, hive, home, hub, info, init,
+    init_tracing, install, invariants, jj, latest, lifecycle, log_server, macos, notify, otp,
+    palette, parallel, processes, projects, proxy, publish, push, recipe, registry, release, repos,
+    reviews_todo, seq_rpc, services, setup, skills, ssh_keys, storage, supervisor, sync,
+    task_match, tasks, todo, tools, traces, undo, updates, upgrade, upstream, url_inspect, usage,
+    web,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,13 +67,15 @@ fn main() -> Result<()> {
                     err.kind(),
                     ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
                 ) {
-                    // Fallback: treat first positional as task name and rest as args.
                     let mut iter = raw_args.into_iter();
                     let _bin = iter.next();
-                    if let Some(task_name) = iter.next() {
-                        let args: Vec<String> = iter.collect();
+                    let args: Vec<String> = iter.collect();
+                    if !args.is_empty() {
+                        if task_match::looks_like_cli_subcommand(&args) {
+                            err.exit()
+                        }
                         apply_startup_policy(StartupPolicy::SECRETS_ONLY);
-                        return tasks::run_with_discovery(&task_name, args);
+                        return run_cli_frontdoor(args);
                     }
                 }
                 err.exit()
@@ -616,6 +619,9 @@ fn main() -> Result<()> {
                     install::run(cmd.opts)?;
                 }
             }
+            Some(Commands::Cli(cmd)) => {
+                external_cli::run_command(cmd)?;
+            }
             Some(Commands::Registry(cmd)) => {
                 registry::run(cmd)?;
             }
@@ -629,15 +635,19 @@ fn main() -> Result<()> {
                 domains::run(cmd)?;
             }
             Some(Commands::TaskShortcut(args)) => {
-                let Some(task_name) = args.first() else {
+                if args.is_empty() {
                     bail!("no task name provided");
-                };
-                if let Err(err) = tasks::run_with_discovery(task_name, args[1..].to_vec()) {
-                    if is_task_not_found(&err) {
-                        return Err(err);
-                    }
-                    return Err(err);
                 }
+                if task_match::looks_like_cli_subcommand(&args) {
+                    let invalid = args.get(1).map(String::as_str).unwrap_or(args[0].as_str());
+                    Cli::command()
+                        .error(
+                            ErrorKind::InvalidSubcommand,
+                            format!("unrecognized subcommand '{invalid}'"),
+                        )
+                        .exit();
+                }
+                run_cli_frontdoor(args)?;
             }
             None => {
                 palette::run(TasksOpts::default())?;
@@ -729,6 +739,7 @@ fn startup_policy_for(command: Option<&Commands>) -> StartupPolicy {
         Some(Commands::Upstream(_)) => StartupPolicy::NONE,
         Some(Commands::Latest) => StartupPolicy::NONE,
         Some(Commands::Url(_)) => StartupPolicy::SECRETS_ONLY,
+        Some(Commands::Cli(_)) => StartupPolicy::SECRETS_ONLY,
         Some(Commands::Analytics(cmd)) => match cmd.action.as_ref() {
             None
             | Some(&AnalyticsAction::Status)
@@ -870,6 +881,18 @@ fn is_task_not_found(err: &anyhow::Error) -> bool {
     msg.contains("task '") && msg.contains("not found")
 }
 
+fn run_cli_frontdoor(args: Vec<String>) -> Result<()> {
+    let Some(task_name) = args.first() else {
+        bail!("no task name provided");
+    };
+
+    match tasks::run_with_discovery(task_name, args[1..].to_vec()) {
+        Ok(()) => Ok(()),
+        Err(err) if is_task_not_found(&err) && args.len() > 1 => task_match::run_implicit(args),
+        Err(err) => Err(err),
+    }
+}
+
 fn shell_command(cmd: ShellCommand) {
     match cmd.action.unwrap_or(ShellAction::Reset) {
         ShellAction::Reset => {
@@ -921,9 +944,10 @@ fn shell_init(shell: &str) {
         "fish" => {
             let config_fish = config_dir.join("fish").join("config.fish");
 
-            println!("No fish integration changes applied.");
+            println!("No fish wrapper is needed.");
+            println!("Use the real `f` binary on PATH for the fastest startup.");
             println!(
-                "Manage your fish config manually: {}",
+                "If `f` is not on PATH yet, add its install dir in: {}",
                 config_fish.display()
             );
         }
@@ -1094,7 +1118,7 @@ fn proxy_command(cmd: ProxyCommand) -> Result<()> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{StartupPolicy, startup_policy_for};
+    use super::{StartupPolicy, is_task_not_found, startup_policy_for};
     use flowd::cli::{
         AiAction, AiCommand, AnalyticsCommand, Commands, GlobalAction, GlobalCommand,
         RepoAliasAction, RepoAliasCommand, RepoCapsuleOpts, ReposAction, ReposCommand,
@@ -1231,5 +1255,15 @@ mod tests {
             }))),
             StartupPolicy::NONE
         );
+    }
+
+    #[test]
+    fn task_not_found_detection_is_specific() {
+        assert!(is_task_not_found(&anyhow::anyhow!(
+            "Task 'devd' not found."
+        )));
+        assert!(!is_task_not_found(&anyhow::anyhow!(
+            "failed to start process"
+        )));
     }
 }

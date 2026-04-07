@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 use crate::cli::{
     DomainsAction, DomainsAddOpts, DomainsCommand, DomainsEngineArg, DomainsGetOpts, DomainsRmOpts,
 };
+use crate::runtime_assets;
 
 const PROXY_CONTAINER_NAME: &str = "flow-local-domains-proxy";
 const NATIVE_PROXY_HEADER: &str = "x-flow-domainsd: 1";
@@ -608,7 +609,7 @@ fn run_down_native(paths: &DomainsPaths) -> Result<()> {
             );
             println!(
                 "To stop/uninstall launchd mode, run:\n  sudo {}",
-                macos_launchd_uninstall_script_path().display()
+                macos_launchd_uninstall_script_hint()
             );
             return Ok(());
         }
@@ -691,25 +692,23 @@ fn run_doctor_native(paths: &DomainsPaths) -> Result<()> {
     Ok(())
 }
 
-fn native_source_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tools")
-        .join("domainsd-cpp")
-        .join("domainsd.cpp")
+fn native_source_path() -> Result<PathBuf> {
+    runtime_assets::require_asset_path("tools/domainsd-cpp/domainsd.cpp")
 }
 
-fn domainsd_tools_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tools")
-        .join("domainsd-cpp")
+fn launchd_script_hint(relative: &str) -> String {
+    runtime_assets::asset_path(relative)
+        .unwrap_or_else(|| PathBuf::from(relative))
+        .display()
+        .to_string()
 }
 
-fn macos_launchd_install_script_path() -> PathBuf {
-    domainsd_tools_dir().join("install-macos-launchd.sh")
+fn macos_launchd_install_script_hint() -> String {
+    launchd_script_hint("tools/domainsd-cpp/install-macos-launchd.sh")
 }
 
-fn macos_launchd_uninstall_script_path() -> PathBuf {
-    domainsd_tools_dir().join("uninstall-macos-launchd.sh")
+fn macos_launchd_uninstall_script_hint() -> String {
+    launchd_script_hint("tools/domainsd-cpp/uninstall-macos-launchd.sh")
 }
 
 fn macos_launchd_plist_path() -> PathBuf {
@@ -726,13 +725,7 @@ fn log_contains_permission_denied(path: &Path) -> Result<bool> {
 }
 
 fn ensure_native_binary(paths: &DomainsPaths) -> Result<()> {
-    let source = native_source_path();
-    if !source.exists() {
-        bail!(
-            "Native domains daemon source not found at {}",
-            source.display()
-        );
-    }
+    let source = native_source_path()?;
 
     let rebuild = if !paths.native_bin.exists() {
         true
@@ -837,7 +830,7 @@ macOS requires privileged socket ownership for :80 in native mode.\n\
 Run once:\n  sudo {}\n\
 Then retry: f domains --engine native up\n\
 Log: {}",
-            macos_launchd_install_script_path().display(),
+            macos_launchd_install_script_hint(),
             paths.native_log.display()
         );
     }

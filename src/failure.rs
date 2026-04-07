@@ -15,7 +15,7 @@ use crate::{
         FailureAction, FailureCommand, FailureCopyFormat, FailureCopyOpts, FailureLastOpts,
         FailureListOpts,
     },
-    secret_redact,
+    secret_redact, setup,
 };
 
 const DEFAULT_OUTPUT_MAX_CHARS: usize = 20_000;
@@ -23,6 +23,10 @@ const PROMPT_MAX_LINES: usize = 80;
 const PROMPT_MAX_CHARS: usize = 12_000;
 const EXCERPT_MAX_LINES: usize = 40;
 const EXCERPT_MAX_CHARS: usize = 4_000;
+const GIT_STATUS_MAX_LINES: usize = 40;
+const GIT_STATUS_MAX_CHARS: usize = 4_000;
+const GIT_DIFF_STAT_MAX_LINES: usize = 40;
+const GIT_DIFF_STAT_MAX_CHARS: usize = 4_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureRecord {
@@ -68,6 +72,32 @@ impl FailureSummary {
             ts: entry.record.ts,
             workdir: entry.record.workdir.clone(),
             config: entry.record.config.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FailurePromptTool {
+    Codex,
+    Claude,
+}
+
+impl FailurePromptTool {
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+        }
+    }
+
+    fn completion_instruction(self) -> &'static str {
+        match self {
+            Self::Codex => {
+                "Provide the smallest safe fix first, then summarize verification and any remaining blockers."
+            }
+            Self::Claude => {
+                "Explain the likely root cause briefly, propose the safest fix, and note how to validate it."
+            }
         }
     }
 }
@@ -211,6 +241,8 @@ fn run_copy(opts: FailureCopyOpts) -> Result<()> {
     let payload = match opts.format {
         FailureCopyFormat::Prompt => render_prompt(&entry),
         FailureCopyFormat::Excerpt => render_excerpt(&entry),
+        FailureCopyFormat::Codex => render_ai_prompt(&entry, FailurePromptTool::Codex),
+        FailureCopyFormat::Claude => render_ai_prompt(&entry, FailurePromptTool::Claude),
         FailureCopyFormat::Json => serde_json::to_string_pretty(&json!({
             "id": entry.id,
             "path": entry.path.display().to_string(),
@@ -227,17 +259,33 @@ fn run_copy(opts: FailureCopyOpts) -> Result<()> {
         .context("failed to encode failure JSON")?,
     };
 
+    let written_path = if opts.write_repo {
+        Some(write_repo_payload(&entry, opts.format, &payload)?)
+    } else {
+        None
+    };
+
     match copy_to_clipboard(&payload)? {
-        true => {
-            println!(
+        true => match written_path.as_ref() {
+            Some(path) => println!(
+                "Copied {} failure {} to clipboard and wrote {}",
+                format_name(opts.format),
+                entry.id,
+                path.display()
+            ),
+            None => println!(
                 "Copied {} failure {} to clipboard",
                 format_name(opts.format),
                 entry.id
-            );
-        }
-        false => {
-            println!("Clipboard disabled by FLOW_NO_CLIPBOARD; skipped copy.");
-        }
+            ),
+        },
+        false => match written_path.as_ref() {
+            Some(path) => println!(
+                "Clipboard disabled by FLOW_NO_CLIPBOARD; wrote {} instead.",
+                path.display()
+            ),
+            None => println!("Clipboard disabled by FLOW_NO_CLIPBOARD; skipped copy."),
+        },
     }
     Ok(())
 }
@@ -334,12 +382,9 @@ fn render_last(entry: &FailureEntry) -> String {
     out.push_str(&format!("Workdir: {}\n", entry.record.workdir));
     out.push_str(&format!("Command: {}\n", entry.record.command));
     out.push_str(&format!("Bundle: {}\n", entry.path.display()));
-    if let Some(path) = find_rise_prompt(&entry.record, "codex.md") {
-        out.push_str(&format!("Codex prompt: {}\n", path.display()));
-    }
-    if let Some(path) = find_rise_prompt(&entry.record, "claude.md") {
-        out.push_str(&format!("Claude prompt: {}\n", path.display()));
-    }
+    out.push_str("Flow-native prompt copy:\n");
+    out.push_str("- Codex: f failure copy --format codex\n");
+    out.push_str("- Claude: f failure copy --format claude\n");
     if let Some(path) = proxy_summary_path() {
         out.push_str(&format!("Proxy trace summary: {}\n", path.display()));
     }
@@ -374,15 +419,80 @@ fn render_prompt(entry: &FailureEntry) -> String {
 
     out.push_str("Artifacts:\n");
     out.push_str(&format!("- Failure bundle: {}\n", entry.path.display()));
-    if let Some(path) = find_rise_prompt(&entry.record, "codex.md") {
-        out.push_str(&format!("- Codex prompt: {}\n", path.display()));
-    }
-    if let Some(path) = find_rise_prompt(&entry.record, "claude.md") {
-        out.push_str(&format!("- Claude prompt: {}\n", path.display()));
-    }
+    out.push_str("- Codex prompt: f failure copy --format codex\n");
+    out.push_str("- Claude prompt: f failure copy --format claude\n");
     if let Some(path) = proxy_summary_path() {
         out.push_str(&format!("- Proxy trace summary: {}\n", path.display()));
     }
+    out
+}
+
+fn render_ai_prompt(entry: &FailureEntry, tool: FailurePromptTool) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {} Failure Prompt\n\n", tool.display_name()));
+    out.push_str("## Task\n");
+    out.push_str(&format!(
+        "Fix the `{}` task failure in `{}`.\n\n",
+        task_label(&entry.record),
+        entry.record.workdir
+    ));
+
+    out.push_str("## Failure Context\n");
+    out.push_str(&format!("- Task: {}\n", task_label(&entry.record)));
+    if let Some(project) = entry.record.project.as_deref()
+        && !project.trim().is_empty()
+    {
+        out.push_str(&format!("- Project: {}\n", project));
+    }
+    out.push_str(&format!("- Workdir: {}\n", entry.record.workdir));
+    out.push_str(&format!("- Config: {}\n", entry.record.config));
+    out.push_str(&format!("- Command: {}\n", entry.record.command));
+    out.push_str(&format!("- Exit status: {}\n", entry.record.status));
+    out.push_str(&format!("- Failure bundle: {}\n", entry.path.display()));
+    if let Some(path) = proxy_summary_path() {
+        out.push_str(&format!("- Proxy trace summary: {}\n", path.display()));
+    }
+
+    let workdir = Path::new(&entry.record.workdir);
+    if let Some(repo_root) = git_root_for(workdir) {
+        out.push('\n');
+        out.push_str("## Repo State\n");
+        out.push_str(&format!("- Git root: {}\n", repo_root.display()));
+
+        if let Some(status) = git_status_summary(&repo_root) {
+            out.push_str("\n### Git Status\n```text\n");
+            out.push_str(&status);
+            if !status.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```\n");
+        }
+
+        if let Some(diff_stat) = git_diff_stat_summary(&repo_root) {
+            out.push_str("\n### Git Diff Stat\n```text\n");
+            out.push_str(&diff_stat);
+            if !diff_stat.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```\n");
+        }
+    }
+
+    let recent = compact_output_tail(&entry.record.output, PROMPT_MAX_LINES, PROMPT_MAX_CHARS);
+    if !recent.is_empty() {
+        out.push('\n');
+        out.push_str("## Recent Output\n```text\n");
+        out.push_str(&recent);
+        if !recent.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("```\n");
+    }
+
+    out.push('\n');
+    out.push_str("## Requested Output\n");
+    out.push_str(tool.completion_instruction());
+    out.push('\n');
     out
 }
 
@@ -435,15 +545,115 @@ fn task_label(record: &FailureRecord) -> String {
     }
 }
 
-fn find_rise_prompt(record: &FailureRecord, filename: &str) -> Option<PathBuf> {
-    let workdir = PathBuf::from(&record.workdir);
-    for ancestor in workdir.ancestors() {
-        let candidate = ancestor.join(".rise").join("prompts").join(filename);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+fn truncate_output_head(output: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut lines: Vec<&str> = output.lines().collect();
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
     }
-    None
+    let mut joined = lines.join("\n");
+    if joined.len() > max_chars {
+        joined = format!("{}...", truncate_utf8_prefix(&joined, max_chars));
+    }
+    joined
+}
+
+fn truncate_utf8_prefix(value: &str, max_chars: usize) -> &str {
+    if value.chars().count() <= max_chars {
+        return value;
+    }
+    let end = value
+        .char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(value.len());
+    &value[..end]
+}
+
+fn git_root_for(workdir: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
+}
+
+fn repo_failure_dir(entry: &FailureEntry) -> PathBuf {
+    let workdir = Path::new(&entry.record.workdir);
+    let base = git_root_for(workdir).unwrap_or_else(|| workdir.to_path_buf());
+    base.join(".ai").join("internal").join("failures")
+}
+
+fn repo_failure_filename(format: FailureCopyFormat) -> &'static str {
+    match format {
+        FailureCopyFormat::Prompt => "latest-prompt.md",
+        FailureCopyFormat::Excerpt => "latest-excerpt.txt",
+        FailureCopyFormat::Codex => "latest-codex.md",
+        FailureCopyFormat::Claude => "latest-claude.md",
+        FailureCopyFormat::Json => "latest-failure.json",
+    }
+}
+
+fn write_repo_payload(
+    entry: &FailureEntry,
+    format: FailureCopyFormat,
+    payload: &str,
+) -> Result<PathBuf> {
+    let dir = repo_failure_dir(entry);
+    let repo_root = dir
+        .ancestors()
+        .nth(3)
+        .context("failed to derive repo root for failure artifact")?;
+    let _ = setup::add_gitignore_entry(repo_root, ".ai/internal/");
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let path = dir.join(repo_failure_filename(format));
+    fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn git_status_summary(repo_root: &Path) -> Option<String> {
+    let status = git_capture(repo_root, &["status", "--short", "--branch"])?;
+    Some(truncate_output_head(
+        &status,
+        GIT_STATUS_MAX_LINES,
+        GIT_STATUS_MAX_CHARS,
+    ))
+}
+
+fn git_diff_stat_summary(repo_root: &Path) -> Option<String> {
+    let diff_stat = git_capture(repo_root, &["diff", "--stat", "--compact-summary", "HEAD"])?;
+    Some(truncate_output_head(
+        &diff_stat,
+        GIT_DIFF_STAT_MAX_LINES,
+        GIT_DIFF_STAT_MAX_CHARS,
+    ))
 }
 
 fn proxy_summary_path() -> Option<PathBuf> {
@@ -520,6 +730,8 @@ fn format_name(format: FailureCopyFormat) -> &'static str {
     match format {
         FailureCopyFormat::Prompt => "prompt",
         FailureCopyFormat::Excerpt => "excerpt",
+        FailureCopyFormat::Codex => "Codex prompt",
+        FailureCopyFormat::Claude => "Claude prompt",
         FailureCopyFormat::Json => "JSON",
     }
 }
@@ -585,7 +797,8 @@ fn copy_to_clipboard(text: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FailureEntry, FailureRecord, compact_output_tail, render_excerpt, render_prompt,
+        FailureCopyFormat, FailureEntry, FailurePromptTool, FailureRecord, compact_output_tail,
+        render_ai_prompt, render_excerpt, render_prompt, repo_failure_dir, repo_failure_filename,
         slug_component, unique_history_path,
     };
     use std::path::{Path, PathBuf};
@@ -656,5 +869,63 @@ mod tests {
         let excerpt = render_excerpt(&entry);
         assert!(excerpt.contains("exit 1"));
         assert!(excerpt.contains("/tmp/123-designer-hot.json"));
+    }
+
+    #[test]
+    fn ai_prompt_renderer_includes_flow_native_context() {
+        let entry = FailureEntry {
+            id: "123-designer-hot".to_string(),
+            path: PathBuf::from("/tmp/123-designer-hot.json"),
+            record: FailureRecord {
+                task: "hot".to_string(),
+                command: "npm run hot".to_string(),
+                workdir: "/tmp/designer".to_string(),
+                config: "/tmp/designer/flow.toml".to_string(),
+                project: Some("designer".to_string()),
+                status: 1,
+                output: "line1\nline2".to_string(),
+                fishx: false,
+                ts: 123,
+            },
+        };
+
+        let prompt = render_ai_prompt(&entry, FailurePromptTool::Codex);
+        assert!(prompt.contains("# Codex Failure Prompt"));
+        assert!(prompt.contains("Fix the `designer/hot` task failure"));
+        assert!(prompt.contains("Failure bundle: /tmp/123-designer-hot.json"));
+        assert!(prompt.contains("## Recent Output"));
+        assert!(prompt.contains("Provide the smallest safe fix first"));
+    }
+
+    #[test]
+    fn repo_failure_artifacts_live_under_ai_internal_failures() {
+        let entry = FailureEntry {
+            id: "123-designer-hot".to_string(),
+            path: PathBuf::from("/tmp/123-designer-hot.json"),
+            record: FailureRecord {
+                task: "hot".to_string(),
+                command: "npm run hot".to_string(),
+                workdir: "/tmp/designer".to_string(),
+                config: "/tmp/designer/flow.toml".to_string(),
+                project: Some("designer".to_string()),
+                status: 1,
+                output: "line1\nline2".to_string(),
+                fishx: false,
+                ts: 123,
+            },
+        };
+
+        assert_eq!(
+            repo_failure_dir(&entry),
+            PathBuf::from("/tmp/designer/.ai/internal/failures")
+        );
+        assert_eq!(
+            repo_failure_filename(FailureCopyFormat::Codex),
+            "latest-codex.md"
+        );
+        assert_eq!(
+            repo_failure_filename(FailureCopyFormat::Json),
+            "latest-failure.json"
+        );
     }
 }

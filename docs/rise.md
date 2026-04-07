@@ -46,7 +46,7 @@ The defining Rise behavior is `rise adopt`.
 
 For external repos, Rise creates a JJ overlay bookmark (`rise`) above `main`:
 
-- `rise` layer contains your local workflow files (for example `flow.toml`, `.rise/`).
+- `rise` layer contains your local workflow files (for example `flow.toml`).
 - Team-facing `main` remains untouched.
 - PR branches are created from `main`, so Rise files do not leak into PRs.
 
@@ -156,13 +156,13 @@ Use this when you need stronger isolation for verification or reproduction loops
 Rise docs also describe:
 
 - AI trace collection (`rise logs`)
-- build failure context for AI-assisted remediation (`rise work --errors` paths)
+- build failure context for AI-assisted remediation (Flow-native failure bundles)
 - integration patterns around generated prompts and operational context
 
 For Flow users, this complements:
 
 - `f commit` review/message provider strategies that can call Rise-backed providers
-- task failure hooks that invoke `rise work`
+- Flow-native task failure tooling such as `f failure copy --format codex`
 
 ## Typical Onboarding Sequence
 

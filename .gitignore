@@ -23,6 +23,7 @@
 !.ai/skills/pr-markdown-body-file/
 .ai/skills/pr-markdown-body-file/*
 !.ai/skills/pr-markdown-body-file/skill.md
+.ai/todos/todos.json
 .ai/todos/*.bike
 .claude/
 .codex/
@@ -72,7 +73,6 @@ testing/
 desktop/.tauri-dev.json
 
 .ai/review-log.jsonl
-.rise/
 .ai/state.json
 .ai/docs/session-changes/
 .ai/docs/session-changes-promoted/
@@ -95,3 +95,6 @@ docs/commits/*
 
 # local workspace bootstrap stamp
 .flow-workspace-bootstrap.json
+
+# local codedb inspection snapshot
+codedb.snapshot

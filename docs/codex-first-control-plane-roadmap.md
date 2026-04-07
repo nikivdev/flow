@@ -79,7 +79,7 @@ That means:
 ### 1. warm Codex control layer
 
 Add a Flow-managed warm control layer, either as an extension of `ai-taskd`, a
-focused `codexd`, or a lighter in-process broker where that is enough for the
+focused `jd`, or a lighter in-process broker where that is enough for the
 current upstream Codex client surface.
 
 Responsibilities:
@@ -177,7 +177,7 @@ f codex teach suggest
 f codex teach accept <intent-or-suggestion-id>
 f codex teach reject <intent-or-suggestion-id>
 f codex doctor
-f codexd start|stop|status
+f codex daemon start|stop|status
 ```
 
 Intended behavior:
@@ -238,7 +238,7 @@ Use this for personal language variants that should not live in repo config.
 
 ## Daemon Responsibilities
 
-`codexd` should own:
+`jd` should own:
 
 - app-server lifecycle
 - repo session caches
@@ -320,7 +320,7 @@ That means:
 
 ### Phase 1: warm daemon
 
-- add `codexd` with persistent app-server connection per repo
+- add `jd` with persistent app-server connection per repo
 - keep recent thread cache and skills cache warm
 - remove process-per-query overhead for session lookup/reload paths
 
@@ -353,7 +353,7 @@ That means:
 The highest-value first slice is:
 
 1. `f codex open`
-2. `codexd` with warm repo-scoped app-server
+2. `jd` with warm repo-scoped app-server
 3. `f codex resolve`
 4. config-backed intents
 5. built-in resolvers for:

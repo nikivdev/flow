@@ -1,14 +1,19 @@
 //! Ask the AI server to suggest a task or flow command.
 
 use std::collections::HashSet;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::CommandFactory;
 
 use crate::ai_server;
 use crate::cli::Cli;
 use crate::discover::{self, DiscoveredTask};
+use crate::{config, external_cli, opentui_prompt};
+
+const RUN_AGENT_ROUTER_PATH: &str = "~/run/scripts/agent-router.sh";
 
 /// Options for the ask command.
 #[derive(Debug, Clone)]
@@ -32,6 +37,17 @@ struct FlowCommand {
     about: Option<String>,
 }
 
+struct AskRoutingContext {
+    cwd: PathBuf,
+    external_clis: Vec<AskExternalCli>,
+    codex_agents: Vec<String>,
+}
+
+struct AskExternalCli {
+    id: String,
+    description: Option<String>,
+}
+
 /// Ask the AI server for a suggested task or command.
 pub fn run(opts: AskOpts) -> Result<()> {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -41,22 +57,29 @@ pub fn run(opts: AskOpts) -> Result<()> {
 
 fn run_with_tasks(opts: AskOpts, tasks: Vec<DiscoveredTask>) -> Result<()> {
     let query_display = opts.args.join(" ");
+    let routing = load_routing_context();
 
     if let Some(direct) = try_direct_match(&opts.args, &tasks) {
         let matched = find_task(&direct.task_name, &tasks)?;
-        print_task_suggestion(matched, &direct.args);
+        suggest_task(matched, &direct.args)?;
         return Ok(());
     }
 
     if is_cli_subcommand(&opts.args) {
         let command = format!("f {}", opts.args.join(" "));
-        print_command_suggestion(&command);
+        suggest_command(&command, &[])?;
+        return Ok(());
+    }
+
+    if let Some(command) = route_special_query(&query_display, &routing) {
+        let details = vec!["Matched built-in Codex session routing.".to_string()];
+        suggest_command(&command, &details)?;
         return Ok(());
     }
 
     let commands = flow_command_candidates();
     let valid_subcommands = valid_subcommand_set(&commands);
-    let prompt = build_prompt(&query_display, &tasks, &commands);
+    let prompt = build_prompt(&query_display, &tasks, &commands, &routing);
 
     let response =
         ai_server::quick_prompt(&prompt, opts.model.as_deref(), opts.url.as_deref(), None)?;
@@ -66,37 +89,38 @@ fn run_with_tasks(opts: AskOpts, tasks: Vec<DiscoveredTask>) -> Result<()> {
     match selection {
         AskSelection::Task { name } => {
             let matched = find_task(&name, &tasks)?;
-            print_task_suggestion(matched, &[]);
+            suggest_task(matched, &[])?;
         }
         AskSelection::Command { command } => {
-            print_command_suggestion(&command);
+            suggest_command(&command, &[])?;
         }
     }
 
     Ok(())
 }
 
-fn print_task_suggestion(task: &DiscoveredTask, args: &[String]) {
+fn suggest_task(task: &DiscoveredTask, args: &[String]) -> Result<()> {
     let command = if args.is_empty() {
         format!("f {}", task.task.name)
     } else {
         format!("f {} {}", task.task.name, args.join(" "))
     };
 
-    println!("Suggested command:");
-    println!("{}", command);
-
     let mut detail = format!("Matched task: {}", task.task.name);
     if !task.relative_dir.is_empty() {
         detail.push_str(&format!(" ({})", task.relative_dir));
     }
     detail.push_str(&format!(" - {}", task.task.command));
-    println!("{}", detail);
+    suggest_command(&command, &[detail])
 }
 
-fn print_command_suggestion(command: &str) {
+fn suggest_command(command: &str, details: &[String]) -> Result<()> {
     println!("Suggested command:");
     println!("{}", command.trim());
+    for detail in details {
+        println!("{}", detail);
+    }
+    maybe_offer_execute(command)
 }
 
 fn find_task<'a>(name: &str, tasks: &'a [DiscoveredTask]) -> Result<&'a DiscoveredTask> {
@@ -104,6 +128,172 @@ fn find_task<'a>(name: &str, tasks: &'a [DiscoveredTask]) -> Result<&'a Discover
         .iter()
         .find(|t| t.task.name.eq_ignore_ascii_case(name))
         .ok_or_else(|| anyhow::anyhow!("AI returned unknown task: {}", name))
+}
+
+fn load_routing_context() -> AskRoutingContext {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let external_clis = external_cli::list_external_cli_tools()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tool| AskExternalCli {
+            id: tool.manifest.id,
+            description: tool.manifest.description,
+        })
+        .collect();
+    let codex_agents = load_codex_agent_ids().unwrap_or_default();
+
+    AskRoutingContext {
+        cwd,
+        external_clis,
+        codex_agents,
+    }
+}
+
+fn load_codex_agent_ids() -> Result<Vec<String>> {
+    let router_path = config::expand_path(RUN_AGENT_ROUTER_PATH);
+    if !router_path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let output = Command::new("bash")
+        .arg(&router_path)
+        .arg("list")
+        .output()?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn route_special_query(query: &str, routing: &AskRoutingContext) -> Option<String> {
+    let query_lower = query.to_ascii_lowercase();
+    let target_path = extract_path_hint(query).unwrap_or_else(|| routing.cwd.clone());
+    let target = target_path.display().to_string();
+
+    let session_like = query_lower.contains("session")
+        && (query_lower.contains("my ")
+            || query_lower.contains(" current")
+            || query_lower.contains("what is")
+            || query_lower.contains("which session")
+            || query_lower.contains("browse"));
+    if session_like {
+        return Some(format!(
+            "f ai codex browse --path {}",
+            shell_words::quote(&target)
+        ));
+    }
+
+    None
+}
+
+fn extract_path_hint(query: &str) -> Option<PathBuf> {
+    for raw in query.split_whitespace() {
+        let token = raw.trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\''
+                    | '`'
+                    | ','
+                    | '.'
+                    | ';'
+                    | ':'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '?'
+                    | '!'
+            )
+        });
+        if !(token.starts_with("~/") || token.starts_with('/')) {
+            continue;
+        }
+        let expanded = config::expand_path(token);
+        if expanded.exists() {
+            return Some(expanded);
+        }
+    }
+    None
+}
+
+fn maybe_offer_execute(command: &str) -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Ok(());
+    }
+
+    let lines = vec![
+        "Run this command now?".to_string(),
+        command.trim().to_string(),
+    ];
+    if !confirm_with_tui("Ask", &lines, "Run suggested command? [Y/n]: ")? {
+        return Ok(());
+    }
+
+    execute_suggested_command(command)
+}
+
+fn execute_suggested_command(command: &str) -> Result<()> {
+    let tokens = shell_words::split(command).unwrap_or_else(|_| {
+        command
+            .split_whitespace()
+            .map(|part| part.to_string())
+            .collect()
+    });
+    if tokens.is_empty() {
+        bail!("Suggested command is empty.");
+    }
+
+    let args = match tokens.first().map(|token| token.as_str()) {
+        Some("f") | Some("flow") => tokens[1..].to_vec(),
+        _ => tokens,
+    };
+    if args.is_empty() {
+        bail!("Suggested command is incomplete.");
+    }
+
+    let exe = std::env::current_exe()?;
+    let status = Command::new(&exe)
+        .args(&args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("failed to execute suggested command via {}", exe.display()))?;
+    if !status.success() {
+        bail!(
+            "suggested command exited unsuccessfully with status {}",
+            status
+        );
+    }
+    Ok(())
+}
+
+fn confirm_with_tui(title: &str, lines: &[String], prompt: &str) -> Result<bool> {
+    if let Some(answer) = opentui_prompt::confirm(title, lines, true) {
+        return Ok(answer);
+    }
+    confirm_default_yes(prompt)
+}
+
+fn confirm_default_yes(prompt: &str) -> Result<bool> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    if answer.is_empty() {
+        return Ok(true);
+    }
+    Ok(matches!(answer.as_str(), "y" | "yes"))
 }
 
 fn flow_command_candidates() -> Vec<FlowCommand> {
@@ -150,13 +340,19 @@ fn valid_subcommand_set(commands: &[FlowCommand]) -> HashSet<String> {
     set
 }
 
-fn build_prompt(query: &str, tasks: &[DiscoveredTask], commands: &[FlowCommand]) -> String {
+fn build_prompt(
+    query: &str,
+    tasks: &[DiscoveredTask],
+    commands: &[FlowCommand],
+    routing: &AskRoutingContext,
+) -> String {
     let mut prompt = String::new();
     prompt.push_str("You are a Flow CLI assistant.\n");
     prompt.push_str("Choose the best command for the user to run.\n");
     prompt.push_str("Respond with ONE line in one of these formats only:\n");
     prompt.push_str("task:<task_name>\n");
     prompt.push_str("cmd:f <flow command>\n\n");
+    prompt.push_str(&format!("Current workspace: {}\n\n", routing.cwd.display()));
 
     if tasks.is_empty() {
         prompt.push_str("No flow.toml tasks were discovered.\n");
@@ -186,6 +382,34 @@ fn build_prompt(query: &str, tasks: &[DiscoveredTask], commands: &[FlowCommand])
             }
         }
         prompt.push_str(&format!("{}\n", line));
+    }
+
+    prompt.push_str("\nSpecial command templates:\n");
+    prompt.push_str(&format!(
+        "- f ai codex browse --path {}: browse and select Codex sessions for the current workspace\n",
+        shell_words::quote(&routing.cwd.display().to_string())
+    ));
+
+    for tool in &routing.external_clis {
+        let mut line = format!("- f cli {} -- ...: run external CLI {}", tool.id, tool.id);
+        if let Some(description) = &tool.description {
+            if !description.trim().is_empty() {
+                line.push_str(&format!(" ({})", description.trim()));
+            }
+        }
+        prompt.push_str(&format!("{line}\n"));
+    }
+
+    if !routing.codex_agents.is_empty() {
+        prompt.push_str("\nRun-owned Codex agents:\n");
+        for agent_id in &routing.codex_agents {
+            prompt.push_str(&format!(
+                "- f ai codex agent run --path {} {} \"<query>\": run the {} agent for the current workspace\n",
+                shell_words::quote(&routing.cwd.display().to_string()),
+                agent_id,
+                agent_id
+            ));
+        }
     }
 
     prompt.push_str(&format!("\nUser query: {}\n", query));
@@ -508,5 +732,34 @@ mod tests {
             AskSelection::Command { command } => assert_eq!(command, "f tasks list"),
             _ => panic!("expected command"),
         }
+    }
+
+    #[test]
+    fn special_session_query_routes_to_codex_browser() {
+        let routing = AskRoutingContext {
+            cwd: PathBuf::from("/tmp/example"),
+            external_clis: Vec::new(),
+            codex_agents: Vec::new(),
+        };
+
+        let command = route_special_query("what is my session", &routing).expect("route");
+        assert_eq!(command, "f ai codex browse --path /tmp/example");
+    }
+
+    #[test]
+    fn special_session_query_prefers_explicit_path_hint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let routing = AskRoutingContext {
+            cwd: PathBuf::from("/tmp/example"),
+            external_clis: Vec::new(),
+            codex_agents: Vec::new(),
+        };
+
+        let query = format!("what is my session for {}", temp.path().display());
+        let command = route_special_query(&query, &routing).expect("route");
+        assert_eq!(
+            command,
+            format!("f ai codex browse --path {}", temp.path().display())
+        );
     }
 }

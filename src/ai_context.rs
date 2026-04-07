@@ -5,7 +5,7 @@
 //!
 //! ## Directory Structure
 //!
-//! ```
+//! ```text
 //! .ai/
 //!   context/
 //!     commands/        # Command-specific context

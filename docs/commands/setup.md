@@ -27,7 +27,6 @@ f setup --config ./flow.toml
 - If `flow.toml` defines a `setup` task, `f setup` runs that task.
 - After the `setup` task exits, Flow re-reads `flow.toml`, re-syncs task skills to `.ai/skills`, and reloads Codex skills (when configured). This makes setup-generated task changes visible to Claude/Codex immediately.
 - Otherwise, it prints shell aliases from `[alias]` in `flow.toml`.
-- After successful completion, Flow writes a setup checkpoint to `.rise/setup.json` in the repo root.
 - `f setup deploy` adds a `[host]` section, creates a remote setup script, copies env templates, and optionally stores the deploy host.
 - `f setup release` detects server projects and offers Linux host deployment defaults.
 

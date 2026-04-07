@@ -17,6 +17,13 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 PROFILE=release
+RUNTIME_ASSETS=(
+    "scripts/private_mirror.py"
+    "scripts/codex-skill-eval-launchd.py"
+    "tools/domainsd-cpp/domainsd.cpp"
+    "tools/domainsd-cpp/install-macos-launchd.sh"
+    "tools/domainsd-cpp/uninstall-macos-launchd.sh"
+)
 
 fail() {
     echo "package-release: $*" >&2
@@ -88,6 +95,23 @@ checksum() {
     fi
 }
 
+copy_runtime_assets() {
+    local stage="$1"
+    local assets_root="${stage}/share/flow"
+    local rel=""
+    mkdir -p "${assets_root}"
+    for rel in "${RUNTIME_ASSETS[@]}"; do
+        local src="${ROOT_DIR}/${rel}"
+        local dest="${assets_root}/${rel}"
+        [[ -f "${src}" ]] || fail "missing runtime asset: ${src}"
+        mkdir -p "$(dirname "${dest}")"
+        cp "${src}" "${dest}"
+        if [[ -x "${src}" ]]; then
+            chmod +x "${dest}" 2>/dev/null || true
+        fi
+    done
+}
+
 main() {
     detect_platform
     resolve_version
@@ -103,6 +127,7 @@ main() {
     cp "${target_dir}/f" "${stage}/f"
     cp "${target_dir}/flow" "${stage}/flow"
     cp "${target_dir}/lin" "${stage}/lin"
+    copy_runtime_assets "${stage}"
 
     codesign_if_requested "${stage}/f"
     codesign_if_requested "${stage}/flow"

@@ -271,7 +271,7 @@ pub enum Commands {
     Pr(PrOpts),
     #[command(
         about = "Manage personal tooling ignore policy across repos.",
-        long_about = "Audit and clean personal tooling ignore patterns from project .gitignore files. This helps keep external repositories free of local-only patterns like .beads/ and .rise/."
+        long_about = "Audit and clean personal tooling ignore patterns from project .gitignore files. This helps keep external repositories free of local-only patterns like .beads/."
     )]
     Gitignore(GitignoreCommand),
     #[command(
@@ -498,8 +498,8 @@ pub enum Commands {
     )]
     Switch(SwitchCommand),
     #[command(
-        about = "Push current branch to a configured private mirror remote.",
-        long_about = "Pushes the current branch to a private mirror remote (typically on GitHub). When the repo is a read-only clone (origin == upstream), Flow can repoint origin to your mirror based on FLOW_PUSH_OWNER (or --owner) and push there."
+        about = "Push helpers: mirror push, hook management, and policy enforcement.",
+        long_about = "Pushes the current branch to a private mirror remote (typically on GitHub) when invoked without a subcommand. Also manages Flow-owned global Git push hooks and internal push-policy plumbing used by those hooks."
     )]
     Push(PushCommand),
     #[command(
@@ -593,11 +593,16 @@ pub enum Commands {
     )]
     Release(ReleaseCommand),
     #[command(
-        about = "Install a CLI/tool binary (registry, parm, or flox).",
-        long_about = "Install binaries via Flow registry, GitHub releases via parm, or flox. Auto mode tries registry first, then parm, then flox.",
+        about = "Install a CLI/tool binary or link an external CLI source tree.",
+        long_about = "Install binaries via Flow registry, GitHub releases via parm, or flox. If the argument is a local path with flow-tool.toml, Flow links it as an external CLI source tool. Auto mode otherwise tries registry first, then parm, then flox.",
         alias = "inst"
     )]
     Install(InstallCommand),
+    #[command(
+        about = "Run or inspect external Flow CLIs.",
+        long_about = "Run registered or discovered external CLIs through Flow. Supports linked source tools plus dev-root manifest discovery under ~/code/lang/go/cli and ~/code/lang/rust/cli."
+    )]
+    Cli(CliToolCommand),
     #[command(
         about = "Manage the Flow registry (tokens, setup).",
         long_about = "Create registry tokens and wire them into worker secrets and local envs."
@@ -959,15 +964,20 @@ pub struct FailureCopyOpts {
     /// Recent failure id to copy (from `f failure list`). Defaults to the latest failure.
     #[arg(long)]
     pub id: Option<String>,
-    /// Clipboard payload format.
+    /// Clipboard payload format. Use `codex` or `claude` for Flow-native repair prompts.
     #[arg(long, value_enum, default_value_t = FailureCopyFormat::Prompt)]
     pub format: FailureCopyFormat,
+    /// Also write the selected payload into .ai/internal/failures/ under the project root.
+    #[arg(long)]
+    pub write_repo: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FailureCopyFormat {
     Prompt,
     Excerpt,
+    Codex,
+    Claude,
     Json,
 }
 
@@ -2674,6 +2684,15 @@ pub enum ProviderAiAction {
         #[arg(long)]
         json: bool,
     },
+    /// Launch the external Codex session browser and resume the selected session.
+    Browse {
+        /// Project path or repo root to browse instead of the current directory.
+        #[arg(long, alias = "repo")]
+        path: Option<String>,
+        /// Seed the browser filter with this query text.
+        #[arg(value_name = "QUERY", trailing_var_arg = true)]
+        query: Vec<String>,
+    },
     /// Continue the most recent session for this provider.
     Continue {
         /// Session name or ID to continue (optional).
@@ -2795,7 +2814,7 @@ pub enum ProviderAiAction {
         /// Also install the macOS launchd scorecard refresher.
         #[arg(long)]
         install_launchd: bool,
-        /// Start codexd immediately after enabling the global config.
+        /// Start jd immediately after enabling the global config.
         #[arg(long)]
         start_daemon: bool,
         /// Sync any discovered external skill sources after enabling the config.
@@ -2817,7 +2836,7 @@ pub enum ProviderAiAction {
         #[arg(long, default_value = "168")]
         within_hours: u64,
     },
-    /// Manage the Flow codexd query daemon.
+    /// Manage the Flow jd query daemon.
     Daemon {
         #[command(subcommand)]
         action: Option<CodexDaemonAction>,
@@ -2864,6 +2883,11 @@ pub enum ProviderAiAction {
     Runtime {
         #[command(subcommand)]
         action: Option<CodexRuntimeAction>,
+    },
+    /// Inspect the automatic `~/log` capture lane for completed j sessions.
+    Log {
+        #[command(subcommand)]
+        action: Option<CodexLogAction>,
     },
     /// Search Codex sessions by prompt text and resume the best match.
     #[command(alias = "search")]
@@ -2958,22 +2982,22 @@ pub enum ProviderAiAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum CodexDaemonAction {
-    /// Start codexd under Flow supervision.
+    /// Start jd under Flow supervision.
     Start,
-    /// Stop codexd.
+    /// Stop jd.
     Stop,
-    /// Restart codexd.
+    /// Restart jd.
     Restart,
-    /// Show codexd status.
+    /// Show jd status.
     Status,
-    /// Run codexd in the foreground (internal).
+    /// Run jd in the foreground (internal).
     #[command(hide = true)]
     Serve {
-        /// Override the codexd socket path.
+        /// Override the jd socket path.
         #[arg(long)]
         socket: Option<PathBuf>,
     },
-    /// Ping codexd and exit non-zero if unavailable (internal).
+    /// Ping jd and exit non-zero if unavailable (internal).
     #[command(hide = true)]
     Ping,
 }
@@ -3231,6 +3255,25 @@ pub enum CodexRuntimeAction {
     },
 }
 
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexLogAction {
+    /// Show the current `~/log` capture status for completed j sessions.
+    Status {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Backfill missing `~/log` bundles for previously captured completed sessions.
+    Sync {
+        /// Maximum number of missing session bundles to backfill.
+        #[arg(long, default_value = "200")]
+        limit: usize,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct EnvCommand {
     #[command(subcommand)]
@@ -3252,6 +3295,53 @@ pub struct ServicesCommand {
 
 #[derive(Args, Debug, Clone)]
 pub struct PushCommand {
+    #[command(subcommand)]
+    pub action: Option<PushAction>,
+    #[command(flatten)]
+    pub options: PushMirrorOptions,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PushAction {
+    /// Install or inspect Flow-managed global Git push hooks.
+    Hooks(PushHooksCommand),
+    /// Evaluate the current Git pre-push request (internal).
+    #[command(hide = true, name = "hook-eval")]
+    HookEval(PushHookEvalCommand),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PushHooksCommand {
+    #[command(subcommand)]
+    pub action: Option<PushHooksAction>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PushHooksAction {
+    /// Install the global Flow pre-push hook via core.hooksPath.
+    Install {
+        /// Overwrite an existing global hooks path or non-Flow pre-push hook.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove the Flow-managed global pre-push hook.
+    Uninstall,
+    /// Show Flow pre-push hook status.
+    Status,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PushHookEvalCommand {
+    /// Remote name supplied by Git pre-push.
+    #[arg(long)]
+    pub remote_name: Option<String>,
+    /// Remote URL supplied by Git pre-push.
+    #[arg(long)]
+    pub remote_url: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct PushMirrorOptions {
     /// Git remote name to push to (default: origin).
     #[arg(long, default_value = "origin")]
     pub remote: String,
@@ -4375,7 +4465,7 @@ pub struct ReposCloneOpts {
     /// Upstream URL override (defaults to fork parent via gh).
     #[arg(short = 'u', long)]
     pub upstream_url: Option<String>,
-    /// Skip the nikiv home-branch bootstrap after clone.
+    /// Skip local nikiv home-branch setup after clone.
     #[arg(long)]
     pub no_home_branch_bootstrap: bool,
 }
@@ -4925,7 +5015,7 @@ pub struct RegistryReleaseOpts {
 
 #[derive(Args, Debug, Clone)]
 pub struct InstallOpts {
-    /// Package name to install (leave blank to search).
+    /// Package name to install, or a local path to an external CLI source tree.
     pub name: Option<String>,
     /// Registry base URL (defaults to FLOW_REGISTRY_URL).
     #[arg(long)]
@@ -4957,6 +5047,27 @@ pub struct InstallCommand {
 
     #[command(flatten)]
     pub opts: InstallOpts,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CliToolCommand {
+    #[command(subcommand)]
+    pub action: Option<CliToolAction>,
+    /// External CLI tool id to run.
+    pub id: Option<String>,
+    /// Additional arguments passed directly to the external CLI.
+    #[arg(value_name = "ARGS", trailing_var_arg = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CliToolAction {
+    /// List registered and discovered external CLIs.
+    List,
+    /// Print the source root for an external CLI.
+    Which { id: String },
+    /// Show resolution and manifest details for an external CLI.
+    Doctor { id: String },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -5970,6 +6081,107 @@ mod tests {
                 assert!(!json);
                 assert_eq!(agent_id, "planner");
                 assert_eq!(query, vec!["make", "a", "plan"]);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_log_status() {
+        let cli = Cli::parse_from(["f", "codex", "log", "status", "--json"]);
+
+        match cli.command {
+            Some(Commands::Codex {
+                action:
+                    Some(ProviderAiAction::Log {
+                        action: Some(CodexLogAction::Status { json }),
+                    }),
+            }) => {
+                assert!(json);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_log_sync() {
+        let cli = Cli::parse_from(["f", "codex", "log", "sync", "--limit", "42", "--json"]);
+
+        match cli.command {
+            Some(Commands::Codex {
+                action:
+                    Some(ProviderAiAction::Log {
+                        action: Some(CodexLogAction::Sync { limit, json }),
+                    }),
+            }) => {
+                assert_eq!(limit, 42);
+                assert!(json);
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_push_hooks_install() {
+        let cli = Cli::parse_from(["f", "push", "hooks", "install", "--force"]);
+
+        match cli.command {
+            Some(Commands::Push(PushCommand {
+                action: Some(PushAction::Hooks(PushHooksCommand { action })),
+                options,
+            })) => {
+                assert!(matches!(
+                    action,
+                    Some(PushHooksAction::Install { force: true })
+                ));
+                assert_eq!(options.remote, "origin");
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_push_hook_eval_internal_command() {
+        let cli = Cli::parse_from([
+            "f",
+            "push",
+            "hook-eval",
+            "--remote-name",
+            "origin",
+            "--remote-url",
+            "git@github.com:zed-industries/zed.git",
+        ]);
+
+        match cli.command {
+            Some(Commands::Push(PushCommand {
+                action:
+                    Some(PushAction::HookEval(PushHookEvalCommand {
+                        remote_name,
+                        remote_url,
+                    })),
+                ..
+            })) => {
+                assert_eq!(remote_name.as_deref(), Some("origin"));
+                assert_eq!(
+                    remote_url.as_deref(),
+                    Some("git@github.com:zed-industries/zed.git")
+                );
+            }
+            other => panic!("unexpected parsed command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_push_mirror_flags_without_subcommand() {
+        let cli = Cli::parse_from(["f", "push", "--repo", "zed", "--dry-run"]);
+
+        match cli.command {
+            Some(Commands::Push(PushCommand {
+                action: None,
+                options,
+            })) => {
+                assert_eq!(options.repo.as_deref(), Some("zed"));
+                assert!(options.dry_run);
             }
             other => panic!("unexpected parsed command: {other:?}"),
         }

@@ -11,9 +11,37 @@ use serde::Deserialize;
 
 use crate::cli::{InstallBackend, InstallIndexOpts, InstallOpts};
 use crate::config::FloxInstallSpec;
-use crate::registry;
+use crate::{external_cli, registry};
 
 pub fn run(mut opts: InstallOpts) -> Result<()> {
+    if let Some(name) = opts
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let candidate = Path::new(name);
+        if candidate.exists() {
+            let tool = external_cli::install_external_cli_link(candidate, opts.force)?;
+            println!(
+                "Linked external CLI {} from {}",
+                tool.manifest.id,
+                tool.source_root.display()
+            );
+            if let Some(path) = &tool.registration_path {
+                println!("Link record: {}", path.display());
+            }
+            return Ok(());
+        }
+
+        if looks_like_remote_external_cli_id(name) {
+            bail!(
+                "remote external CLI installs are not implemented yet for {}; use `f install <path-to-cli>` for now",
+                name
+            );
+        }
+    }
+
     if opts
         .name
         .as_deref()
@@ -86,6 +114,10 @@ fn install_with_auto(opts: &InstallOpts) -> Result<()> {
 
 fn is_existing_destination_error(err: &anyhow::Error) -> bool {
     err.to_string().contains("already exists")
+}
+
+fn looks_like_remote_external_cli_id(name: &str) -> bool {
+    name.starts_with("cli_") || name.starts_with("cli:")
 }
 
 pub fn run_index(opts: InstallIndexOpts) -> Result<()> {

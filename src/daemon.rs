@@ -16,9 +16,8 @@ use reqwest::blocking::Client;
 
 use crate::{
     cli::{DaemonAction, DaemonCommand},
-    codexd,
     config::{self, DaemonConfig, DaemonRestartPolicy},
-    env, supervisor,
+    env, jd, supervisor,
 };
 
 /// Run the daemon command.
@@ -458,11 +457,16 @@ fn wait_for_daemon_ready(daemon: &DaemonConfig, stdout_log: &Path) -> Result<()>
 /// Find a daemon config by name from merged configs.
 fn find_daemon_config_with_path(name: &str, config_path: Option<&Path>) -> Result<DaemonConfig> {
     let config = load_merged_config_with_path(config_path)?;
+    let aliases = match name {
+        "codexd" => ["codexd", "jd"],
+        "jd" => ["jd", "codexd"],
+        _ => [name, name],
+    };
 
     config
         .daemons
         .into_iter()
-        .find(|d| d.name == name)
+        .find(|d| aliases.contains(&d.name.as_str()))
         .ok_or_else(|| anyhow::anyhow!("daemon '{}' not found in config", name))
 }
 
@@ -493,8 +497,8 @@ pub fn load_merged_config_with_path(config_path: Option<&Path>) -> Result<config
         }
     }
 
-    if !merged.daemons.iter().any(|daemon| daemon.name == "codexd") {
-        if let Ok(daemon) = codexd::builtin_daemon_config() {
+    if !merged.daemons.iter().any(|daemon| daemon.name == "jd") {
+        if let Ok(daemon) = jd::builtin_daemon_config() {
             merged.daemons.push(daemon);
         }
     }

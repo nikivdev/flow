@@ -17,7 +17,7 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::cli::UpgradeOpts;
+use crate::{cli::UpgradeOpts, runtime_assets};
 
 const UPGRADE_CHECK_INTERVAL_HOURS: u64 = 24;
 
@@ -378,12 +378,10 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Extract tarball and find the binary.
-fn extract_binary(tarball: &Path, binary_name: &str) -> Result<PathBuf> {
+fn extract_release_bundle(tarball: &Path) -> Result<(tempfile::TempDir, PathBuf)> {
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
     let temp_path = temp_dir.path();
 
-    // Extract tarball
     let status = Command::new("tar")
         .args([
             "-xzf",
@@ -398,34 +396,73 @@ fn extract_binary(tarball: &Path, binary_name: &str) -> Result<PathBuf> {
         bail!("Failed to extract tarball");
     }
 
-    // Find the binary (might be in a subdirectory)
-    let find_binary = |dir: &Path| -> Option<PathBuf> {
-        if dir.join(binary_name).exists() {
-            return Some(dir.join(binary_name));
-        }
-        // Check one level deep
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let bin_path = path.join(binary_name);
-                    if bin_path.exists() {
-                        return Some(bin_path);
-                    }
-                }
-            }
-        }
-        None
-    };
+    let bundle_root = fs::read_dir(temp_path)
+        .ok()
+        .and_then(|mut entries| entries.find_map(|entry| entry.ok().map(|item| item.path())))
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| temp_path.to_path_buf());
 
-    let binary_path = find_binary(temp_path)
+    Ok((temp_dir, bundle_root))
+}
+
+fn find_bundle_binary(bundle_root: &Path, binary_name: &str) -> Result<PathBuf> {
+    let direct = bundle_root.join(binary_name);
+    if direct.exists() {
+        return Ok(direct);
+    }
+
+    let binary_path = fs::read_dir(bundle_root)
+        .ok()
+        .and_then(|entries| {
+            entries.flatten().find_map(|entry| {
+                let path = entry.path();
+                if !path.is_dir() {
+                    return None;
+                }
+                let candidate = path.join(binary_name);
+                candidate.exists().then_some(candidate)
+            })
+        })
         .ok_or_else(|| anyhow::anyhow!("Binary '{}' not found in tarball", binary_name))?;
 
-    // Copy to a persistent temp location
     let dest = env::temp_dir().join(format!("flow_upgrade_{}", binary_name));
     fs::copy(&binary_path, &dest).context("Failed to copy binary")?;
 
     Ok(dest)
+}
+
+fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest).with_context(|| format!("failed to create {}", dest.display()))?;
+    for entry in
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {}", source.display()))?;
+        let source_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_recursive(&source_path, &dest_path)?;
+        } else {
+            fs::copy(&source_path, &dest_path).with_context(|| {
+                format!(
+                    "failed to copy {} -> {}",
+                    source_path.display(),
+                    dest_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn install_bundle_assets(bundle_root: &Path, output_path: &Path) -> Result<()> {
+    let source_assets = bundle_root.join("share").join("flow");
+    if !source_assets.is_dir() {
+        return Ok(());
+    }
+    let Some(dest_assets) = runtime_assets::installed_assets_root_for_exe(output_path) else {
+        return Ok(());
+    };
+    copy_dir_recursive(&source_assets, &dest_assets)
 }
 
 /// Validate the new binary by running --version.
@@ -660,12 +697,15 @@ pub fn run(opts: UpgradeOpts) -> Result<()> {
     // Extract and find the binary
     println!("Extracting...");
     let binary_name = if cfg!(windows) { "f.exe" } else { "f" };
-    let new_exe = extract_binary(&temp_tarball, binary_name)?;
+    let (_bundle_dir, bundle_root) = extract_release_bundle(&temp_tarball)?;
+    let new_exe = find_bundle_binary(&bundle_root, binary_name)?;
 
     // Validate the new binary
     println!("Validating...");
     let new_version = validate_binary(&new_exe)?;
     println!("New binary version: {}", new_version);
+
+    install_bundle_assets(&bundle_root, &output_path)?;
 
     // Replace the executable
     println!("Installing...");

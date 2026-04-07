@@ -15,7 +15,7 @@ use crate::cli::{
     CloneOpts, ReposAction, ReposBootstrapHomeBranchOpts, ReposCloneOpts, ReposCommand,
     ReposHomeBranchStatusOpts, ReposMigrateHomeBranchOpts,
 };
-use crate::{config, publish, repo_capsule, ssh, ssh_keys, upstream, vcs};
+use crate::{config, publish, repo_capsule, runtime_assets, ssh, ssh_keys, upstream, vcs};
 
 const DEFAULT_HOME_BRANCH: &str = "nikiv";
 const DEFAULT_FORK_REMOTE: &str = "fork";
@@ -28,14 +28,19 @@ pub fn run(cmd: ReposCommand) -> Result<()> {
     match cmd.action {
         Some(ReposAction::Clone(opts)) => {
             let no_home_branch_bootstrap = opts.no_home_branch_bootstrap;
-            let path = clone_repo(opts)?;
+            let clone = clone_repo(opts)?;
+            if clone.already_cloned {
+                return Ok(());
+            }
+            let path = clone.path;
             if !no_home_branch_bootstrap {
                 bootstrap_home_branch(
                     &path,
                     &HomeBranchBootstrapOptions {
                         dry_run: false,
                         allow_switch: true,
-                        fail_on_dirty: true,
+                        fail_on_dirty: false,
+                        ensure_private_mirror: false,
                         home_branch: DEFAULT_HOME_BRANCH.to_string(),
                         quiet: false,
                     },
@@ -149,6 +154,7 @@ struct HomeBranchBootstrapOptions {
     dry_run: bool,
     allow_switch: bool,
     fail_on_dirty: bool,
+    ensure_private_mirror: bool,
     home_branch: String,
     quiet: bool,
 }
@@ -375,7 +381,12 @@ struct GenericRepoRef {
     clone_url: String,
 }
 
-pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
+pub(crate) struct CloneRepoResult {
+    pub(crate) path: PathBuf,
+    pub(crate) already_cloned: bool,
+}
+
+pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<CloneRepoResult> {
     ssh::ensure_ssh_env();
     let mode = ssh::ssh_mode();
     if matches!(mode, ssh::SshMode::Force) && !ssh::has_identities() {
@@ -429,7 +440,10 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
 
     if preflight_clone_target(&target_dir)? {
         println!("Already cloned: {}", target_dir.display());
-        return Ok(target_dir);
+        return Ok(CloneRepoResult {
+            path: target_dir,
+            already_cloned: true,
+        });
     }
 
     if let Some(parent) = target_dir.parent() {
@@ -438,12 +452,6 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
     }
 
     let shallow = !opts.full;
-    let complete_history_before_bootstrap = shallow
-        && should_complete_history_before_clone_bootstrap(
-            &opts,
-            is_github,
-            home_branch_workflow_mode(&target_dir),
-        );
     let fetch_depth = if shallow { Some(1) } else { None };
     run_git_clone(&clone_url, &target_dir, shallow)?;
 
@@ -451,14 +459,13 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
 
     if opts.no_upstream {
         if shallow {
-            if complete_history_before_bootstrap {
-                fetch_complete_history_for_clone(&target_dir, false)?;
-            } else {
-                spawn_background_history_fetch(&target_dir, false)?;
-            }
+            spawn_background_history_fetch(&target_dir, false)?;
         }
         init_jj_repo(&target_dir)?;
-        return Ok(target_dir);
+        return Ok(CloneRepoResult {
+            path: target_dir,
+            already_cloned: false,
+        });
     }
 
     if !is_github {
@@ -472,14 +479,13 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
         }
         configure_upstream(&target_dir, &upstream_url, fetch_depth)?;
         if shallow {
-            if complete_history_before_bootstrap {
-                fetch_complete_history_for_clone(&target_dir, !upstream_is_origin)?;
-            } else {
-                spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
-            }
+            spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
         }
         init_jj_repo(&target_dir)?;
-        return Ok(target_dir);
+        return Ok(CloneRepoResult {
+            path: target_dir,
+            already_cloned: false,
+        });
     }
 
     let upstream_url = if let Some(url) = opts.upstream_url {
@@ -504,26 +510,14 @@ pub(crate) fn clone_repo(opts: ReposCloneOpts) -> Result<PathBuf> {
 
     configure_upstream(&target_dir, &upstream_url, fetch_depth)?;
     if shallow {
-        if complete_history_before_bootstrap {
-            fetch_complete_history_for_clone(&target_dir, !upstream_is_origin)?;
-        } else {
-            spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
-        }
+        spawn_background_history_fetch(&target_dir, !upstream_is_origin)?;
     }
 
     init_jj_repo(&target_dir)?;
-    Ok(target_dir)
-}
-
-fn should_complete_history_before_clone_bootstrap(
-    opts: &ReposCloneOpts,
-    is_github: bool,
-    workflow_mode: HomeBranchWorkflowMode,
-) -> bool {
-    is_github
-        && !opts.full
-        && !opts.no_home_branch_bootstrap
-        && workflow_mode == HomeBranchWorkflowMode::PrivateMirror
+    Ok(CloneRepoResult {
+        path: target_dir,
+        already_cloned: false,
+    })
 }
 
 fn preflight_clone_target(target_dir: &Path) -> Result<bool> {
@@ -709,6 +703,7 @@ fn run_bootstrap_home_branch(opts: ReposBootstrapHomeBranchOpts) -> Result<()> {
             dry_run: opts.dry_run,
             allow_switch: !opts.no_switch,
             fail_on_dirty: false,
+            ensure_private_mirror: true,
             home_branch: DEFAULT_HOME_BRANCH.to_string(),
             quiet: opts.json,
         },
@@ -745,6 +740,7 @@ fn run_migrate_home_branch(opts: ReposMigrateHomeBranchOpts) -> Result<()> {
                 dry_run: opts.dry_run,
                 allow_switch: true,
                 fail_on_dirty: false,
+                ensure_private_mirror: true,
                 home_branch: DEFAULT_HOME_BRANCH.to_string(),
                 quiet: opts.json,
             },
@@ -799,7 +795,11 @@ fn bootstrap_home_branch(
     let mut steps = Vec::new();
     let mut changed = false;
     let mut switched_to_home_branch = false;
-    let mut status = repo_home_branch_status(repo_root, &options.home_branch)?;
+    let mut status = repo_home_branch_status_with_options(
+        repo_root,
+        &options.home_branch,
+        options.ensure_private_mirror,
+    )?;
 
     if !status.eligible {
         let result = HomeBranchBootstrapResult {
@@ -965,7 +965,7 @@ fn bootstrap_home_branch(
     }
 
     match status.workflow_mode {
-        HomeBranchWorkflowMode::PrivateMirror => {
+        HomeBranchWorkflowMode::PrivateMirror if options.ensure_private_mirror => {
             let mirror_status_before =
                 private_mirror_status(repo_root, &public_default_branch).ok();
             let needs_mirror_ensure = mirror_status_before
@@ -999,6 +999,7 @@ fn bootstrap_home_branch(
                 changed = true;
             }
         }
+        HomeBranchWorkflowMode::PrivateMirror => {}
         HomeBranchWorkflowMode::DirectPush => {
             let push_remote = resolve_push_remote_name(repo_root, status.public_remote.as_deref())
                 .ok_or_else(|| {
@@ -1027,7 +1028,11 @@ fn bootstrap_home_branch(
         }
     }
 
-    status = repo_home_branch_status(repo_root, &options.home_branch)?;
+    status = repo_home_branch_status_with_options(
+        repo_root,
+        &options.home_branch,
+        options.ensure_private_mirror,
+    )?;
     Ok(HomeBranchBootstrapResult {
         repo_root: repo_root.display().to_string(),
         changed,
@@ -1040,6 +1045,14 @@ fn bootstrap_home_branch(
 fn repo_home_branch_status(
     repo_root: &Path,
     requested_home_branch: &str,
+) -> Result<HomeBranchRepoStatus> {
+    repo_home_branch_status_with_options(repo_root, requested_home_branch, true)
+}
+
+fn repo_home_branch_status_with_options(
+    repo_root: &Path,
+    requested_home_branch: &str,
+    include_private_mirror_status: bool,
 ) -> Result<HomeBranchRepoStatus> {
     let repo_root = repo_root
         .canonicalize()
@@ -1089,18 +1102,20 @@ fn repo_home_branch_status(
         (Some(owner), Some(repo)) => Some(format!("git@github.com:{owner}/{repo}.git")),
         _ => None,
     };
-    let private_mirror_status =
-        if workflow_mode == HomeBranchWorkflowMode::PrivateMirror && public_github_ref.is_some() {
-            private_mirror_status(
-                &repo_root,
-                public_default_branch
-                    .as_deref()
-                    .unwrap_or(home_branch.as_str()),
-            )
-            .ok()
-        } else {
-            None
-        };
+    let private_mirror_status = if include_private_mirror_status
+        && workflow_mode == HomeBranchWorkflowMode::PrivateMirror
+        && public_github_ref.is_some()
+    {
+        private_mirror_status(
+            &repo_root,
+            public_default_branch
+                .as_deref()
+                .unwrap_or(home_branch.as_str()),
+        )
+        .ok()
+    } else {
+        None
+    };
     let category = classify_repo_category(
         public_github_ref.as_ref(),
         gh_login.as_deref(),
@@ -1394,9 +1409,7 @@ fn private_mirror_status(repo_root: &Path, branch: &str) -> Result<PrivateMirror
 }
 
 fn run_private_mirror_script(repo_root: &Path, args: &[&str]) -> Result<String> {
-    let script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts")
-        .join("private_mirror.py");
+    let script_path = runtime_assets::require_asset_path("scripts/private_mirror.py")?;
     let output = Command::new("python3")
         .arg(&script_path)
         .args(args)
@@ -1894,11 +1907,6 @@ fn spawn_background_history_fetch(repo_dir: &Path, has_upstream: bool) -> Result
     Ok(())
 }
 
-fn fetch_complete_history_for_clone(repo_dir: &Path, has_upstream: bool) -> Result<()> {
-    println!("Completing git history before private mirror bootstrap...");
-    fetch_complete_history(repo_dir, has_upstream, false)
-}
-
 fn fetch_complete_history(repo_dir: &Path, has_upstream: bool, quiet: bool) -> Result<()> {
     let mut remotes = history_fetch_remotes(repo_dir);
     if remotes.is_empty() {
@@ -2076,49 +2084,31 @@ mod tests {
     }
 
     #[test]
-    fn private_mirror_clone_bootstrap_requires_complete_history() {
-        let opts = ReposCloneOpts {
-            url: "astral-sh/ruff".to_string(),
-            root: "~/repos".to_string(),
-            full: false,
-            no_upstream: false,
-            upstream_url: None,
-            no_home_branch_bootstrap: false,
+    fn clone_bootstrap_skips_private_mirror_ensure() {
+        let options = HomeBranchBootstrapOptions {
+            dry_run: false,
+            allow_switch: true,
+            fail_on_dirty: false,
+            ensure_private_mirror: false,
+            home_branch: DEFAULT_HOME_BRANCH.to_string(),
+            quiet: false,
         };
 
-        assert!(should_complete_history_before_clone_bootstrap(
-            &opts,
-            true,
-            HomeBranchWorkflowMode::PrivateMirror
-        ));
-        assert!(!should_complete_history_before_clone_bootstrap(
-            &opts,
-            true,
-            HomeBranchWorkflowMode::DirectPush
-        ));
-        assert!(!should_complete_history_before_clone_bootstrap(
-            &opts,
-            false,
-            HomeBranchWorkflowMode::PrivateMirror
-        ));
+        assert!(!options.ensure_private_mirror);
     }
 
     #[test]
-    fn skipping_home_branch_bootstrap_keeps_fast_background_fetch() {
-        let opts = ReposCloneOpts {
-            url: "astral-sh/ruff".to_string(),
-            root: "~/repos".to_string(),
-            full: false,
-            no_upstream: false,
-            upstream_url: None,
-            no_home_branch_bootstrap: true,
+    fn explicit_bootstrap_keeps_private_mirror_ensure_enabled() {
+        let options = HomeBranchBootstrapOptions {
+            dry_run: false,
+            allow_switch: true,
+            fail_on_dirty: false,
+            ensure_private_mirror: true,
+            home_branch: DEFAULT_HOME_BRANCH.to_string(),
+            quiet: false,
         };
 
-        assert!(!should_complete_history_before_clone_bootstrap(
-            &opts,
-            true,
-            HomeBranchWorkflowMode::PrivateMirror
-        ));
+        assert!(options.ensure_private_mirror);
     }
 
     #[test]

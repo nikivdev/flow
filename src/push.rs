@@ -3,10 +3,20 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::PushCommand;
-use crate::{env, ssh, ssh_keys};
+use crate::cli::{PushAction, PushCommand, PushMirrorOptions};
+use crate::{env, push_hook, ssh, ssh_keys};
 
 pub fn run(cmd: PushCommand) -> Result<()> {
+    match cmd.action {
+        Some(PushAction::Hooks(hooks)) => return push_hook::run_hooks_command(hooks),
+        Some(PushAction::HookEval(eval)) => return push_hook::run_hook_eval(eval),
+        None => {}
+    }
+
+    run_mirror_push(cmd.options)
+}
+
+fn run_mirror_push(cmd: PushMirrorOptions) -> Result<()> {
     let repo_root = git_root()?;
     let current_branch = current_branch(&repo_root)?;
 
@@ -52,7 +62,11 @@ pub fn run(cmd: PushCommand) -> Result<()> {
     }
 
     println!("==> Pushing {} to {}...", current_branch, cmd.remote);
-    git_run_in(&repo_root, &["push", "-u", &cmd.remote, &current_branch])?;
+    git_run_in_with_env(
+        &repo_root,
+        &["push", "-u", &cmd.remote, &current_branch],
+        &[("FLOW_PUSH_ORCHESTRATED", "1")],
+    )?;
     println!("✓ Pushed to {}/{}", owner, repo_name);
     Ok(())
 }
@@ -166,7 +180,7 @@ fn build_github_https_url(owner: &str, repo: &str) -> String {
     format!("https://github.com/{}/{}.git", owner, repo)
 }
 
-fn choose_github_remote_url(owner: &str, repo: &str, cmd: &PushCommand) -> Result<String> {
+fn choose_github_remote_url(owner: &str, repo: &str, cmd: &PushMirrorOptions) -> Result<String> {
     let ssh_url = build_github_ssh_url(owner, repo);
     let https_url = build_github_https_url(owner, repo);
 
@@ -344,9 +358,18 @@ pub(crate) fn git_capture_in(repo_root: &Path, args: &[&str]) -> Result<String> 
 }
 
 pub(crate) fn git_run_in(repo_root: &Path, args: &[&str]) -> Result<()> {
+    git_run_in_with_env(repo_root, args, &[])
+}
+
+pub(crate) fn git_run_in_with_env(
+    repo_root: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<()> {
     let status = Command::new("git")
         .args(args)
         .current_dir(repo_root)
+        .envs(envs.iter().copied())
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

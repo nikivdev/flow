@@ -13,7 +13,8 @@ use serde_json::Value;
 
 use crate::{ai, ai_project_manifest, codex_session_docs, config, daemon, supervisor, sync_plan};
 
-const CODEXD_NAME: &str = "codexd";
+const JD_NAME: &str = "jd";
+const LEGACY_CODEXD_NAME: &str = "codexd";
 
 #[cfg(unix)]
 #[derive(Debug)]
@@ -74,9 +75,9 @@ struct CodexdResponse {
 }
 
 pub fn builtin_daemon_config() -> Result<config::DaemonConfig> {
-    let exe = std::env::current_exe().context("failed to resolve current executable for codexd")?;
+    let exe = std::env::current_exe().context("failed to resolve current executable for jd")?;
     Ok(config::DaemonConfig {
-        name: CODEXD_NAME.to_string(),
+        name: JD_NAME.to_string(),
         binary: exe.display().to_string(),
         command: Some("codex".to_string()),
         args: vec![
@@ -98,16 +99,20 @@ pub fn builtin_daemon_config() -> Result<config::DaemonConfig> {
         retry: None,
         ready_delay: Some(100),
         ready_output: None,
-        description: Some("Flow-managed Codex query daemon".to_string()),
+        description: Some("Flow-managed jd query daemon for j/Codex session recovery".to_string()),
     })
 }
 
 pub fn socket_path() -> Result<PathBuf> {
-    Ok(config::ensure_global_state_dir()?.join("codexd.sock"))
+    Ok(config::ensure_global_state_dir()?.join("jd.sock"))
 }
 
 fn lock_path() -> Result<PathBuf> {
-    Ok(config::ensure_global_state_dir()?.join("codexd.lock"))
+    Ok(config::ensure_global_state_dir()?.join("jd.lock"))
+}
+
+fn legacy_socket_path() -> Result<PathBuf> {
+    Ok(config::ensure_global_state_dir()?.join("codexd.sock"))
 }
 
 #[cfg(unix)]
@@ -120,9 +125,9 @@ fn acquire_process_lock(file: &std::fs::File) -> Result<FileLockGuard> {
     let err = std::io::Error::last_os_error();
     let raw = err.raw_os_error();
     if raw == Some(libc::EWOULDBLOCK) || raw == Some(libc::EAGAIN) {
-        bail!("codexd already holds {}", lock_path()?.display());
+        bail!("jd already holds {}", lock_path()?.display());
     }
-    Err(err).context("failed to lock codexd process lock")
+    Err(err).context("failed to lock jd process lock")
 }
 
 #[cfg(not(unix))]
@@ -139,7 +144,7 @@ pub fn ping() -> Result<()> {
             "{}",
             response
                 .message
-                .unwrap_or_else(|| "codexd ping failed".to_string())
+                .unwrap_or_else(|| "jd ping failed".to_string())
         )
     }
 }
@@ -152,19 +157,23 @@ pub fn ensure_running() -> Result<()> {
     if is_running() {
         return Ok(());
     }
-    supervisor::ensure_daemon_running(CODEXD_NAME, None, false)
+    stop_legacy_codexd().ok();
+    supervisor::ensure_daemon_running(JD_NAME, None, false)
 }
 
 pub fn start() -> Result<()> {
-    supervisor::ensure_daemon_running(CODEXD_NAME, None, true)
+    stop_legacy_codexd().ok();
+    supervisor::ensure_daemon_running(JD_NAME, None, true)
 }
 
 pub fn stop() -> Result<()> {
-    supervisor::stop_daemon_managed(CODEXD_NAME, None, true)
+    supervisor::stop_daemon_managed(JD_NAME, None, true)?;
+    stop_legacy_codexd().ok();
+    Ok(())
 }
 
 pub fn status() -> Result<()> {
-    daemon::show_status_for_with_path(CODEXD_NAME, None)
+    daemon::show_status_for_with_path(JD_NAME, None)
 }
 
 pub fn serve(socket_override: Option<&Path>) -> Result<()> {
@@ -195,7 +204,14 @@ pub fn serve(socket_override: Option<&Path>) -> Result<()> {
     }
 
     let listener = UnixListener::bind(&socket)
-        .with_context(|| format!("failed to bind codexd socket {}", socket.display()))?;
+        .with_context(|| format!("failed to bind jd socket {}", socket.display()))?;
+
+    if let Ok(legacy_socket) = legacy_socket_path()
+        && legacy_socket != socket
+        && legacy_socket.exists()
+    {
+        fs::remove_file(&legacy_socket).ok();
+    }
 
     start_background_maintenance_loop();
 
@@ -203,28 +219,38 @@ pub fn serve(socket_override: Option<&Path>) -> Result<()> {
         let (stream, _) = match listener.accept() {
             Ok(stream) => stream,
             Err(err) => {
-                eprintln!("WARN codexd accept failed: {err}");
+                eprintln!("WARN jd accept failed: {err}");
                 continue;
             }
         };
         if let Err(err) = handle_client(stream) {
-            eprintln!("WARN codexd request failed: {err:#}");
+            eprintln!("WARN jd request failed: {err:#}");
         }
     }
 }
 
-fn background_poll_secs() -> u64 {
-    std::env::var("FLOW_CODEXD_BACKGROUND_POLL_SECS")
+fn daemon_env_u64(primary: &str, legacy: &str) -> Option<u64> {
+    std::env::var(primary)
         .ok()
+        .or_else(|| std::env::var(legacy).ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .map(|value| value.clamp(5, 300))
-        .unwrap_or(20)
 }
 
-fn background_maintenance_interval_secs(env_key: &str, default_secs: u64) -> u64 {
-    std::env::var(env_key)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
+fn background_poll_secs() -> u64 {
+    daemon_env_u64(
+        "FLOW_JD_BACKGROUND_POLL_SECS",
+        "FLOW_CODEXD_BACKGROUND_POLL_SECS",
+    )
+    .map(|value| value.clamp(5, 300))
+    .unwrap_or(20)
+}
+
+fn background_maintenance_interval_secs(
+    primary_env_key: &str,
+    legacy_env_key: &str,
+    default_secs: u64,
+) -> u64 {
+    daemon_env_u64(primary_env_key, legacy_env_key)
         .map(|value| value.clamp(30, 3600))
         .unwrap_or(default_secs)
 }
@@ -232,15 +258,17 @@ fn background_maintenance_interval_secs(env_key: &str, default_secs: u64) -> u64
 fn start_background_maintenance_loop() {
     let poll_secs = background_poll_secs();
     let docs_review_every = Duration::from_secs(background_maintenance_interval_secs(
+        "FLOW_JD_DOC_REVIEW_EVERY_SECS",
         "FLOW_CODEXD_DOC_REVIEW_EVERY_SECS",
         300,
     ));
     let project_ai_refresh_every = Duration::from_secs(background_maintenance_interval_secs(
+        "FLOW_JD_PROJECT_AI_REFRESH_EVERY_SECS",
         "FLOW_CODEXD_PROJECT_AI_REFRESH_EVERY_SECS",
         600,
     ));
     let _ = thread::Builder::new()
-        .name("flow-codexd-maint".to_string())
+        .name("flow-jd-maint".to_string())
         .spawn(move || {
             let mut last_docs_review = Instant::now()
                 .checked_sub(docs_review_every)
@@ -250,26 +278,29 @@ fn start_background_maintenance_loop() {
                 .unwrap_or_else(Instant::now);
             loop {
                 if let Err(err) = ai::run_codex_background_maintenance() {
-                    eprintln!("WARN codexd maintenance failed: {err:#}");
+                    eprintln!("WARN jd maintenance failed: {err:#}");
                 }
                 if let Err(err) = ai::maybe_run_codex_learning_refresh() {
-                    eprintln!("WARN codexd learning refresh failed: {err:#}");
+                    eprintln!("WARN jd learning refresh failed: {err:#}");
                 }
                 if let Err(err) = ai::maybe_run_codex_telemetry_export(200) {
-                    eprintln!("WARN codexd telemetry export failed: {err:#}");
+                    eprintln!("WARN jd telemetry export failed: {err:#}");
                 }
                 if let Err(err) = sync_plan::drain_queued_requests(1) {
-                    eprintln!("WARN codexd sync plan queue drain failed: {err:#}");
+                    eprintln!("WARN jd sync plan queue drain failed: {err:#}");
                 }
                 if last_docs_review.elapsed() >= docs_review_every {
                     if let Err(err) = codex_session_docs::review_pending_entries(12) {
-                        eprintln!("WARN codexd docs review pass failed: {err:#}");
+                        eprintln!("WARN jd docs review pass failed: {err:#}");
+                    }
+                    if let Err(err) = codex_session_docs::sync_home_log_entries(12) {
+                        eprintln!("WARN jd home-log sync failed: {err:#}");
                     }
                     last_docs_review = Instant::now();
                 }
                 if last_project_ai_refresh.elapsed() >= project_ai_refresh_every {
                     if let Err(err) = ai_project_manifest::refresh_recent(12) {
-                        eprintln!("WARN codexd project-ai refresh failed: {err:#}");
+                        eprintln!("WARN jd project-ai refresh failed: {err:#}");
                     }
                     last_project_ai_refresh = Instant::now();
                 }
@@ -298,7 +329,7 @@ pub(crate) fn query_recent(
             "{}",
             response
                 .message
-                .unwrap_or_else(|| "codexd recent query failed".to_string())
+                .unwrap_or_else(|| "jd recent query failed".to_string())
         )
     }
 }
@@ -319,7 +350,7 @@ pub(crate) fn query_session_hint(
             "{}",
             response
                 .message
-                .unwrap_or_else(|| "codexd session hint query failed".to_string())
+                .unwrap_or_else(|| "jd session hint query failed".to_string())
         )
     }
 }
@@ -346,7 +377,7 @@ pub(crate) fn query_find(
             "{}",
             response
                 .message
-                .unwrap_or_else(|| "codexd find query failed".to_string())
+                .unwrap_or_else(|| "jd find query failed".to_string())
         )
     }
 }
@@ -363,14 +394,14 @@ pub(crate) fn query_project_ai_manifest(
     if response.ok {
         let payload = response
             .payload
-            .context("codexd project-ai manifest response was missing payload")?;
-        serde_json::from_value(payload).context("failed to decode codexd project-ai manifest")
+            .context("jd project-ai manifest response was missing payload")?;
+        serde_json::from_value(payload).context("failed to decode jd project-ai manifest")
     } else {
         bail!(
             "{}",
             response
                 .message
-                .unwrap_or_else(|| "codexd project-ai manifest query failed".to_string())
+                .unwrap_or_else(|| "jd project-ai manifest query failed".to_string())
         )
     }
 }
@@ -383,14 +414,14 @@ pub(crate) fn query_recent_project_ai(
     if response.ok {
         let payload = response
             .payload
-            .context("codexd project-ai recent response was missing payload")?;
-        serde_json::from_value(payload).context("failed to decode codexd project-ai recent list")
+            .context("jd project-ai recent response was missing payload")?;
+        serde_json::from_value(payload).context("failed to decode jd project-ai recent list")
     } else {
         bail!(
             "{}",
             response
                 .message
-                .unwrap_or_else(|| "codexd project-ai recent query failed".to_string())
+                .unwrap_or_else(|| "jd project-ai recent query failed".to_string())
         )
     }
 }
@@ -407,40 +438,40 @@ pub(crate) fn recent_sync_plans(
     if response.ok {
         let payload = response
             .payload
-            .context("codexd recent sync plans response was missing payload")?;
-        serde_json::from_value(payload).context("failed to decode codexd recent sync plans")
+            .context("jd recent sync plans response was missing payload")?;
+        serde_json::from_value(payload).context("failed to decode jd recent sync plans")
     } else {
         bail!(
             "{}",
             response
                 .message
-                .unwrap_or_else(|| "codexd recent sync plans query failed".to_string())
+                .unwrap_or_else(|| "jd recent sync plans query failed".to_string())
         )
     }
 }
 
 fn send_request(request: &CodexdRequest) -> Result<CodexdResponse> {
     let mut stream =
-        UnixStream::connect(socket_path()?).context("failed to connect to codexd socket")?;
-    let payload = serde_json::to_string(request).context("failed to encode codexd request")?;
+        UnixStream::connect(socket_path()?).context("failed to connect to jd socket")?;
+    let payload = serde_json::to_string(request).context("failed to encode jd request")?;
     stream
         .write_all(payload.as_bytes())
-        .context("failed to write codexd request")?;
+        .context("failed to write jd request")?;
     stream
         .write_all(b"\n")
-        .context("failed to terminate codexd request")?;
-    stream.flush().context("failed to flush codexd request")?;
+        .context("failed to terminate jd request")?;
+    stream.flush().context("failed to flush jd request")?;
 
     let mut reader = BufReader::new(stream);
     let mut line = Vec::with_capacity(1024);
     reader
         .read_until(b'\n', &mut line)
-        .context("failed to read codexd response")?;
+        .context("failed to read jd response")?;
     let trimmed = trim_ascii_whitespace(&line);
     if trimmed.is_empty() {
-        bail!("codexd returned an empty response");
+        bail!("jd returned an empty response");
     }
-    serde_json::from_slice(trimmed).context("failed to decode codexd response")
+    serde_json::from_slice(trimmed).context("failed to decode jd response")
 }
 
 fn send_request_with_restart(request: CodexdRequest) -> Result<CodexdResponse> {
@@ -448,9 +479,9 @@ fn send_request_with_restart(request: CodexdRequest) -> Result<CodexdResponse> {
         Ok(response) => Ok(response),
         Err(initial_err) => {
             let _ = stop();
-            start().context("failed to restart codexd for upgraded request")?;
+            start().context("failed to restart jd for upgraded request")?;
             send_request(&request)
-                .with_context(|| format!("codexd request failed before restart: {initial_err:#}"))
+                .with_context(|| format!("jd request failed before restart: {initial_err:#}"))
         }
     }
 }
@@ -465,14 +496,19 @@ fn handle_client(stream: UnixStream) -> Result<()> {
     }
 
     let request: CodexdRequest =
-        serde_json::from_slice(trimmed).context("failed to decode codexd request")?;
+        serde_json::from_slice(trimmed).context("failed to decode jd request")?;
     let response = handle_request(request);
 
     let mut writer = &stream;
-    let payload = serde_json::to_string(&response).context("failed to encode codexd response")?;
+    let payload = serde_json::to_string(&response).context("failed to encode jd response")?;
     writer.write_all(payload.as_bytes())?;
     writer.write_all(b"\n")?;
     writer.flush()?;
+    Ok(())
+}
+
+fn stop_legacy_codexd() -> Result<()> {
+    supervisor::stop_daemon_managed(LEGACY_CODEXD_NAME, None, false)?;
     Ok(())
 }
 
@@ -621,10 +657,10 @@ mod tests {
 
     #[test]
     fn builtin_daemon_config_uses_socket_health() {
-        let cfg = builtin_daemon_config().expect("builtin codexd config");
-        let socket = socket_path().expect("codexd socket");
+        let cfg = builtin_daemon_config().expect("builtin jd config");
+        let socket = socket_path().expect("jd socket");
 
-        assert_eq!(cfg.name, CODEXD_NAME);
+        assert_eq!(cfg.name, JD_NAME);
         assert_eq!(cfg.command.as_deref(), Some("codex"));
         assert_eq!(
             cfg.effective_health_socket().as_deref(),
@@ -646,7 +682,7 @@ mod tests {
     #[test]
     fn process_lock_rejects_second_holder() {
         let temp = tempdir().expect("tempdir");
-        let path = temp.path().join("codexd.lock");
+        let path = temp.path().join("jd.lock");
         let first = OpenOptions::new()
             .create(true)
             .read(true)
@@ -662,6 +698,6 @@ mod tests {
             .open(&path)
             .expect("second lock file");
         let err = acquire_process_lock(&second).expect_err("second lock should fail");
-        assert!(format!("{err:#}").contains("codexd already holds"));
+        assert!(format!("{err:#}").contains("jd already holds"));
     }
 }

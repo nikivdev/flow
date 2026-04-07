@@ -6665,11 +6665,6 @@ fn ensure_no_unwanted_staged(repo_root: &Path) -> Result<()> {
             saw_personal_tooling = true;
             continue;
         }
-        if path == ".rise" || path.starts_with(".rise/") || path.contains("/.rise/") {
-            saw_personal_tooling = true;
-            continue;
-        }
-
         if path.ends_with(".pyc")
             || path.contains("/__pycache__/")
             || path.ends_with("/__pycache__")
@@ -6694,7 +6689,7 @@ fn ensure_no_unwanted_staged(repo_root: &Path) -> Result<()> {
     }
     if saw_personal_tooling {
         println!(
-            "Personal tooling paths (.beads/, .rise/) should be ignored globally, not in project .gitignore."
+            "Personal tooling paths (.beads/) should be ignored globally, not in project .gitignore."
         );
         println!("Run `f gitignore policy-init` and `f gitignore fix` to clean existing repos.");
     }
@@ -6758,9 +6753,6 @@ fn unwanted_reason(path: &str) -> Option<&'static str> {
     }
     if path == ".beads" || path.starts_with(".beads/") || path.contains("/.beads/") {
         return Some("beads metadata");
-    }
-    if path == ".rise" || path.starts_with(".rise/") || path.contains("/.rise/") {
-        return Some("rise metadata");
     }
     if path.ends_with(".pyc") {
         return Some("python bytecode");

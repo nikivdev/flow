@@ -305,12 +305,12 @@ mod tests {
             stale: 0,
             entries: vec![
                 FlowDaemonEntry {
-                    name: "codexd".to_string(),
+                    name: "jd".to_string(),
                     status: "healthy".to_string(),
                     running: true,
                     healthy: Some(true),
                     pid: Some(10),
-                    health_target: Some("unix:/tmp/codexd.sock".to_string()),
+                    health_target: Some("unix:/tmp/jd.sock".to_string()),
                     description: None,
                 },
                 FlowDaemonEntry {

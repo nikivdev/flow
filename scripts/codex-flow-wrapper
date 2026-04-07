@@ -5,17 +5,34 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
 RUNTIME_PREFIX = "flow-runtime-"
+DEFAULT_J_BIN = Path.home() / "bin" / "j"
 
 
 def real_codex_bin() -> str:
     value = os.environ.get("FLOW_CODEX_REAL_BIN", "").strip()
-    return value or "codex"
+    if value:
+        return value
+    return str(DEFAULT_J_BIN)
+
+
+def validate_real_codex_bin(path: str) -> None:
+    expanded = Path(path).expanduser()
+    if expanded.is_absolute():
+        if expanded.exists():
+            return
+        raise SystemExit(f"Flow Codex binary not found: {expanded}")
+
+    if shutil.which(path):
+        return
+
+    raise SystemExit(f"Flow Codex binary not found on PATH: {path}")
 
 
 def agents_skill_root() -> Path:
@@ -79,6 +96,8 @@ def cleanup_runtime_symlinks(paths: list[Path]) -> None:
 def main() -> int:
     state = load_runtime_state()
     created = materialize_runtime_skills(state) if state else []
+    codex_bin = real_codex_bin()
+    validate_real_codex_bin(codex_bin)
 
     env = dict(os.environ)
     runtime_state_path = env.get("FLOW_CODEX_RUNTIME_STATE", "").strip()
@@ -96,7 +115,7 @@ def main() -> int:
         signal.signal(signum, forward_signal)
 
     try:
-        proc = subprocess.Popen([real_codex_bin(), *sys.argv[1:]], env=env)
+        proc = subprocess.Popen([codex_bin, *sys.argv[1:]], env=env)
         return proc.wait()
     finally:
         cleanup_runtime_symlinks(created)

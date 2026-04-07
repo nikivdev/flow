@@ -6,7 +6,7 @@ If you want standard `git clone` destination behavior, use [`f clone`](clone.md)
 
 ## Overview
 
-`f repos clone` clones GitHub repositories into `~/repos/<owner>/<repo>` using SSH URLs. By default it does a shallow clone for speed, then fetches full history in the background. It always sets up an `upstream` remote and local tracking branch unless you pass `--no-upstream`.
+`f repos clone` clones GitHub repositories into `~/repos/<owner>/<repo>` using SSH URLs. By default it does a shallow clone for speed, then fetches full history in the background. It always sets up an `upstream` remote and local tracking branch unless you pass `--no-upstream`. Clone-time bootstrap is local-only: it does not create or push a private mirror repo. If the target checkout already exists, Flow reports that and exits without re-bootstrapping or reopening the repo.
 `f repos create` creates a GitHub repository from the current folder and pushes it.
 
 By default, Flow treats `~/repos` as an immutable managed root. Use `FLOW_REPOS_ALLOW_ROOT_OVERRIDE=1` if you need to point `--root` somewhere else.
@@ -41,6 +41,7 @@ f repos create
 | `--full` | | Full clone (skip shallow clone + background history fetch) |
 | `--no-upstream` | | Skip upstream setup |
 | `--upstream-url <URL>` | `-u` | Upstream URL override (skips GitHub lookup) |
+| `--no-home-branch-bootstrap` | | Skip local nikiv home-branch setup after clone |
 
 ### f repos create
 
@@ -68,6 +69,16 @@ When cloning in fast mode (default), flow spawns a background fetch:
 
 - `git fetch --unshallow --tags origin`
 - `git fetch --tags upstream` (if upstream was configured)
+
+## Private Mirror Setup
+
+`f repos clone` no longer creates or pushes the `fork` / `*-i` private mirror as part of clone.
+
+If you want Flow to create or repair the private mirror workflow for an existing repo, run:
+
+```bash
+f repos bootstrap-home-branch --path ~/repos/<owner>/<repo>
+```
 
 ## Examples
 

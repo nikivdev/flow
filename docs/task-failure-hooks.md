@@ -25,7 +25,7 @@ You can set the hook in either place:
 1. Environment variable (highest priority):
 
 ```bash
-export FLOW_TASK_FAILURE_HOOK='rise work --errors --diff --patch --focus --focus-app lin --target codex "fix $FLOW_TASK_NAME failure"'
+export FLOW_TASK_FAILURE_HOOK='f failure copy --format codex --write-repo >/dev/null'
 ```
 
 2. Global Flow config (generated file):
@@ -38,7 +38,7 @@ Example entry in config:
 ```ts
 export default {
   flow: {
-    taskFailureHook: "rise work --errors --diff --patch --focus --focus-app lin --target codex \"fix $FLOW_TASK_NAME failure\""
+    taskFailureHook: "f failure copy --format codex --write-repo >/dev/null"
   }
 }
 ```
@@ -84,23 +84,27 @@ Set the following env var:
 export FLOW_DISABLE_TASK_FAILURE_HOOK=1
 ```
 
-## Rise / Zed Behavior
+## Recommended Flow-Native Hooks
 
-If your hook calls `rise work`, Flow automatically appends `--no-open` and strips
-`--focus` / `--focus-app` unless you explicitly allow opening. This prevents Zed
-or other apps from launching on every failure.
-
-To allow the open behavior:
+Use one of these if you want Flow to copy a ready-made repair prompt
+automatically after an interactive task failure:
 
 ```bash
-export FLOW_TASK_FAILURE_HOOK_ALLOW_OPEN=1
+export FLOW_TASK_FAILURE_HOOK='f failure copy --format codex --write-repo >/dev/null'
+export FLOW_TASK_FAILURE_HOOK='f failure copy --format claude --write-repo >/dev/null'
 ```
+
+These commands use the failure bundle Flow just recorded and write the rendered
+prompt under `.ai/internal/failures/` in the project root.
+
+Legacy `rise work` hooks are retired. If your config still uses them, Flow will
+warn and skip the hook.
 
 ## Example Hook
 
 ```bash
-export FLOW_TASK_FAILURE_HOOK='rise work --errors --diff --patch --focus --focus-app lin --target codex "fix $FLOW_TASK_NAME failure"'
+export FLOW_TASK_FAILURE_HOOK='f failure copy --format codex --write-repo >/dev/null'
 ```
 
-This will write prompts to `.rise/prompts/` and focus the codex prompt without
-opening Zed by default.
+This copies a Flow-generated Codex repair prompt to the clipboard and writes
+`.ai/internal/failures/latest-codex.md` after each interactive task failure.

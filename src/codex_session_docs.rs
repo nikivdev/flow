@@ -16,6 +16,7 @@ const SESSION_DOC_PACKET_VERSION: u32 = 1;
 const SESSION_DOC_INDEX_VERSION: u32 = 1;
 const DOC_REVIEW_QUEUE_VERSION: u32 = 1;
 const DOC_QUALITY_LOG_VERSION: u32 = 1;
+const HOME_LOG_STATUS_VERSION: u32 = 1;
 const MAX_INDEX_RECENT: usize = 200;
 const MAX_INDEX_FILE_SESSIONS: usize = 8;
 const SIGNAL_SCAN_LIMIT: usize = 512;
@@ -215,6 +216,26 @@ pub struct CommitPendingPlan {
     pub files: Vec<String>,
     pub commit_message: String,
     pub committed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeLogStatus {
+    pub version: u32,
+    pub root_dir: String,
+    pub captured_sessions: usize,
+    pub logged_sessions: usize,
+    pub missing_sessions: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_logged_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_logged_session_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_logged_summary_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_logged_completed_at_unix: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latest_missing_session_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -429,6 +450,83 @@ pub fn promote_session(
         promotion_reason: preview.promotion_reason,
         blocked_reason: None,
         markdown: preview.markdown,
+    })
+}
+
+pub fn sync_home_log_entries(limit: usize) -> Result<usize> {
+    let state_root = config::ensure_global_state_dir()?;
+    sync_home_log_entries_at(&state_root, limit)
+}
+
+fn sync_home_log_entries_at(state_root: &Path, limit: usize) -> Result<usize> {
+    if limit == 0 {
+        return Ok(0);
+    }
+    let entries = load_review_queue_entries(&doc_review_queue_path(state_root))?;
+    let mut synced = 0usize;
+    for entry in entries.iter().rev() {
+        if synced >= limit {
+            break;
+        }
+        let packet = load_packet(Path::new(&entry.session_json_path))?;
+        if sync_home_log_packet(&packet)? {
+            synced += 1;
+        }
+    }
+    Ok(synced)
+}
+
+pub fn home_log_status() -> Result<HomeLogStatus> {
+    let state_root = config::ensure_global_state_dir()?;
+    home_log_status_at(&state_root)
+}
+
+fn home_log_status_at(state_root: &Path) -> Result<HomeLogStatus> {
+    let entries = load_review_queue_entries(&doc_review_queue_path(state_root))?;
+    let mut logged_sessions = 0usize;
+    let mut latest_logged: Option<(u64, String, String, String)> = None;
+    let mut latest_missing_session_keys = Vec::new();
+    for entry in entries.iter().rev() {
+        let Ok(packet) = load_packet(Path::new(&entry.session_json_path)) else {
+            if latest_missing_session_keys.len() < 5 {
+                latest_missing_session_keys.push(entry.session_key.clone());
+            }
+            continue;
+        };
+        let summary_path = home_log_summary_path(&packet);
+        if summary_path.exists() {
+            logged_sessions += 1;
+            let candidate = (
+                packet.completed_at_unix,
+                packet.session_id.clone(),
+                session_key_from_packet(&packet),
+                summary_path.display().to_string(),
+            );
+            if latest_logged
+                .as_ref()
+                .is_none_or(|current| candidate.0 > current.0)
+            {
+                latest_logged = Some(candidate);
+            }
+        } else if latest_missing_session_keys.len() < 5 {
+            latest_missing_session_keys.push(entry.session_key.clone());
+        }
+    }
+    let latest_logged_session_id = latest_logged.as_ref().map(|value| value.1.clone());
+    let latest_logged_session_key = latest_logged.as_ref().map(|value| value.2.clone());
+    let latest_logged_summary_path = latest_logged.as_ref().map(|value| value.3.clone());
+    let latest_logged_completed_at_unix = latest_logged.as_ref().map(|value| value.0);
+    Ok(HomeLogStatus {
+        version: HOME_LOG_STATUS_VERSION,
+        root_dir: home_log_root().display().to_string(),
+        captured_sessions: entries.len(),
+        logged_sessions,
+        missing_sessions: entries.len().saturating_sub(logged_sessions),
+        latest_logged_session_id,
+        latest_logged_session_key,
+        latest_logged_summary_path,
+        latest_logged_completed_at_unix,
+        latest_missing_session_keys,
     })
 }
 
@@ -649,6 +747,12 @@ fn document_completed_session_at(
         &summary_path,
         &session_json_path,
     )?;
+    if let Err(err) = sync_home_log_packet(&packet) {
+        eprintln!(
+            "WARN codex session home-log sync failed for {}: {err:#}",
+            packet.session_id
+        );
+    }
 
     Ok(packet)
 }
@@ -1015,6 +1119,7 @@ fn promotion_topic(packet: &SessionDocPacket) -> &'static str {
     }
     if packet.changed_files.iter().any(|path| {
         path.contains("daemon")
+            || path.contains("jd")
             || path.contains("codexd")
             || path.contains("ops")
             || path.ends_with("/server.rs")
@@ -1115,6 +1220,20 @@ fn render_promoted_markdown(packet: &SessionDocPacket) -> String {
     out
 }
 
+fn render_home_log_markdown(packet: &SessionDocPacket) -> String {
+    let mut out = String::new();
+    out.push_str("# J Session Log\n\n");
+    out.push_str("- Captured automatically by `jd`\n");
+    out.push_str(&format!("- Repo root: `{}`\n", packet.target_path));
+    out.push_str(&format!("- Session: `{}`\n", packet.session_id));
+    out.push_str(&format!(
+        "- Completed: `{}`\n\n",
+        format_unix_secs(packet.completed_at_unix)
+    ));
+    out.push_str(&render_summary_markdown(packet));
+    out
+}
+
 fn load_packet(session_json_path: &Path) -> Result<SessionDocPacket> {
     let bytes = fs::read(session_json_path)
         .with_context(|| format!("failed to read {}", session_json_path.display()))?;
@@ -1131,7 +1250,16 @@ fn write_packet(session_json_path: &Path, packet: &SessionDocPacket) -> Result<(
 }
 
 fn write_promotion_state(promotion_path: &Path, packet: &SessionDocPacket) -> Result<()> {
-    let promotion = SessionDocPromotion {
+    let promotion = build_promotion_state(packet);
+    fs::write(
+        promotion_path,
+        serde_json::to_vec_pretty(&promotion).context("failed to encode promotion state")?,
+    )
+    .with_context(|| format!("failed to write {}", promotion_path.display()))
+}
+
+fn build_promotion_state(packet: &SessionDocPacket) -> SessionDocPromotion {
+    SessionDocPromotion {
         version: SESSION_DOC_PACKET_VERSION,
         recorded_at_unix: packet.recorded_at_unix,
         session_id: packet.session_id.clone(),
@@ -1150,12 +1278,7 @@ fn write_promotion_state(promotion_path: &Path, packet: &SessionDocPacket) -> Re
         promoted: !packet.promoted_paths.is_empty(),
         committed: packet.committed,
         commit_message: packet.commit_message.clone(),
-    };
-    fs::write(
-        promotion_path,
-        serde_json::to_vec_pretty(&promotion).context("failed to encode promotion state")?,
-    )
-    .with_context(|| format!("failed to write {}", promotion_path.display()))
+    }
 }
 
 fn promotion_path_for_session_json(session_json_path: &Path) -> PathBuf {
@@ -1163,6 +1286,100 @@ fn promotion_path_for_session_json(session_json_path: &Path) -> PathBuf {
         .parent()
         .map(|path| path.join("promotion.json"))
         .unwrap_or_else(|| PathBuf::from("promotion.json"))
+}
+
+fn home_log_root() -> PathBuf {
+    std::env::var_os("FLOW_ACTIVITY_LOG_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config::expand_path("~/log"))
+}
+
+fn home_log_bundle_dir(packet: &SessionDocPacket) -> PathBuf {
+    let dt: DateTime<Utc> = DateTime::<Utc>::from(
+        UNIX_EPOCH + std::time::Duration::from_secs(packet.completed_at_unix),
+    );
+    let date_dir = dt.format("%Y-%m-%d").to_string();
+    home_log_root()
+        .join(".ai")
+        .join("docs")
+        .join("session-changes")
+        .join(date_dir)
+        .join(session_key_from_packet(packet))
+}
+
+fn home_log_summary_path(packet: &SessionDocPacket) -> PathBuf {
+    home_log_bundle_dir(packet).join("summary.md")
+}
+
+fn home_log_bundle_complete(packet: &SessionDocPacket) -> bool {
+    let bundle_dir = home_log_bundle_dir(packet);
+    bundle_dir.join("summary.md").exists()
+        && bundle_dir.join("diff.txt").exists()
+        && bundle_dir.join("session.json").exists()
+        && bundle_dir.join("promotion.json").exists()
+}
+
+fn sync_home_log_packet(packet: &SessionDocPacket) -> Result<bool> {
+    if home_log_bundle_complete(packet) {
+        return Ok(false);
+    }
+    let bundle_dir = home_log_bundle_dir(packet);
+    fs::create_dir_all(&bundle_dir)
+        .with_context(|| format!("failed to create {}", bundle_dir.display()))?;
+    let summary_path = bundle_dir.join("summary.md");
+    let diff_path = bundle_dir.join("diff.txt");
+    let session_json_path = bundle_dir.join("session.json");
+    let promotion_path = bundle_dir.join("promotion.json");
+    fs::write(&summary_path, render_home_log_markdown(packet))
+        .with_context(|| format!("failed to write {}", summary_path.display()))?;
+    fs::write(&diff_path, render_diff_text(packet))
+        .with_context(|| format!("failed to write {}", diff_path.display()))?;
+    fs::write(
+        &session_json_path,
+        serde_json::to_vec_pretty(packet).context("failed to encode session doc packet")?,
+    )
+    .with_context(|| format!("failed to write {}", session_json_path.display()))?;
+    fs::write(
+        &promotion_path,
+        serde_json::to_vec_pretty(&build_promotion_state(packet))
+            .context("failed to encode promotion state")?,
+    )
+    .with_context(|| format!("failed to write {}", promotion_path.display()))?;
+    append_home_log_activity_event(packet, &summary_path, &session_json_path)?;
+    Ok(true)
+}
+
+fn append_home_log_activity_event(
+    packet: &SessionDocPacket,
+    summary_path: &Path,
+    session_json_path: &Path,
+) -> Result<()> {
+    let summary = if packet.changed_files.is_empty() {
+        format!(
+            "logged completed j session {} (metadata-only)",
+            short_session_id(&packet.session_id)
+        )
+    } else {
+        format!(
+            "logged completed j session {} ({} files)",
+            short_session_id(&packet.session_id),
+            packet.changed_files.len()
+        )
+    };
+    let mut event = activity_log::ActivityEvent::done("codex.session.log", summary);
+    event.route = Some("jd-home-log".to_string());
+    event.target_path = Some(packet.target_path.clone());
+    event.launch_path = packet.launch_path.clone();
+    event.session_id = Some(packet.session_id.clone());
+    event.source = Some("codex-session-docs".to_string());
+    event.artifact_path = Some(summary_path.display().to_string());
+    event.payload_ref = Some(session_json_path.display().to_string());
+    event.dedupe_key = Some(format!(
+        "codex:home-log:{}:{}",
+        packet.session_id, packet.completed_at_unix
+    ));
+    activity_log::append_daily_event(event)?;
+    Ok(())
 }
 
 fn load_review_queue_entries(queue_path: &Path) -> Result<Vec<DocReviewQueueEntry>> {
@@ -1705,7 +1922,20 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
+
+    fn activity_log_env_guard(root: &Path) -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock activity log env");
+        unsafe {
+            std::env::set_var("FLOW_ACTIVITY_LOG_ROOT", root);
+        }
+        guard
+    }
 
     fn init_git_repo(repo: &Path) {
         Command::new("git")
@@ -1752,9 +1982,7 @@ mod tests {
     fn document_completed_session_writes_packet_index_and_queue() {
         let repo = tempdir().expect("repo");
         let state = tempdir().expect("state");
-        unsafe {
-            std::env::set_var("FLOW_ACTIVITY_LOG_ROOT", repo.path().join("activity"));
-        }
+        let _guard = activity_log_env_guard(&repo.path().join("activity"));
 
         let packet = document_completed_session_at(
             repo.path(),
@@ -1792,9 +2020,7 @@ mod tests {
     fn document_completed_session_marks_metadata_only_without_patch_changes() {
         let repo = tempdir().expect("repo");
         let state = tempdir().expect("state");
-        unsafe {
-            std::env::set_var("FLOW_ACTIVITY_LOG_ROOT", repo.path().join("activity"));
-        }
+        let _guard = activity_log_env_guard(&repo.path().join("activity"));
 
         let packet = document_completed_session_at(
             repo.path(),
@@ -1815,9 +2041,7 @@ mod tests {
         let repo = tempdir().expect("repo");
         let state = tempdir().expect("state");
         init_git_repo(repo.path());
-        unsafe {
-            std::env::set_var("FLOW_ACTIVITY_LOG_ROOT", repo.path().join("activity"));
-        }
+        let _guard = activity_log_env_guard(&repo.path().join("activity"));
 
         let packet = document_completed_session_at(
             repo.path(),
@@ -1853,6 +2077,122 @@ mod tests {
         let updated_packet = load_packet(&session_json_path).expect("updated packet");
         assert_eq!(updated_packet.doc_review_state, "reviewed");
         assert!(updated_packet.promotion_target.is_some());
+    }
+
+    #[test]
+    fn document_completed_session_mirrors_bundle_into_home_log() {
+        let repo = tempdir().expect("repo");
+        let state = tempdir().expect("state");
+        let home_log = tempdir().expect("home log");
+        let _guard = activity_log_env_guard(home_log.path());
+
+        let packet = document_completed_session_at(
+            repo.path(),
+            state.path(),
+            &sample_input(
+                repo.path(),
+                vec![SessionDocPatchChange {
+                    path: repo.path().join("src/main.rs").display().to_string(),
+                    action: "update".to_string(),
+                    patch: "@@\n+fn main() {}\n".to_string(),
+                }],
+            ),
+        )
+        .expect("packet");
+
+        let bundle_dir = home_log_bundle_dir(&packet);
+        assert!(bundle_dir.join("summary.md").exists());
+        assert!(bundle_dir.join("diff.txt").exists());
+        assert!(bundle_dir.join("session.json").exists());
+        assert!(bundle_dir.join("promotion.json").exists());
+    }
+
+    #[test]
+    fn sync_home_log_entries_backfills_missing_bundle() {
+        let repo = tempdir().expect("repo");
+        let state = tempdir().expect("state");
+        let home_log = tempdir().expect("home log");
+        let _guard = activity_log_env_guard(home_log.path());
+
+        let packet = document_completed_session_at(
+            repo.path(),
+            state.path(),
+            &sample_input(
+                repo.path(),
+                vec![SessionDocPatchChange {
+                    path: repo.path().join("src/main.rs").display().to_string(),
+                    action: "update".to_string(),
+                    patch: "@@\n+fn main() {}\n".to_string(),
+                }],
+            ),
+        )
+        .expect("packet");
+        fs::remove_dir_all(home_log_bundle_dir(&packet)).expect("remove home log bundle");
+
+        let synced = sync_home_log_entries_at(state.path(), 4).expect("sync");
+        assert_eq!(synced, 1);
+        assert!(home_log_bundle_dir(&packet).join("summary.md").exists());
+    }
+
+    #[test]
+    fn home_log_status_reports_logged_and_missing_sessions() {
+        let repo = tempdir().expect("repo");
+        let state = tempdir().expect("state");
+        let home_log = tempdir().expect("home log");
+        let _guard = activity_log_env_guard(home_log.path());
+
+        let logged_packet = document_completed_session_at(
+            repo.path(),
+            state.path(),
+            &sample_input(
+                repo.path(),
+                vec![SessionDocPatchChange {
+                    path: repo.path().join("src/main.rs").display().to_string(),
+                    action: "update".to_string(),
+                    patch: "@@\n+fn main() {}\n".to_string(),
+                }],
+            ),
+        )
+        .expect("logged packet");
+        let missing_packet = document_completed_session_at(
+            repo.path(),
+            state.path(),
+            &CompletedSessionDocInput {
+                completed_at_unix: 1_773_776_291,
+                ..sample_input(
+                    repo.path(),
+                    vec![SessionDocPatchChange {
+                        path: repo.path().join("src/lib.rs").display().to_string(),
+                        action: "update".to_string(),
+                        patch: "@@\n+pub fn lib() {}\n".to_string(),
+                    }],
+                )
+            },
+        )
+        .expect("missing packet");
+        fs::remove_dir_all(home_log_bundle_dir(&missing_packet)).expect("remove missing bundle");
+
+        let status = home_log_status_at(state.path()).expect("status");
+        assert_eq!(status.captured_sessions, 2);
+        assert_eq!(status.logged_sessions, 1);
+        assert_eq!(status.missing_sessions, 1);
+        assert_eq!(
+            status.latest_logged_session_id,
+            Some(logged_packet.session_id.clone())
+        );
+        assert_eq!(
+            status.latest_logged_summary_path,
+            Some(
+                home_log_bundle_dir(&logged_packet)
+                    .join("summary.md")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            status.latest_missing_session_keys,
+            vec![session_key_from_packet(&missing_packet)]
+        );
     }
 
     #[test]

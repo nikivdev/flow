@@ -8,7 +8,7 @@ Cursor transcripts are supported for reading only.
 
 Architecture note:
 
-- for the underlying transport split between wrapped Codex CLI, `codexd`, and `codex app-server`, see `docs/codex-interface.md`
+- for the underlying transport split between wrapped Codex CLI, `jd`, and `codex app-server`, see `docs/codex-interface.md`
 
 ## Quick Start
 
@@ -160,6 +160,14 @@ Behavior:
 - shows the stable session id plus a preview of the latest message
 - the numeric index matches `continue`, so you can reopen quickly
 
+If you want to read or hand off a session instead of reopening it, use the native session bridge in Codex chat:
+
+```text
+see codex in ~/repos/mark3labs/kit
+see 019cd046 codex session
+read 019cd046 codex session deeply
+```
+
 Examples:
 
 ```bash
@@ -248,6 +256,8 @@ Inspect or clear runtime state:
 ```bash
 f codex runtime show
 f codex runtime clear
+f codex log status
+f codex log sync --limit 400
 f codex memory status
 f codex memory query --path ~/code/flow "codex control plane runtime skills"
 f codex memory recent --path ~/docs
@@ -279,6 +289,10 @@ EOF
 
 By default this writes to today's `~/docs/plan/<day-of-month>/` bucket, for
 example `~/docs/plan/23/` on the 23rd day of the month.
+
+Completed `j` sessions are also mirrored automatically into `~/log/.ai/docs/session-changes/`
+through `jd`, so durable home-log notes exist even when a repo-local `.ai/docs/`
+promotion never happens.
 
 ### Run-owned agent bridge
 
@@ -352,7 +366,7 @@ The Codex memory mirror:
 
 The project-ai manifest:
 
-- gives `codexd` a bounded metadata view of repo-local `.ai/` scaffolding
+- gives `jd` a bounded metadata view of repo-local `.ai/` scaffolding
 - records counts and latest paths for skills, docs, reviews, tasks, and todos
 - keeps default context fill minimal by exposing only compact hints, not raw content
 - tracks query counts and recent repo usage so you can see whether the feature is actually being used
@@ -417,9 +431,15 @@ copying ids.
 - concrete “what to improve next” recommendations
 - commands to deepen or fix the current state
 
-If `codexd` is running, it also keeps recent completion reconciliation warm and
+If `jd` is running, it also keeps recent completion reconciliation warm and
 now does a bounded background scorecard refresh, so the eval report does not go
 stale as quickly between manual runs.
+
+If the native session bridge skill is installed, `jd` also prewarms compact
+handoff capsules for recent native Codex sessions whenever the Codex state DB
+changes. That keeps the exact handoff path cheap, so pasting
+`019d... codex session` into another chat is usually already a warm cache hit
+instead of the first lookup having to build the capsule from the rollout.
 
 Optional telemetry export follows the same local-first pattern: Flow keeps
 local Codex logs canonical, and if `FLOW_CODEX_MAPLE_*` env vars are set it can
@@ -436,7 +456,7 @@ need `f env unlock` once per day for background reads. Flow-launched Codex
 sessions also inherit the same `FLOW_CODEX_MAPLE_*` values from the personal
 store, while explicit shell env still wins for one-off tests.
 
-When `codexd` is running, the daemon also performs a bounded background export
+When `jd` is running, the daemon also performs a bounded background export
 pass so the external analytics view stays warm.
 
 ### macOS launchd schedule for skill-eval
