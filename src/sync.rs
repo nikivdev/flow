@@ -4428,67 +4428,6 @@ fn resolve_branch_containing_head(repo_root: &Path) -> Option<String> {
         .map(|value| value.to_string())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum JjSyncBypassReason {
-    ConfiguredGitRemote(String),
-    TrackingRemote(String),
-}
-
-impl JjSyncBypassReason {
-    fn message(&self) -> String {
-        match self {
-            Self::ConfiguredGitRemote(remote) => {
-                format!(
-                    "⚠️  Configured git.remote '{}' detected; using git sync flow.",
-                    remote
-                )
-            }
-            Self::TrackingRemote(remote) => format!(
-                "⚠️  Tracking remote '{}' detected; using git sync flow for reliable branch + upstream sync.",
-                remote
-            ),
-        }
-    }
-
-    fn recorder_mode(&self) -> String {
-        match self {
-            Self::ConfiguredGitRemote(remote) => {
-                format!("jj bypassed (configured git.remote {})", remote)
-            }
-            Self::TrackingRemote(remote) => {
-                format!("jj bypassed (custom tracking remote {})", remote)
-            }
-        }
-    }
-}
-
-fn is_standard_sync_remote(remote: &str) -> bool {
-    matches!(remote.trim(), "origin" | "upstream")
-}
-
-fn jj_sync_bypass_reason(
-    preferred_remote: &str,
-    tracking_remote: Option<&str>,
-) -> Option<JjSyncBypassReason> {
-    let preferred_remote = preferred_remote.trim();
-    if !preferred_remote.is_empty() && !is_standard_sync_remote(preferred_remote) {
-        return Some(JjSyncBypassReason::ConfiguredGitRemote(
-            preferred_remote.to_string(),
-        ));
-    }
-
-    let tracking_remote = tracking_remote
-        .map(str::trim)
-        .filter(|remote| !remote.is_empty())?;
-    if !is_standard_sync_remote(tracking_remote) {
-        return Some(JjSyncBypassReason::TrackingRemote(
-            tracking_remote.to_string(),
-        ));
-    }
-
-    None
-}
-
 fn should_use_jj(repo_root: &Path) -> bool {
     has_jj_workspace(repo_root) && jj_cli_available() && jj_workspace_healthy(repo_root)
 }
