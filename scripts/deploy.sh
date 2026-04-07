@@ -35,10 +35,21 @@ if [[ "${PROFILE}" == "release" ]]; then
 fi
 
 # Build
-cargo build "${BUILD_ARGS[@]}" --quiet
+if [[ ${#BUILD_ARGS[@]} -gt 0 ]]; then
+    cargo build "${BUILD_ARGS[@]}" --quiet
+else
+    cargo build --quiet
+fi
 
 SOURCE_F="${ROOT_DIR}/target/${TARGET_DIR}/f"
 SOURCE_LIN="${ROOT_DIR}/target/${TARGET_DIR}/lin"
+RUNTIME_ASSETS=(
+    "scripts/private_mirror.py"
+    "scripts/codex-skill-eval-launchd.py"
+    "tools/domainsd-cpp/domainsd.cpp"
+    "tools/domainsd-cpp/install-macos-launchd.sh"
+    "tools/domainsd-cpp/uninstall-macos-launchd.sh"
+)
 
 PRIMARY_DIR="${HOME}/bin"
 ALT_DIR="${HOME}/.local/bin"
@@ -85,9 +96,33 @@ install_to_dir() {
     return 0
 }
 
+install_runtime_assets() {
+    local install_root="$1"
+    local assets_root="${install_root}/share/flow"
+    local rel=""
+    mkdir -p "${assets_root}"
+    for rel in "${RUNTIME_ASSETS[@]}"; do
+        local src="${ROOT_DIR}/${rel}"
+        local dest="${assets_root}/${rel}"
+        [[ -f "${src}" ]] || {
+            echo "missing runtime asset: ${src}" >&2
+            return 1
+        }
+        mkdir -p "$(dirname "${dest}")"
+        cp -f "${src}" "${dest}"
+        if [[ -x "${src}" ]]; then
+            chmod +x "${dest}" 2>/dev/null || true
+        fi
+    done
+}
+
 mkdir -p "${PRIMARY_DIR}"
 if install_to_dir "${PRIMARY_DIR}"; then
     PRIMARY_INSTALLED=true
+fi
+
+if [[ "${PRIMARY_INSTALLED}" == true ]]; then
+    install_runtime_assets "$(dirname -- "${PRIMARY_DIR}")"
 fi
 
 # If ~/.local/bin exists, link to the primary install for consistency.

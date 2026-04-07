@@ -149,7 +149,80 @@ struct HomeBranchSyncTarget {
 
 // Use the Claude family alias so sync always targets the latest Opus model.
 const SYNC_CLAUDE_MODEL: &str = "opus";
+const SYNC_CODEX_RESOLVER_BIN: &str = "codex-merge-resolve";
+const SYNC_CODEX_RESOLVER_REPO_DEFAULT: &str = "~/repos/lox/codex-app-server-go";
+const SYNC_CODEX_RESOLVER_ENV_BIN: &str = "FLOW_SYNC_CODEX_RESOLVER_BIN";
+const SYNC_CODEX_RESOLVER_ENV_REPO: &str = "FLOW_SYNC_CODEX_RESOLVER_REPO";
+const SYNC_CONFLICT_RESOLVER_ENV: &str = "FLOW_SYNC_CONFLICT_RESOLVER";
+const SYNC_STASH_RESTORE_AUTOFIX_ENV: &str = "FLOW_SYNC_STASH_RESTORE_AUTOFIX";
+const SYNC_AGENT_CLI_DEFAULT: &str = "agent-sync";
+const SYNC_AGENT_CLI_ENV: &str = "FLOW_SYNC_AGENT_CLI";
+const SYNC_CODEX_SERVICE_TIER: &str = "fast";
 const JJ_GIT_EXPORT_LOCK_RETRY_DELAYS_MS: &[u64] = &[150, 400, 900];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncConflictResolver {
+    Smart,
+    Codex,
+    Claude,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncCodexResolveRequest<'a> {
+    #[serde(skip_serializing_if = "str::is_empty")]
+    context: &'a str,
+    files: Vec<SyncCodexResolveFile<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncCodexResolveFile<'a> {
+    path: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncCodexResolveResponse {
+    #[allow(dead_code)]
+    model: Option<String>,
+    #[allow(dead_code)]
+    effort: Option<String>,
+    results: Vec<SyncCodexResolveResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SyncCodexResolveResult {
+    path: String,
+    resolved: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SyncRepairKind {
+    MergeConflict,
+    StashRestoreConflict,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SyncRepairPacket {
+    version: u32,
+    generated_at: String,
+    kind: SyncRepairKind,
+    repo_root: String,
+    current_branch: String,
+    conflicted_files: Vec<String>,
+    merge_remote_ref: Option<String>,
+    stash_ref: Option<String>,
+    stash_list: Vec<String>,
+    detail: String,
+    intent_to_add_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncRepairRouteOutcome {
+    Completed,
+    ValidationPending,
+    Unresolved,
+}
 
 thread_local! {
     static ACTIVE_SYNC_STATUS: RefCell<Option<StatusLine>> = const { RefCell::new(None) };
@@ -216,6 +289,587 @@ fn sync_claude_command(prompt: &str) -> Command {
         prompt,
     ]);
     cmd
+}
+
+fn parse_sync_conflict_resolver(value: &str) -> SyncConflictResolver {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "smart" => SyncConflictResolver::Smart,
+        "codex" => SyncConflictResolver::Codex,
+        "claude" => SyncConflictResolver::Claude,
+        _ => SyncConflictResolver::Smart,
+    }
+}
+
+fn sync_conflict_resolver() -> SyncConflictResolver {
+    env::var(SYNC_CONFLICT_RESOLVER_ENV)
+        .map(|value| parse_sync_conflict_resolver(&value))
+        .unwrap_or(SyncConflictResolver::Smart)
+}
+
+fn sync_stash_restore_autofix_enabled() -> bool {
+    !matches!(
+        env::var(SYNC_STASH_RESTORE_AUTOFIX_ENV)
+            .ok()
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no")
+    )
+}
+
+fn ensure_sync_codex_resolver_helper() -> Result<Option<PathBuf>> {
+    if let Ok(bin_override) = env::var(SYNC_CODEX_RESOLVER_ENV_BIN) {
+        let path = crate::config::expand_path(&bin_override);
+        if path.exists() {
+            return Ok(Some(path));
+        }
+    }
+
+    if let Ok(path) = which::which(SYNC_CODEX_RESOLVER_BIN) {
+        return Ok(Some(path));
+    }
+
+    let repo = env::var(SYNC_CODEX_RESOLVER_ENV_REPO)
+        .map(|value| crate::config::expand_path(&value))
+        .unwrap_or_else(|_| crate::config::expand_path(SYNC_CODEX_RESOLVER_REPO_DEFAULT));
+    if !repo.exists() {
+        return Ok(None);
+    }
+
+    sync_progressln!("Installing {}...", SYNC_CODEX_RESOLVER_BIN);
+    let install_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local/bin");
+    fs::create_dir_all(&install_dir)
+        .with_context(|| format!("failed to create {}", install_dir.display()))?;
+    let install_path = install_dir.join(SYNC_CODEX_RESOLVER_BIN);
+
+    let status = Command::new("go")
+        .args([
+            "build",
+            "-o",
+            install_path.to_string_lossy().as_ref(),
+            "./cmd/codex-merge-resolve",
+        ])
+        .current_dir(&repo)
+        .status()
+        .context("failed to build codex merge resolver helper")?;
+
+    if !status.success() {
+        bail!("codex merge resolver helper build failed");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&install_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&install_path, perms)?;
+    }
+
+    Ok(Some(install_path))
+}
+
+fn repo_root_for_sync() -> Result<PathBuf> {
+    let repo_root = git_capture(&["rev-parse", "--show-toplevel"])?;
+    Ok(PathBuf::from(repo_root.trim()))
+}
+
+fn contains_merge_conflict_markers(content: &str) -> bool {
+    content.contains("<<<<<<<") && content.contains("=======") && content.contains(">>>>>>>")
+}
+
+fn apply_resolved_conflict_file(file: &str, resolved: &str) -> Result<bool> {
+    if contains_merge_conflict_markers(resolved) {
+        return Ok(false);
+    }
+
+    fs::write(file, resolved)
+        .with_context(|| format!("failed to write resolved contents for {}", file))?;
+    let _ = Command::new("git").args(["add", file]).output();
+    Ok(true)
+}
+
+fn apply_resolved_conflict_file_in_repo(
+    repo_root: &Path,
+    file: &str,
+    resolved: &str,
+) -> Result<bool> {
+    if contains_merge_conflict_markers(resolved) {
+        return Ok(false);
+    }
+
+    fs::write(repo_root.join(file), resolved)
+        .with_context(|| format!("failed to write resolved contents for {}", file))?;
+    let _ = Command::new("git")
+        .current_dir(repo_root)
+        .args(["add", file])
+        .output();
+    Ok(true)
+}
+
+fn try_resolve_conflicts_with_codex(
+    repo_root: &Path,
+    files: &[String],
+    context: &str,
+    required: bool,
+    allow_claude_fallback: bool,
+) -> Result<Option<HashMap<String, String>>> {
+    let helper = match ensure_sync_codex_resolver_helper() {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            if required {
+                bail!(
+                    "Codex merge resolver helper not found. Set {} or install {}.",
+                    SYNC_CODEX_RESOLVER_ENV_BIN,
+                    SYNC_CODEX_RESOLVER_BIN
+                );
+            }
+            return Ok(None);
+        }
+        Err(err) => {
+            if required {
+                return Err(err);
+            }
+            if allow_claude_fallback {
+                sync_progressln!(
+                    "Codex resolver unavailable ({}); falling back to Claude Opus.",
+                    err
+                );
+            } else {
+                sync_progressln!(
+                    "Codex resolver unavailable ({}); leaving remaining conflicts for sync agent or manual repair.",
+                    err
+                );
+            }
+            return Ok(None);
+        }
+    };
+
+    let request = SyncCodexResolveRequest {
+        context,
+        files: files
+            .iter()
+            .map(|path| SyncCodexResolveFile {
+                path: path.as_str(),
+            })
+            .collect(),
+    };
+    let request_bytes =
+        serde_json::to_vec(&request).context("failed to encode codex merge resolve request")?;
+
+    let mut child = Command::new(&helper)
+        .arg("-repo")
+        .arg(repo_root)
+        .arg("-service-tier")
+        .arg(SYNC_CODEX_SERVICE_TIER)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to launch {}", helper.display()))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&request_bytes)
+            .context("failed to write codex merge resolve request")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for codex merge resolve helper")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("exit status {}", output.status)
+        };
+        if required {
+            bail!("codex merge resolver failed: {}", detail);
+        }
+        if allow_claude_fallback {
+            sync_progressln!(
+                "Codex resolver failed ({}); falling back to Claude Opus.",
+                detail
+            );
+        } else {
+            sync_progressln!(
+                "Codex resolver failed ({}); leaving remaining conflicts for sync agent or manual repair.",
+                detail
+            );
+        }
+        return Ok(None);
+    }
+
+    let response: SyncCodexResolveResponse = serde_json::from_slice(&output.stdout)
+        .context("failed to decode codex merge resolve response")?;
+    let mut resolved = HashMap::new();
+    for result in response.results {
+        if let Some(content) = result.resolved {
+            resolved.insert(result.path, content);
+        } else if let Some(error) = result.error {
+            sync_progressln!("Codex could not resolve {}: {}", result.path, error);
+        }
+    }
+
+    Ok(Some(resolved))
+}
+
+fn try_resolve_conflicts_with_claude(
+    files: &[String],
+    context: &str,
+) -> Result<HashMap<String, String>> {
+    let mut resolved = HashMap::new();
+    let context_section = if !context.is_empty() {
+        format!("## Context\n\n{}\n\n", context)
+    } else {
+        String::new()
+    };
+
+    for file in files {
+        let content = fs::read_to_string(file).unwrap_or_default();
+        if !content.contains("<<<<<<<") {
+            continue;
+        }
+
+        let prompt = format!(
+            "{}This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
+            context_section, content
+        );
+
+        let output = sync_claude_command(&prompt).output();
+        if let Ok(out) = output
+            && out.status.success()
+        {
+            let candidate = String::from_utf8_lossy(&out.stdout);
+            if !contains_merge_conflict_markers(&candidate) {
+                resolved.insert(file.clone(), candidate.into_owned());
+                continue;
+            }
+        }
+        sync_progressln!("Could not resolve {}", file);
+    }
+
+    Ok(resolved)
+}
+
+fn auto_generated_conflict_file(filename: &str) -> bool {
+    [
+        "STATS.md",
+        "stats.md",
+        "CHANGELOG.md",
+        "changelog.md",
+        "package-lock.json",
+        "yarn.lock",
+        "bun.lock",
+        "pnpm-lock.yaml",
+        "Cargo.lock",
+        "Gemfile.lock",
+        "poetry.lock",
+        "composer.lock",
+    ]
+    .iter()
+    .any(|&ag| filename.eq_ignore_ascii_case(ag))
+}
+
+fn conflicted_files_in_repo(repo_root: &Path) -> Result<Vec<String>> {
+    Ok(
+        git_capture_in(repo_root, &["diff", "--name-only", "--diff-filter=U"])?
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+    )
+}
+
+fn is_merge_in_progress_in(repo_root: &Path) -> Result<bool> {
+    let git_dir = git_capture_in(repo_root, &["rev-parse", "--git-dir"])
+        .unwrap_or_else(|_| repo_root.join(".git").display().to_string());
+    let git_dir = git_dir.trim();
+    Ok(repo_root.join(git_dir).join("MERGE_HEAD").exists()
+        || Path::new(git_dir).join("MERGE_HEAD").exists())
+}
+
+fn classify_sync_repair_route_outcome(
+    conflicted_files: &[String],
+    merge_in_progress: bool,
+) -> SyncRepairRouteOutcome {
+    if !conflicted_files.is_empty() {
+        return SyncRepairRouteOutcome::Unresolved;
+    }
+    if merge_in_progress {
+        return SyncRepairRouteOutcome::ValidationPending;
+    }
+    SyncRepairRouteOutcome::Completed
+}
+
+fn try_resolve_stash_restore_conflicts_with_codex(
+    repo_root: &Path,
+    conflicted_files: &[String],
+    context: &str,
+) -> Result<bool> {
+    if conflicted_files.is_empty() {
+        return Ok(true);
+    }
+
+    let mut resolved_count = 0;
+    let mut needs_codex = Vec::new();
+
+    for file in conflicted_files {
+        let filename = file.rsplit('/').next().unwrap_or(file);
+        if auto_generated_conflict_file(filename) {
+            sync_progressln!("Auto-resolving {} (accepting upstream)", file);
+            let _ = Command::new("git")
+                .current_dir(repo_root)
+                .args(["checkout", "--theirs", file])
+                .output();
+            let _ = Command::new("git")
+                .current_dir(repo_root)
+                .args(["add", file])
+                .output();
+            resolved_count += 1;
+        } else {
+            needs_codex.push(file.clone());
+        }
+    }
+
+    if needs_codex.is_empty() {
+        return Ok(true);
+    }
+
+    let Some(resolved) =
+        try_resolve_conflicts_with_codex(repo_root, &needs_codex, context, false, false)?
+    else {
+        return Ok(false);
+    };
+
+    for file in needs_codex {
+        match resolved.get(&file) {
+            Some(content) if apply_resolved_conflict_file_in_repo(repo_root, &file, content)? => {
+                resolved_count += 1;
+                sync_progressln!("Resolved {}", file);
+            }
+            Some(_) => sync_progressln!("Codex returned invalid conflict output for {}", file),
+            None => {}
+        }
+    }
+
+    Ok(resolved_count == conflicted_files.len())
+}
+
+fn sync_repair_packets_dir(packet_dir_override: Option<&Path>) -> Result<PathBuf> {
+    if let Some(dir) = packet_dir_override {
+        return Ok(dir.to_path_buf());
+    }
+    Ok(config::ensure_global_state_dir()?.join("sync-repair"))
+}
+
+fn sync_agent_cli() -> Option<String> {
+    if let Ok(path) = env::var(SYNC_AGENT_CLI_ENV) {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    Command::new("bash")
+        .args(["-lc", &format!("command -v {}", SYNC_AGENT_CLI_DEFAULT)])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!path.is_empty()).then_some(path)
+        })
+}
+
+fn try_route_sync_conflicts_to_sync_agent(
+    repo_root: &Path,
+    packet_path: &Path,
+) -> Result<SyncRepairRouteOutcome> {
+    let Some(cli) = sync_agent_cli() else {
+        sync_progressln!(
+            "Sync agent unavailable; install {} or set {}.",
+            SYNC_AGENT_CLI_DEFAULT,
+            SYNC_AGENT_CLI_ENV
+        );
+        return Ok(SyncRepairRouteOutcome::Unresolved);
+    };
+
+    sync_progressln!("Routing unresolved sync conflicts to sync agent...");
+    let status = Command::new(&cli)
+        .current_dir(repo_root)
+        .args(["repair", "--packet"])
+        .arg(packet_path)
+        .status()
+        .with_context(|| format!("failed to launch sync agent via {}", cli))?;
+    if !status.success() {
+        sync_progressln!("Sync agent exited with {}", status);
+        return Ok(SyncRepairRouteOutcome::Unresolved);
+    }
+
+    let conflicted_files = conflicted_files_in_repo(repo_root)?;
+    let merge_in_progress = is_merge_in_progress_in(repo_root)?;
+    match classify_sync_repair_route_outcome(&conflicted_files, merge_in_progress) {
+        SyncRepairRouteOutcome::Completed => Ok(SyncRepairRouteOutcome::Completed),
+        SyncRepairRouteOutcome::ValidationPending => {
+            sync_progressln!(
+                "Sync agent cleared raw conflicts, but validation and merge finalization are still pending."
+            );
+            Ok(SyncRepairRouteOutcome::ValidationPending)
+        }
+        SyncRepairRouteOutcome::Unresolved => {
+            sync_progressln!("Sync agent finished but conflicts remain.");
+            Ok(SyncRepairRouteOutcome::Unresolved)
+        }
+    }
+}
+
+fn write_sync_repair_packet(
+    repo_root: &Path,
+    kind: SyncRepairKind,
+    conflicted_files: &[String],
+    detail: &str,
+    merge_remote_ref: Option<&str>,
+    auto_stash_state: Option<&AutoStashState>,
+    packet_dir_override: Option<&Path>,
+) -> Result<PathBuf> {
+    let dir = sync_repair_packets_dir(packet_dir_override)?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+
+    let current_branch = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let stash_list = git_capture_in(repo_root, &["stash", "list"])
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(5)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    let packet = SyncRepairPacket {
+        version: 1,
+        generated_at: Utc::now().to_rfc3339(),
+        kind,
+        repo_root: repo_root.display().to_string(),
+        current_branch,
+        conflicted_files: conflicted_files.to_vec(),
+        merge_remote_ref: merge_remote_ref.map(ToOwned::to_owned),
+        stash_ref: auto_stash_state
+            .and_then(|state| state.stashed.then(|| "stash@{0}".to_string())),
+        stash_list,
+        detail: detail.to_string(),
+        intent_to_add_paths: auto_stash_state
+            .map(|state| state.intent_to_add_paths.clone())
+            .unwrap_or_default(),
+    };
+
+    let stamped_path = dir.join(format!("{}.json", Utc::now().format("%Y%m%d-%H%M%S")));
+    let latest_path = dir.join("last.json");
+    let json = serde_json::to_vec_pretty(&packet).context("failed to encode sync repair packet")?;
+    fs::write(&stamped_path, &json)
+        .with_context(|| format!("failed to write {}", stamped_path.display()))?;
+    fs::write(&latest_path, &json)
+        .with_context(|| format!("failed to write {}", latest_path.display()))?;
+    Ok(latest_path)
+}
+
+fn drop_latest_stash_if_present(repo_root: &Path) -> Result<bool> {
+    if git_capture_in(repo_root, &["rev-parse", "--verify", "stash@{0}"]).is_err() {
+        return Ok(false);
+    }
+    git_run_in(repo_root, &["stash", "drop", "stash@{0}"])?;
+    Ok(true)
+}
+
+fn try_resolve_conflicted_files(conflicted_files: &[String]) -> Result<bool> {
+    if conflicted_files.is_empty() {
+        return Ok(true);
+    }
+
+    let mut resolved_count = 0;
+    let mut needs_ai = Vec::new();
+
+    for file in conflicted_files {
+        let filename = file.rsplit('/').next().unwrap_or(file);
+        if auto_generated_conflict_file(filename) {
+            sync_progressln!("Auto-resolving {} (accepting upstream)", file);
+            let _ = Command::new("git")
+                .args(["checkout", "--theirs", file])
+                .output();
+            let _ = Command::new("git").args(["add", file]).output();
+            resolved_count += 1;
+        } else {
+            needs_ai.push(file.clone());
+        }
+    }
+
+    if needs_ai.is_empty() {
+        return Ok(true);
+    }
+
+    let context = ai_context::load_command_context("sync").unwrap_or_default();
+    let resolver = sync_conflict_resolver();
+    let repo_root = repo_root_for_sync()?;
+
+    let mut unresolved = needs_ai.clone();
+    if matches!(
+        resolver,
+        SyncConflictResolver::Smart | SyncConflictResolver::Codex
+    ) {
+        sync_progressln!(
+            "Trying Codex for {} remaining conflicts...",
+            unresolved.len()
+        );
+        if let Some(resolved) = try_resolve_conflicts_with_codex(
+            &repo_root,
+            &unresolved,
+            &context,
+            resolver == SyncConflictResolver::Codex,
+            resolver == SyncConflictResolver::Claude,
+        )? {
+            let mut still_unresolved = Vec::new();
+            for file in unresolved {
+                match resolved.get(&file) {
+                    Some(content) if apply_resolved_conflict_file(&file, content)? => {
+                        resolved_count += 1;
+                        sync_progressln!("Resolved {}", file);
+                    }
+                    Some(_) => {
+                        sync_progressln!("Codex returned invalid conflict output for {}", file);
+                        still_unresolved.push(file);
+                    }
+                    None => still_unresolved.push(file),
+                }
+            }
+            unresolved = still_unresolved;
+        }
+    }
+
+    if !unresolved.is_empty() && resolver == SyncConflictResolver::Claude {
+        sync_progressln!(
+            "Trying Claude Opus for {} remaining conflicts...",
+            unresolved.len()
+        );
+        let resolved = try_resolve_conflicts_with_claude(&unresolved, &context)?;
+        for file in unresolved {
+            match resolved.get(&file) {
+                Some(content) if apply_resolved_conflict_file(&file, content)? => {
+                    resolved_count += 1;
+                    sync_progressln!("Resolved {}", file);
+                }
+                _ => sync_progressln!("Could not resolve {}", file),
+            }
+        }
+    }
+
+    Ok(resolved_count == conflicted_files.len())
 }
 
 fn jj_working_copy_update(
@@ -336,6 +990,14 @@ fn is_hidden_jj_sync_bookmark(name: &str) -> bool {
         || name.starts_with("recovery/")
         || name.starts_with("jj/keep/")
         || name.ends_with("-jj-export-backup")
+}
+
+fn jj_git_head_needs_reattach(git_head: &str) -> bool {
+    let git_head = git_head.trim();
+    git_head.is_empty()
+        || git_head == "HEAD"
+        || git_head.starts_with("jj/keep/")
+        || git_head.starts_with("refs/jj/")
 }
 
 impl SyncRecorder {
@@ -630,7 +1292,7 @@ fn run_sync(cmd: SyncRunOptions) -> Result<()> {
             .to_string();
         let repo_root_path = Path::new(&repo_root);
         let mut remote_probe_cache = SyncRemoteProbeCache::default();
-        let preferred_remote = config::preferred_git_remote_for_repo(repo_root_path);
+        let preferred_remote = config::preferred_git_sync_remote_for_repo(repo_root_path);
         let current_branch = git_capture_in(repo_root_path, &["rev-parse", "--abbrev-ref", "HEAD"])
             .ok()
             .map(|branch| branch.trim().to_string())
@@ -639,8 +1301,8 @@ fn run_sync(cmd: SyncRunOptions) -> Result<()> {
             .as_deref()
             .and_then(|branch| resolve_tracking_remote_branch_in(repo_root_path, Some(branch)))
             .map(|(remote, _)| remote);
-        let jj_bypass_reason = jj_sync_bypass_reason(&preferred_remote, tracking_remote.as_deref());
         let mut use_jj = should_use_jj(repo_root_path);
+        let jj_bypass_reason = jj_sync_bypass_reason(&preferred_remote, tracking_remote.as_deref());
         if let Some(reason) = jj_bypass_reason.as_ref() {
             sync_progressln!("{}", reason.message());
             recorder.record("mode", reason.recorder_mode());
@@ -918,7 +1580,7 @@ Use `f commit-queue list` to review, or re-run with `--allow-queue`."
                                 .current_dir(repo_root_path)
                                 .args(["rebase", "--abort"])
                                 .output();
-                            restore_stash(repo_root_path, &auto_stash_state);
+                            restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                             recorder.record("pull", "blocked by unstaged changes");
                             bail!(
                                 "git pull --rebase refused due unstaged changes. \
@@ -933,21 +1595,21 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                                     sync_progressln!("Rebase conflicts auto-resolved");
                                     recorder.record("pull", "rebase conflicts auto-resolved");
                                 } else {
-                                    restore_stash(repo_root_path, &auto_stash_state);
+                                    restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                                     recorder.record("pull", "rebase conflicts unresolved");
                                     bail!(
                                         "Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue"
                                     );
                                 }
                             } else {
-                                restore_stash(repo_root_path, &auto_stash_state);
+                                restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                                 recorder.record("pull", "rebase conflicts unresolved");
                                 bail!(
                                     "Rebase conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git rebase --continue"
                                 );
                             }
                         } else {
-                            restore_stash(repo_root_path, &auto_stash_state);
+                            restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                             recorder.record("pull", "git pull --rebase failed");
                             bail!("git pull --rebase failed");
                         }
@@ -976,21 +1638,21 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                                     sync_progressln!("Merge conflicts auto-resolved");
                                     recorder.record("pull", "merge conflicts auto-resolved");
                                 } else {
-                                    restore_stash(repo_root_path, &auto_stash_state);
+                                    restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                                     recorder.record("pull", "merge conflicts unresolved");
                                     bail!(
                                         "Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit"
                                     );
                                 }
                             } else {
-                                restore_stash(repo_root_path, &auto_stash_state);
+                                restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                                 recorder.record("pull", "merge conflicts unresolved");
                                 bail!(
                                     "Merge conflicts. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit"
                                 );
                             }
                         } else {
-                            restore_stash(repo_root_path, &auto_stash_state);
+                            restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                             recorder.record("pull", "git pull failed");
                             bail!("git pull failed");
                         }
@@ -1043,7 +1705,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                 auto_fix,
                 &mut recorder,
             ) {
-                restore_stash(repo_root_path, &auto_stash_state);
+                restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                 return Err(e);
             }
         } else if has_upstream {
@@ -1093,7 +1755,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                     sync_upstream_internal(repo_root_path, current, auto_fix, &mut recorder)
                 };
                 if let Err(e) = upstream_result {
-                    restore_stash(repo_root_path, &auto_stash_state);
+                    restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                     return Err(e);
                 }
             }
@@ -1114,7 +1776,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                     auto_fix,
                     &mut recorder,
                 ) {
-                    restore_stash(repo_root_path, &auto_stash_state);
+                    restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                     return Err(e);
                 }
             } else {
@@ -1215,7 +1877,7 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
                 let push_result =
                     push_with_autofix(current, &push_remote, auto_fix, cmd.max_fix_attempts);
                 if let Err(e) = push_result {
-                    restore_stash(repo_root_path, &auto_stash_state);
+                    restore_stash(repo_root_path, &auto_stash_state, auto_fix);
                     recorder.record("push", "push failed");
                     return Err(e);
                 }
@@ -1230,7 +1892,10 @@ Clean local file conflicts/case-only path conflicts, then re-run `f sync`."
         }
 
         // Restore stash
-        restore_stash(repo_root_path, &auto_stash_state);
+        if let Err(err) = restore_stash_result(repo_root_path, &auto_stash_state, auto_fix) {
+            recorder.record("stash", format!("restore failed: {}", err));
+            return Err(err);
+        }
         if auto_stash_state.stashed {
             recorder.record("stash", "stash restored");
         }
@@ -1452,11 +2117,11 @@ pub fn run_switch(cmd: SwitchCommand) -> Result<()> {
     })();
 
     if let Err(err) = switch_result {
-        restore_stash(&repo_root_path, &auto_stash_state);
+        restore_stash(&repo_root_path, &auto_stash_state, false);
         return Err(err);
     }
 
-    restore_stash(&repo_root_path, &auto_stash_state);
+    restore_stash(&repo_root_path, &auto_stash_state, false);
 
     println!("✓ Switched to {}", switched_branch);
 
@@ -1640,11 +2305,11 @@ pub fn run_checkout(cmd: CheckoutCommand) -> Result<()> {
     })();
 
     if let Err(err) = checkout_result {
-        restore_stash(&repo_root_path, &auto_stash_state);
+        restore_stash(&repo_root_path, &auto_stash_state, false);
         return Err(err);
     }
 
-    restore_stash(&repo_root_path, &auto_stash_state);
+    restore_stash(&repo_root_path, &auto_stash_state, false);
 
     let current = git_capture_in(&repo_root_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "HEAD".to_string())
@@ -3057,7 +3722,7 @@ fn run_jj_sync(
             let git_head = git_capture_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
                 .unwrap_or_default();
             let git_head = git_head.trim();
-            if git_head == "HEAD" || git_head.starts_with("jj/keep/") {
+            if jj_git_head_needs_reattach(git_head) {
                 if git_ref_exists_in(repo_root, &format!("refs/heads/{}", current_branch)) {
                     let branch_sha = git_capture_in(
                         repo_root,
@@ -3388,35 +4053,117 @@ fn merge_remote_branch_into_current(
         );
     }
 
-    match git_run_in(repo_root, &["merge", &remote_ref, "--no-edit"]) {
-        Ok(()) => {
-            recorder.record(stage, format!("merged {} with commit", remote_ref));
-            return Ok(());
-        }
-        Err(err) if is_git_index_lock_error(&err.to_string()) => {
-            bail!(
-                "Git index lock detected during merge. Remove stale .git/index.lock (if no git process is running) and re-run."
-            );
-        }
-        Err(_) => {}
+    let merge_output = git_run_output_in(repo_root, &["merge", &remote_ref, "--no-edit"])?;
+    if merge_output.status.success() {
+        recorder.record(stage, format!("merged {} with commit", remote_ref));
+        return Ok(());
+    }
+    let merge_detail = git_output_text(&merge_output);
+    if is_git_index_lock_error(&merge_detail) {
+        bail!(
+            "Git index lock detected during merge. Remove stale .git/index.lock (if no git process is running) and re-run."
+        );
     }
 
     let should_fix = auto_fix || prompt_for_auto_fix()?;
     if should_fix {
-        sync_progressln!("Attempting auto-fix...");
+        sync_progressln!("Attempting sync auto-fix...");
         if try_resolve_conflicts()? {
             let _ = git_run_in(repo_root, &["add", "-A"]);
-            let _ = Command::new("git")
-                .current_dir(repo_root)
-                .args(["commit", "--no-edit"])
-                .output();
-            sync_progressln!("Conflicts auto-resolved");
-            recorder.record(stage, "conflicts auto-resolved");
-            return Ok(());
+            if !is_merge_in_progress_in(repo_root)? {
+                sync_progressln!("Conflicts auto-resolved");
+                recorder.record(stage, "conflicts auto-resolved");
+                return Ok(());
+            }
+
+            let repair_packet_path = write_sync_repair_packet(
+                repo_root,
+                SyncRepairKind::MergeConflict,
+                &[],
+                &format!(
+                    "Flow sync auto-fix cleared the raw conflict markers for merge with {remote_ref}, but the repo is still mid-merge. Validate the merged result and only finish the merge commit once the highest-signal checks are clean.\n\nOriginal merge detail:\n{merge_detail}"
+                ),
+                Some(&remote_ref),
+                None,
+                None,
+            )
+            .ok();
+            if let Some(packet_path) = repair_packet_path.as_ref() {
+                match try_route_sync_conflicts_to_sync_agent(repo_root, packet_path)? {
+                    SyncRepairRouteOutcome::Completed => {
+                        sync_progressln!("Sync agent validated and finalized the merge");
+                        recorder.record(stage, "sync agent validated and finalized merge");
+                        return Ok(());
+                    }
+                    SyncRepairRouteOutcome::ValidationPending => {
+                        recorder
+                            .record(stage, "merge validation pending after raw conflict repair");
+                        bail!(
+                            "Sync auto-fix cleared raw conflicts for {} but validation and merge finalization are still pending.\nRun `:sync repair --packet {}` or validate and finish the merge manually.",
+                            remote_ref,
+                            packet_path.display()
+                        );
+                    }
+                    SyncRepairRouteOutcome::Unresolved => {}
+                }
+            }
+            recorder.record(stage, "raw conflicts auto-resolved but merge not finalized");
+            if let Some(packet_path) = repair_packet_path {
+                bail!(
+                    "Sync auto-fix cleared raw conflicts for {} but the merge is still open.\nRun `:sync repair --packet {}` or validate and finish the merge manually.",
+                    remote_ref,
+                    packet_path.display()
+                );
+            }
+            bail!(
+                "Sync auto-fix cleared raw conflicts for {} but the merge is still open. Validate the repo and finish the merge manually.",
+                remote_ref
+            );
+        }
+    }
+
+    let conflicted_files = conflicted_files_in_repo(repo_root).unwrap_or_default();
+    let repair_packet_path = if conflicted_files.is_empty() {
+        None
+    } else {
+        write_sync_repair_packet(
+            repo_root,
+            SyncRepairKind::MergeConflict,
+            &conflicted_files,
+            &merge_detail,
+            Some(&remote_ref),
+            None,
+            None,
+        )
+        .ok()
+    };
+    if should_fix && let Some(packet_path) = repair_packet_path.as_ref() {
+        match try_route_sync_conflicts_to_sync_agent(repo_root, packet_path)? {
+            SyncRepairRouteOutcome::Completed => {
+                sync_progressln!("Sync agent resolved the sync repair flow");
+                recorder.record(stage, "sync agent resolved merge conflicts");
+                return Ok(());
+            }
+            SyncRepairRouteOutcome::ValidationPending => {
+                recorder.record(stage, "merge validation pending after sync agent repair");
+                bail!(
+                    "Sync agent cleared raw conflicts for {} but validation and merge finalization are still pending.\nRun `:sync repair --packet {}` or validate and finish the merge manually.",
+                    remote_ref,
+                    packet_path.display()
+                );
+            }
+            SyncRepairRouteOutcome::Unresolved => {}
         }
     }
 
     recorder.record(stage, "merge conflicts unresolved");
+    if let Some(packet_path) = repair_packet_path {
+        bail!(
+            "Merge conflicts with {}.\nRun `:sync repair --packet {}` or resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit",
+            remote_ref,
+            packet_path.display()
+        );
+    }
     bail!(
         "Merge conflicts with {}. Resolve manually:\n  git status\n  # fix conflicts\n  git add . && git commit",
         remote_ref
@@ -3744,6 +4491,59 @@ fn jj_sync_bypass_reason(
 
 fn should_use_jj(repo_root: &Path) -> bool {
     has_jj_workspace(repo_root) && jj_cli_available() && jj_workspace_healthy(repo_root)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JjSyncBypassReason {
+    ConfiguredSyncRemote(String),
+    TrackingRemote(String),
+}
+
+impl JjSyncBypassReason {
+    fn message(&self) -> String {
+        match self {
+            Self::ConfiguredSyncRemote(remote) => {
+                format!(
+                    "⚠️  Configured sync remote '{}' detected; using git sync flow.",
+                    remote
+                )
+            }
+            Self::TrackingRemote(remote) => format!(
+                "⚠️  Tracking remote '{}' detected; using git sync flow for reliable branch + upstream sync.",
+                remote
+            ),
+        }
+    }
+
+    fn recorder_mode(&self) -> String {
+        match self {
+            Self::ConfiguredSyncRemote(remote) => {
+                format!("jj bypassed (configured sync remote {})", remote)
+            }
+            Self::TrackingRemote(remote) => {
+                format!("jj bypassed (custom tracking remote {})", remote)
+            }
+        }
+    }
+}
+
+fn is_standard_sync_remote(remote: &str) -> bool {
+    remote == "origin" || remote == "upstream"
+}
+
+fn jj_sync_bypass_reason(
+    preferred_remote: &str,
+    tracking_remote: Option<&str>,
+) -> Option<JjSyncBypassReason> {
+    if !is_standard_sync_remote(preferred_remote) {
+        return Some(JjSyncBypassReason::ConfiguredSyncRemote(
+            preferred_remote.to_string(),
+        ));
+    }
+
+    tracking_remote
+        .filter(|remote| !is_standard_sync_remote(remote))
+        .map(|remote| JjSyncBypassReason::TrackingRemote(remote.to_string()))
 }
 
 fn has_jj_workspace(repo_root: &Path) -> bool {
@@ -4169,7 +4969,7 @@ fn prompt_for_rebase_action() -> Result<bool> {
         println!();
     }
 
-    print!("  Try auto-fix with Claude Opus? [y/N] ");
+    print!("  Try sync auto-fix with Codex/sync agent? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
     read_yes_no()
@@ -4180,7 +4980,11 @@ fn try_resolve_rebase_conflicts() -> Result<bool> {
     loop {
         // Get conflicted files
         let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"])?;
-        let conflicted_files: Vec<&str> = conflicts.lines().filter(|l| !l.is_empty()).collect();
+        let conflicted_files: Vec<String> = conflicts
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(ToString::to_string)
+            .collect();
 
         if conflicted_files.is_empty() {
             // No more conflicts, try to continue rebase
@@ -4206,16 +5010,7 @@ fn try_resolve_rebase_conflicts() -> Result<bool> {
 
         sync_progressln!("Resolving {} conflicted files...", conflicted_files.len());
 
-        // Try to resolve each conflict
-        let mut all_resolved = true;
-        for file in &conflicted_files {
-            if !try_resolve_single_conflict(file)? {
-                all_resolved = false;
-                sync_progressln!("Could not resolve {}", file);
-            }
-        }
-
-        if !all_resolved {
+        if !try_resolve_conflicted_files(&conflicted_files)? {
             return Ok(false);
         }
 
@@ -4241,85 +5036,11 @@ fn try_resolve_rebase_conflicts() -> Result<bool> {
     }
 }
 
-/// Try to resolve a single conflicted file.
-fn try_resolve_single_conflict(file: &str) -> Result<bool> {
-    let filename = file.rsplit('/').next().unwrap_or(file);
-
-    // Auto-generated files - accept theirs (upstream/incoming)
-    let auto_generated = [
-        "STATS.md",
-        "stats.md",
-        "CHANGELOG.md",
-        "changelog.md",
-        "package-lock.json",
-        "yarn.lock",
-        "bun.lock",
-        "pnpm-lock.yaml",
-        "Cargo.lock",
-        "Gemfile.lock",
-        "poetry.lock",
-        "composer.lock",
-    ];
-
-    if auto_generated
-        .iter()
-        .any(|&ag| filename.eq_ignore_ascii_case(ag))
-    {
-        sync_progressln!("Auto-resolving {} (accepting theirs)", file);
-        let _ = Command::new("git")
-            .args(["checkout", "--theirs", file])
-            .output();
-        let _ = Command::new("git").args(["add", file]).output();
-        return Ok(true);
-    }
-
-    // Try Claude for code conflicts
-    let content = std::fs::read_to_string(file).unwrap_or_default();
-    if content.contains("<<<<<<<") {
-        sync_progressln!("Trying Claude Opus for {}...", file);
-
-        // Load sync context if available
-        let context = ai_context::load_command_context("sync").unwrap_or_default();
-        let context_section = if !context.is_empty() {
-            format!("## Context\n\n{}\n\n", context)
-        } else {
-            String::new()
-        };
-
-        let prompt = format!(
-            "{}This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
-            context_section,
-            if content.len() > 8000 {
-                &content[..8000]
-            } else {
-                &content
-            }
-        );
-
-        let output = sync_claude_command(&prompt).output();
-
-        if let Ok(out) = output {
-            if out.status.success() {
-                let resolved = String::from_utf8_lossy(&out.stdout);
-                if !resolved.contains("<<<<<<<") && !resolved.contains(">>>>>>>") {
-                    if std::fs::write(file, resolved.as_ref()).is_ok() {
-                        let _ = Command::new("git").args(["add", file]).output();
-                        sync_progressln!("Resolved {}", file);
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
-
 /// Prompt user to try auto-fix for push failures.
 fn prompt_for_push_fix() -> Result<bool> {
     let _sync_status_guard = sync_status_suspend();
     println!();
-    print!("  Try auto-fix with Claude Opus? [y/N] ");
+    print!("  Try AI auto-fix? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
     read_yes_no()
 }
@@ -4341,7 +5062,7 @@ fn prompt_for_auto_fix() -> Result<bool> {
     }
     println!();
 
-    print!("  Try auto-fix with Claude Opus? [y/N] ");
+    print!("  Try sync auto-fix with Codex/sync agent? [y/N] ");
     std::io::Write::flush(&mut std::io::stdout())?;
     read_yes_no()
 }
@@ -4350,105 +5071,18 @@ fn prompt_for_auto_fix() -> Result<bool> {
 fn try_resolve_conflicts() -> Result<bool> {
     // Get list of conflicted files
     let conflicts = git_capture(&["diff", "--name-only", "--diff-filter=U"])?;
-    let conflicted_files: Vec<&str> = conflicts.lines().filter(|l| !l.is_empty()).collect();
+    let conflicted_files: Vec<String> = conflicts
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(ToString::to_string)
+        .collect();
 
     if conflicted_files.is_empty() {
         return Ok(true);
     }
 
     sync_progressln!("Conflicted files: {}", conflicted_files.join(", "));
-
-    // Auto-generated files - accept theirs (upstream)
-    let auto_generated = [
-        "STATS.md",
-        "stats.md",
-        "CHANGELOG.md",
-        "changelog.md",
-        "package-lock.json",
-        "yarn.lock",
-        "bun.lock",
-        "pnpm-lock.yaml",
-        "Cargo.lock",
-        "Gemfile.lock",
-        "poetry.lock",
-        "composer.lock",
-    ];
-
-    let mut resolved_count = 0;
-    let mut needs_claude = Vec::new();
-
-    for file in &conflicted_files {
-        let filename = file.rsplit('/').next().unwrap_or(file);
-
-        if auto_generated
-            .iter()
-            .any(|&ag| filename.eq_ignore_ascii_case(ag))
-        {
-            // Accept theirs for auto-generated files
-            sync_progressln!("Auto-resolving {} (accepting upstream)", file);
-            let _ = Command::new("git")
-                .args(["checkout", "--theirs", file])
-                .output();
-            let _ = Command::new("git").args(["add", file]).output();
-            resolved_count += 1;
-        } else {
-            needs_claude.push(*file);
-        }
-    }
-
-    // If all conflicts were auto-generated files, we're done
-    if needs_claude.is_empty() {
-        return Ok(true);
-    }
-
-    // Try Claude for remaining conflicts
-    sync_progressln!(
-        "  Trying Claude Opus for {} remaining conflicts...",
-        needs_claude.len()
-    );
-
-    // Load sync context once for all files
-    let context = ai_context::load_command_context("sync").unwrap_or_default();
-    let context_section = if !context.is_empty() {
-        format!("## Context\n\n{}\n\n", context)
-    } else {
-        String::new()
-    };
-
-    for file in &needs_claude {
-        let content = std::fs::read_to_string(file).unwrap_or_default();
-        if content.contains("<<<<<<<") {
-            let prompt = format!(
-                "{}This file has git merge conflicts. Resolve them by keeping the best of both versions. Output ONLY the resolved file content, no explanations:\n\n{}",
-                context_section,
-                if content.len() > 8000 {
-                    &content[..8000]
-                } else {
-                    &content
-                }
-            );
-
-            let output = sync_claude_command(&prompt).output();
-
-            if let Ok(out) = output {
-                if out.status.success() {
-                    let resolved = String::from_utf8_lossy(&out.stdout);
-                    // Only use if it doesn't contain conflict markers
-                    if !resolved.contains("<<<<<<<") && !resolved.contains(">>>>>>>") {
-                        if std::fs::write(file, resolved.as_ref()).is_ok() {
-                            let _ = Command::new("git").args(["add", file]).output();
-                            resolved_count += 1;
-                            sync_progressln!("Resolved {}", file);
-                            continue;
-                        }
-                    }
-                }
-            }
-            sync_progressln!("Could not resolve {}", file);
-        }
-    }
-
-    Ok(resolved_count == conflicted_files.len())
+    try_resolve_conflicted_files(&conflicted_files)
 }
 
 fn auto_stash_repo(repo_root: &Path, message: &str) -> Result<AutoStashState> {
@@ -4562,62 +5196,135 @@ fn git_run_captured_in(repo_root: &Path, args: &[&str]) -> Result<()> {
     bail!("git {} failed: {}", args.join(" "), detail);
 }
 
-fn restore_stash(repo_root: &Path, auto_stash_state: &AutoStashState) {
-    if auto_stash_state.stashed {
-        sync_progressln!("Restoring stashed changes...");
-        let output = Command::new("git")
-            .current_dir(repo_root)
-            .args(["stash", "pop"])
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                if let Err(err) =
+fn restore_stash_result(
+    repo_root: &Path,
+    auto_stash_state: &AutoStashState,
+    allow_autofix: bool,
+) -> Result<()> {
+    restore_stash_result_with_packet_dir(repo_root, auto_stash_state, allow_autofix, None)
+}
+
+fn restore_stash_result_with_packet_dir(
+    repo_root: &Path,
+    auto_stash_state: &AutoStashState,
+    allow_autofix: bool,
+    packet_dir_override: Option<&Path>,
+) -> Result<()> {
+    if !auto_stash_state.stashed {
+        return Ok(());
+    }
+
+    sync_progressln!("Restoring stashed changes...");
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["stash", "pop"])
+        .output()
+        .context("failed to run git stash pop")?;
+
+    if output.status.success() {
+        restore_intent_to_add_paths(repo_root, &auto_stash_state.intent_to_add_paths)
+            .context("restored stash but could not restore intent-to-add markers")?;
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}\n{}", stdout, stderr);
+    if stash_pop_untracked_conflict(&combined.to_lowercase()) {
+        if drop_stash_if_untracked_restored(repo_root)
+            .context("stash pop reported untracked-file conflict and stash cleanup failed")?
+        {
+            restore_intent_to_add_paths(repo_root, &auto_stash_state.intent_to_add_paths)
+                .context("restored stash but could not restore intent-to-add markers")?;
+            sync_progressln!("  ✓ Kept local untracked files and dropped redundant auto-stash");
+            return Ok(());
+        }
+    }
+
+    let detail = combined.trim();
+    let conflicted_files = conflicted_files_in_repo(repo_root).unwrap_or_default();
+    if allow_autofix && sync_stash_restore_autofix_enabled() && !conflicted_files.is_empty() {
+        let context = ai_context::load_command_context("sync").unwrap_or_default();
+        sync_progressln!(
+            "Trying Codex for {} stash-restore conflict(s)...",
+            conflicted_files.len()
+        );
+        if try_resolve_stash_restore_conflicts_with_codex(repo_root, &conflicted_files, &context)? {
+            restore_intent_to_add_paths(repo_root, &auto_stash_state.intent_to_add_paths)
+                .context("restored stash but could not restore intent-to-add markers")?;
+            if drop_latest_stash_if_present(repo_root)? {
+                sync_progressln!("  ✓ Auto-resolved stash conflicts and dropped auto-stash");
+            } else {
+                sync_progressln!("  ✓ Auto-resolved stash conflicts");
+            }
+            return Ok(());
+        }
+    }
+    let repair_packet_path = if conflicted_files.is_empty() {
+        None
+    } else {
+        write_sync_repair_packet(
+            repo_root,
+            SyncRepairKind::StashRestoreConflict,
+            &conflicted_files,
+            detail,
+            None,
+            Some(auto_stash_state),
+            packet_dir_override,
+        )
+        .ok()
+    };
+    if detail.is_empty() {
+        if let Some(packet_path) = repair_packet_path {
+            bail!(
+                "failed to restore sync auto-stash automatically. Run `:sync repair --packet {}` or `git stash list` and restore manually if needed.",
+                packet_path.display()
+            );
+        }
+        bail!(
+            "failed to restore sync auto-stash automatically. Run `git stash list` and restore manually if needed."
+        );
+    }
+
+    if let Some(packet_path) = repair_packet_path {
+        if allow_autofix {
+            match try_route_sync_conflicts_to_sync_agent(repo_root, &packet_path)? {
+                SyncRepairRouteOutcome::Completed => {
                     restore_intent_to_add_paths(repo_root, &auto_stash_state.intent_to_add_paths)
-                {
-                    sync_stderrln!(
-                        "warning: restored stash but could not restore intent-to-add markers: {}",
-                        err
+                        .context("restored stash but could not restore intent-to-add markers")?;
+                    if drop_latest_stash_if_present(repo_root)? {
+                        sync_progressln!(
+                            "  ✓ Sync agent resolved stash conflicts and dropped auto-stash"
+                        );
+                    } else {
+                        sync_progressln!("  ✓ Sync agent resolved stash conflicts");
+                    }
+                    return Ok(());
+                }
+                SyncRepairRouteOutcome::ValidationPending => {
+                    bail!(
+                        "sync agent cleared the raw stash conflicts but left the repo mid-merge.\nRun `:sync repair --packet {}` or inspect the repo before dropping the stash.",
+                        packet_path.display()
                     );
                 }
-            }
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let combined = format!("{}\n{}", stdout, stderr).to_lowercase();
-                if stash_pop_untracked_conflict(&combined) {
-                    match drop_stash_if_untracked_restored(repo_root) {
-                        Ok(true) => {
-                            if let Err(err) = restore_intent_to_add_paths(
-                                repo_root,
-                                &auto_stash_state.intent_to_add_paths,
-                            ) {
-                                sync_stderrln!(
-                                    "warning: restored stash but could not restore intent-to-add markers: {}",
-                                    err
-                                );
-                            }
-                            sync_progressln!(
-                                "  ✓ Kept local untracked files and dropped redundant auto-stash"
-                            );
-                            return;
-                        }
-                        Ok(false) => {}
-                        Err(err) => {
-                            sync_stderrln!("warning: stash cleanup failed: {}", err);
-                        }
-                    }
-                }
-                sync_stderrln!(
-                    "warning: failed to restore stash automatically: git stash pop failed\nRun `git stash list` and restore manually if needed."
-                );
-            }
-            Err(err) => {
-                sync_stderrln!(
-                    "warning: failed to restore stash automatically: {}\nRun `git stash list` and restore manually if needed.",
-                    err
-                );
+                SyncRepairRouteOutcome::Unresolved => {}
             }
         }
+        bail!(
+            "failed to restore sync auto-stash automatically: {}\nRun `:sync repair --packet {}` or `git stash list` and restore manually if needed.",
+            detail,
+            packet_path.display()
+        );
+    }
+    bail!(
+        "failed to restore sync auto-stash automatically: {}\nRun `git stash list` and restore manually if needed.",
+        detail
+    );
+}
+
+fn restore_stash(repo_root: &Path, auto_stash_state: &AutoStashState, allow_autofix: bool) {
+    if let Err(err) = restore_stash_result(repo_root, auto_stash_state, allow_autofix) {
+        sync_stderrln!("warning: {}", err);
     }
 }
 
@@ -5323,7 +6030,7 @@ mod tests {
     fn jj_sync_bypass_reason_uses_configured_git_remote_first() {
         assert_eq!(
             jj_sync_bypass_reason("fork", Some("origin")),
-            Some(JjSyncBypassReason::ConfiguredGitRemote("fork".to_string()))
+            Some(JjSyncBypassReason::ConfiguredSyncRemote("fork".to_string()))
         );
     }
 
@@ -5339,6 +6046,7 @@ mod tests {
     fn jj_sync_bypass_reason_ignores_standard_sync_remotes() {
         assert_eq!(jj_sync_bypass_reason("origin", Some("upstream")), None);
         assert_eq!(jj_sync_bypass_reason("upstream", Some("origin")), None);
+        assert_eq!(jj_sync_bypass_reason("origin", None), None);
     }
 
     #[test]
@@ -5546,6 +6254,16 @@ mod tests {
     }
 
     #[test]
+    fn jj_git_head_needs_reattach_for_failed_or_internal_heads() {
+        assert!(jj_git_head_needs_reattach(""));
+        assert!(jj_git_head_needs_reattach("HEAD"));
+        assert!(jj_git_head_needs_reattach("jj/keep/abc123"));
+        assert!(jj_git_head_needs_reattach("refs/jj/root"));
+        assert!(!jj_git_head_needs_reattach("main"));
+        assert!(!jj_git_head_needs_reattach("feature/sync-fix"));
+    }
+
+    #[test]
     fn normalize_sync_commit_line_fills_missing_description() {
         assert_eq!(
             normalize_sync_commit_line("abc12345", "Fix sync output"),
@@ -5653,6 +6371,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_sync_conflict_resolver_defaults_to_smart() {
+        assert_eq!(
+            parse_sync_conflict_resolver(""),
+            SyncConflictResolver::Smart
+        );
+        assert_eq!(
+            parse_sync_conflict_resolver("unknown"),
+            SyncConflictResolver::Smart
+        );
+        assert_eq!(
+            parse_sync_conflict_resolver("auto"),
+            SyncConflictResolver::Smart
+        );
+        assert_eq!(
+            parse_sync_conflict_resolver("smart"),
+            SyncConflictResolver::Smart
+        );
+    }
+
+    #[test]
+    fn parse_sync_conflict_resolver_accepts_codex_and_claude() {
+        assert_eq!(
+            parse_sync_conflict_resolver("codex"),
+            SyncConflictResolver::Codex
+        );
+        assert_eq!(
+            parse_sync_conflict_resolver("CLAUDE"),
+            SyncConflictResolver::Claude
+        );
+    }
+
+    #[test]
+    fn contains_merge_conflict_markers_requires_full_marker_triplet() {
+        assert!(contains_merge_conflict_markers(
+            "<<<<<<< ours\nfoo\n=======\nbar\n>>>>>>> theirs\n"
+        ));
+        assert!(!contains_merge_conflict_markers(
+            "if separator == \"=======\" {\n    return true;\n}\n"
+        ));
+    }
+
+    #[test]
     fn git_index_lock_error_matches_jj_head_reset_failure() {
         let message = "Failed to reset Git HEAD state\nCaused by:\n1: Could not acquire lock for index file\n2: The lock for resource '/tmp/repo/.git/index' could not be obtained immediately after 1 attempt(s). The lockfile at '/tmp/repo/.git/index.lock' might need manual deletion.";
 
@@ -5716,10 +6476,81 @@ mod tests {
             ""
         );
 
-        restore_stash(repo_root, &auto_stash);
+        restore_stash_result(repo_root, &auto_stash, false).expect("restore stash");
 
         let status_after = git_capture_for_test(repo_root, &["status", "--porcelain=v2"]);
         assert!(status_after.contains("1 .A "));
         assert_eq!(git_capture_for_test(repo_root, &["stash", "list"]), "");
+    }
+
+    #[test]
+    fn restore_stash_result_errors_when_pop_conflicts() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+        let repair_dir = dir.path().join("flow-sync-repair");
+        init_git_repo(repo_root);
+
+        fs::write(repo_root.join("notes.txt"), "base\n").expect("write notes");
+        git(repo_root, &["add", "notes.txt"]);
+        git(repo_root, &["commit", "-q", "-m", "add notes"]);
+
+        fs::write(repo_root.join("notes.txt"), "local change\n").expect("write local change");
+        let auto_stash = auto_stash_repo(repo_root, "test auto-stash").expect("auto stash");
+        assert!(auto_stash.stashed);
+
+        fs::write(repo_root.join("notes.txt"), "upstream change\n").expect("write upstream change");
+        git(repo_root, &["add", "notes.txt"]);
+        git(repo_root, &["commit", "-q", "-m", "upstream change"]);
+
+        let err =
+            restore_stash_result_with_packet_dir(repo_root, &auto_stash, false, Some(&repair_dir))
+                .expect_err("stash restore should fail");
+        let message = format!("{err:#}");
+        assert!(message.contains("failed to restore sync auto-stash automatically"));
+        assert!(message.contains(":sync repair --packet"));
+        assert!(!git_capture_for_test(repo_root, &["stash", "list"]).is_empty());
+        assert!(repair_dir.join("last.json").exists());
+        let packet = fs::read_to_string(repair_dir.join("last.json")).expect("read packet");
+        assert!(packet.contains("\"kind\": \"stash_restore_conflict\""));
+    }
+
+    #[test]
+    fn write_sync_repair_packet_records_merge_remote_ref() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path();
+        let repair_dir = dir.path().join("flow-sync-repair");
+        init_git_repo(repo_root);
+
+        let packet_path = write_sync_repair_packet(
+            repo_root,
+            SyncRepairKind::MergeConflict,
+            &["codex-rs/core/src/codex.rs".to_string()],
+            "git merge origin/main --no-edit left the repo in conflict state",
+            Some("origin/main"),
+            None,
+            Some(&repair_dir),
+        )
+        .expect("write packet");
+
+        let packet = fs::read_to_string(packet_path).expect("read packet");
+        assert!(packet.contains("\"kind\": \"merge_conflict\""));
+        assert!(packet.contains("\"merge_remote_ref\": \"origin/main\""));
+        assert!(packet.contains("codex-rs/core/src/codex.rs"));
+    }
+
+    #[test]
+    fn classify_sync_repair_route_outcome_requires_no_conflicts_and_no_merge_to_complete() {
+        assert_eq!(
+            classify_sync_repair_route_outcome(&["a.rs".to_string()], false),
+            SyncRepairRouteOutcome::Unresolved
+        );
+        assert_eq!(
+            classify_sync_repair_route_outcome(&[], true),
+            SyncRepairRouteOutcome::ValidationPending
+        );
+        assert_eq!(
+            classify_sync_repair_route_outcome(&[], false),
+            SyncRepairRouteOutcome::Completed
+        );
     }
 }

@@ -91,6 +91,14 @@ pub struct Config {
     /// Background daemons that flow can manage (start/stop/status).
     #[serde(default, alias = "daemon")]
     pub daemons: Vec<DaemonConfig>,
+    /// Global and per-repo push policy settings.
+    #[serde(
+        default,
+        rename = "push_policy",
+        alias = "push-policy",
+        alias = "pushPolicy"
+    )]
+    pub push_policy: Option<PushPolicyConfig>,
     /// Host deployment config for Linux servers.
     #[serde(default)]
     pub host: Option<crate::deploy::HostConfig>,
@@ -757,6 +765,7 @@ impl Default for Config {
             stream: None,
             server_hub: None,
             daemons: Vec::new(),
+            push_policy: None,
             host: None,
             cloudflare: None,
             railway: None,
@@ -790,6 +799,61 @@ pub struct FlowSettings {
     /// Task to run when invoking `f deploy` with no subcommand.
     #[serde(default, rename = "deploy_task", alias = "deploy-task")]
     pub deploy_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct PushPolicyConfig {
+    /// Whether Flow push policy is active for this config scope.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Global hooks directory used for Flow-managed Git hooks.
+    #[serde(default, rename = "hooks_path", alias = "hooks-path")]
+    pub hooks_path: Option<String>,
+    /// Optional explicit prek binary to use for pre-push validation.
+    #[serde(default, rename = "prek_bin", alias = "prek-bin")]
+    pub prek_bin: Option<String>,
+    /// Default policy mode when no repo rule matches.
+    #[serde(default, rename = "default_mode", alias = "default-mode")]
+    pub default_mode: Option<PushPolicyMode>,
+    /// Repo-specific push policy rules.
+    #[serde(default, rename = "repo")]
+    pub repos: Vec<PushPolicyRepoRule>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PushPolicyMode {
+    #[default]
+    Passthrough,
+    ValidateOnly,
+    HomeBranchOnly,
+    RequireFlowPush,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct PushPolicyRepoRule {
+    /// Absolute or ~-relative repo root/prefix to match.
+    #[serde(rename = "match", alias = "path")]
+    pub match_path: String,
+    /// Policy mode for the matched repo.
+    #[serde(default)]
+    pub mode: Option<PushPolicyMode>,
+    /// Optional required home branch for branch pushes.
+    #[serde(default, rename = "home_branch", alias = "home-branch")]
+    pub home_branch: Option<String>,
+    /// Whether this repo should run prek validation on push.
+    #[serde(default, rename = "run_prek", alias = "run-prek")]
+    pub run_prek: bool,
+    /// Whether this repo is eligible for mirror-to-main orchestration.
+    #[serde(default, rename = "mirror_main", alias = "mirror-main")]
+    pub mirror_main: bool,
+    /// Optional remote name constraint for the rule.
+    #[serde(default, rename = "remote_name", alias = "remote-name")]
+    pub remote_name: Option<String>,
+    /// Optional remote URL constraint for the rule.
+    #[serde(default, rename = "remote_url", alias = "remote-url")]
+    pub remote_url: Option<String>,
 }
 
 /// Project lifecycle configuration for `f up` and `f down`.
@@ -2765,13 +2829,43 @@ pub fn preferred_git_remote_for_repo(repo_root: &Path) -> String {
     "origin".to_string()
 }
 
-fn preferred_git_remote_from_git(repo_root: &Path) -> Option<String> {
-    let current_branch = git_capture_in(repo_root, &["branch", "--show-current"])
-        .ok()
-        .map(|branch| branch.trim().to_string())
-        .filter(|branch| !branch.is_empty() && branch != "HEAD");
+/// Resolve the preferred sync/fetch git remote for a repository.
+///
+/// Precedence:
+/// 1. `<repo>/flow.toml` `[git].remote`
+/// 2. `<repo>/flow.toml` `[jj].remote` (legacy fallback)
+/// 3. repo-local git `branch.<current>.remote`
+/// 4. `~/.config/flow/flow.toml` `[git].remote`
+/// 5. `~/.config/flow/flow.toml` `[jj].remote` (legacy fallback)
+/// 6. `"origin"`
+pub fn preferred_git_sync_remote_for_repo(repo_root: &Path) -> String {
+    let local_config = repo_root.join("flow.toml");
+    if local_config.exists() {
+        if let Ok(cfg) = load(&local_config) {
+            if let Some(remote) = preferred_git_remote_from_cfg(&cfg) {
+                return remote;
+            }
+        }
+    }
 
-    if let Some(current_branch) = current_branch {
+    if let Some(remote) = preferred_git_sync_remote_from_git(repo_root) {
+        return remote;
+    }
+
+    let global_config = default_config_path();
+    if global_config.exists() {
+        if let Ok(cfg) = load(&global_config) {
+            if let Some(remote) = preferred_git_remote_from_cfg(&cfg) {
+                return remote;
+            }
+        }
+    }
+
+    "origin".to_string()
+}
+
+fn preferred_git_remote_from_git(repo_root: &Path) -> Option<String> {
+    if let Some(current_branch) = current_git_branch(repo_root) {
         let branch_push_remote_key = format!("branch.{current_branch}.pushRemote");
         if let Some(remote) = git_config_get(repo_root, &branch_push_remote_key) {
             return Some(remote);
@@ -2779,6 +2873,19 @@ fn preferred_git_remote_from_git(repo_root: &Path) -> Option<String> {
     }
 
     git_config_get(repo_root, "remote.pushDefault")
+}
+
+fn preferred_git_sync_remote_from_git(repo_root: &Path) -> Option<String> {
+    let current_branch = current_git_branch(repo_root)?;
+    let branch_remote_key = format!("branch.{current_branch}.remote");
+    git_config_get(repo_root, &branch_remote_key)
+}
+
+fn current_git_branch(repo_root: &Path) -> Option<String> {
+    git_capture_in(repo_root, &["branch", "--show-current"])
+        .ok()
+        .map(|branch| branch.trim().to_string())
+        .filter(|branch| !branch.is_empty() && branch != "HEAD")
 }
 
 fn git_config_get(repo_root: &Path, key: &str) -> Option<String> {
@@ -2925,6 +3032,47 @@ mod tests {
 
         assert_eq!(expand_path("~/projects/demo"), expected);
         assert_eq!(expand_path("$HOME/projects/demo"), expected);
+    }
+
+    #[test]
+    fn push_policy_parses_optional_fields_without_resetting_defaults() {
+        let toml = r#"
+            [push_policy]
+            enabled = true
+            hooks_path = "~/.config/flow/git-hooks"
+            prek_bin = "~/repos/j178/prek/target/release/prek"
+
+            [[push_policy.repo]]
+            match = "~/repos"
+            mode = "validate_only"
+
+            [[push_policy.repo]]
+            match = "~/repos/zed-industries/zed"
+            mode = "require_flow_push"
+            home_branch = "nikiv"
+            run_prek = true
+            mirror_main = true
+            remote_name = "origin"
+        "#;
+
+        let cfg: Config = toml::from_str(toml).expect("push_policy should parse");
+        let policy = cfg.push_policy.expect("push_policy should exist");
+        assert_eq!(policy.enabled, Some(true));
+        assert_eq!(
+            policy.hooks_path.as_deref(),
+            Some("~/.config/flow/git-hooks")
+        );
+        assert_eq!(
+            policy.prek_bin.as_deref(),
+            Some("~/repos/j178/prek/target/release/prek")
+        );
+        assert_eq!(policy.repos.len(), 2);
+        assert_eq!(policy.repos[0].mode, Some(PushPolicyMode::ValidateOnly));
+        assert_eq!(policy.repos[1].mode, Some(PushPolicyMode::RequireFlowPush));
+        assert_eq!(policy.repos[1].home_branch.as_deref(), Some("nikiv"));
+        assert!(policy.repos[1].run_prek);
+        assert!(policy.repos[1].mirror_main);
+        assert_eq!(policy.repos[1].remote_name.as_deref(), Some("origin"));
     }
 
     #[test]
@@ -3603,6 +3751,36 @@ remote = "myflow-i"
             preferred_git_remote_from_git(repo_root).as_deref(),
             Some("fork")
         );
+    }
+
+    #[test]
+    fn preferred_git_sync_remote_from_git_uses_branch_remote_not_push_remote() {
+        let temp_dir = tempdir().expect("tempdir");
+        let repo_root = temp_dir.path();
+
+        git_ok(repo_root, &["init"]);
+        git_ok(repo_root, &["checkout", "-b", "j"]);
+        git_ok(repo_root, &["config", "branch.j.remote", "origin"]);
+        git_ok(repo_root, &["config", "branch.j.pushRemote", "private"]);
+        git_ok(repo_root, &["config", "remote.pushDefault", "private"]);
+
+        assert_eq!(
+            preferred_git_sync_remote_from_git(repo_root).as_deref(),
+            Some("origin")
+        );
+    }
+
+    #[test]
+    fn preferred_git_sync_remote_for_repo_defaults_to_origin_without_branch_remote() {
+        let temp_dir = tempdir().expect("tempdir");
+        let repo_root = temp_dir.path();
+
+        git_ok(repo_root, &["init"]);
+        git_ok(repo_root, &["checkout", "-b", "j"]);
+        git_ok(repo_root, &["config", "branch.j.pushRemote", "private"]);
+        git_ok(repo_root, &["config", "remote.pushDefault", "private"]);
+
+        assert_eq!(preferred_git_sync_remote_for_repo(repo_root), "origin");
     }
 
     fn git_ok(repo_root: &Path, args: &[&str]) {
