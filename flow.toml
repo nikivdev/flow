@@ -171,21 +171,6 @@ command = "sh -lc \"cd $HOME/code/seq && f agent-qa-capture-logs\""
 description = "Tail background Claude/Codex Q/A ingest daemon logs from seq."
 
 [[tasks]]
-name = "seq-release-deploy"
-command = "sh -lc 'cd \"$HOME/code/seq\" && SEQ_CXX_STD=\"${SEQ_CXX_STD:--std=c++2c}\" bash ./cli/cpp/run.sh deploy && python3 tools/seqd_launchd.py status'"
-description = "Build seq with the latest local LLVM release settings and restart the launchd-managed seqd."
-
-[[tasks]]
-name = "seq-release-deploy-llvm-project"
-command = "sh -lc 'LLVM_ROOT=\"${SEQ_LLVM_ROOT:-$HOME/repos/llvm/llvm-project/build}\"; [ -x \"$LLVM_ROOT/bin/clang++\" ] || { echo \"missing local llvm-project clang++ at $LLVM_ROOT/bin/clang++\" >&2; exit 1; }; cd \"$HOME/code/seq\" && SEQ_LLVM_ROOT=\"$LLVM_ROOT\" SEQ_CXX_STD=\"${SEQ_CXX_STD:--std=c++2c}\" bash ./cli/cpp/run.sh deploy && python3 tools/seqd_launchd.py status'"
-description = "Build seq against a locally built llvm-project clang toolchain and restart seqd."
-
-[[tasks]]
-name = "seqd-status"
-command = "sh -lc 'cd \"$HOME/code/seq\" && python3 tools/seqd_launchd.py status'"
-description = "Show the current launchd status for seqd."
-
-[[tasks]]
 name = "deploy-with-hub-reload"
 command = "FLOW_PROFILE=release ./scripts/deploy.sh && f hub stop && FLOW_DOCS_FOCUS=1 f hub"
 description = "Deploy and restart hub daemons (lin + docs)"
